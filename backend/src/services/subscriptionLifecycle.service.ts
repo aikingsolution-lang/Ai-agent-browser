@@ -16,6 +16,7 @@ export interface CheckoutResult {
   amount: number;
   currency: string;
   keyId: string;
+  shortUrl?: string;
 }
 
 export interface VerifyPaymentParams {
@@ -96,6 +97,7 @@ export class SubscriptionLifecycleService {
       amount: plan.amount,
       currency: plan.currency,
       keyId: env.RAZORPAY_KEY_ID,
+      shortUrl: rzpSub.short_url,
     };
   }
 

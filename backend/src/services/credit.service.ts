@@ -208,10 +208,10 @@ export class CreditService {
         // Fetch the winning ledger entry for this idempotency key
         const winningLedger = await CreditLedger.findOne({ idempotencyKey }).session(session || null);
 
-        logger.info(`Concurrent idempotency race caught and compensated for key '${idempotencyKey}' (user ${userId})`);
+        const finalRestoredBalance = await UserCreditBalance.findOne({ userId }).session(session || null);
 
         return {
-          balance: restoredBalance!,
+          balance: finalRestoredBalance || restoredBalance!,
           ledgerEntry: winningLedger!,
           isIdempotentRetry: true,
         };

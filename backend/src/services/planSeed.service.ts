@@ -3,6 +3,10 @@ import { logger } from '../utils/logger.js';
 
 export class PlanSeedService {
   public static async seedDefaultPlans() {
+    const starterRazorpayId = process.env.RAZORPAY_PLAN_ID_STARTER || 'plan_TZuBsK8wKLB8G6';
+    const proRazorpayId = process.env.RAZORPAY_PLAN_ID_PRO || 'plan_rzp_mock_pro';
+    const powerRazorpayId = process.env.RAZORPAY_PLAN_ID_POWER || 'plan_rzp_mock_power';
+
     const plansToSeed = [
       {
         code: 'free-trial',
@@ -26,7 +30,7 @@ export class PlanSeedService {
         creditsPerBillingPeriod: 1000,
         rateLimitPerMinute: 120,
         features: ['full_browser_automation', 'standard_support'],
-        razorpayPlanId: 'plan_rzp_mock_starter',
+        razorpayPlanId: starterRazorpayId,
         isActive: true,
       },
       {
@@ -39,7 +43,7 @@ export class PlanSeedService {
         creditsPerBillingPeriod: 5000,
         rateLimitPerMinute: 300,
         features: ['full_browser_automation', 'priority_support', 'all_models'],
-        razorpayPlanId: 'plan_rzp_mock_pro',
+        razorpayPlanId: proRazorpayId,
         isActive: true,
       },
       {
@@ -52,19 +56,29 @@ export class PlanSeedService {
         creditsPerBillingPeriod: 25000,
         rateLimitPerMinute: 600,
         features: ['full_browser_automation', 'dedicated_support', 'all_models', 'unlimited_agents'],
-        razorpayPlanId: 'plan_rzp_mock_power',
+        razorpayPlanId: powerRazorpayId,
         isActive: true,
       },
     ];
 
     const seededPlans = [];
     for (const planData of plansToSeed) {
-      const plan = await Plan.findOneAndUpdate(
-        { code: planData.code },
-        { $setOnInsert: planData },
-        { upsert: true, new: true, setDefaultsOnInsert: true },
-      );
-      seededPlans.push(plan);
+      const existing = await Plan.findOne({ code: planData.code });
+      if (!existing) {
+        const newPlan = await Plan.create(planData);
+        seededPlans.push(newPlan);
+      } else {
+        // Preserve user Compass edits unless existing is still mock and new planData is real
+        if (
+          planData.razorpayPlanId &&
+          !planData.razorpayPlanId.startsWith('plan_rzp_mock_') &&
+          existing.razorpayPlanId !== planData.razorpayPlanId
+        ) {
+          existing.razorpayPlanId = planData.razorpayPlanId;
+          await existing.save();
+        }
+        seededPlans.push(existing);
+      }
     }
 
     logger.info(`Idempotently verified/seeded ${seededPlans.length} default plans`);

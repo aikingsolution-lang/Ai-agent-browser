@@ -2,43 +2,25 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import request from 'supertest';
 import mongoose from 'mongoose';
 import crypto from 'crypto';
+import { v1Router } from '../routes/index.js';
+import { authenticate } from '../middleware/auth.middleware.js';
+import { checkEntitlement } from '../middleware/entitlement.middleware.js';
 import { createApp } from '../app.js';
 import { User } from '../models/user.model.js';
 import { Subscription } from '../models/subscription.model.js';
-import { Plan } from '../models/plan.model.js';
 import { UserCreditBalance } from '../models/userCreditBalance.model.js';
 import { CreditLedger } from '../models/creditLedger.model.js';
 import { WebhookLedger } from '../models/webhookLedger.model.js';
 import { PlanSeedService } from '../services/planSeed.service.js';
 import { RazorpayService } from '../services/razorpay.service.js';
-import { TrialService } from '../services/trial.service.js';
-import { checkEntitlement } from '../middleware/entitlement.middleware.js';
 import { env } from '../config/env.js';
 
+// Setup protected dummy route on v1Router BEFORE createApp() initializes Express app
+v1Router.use('/test-entitled-feature', authenticate, checkEntitlement, (_req, res) => {
+  res.status(200).json({ success: true, message: 'Access granted' });
+});
+
 const app = createApp();
-
-// Setup protected dummy route using checkEntitlement middleware
-app.get(
-  '/api/v1/test-entitled-feature',
-  (req, res, next) => {
-    const authHeader = req.headers.authorization;
-    if (authHeader && authHeader.startsWith('Bearer ')) {
-      const token = authHeader.split(' ')[1];
-      try {
-        const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64').toString());
-        (req as any).user = { _id: payload.sub, id: payload.sub, role: payload.role };
-      } catch {
-        // ignore for test harness
-      }
-    }
-    next();
-  },
-  checkEntitlement as any,
-  (_req, res) => {
-    res.status(200).json({ success: true, message: 'Access granted' });
-  },
-);
-
 let mongoConnected = false;
 
 describe('Phase 8: Commercial Payment & Subscription Lifecycle Engine Integration Tests', () => {
@@ -61,7 +43,6 @@ describe('Phase 8: Commercial Payment & Subscription Lifecycle Engine Integratio
       await UserCreditBalance.deleteMany({});
       await CreditLedger.deleteMany({});
       await WebhookLedger.deleteMany({});
-      await Plan.deleteMany({ code: 'free-trial' });
       await mongoose.connection.close();
     }
   });
@@ -203,7 +184,7 @@ describe('Phase 8: Commercial Payment & Subscription Lifecycle Engine Integratio
     });
 
     const token = regRes.body.data.token;
-    const userId = regRes.body.data.user.id;
+    const userId = regRes.body.data.user._id || regRes.body.data.user.id;
 
     // Create checkout session for pro plan
     const checkoutRes = await request(app)
@@ -339,11 +320,21 @@ describe('Phase 8: Commercial Payment & Subscription Lifecycle Engine Integratio
     });
 
     const token = regRes.body.data.token;
-    const userId = regRes.body.data.user.id;
+    const userId = regRes.body.data.user._id || regRes.body.data.user.id;
 
     // Set status to PAST_DUE with pastDueStartedAt 73 hours in the past
     const past73Hours = new Date(Date.now() - 73 * 3600 * 1000);
-    await Subscription.updateOne({ userId }, { $set: { status: 'PAST_DUE', pastDueStartedAt: past73Hours } });
+    await Subscription.updateOne(
+      { userId },
+      {
+        $set: {
+          status: 'PAST_DUE',
+          pastDueStartedAt: past73Hours,
+          trialEndDate: past73Hours,
+          currentPeriodEnd: past73Hours,
+        },
+      },
+    );
 
     // Access protected route -> 403 SUBSCRIPTION_EXPIRED
     const accessRes = await request(app).get('/api/v1/test-entitled-feature').set('Authorization', `Bearer ${token}`);
@@ -366,7 +357,7 @@ describe('Phase 8: Commercial Payment & Subscription Lifecycle Engine Integratio
     });
 
     const token = regRes.body.data.token;
-    const userId = regRes.body.data.user.id;
+    const userId = regRes.body.data.user._id || regRes.body.data.user.id;
 
     // Set status to PAST_DUE with pastDueStartedAt 2 hours in the past
     const past2Hours = new Date(Date.now() - 2 * 3600 * 1000);
@@ -388,13 +379,13 @@ describe('Phase 8: Commercial Payment & Subscription Lifecycle Engine Integratio
     });
 
     const token = regRes.body.data.token;
-    const userId = regRes.body.data.user.id;
+    const userId = regRes.body.data.user._id || regRes.body.data.user.id;
 
     // Set status to ACTIVE, cancelAtPeriodEnd = true, currentPeriodEnd in the past
     const past1Hour = new Date(Date.now() - 3600 * 1000);
     await Subscription.updateOne(
       { userId },
-      { $set: { status: 'ACTIVE', cancelAtPeriodEnd: true, currentPeriodEnd: past1Hour } },
+      { $set: { status: 'ACTIVE', cancelAtPeriodEnd: true, currentPeriodEnd: past1Hour, trialEndDate: past1Hour } },
     );
 
     // Access protected route -> 403 SUBSCRIPTION_EXPIRED

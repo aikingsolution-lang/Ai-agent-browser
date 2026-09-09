@@ -82,7 +82,7 @@ describe('Phase 7: Server-Side Credit & Usage Metering Engine Integration & Unit
     });
 
     expect(res.status).toBe(201);
-    const userId = res.body.data.user.id;
+    const userId = res.body.data.user._id || res.body.data.user.id;
 
     // Verify UserCreditBalance
     const balance = await UserCreditBalance.findOne({ userId });
@@ -107,7 +107,7 @@ describe('Phase 7: Server-Side Credit & Usage Metering Engine Integration & Unit
       password: 'Password123!',
     });
 
-    const userId = regRes.body.data.user.id;
+    const userId = regRes.body.data.user._id || regRes.body.data.user.id;
 
     const result = await CreditService.deductCredits({
       userId,
@@ -131,7 +131,7 @@ describe('Phase 7: Server-Side Credit & Usage Metering Engine Integration & Unit
       password: 'Password123!',
     });
 
-    const userId = regRes.body.data.user.id;
+    const userId = regRes.body.data.user._id || regRes.body.data.user.id;
 
     await expect(
       CreditService.deductCredits({
@@ -156,7 +156,7 @@ describe('Phase 7: Server-Side Credit & Usage Metering Engine Integration & Unit
       password: 'Password123!',
     });
 
-    const userId = regRes.body.data.user.id;
+    const userId = regRes.body.data.user._id || regRes.body.data.user.id;
 
     // Perform 10 parallel deductions of 15 credits each (Total requested = 150, Available = 100)
     const deductionPromises = Array.from({ length: 10 }).map((_, i) =>
@@ -190,7 +190,7 @@ describe('Phase 7: Server-Side Credit & Usage Metering Engine Integration & Unit
       password: 'Password123!',
     });
 
-    const userId = regRes.body.data.user.id;
+    const userId = regRes.body.data.user._id || regRes.body.data.user.id;
     const sameKey = 'concurrent-same-key-001';
 
     // Fire 10 parallel requests with the exact SAME idempotencyKey requesting 10 credits each
@@ -232,7 +232,7 @@ describe('Phase 7: Server-Side Credit & Usage Metering Engine Integration & Unit
       password: 'Password123!',
     });
 
-    const userId = regRes.body.data.user.id;
+    const userId = regRes.body.data.user._id || regRes.body.data.user.id;
     const idempotencyKey = 'seq-task-key-001';
 
     // First deduction
@@ -272,7 +272,7 @@ describe('Phase 7: Server-Side Credit & Usage Metering Engine Integration & Unit
     });
 
     const token = regRes.body.data.token;
-    const userId = regRes.body.data.user.id;
+    const userId = regRes.body.data.user._id || regRes.body.data.user.id;
 
     // 1. Initial balance = 100, requires 5 -> 200 OK
     const accessRes1 = await request(app).get('/api/v1/test-metered-feature').set('Authorization', `Bearer ${token}`);
@@ -297,7 +297,7 @@ describe('Phase 7: Server-Side Credit & Usage Metering Engine Integration & Unit
     });
 
     const token = regRes.body.data.token;
-    const userId = regRes.body.data.user.id;
+    const userId = regRes.body.data.user._id || regRes.body.data.user.id;
 
     const res1 = await request(app).get('/api/v1/credits/balance').set('Authorization', `Bearer ${token}`);
     expect(res1.status).toBe(200);
@@ -324,7 +324,7 @@ describe('Phase 7: Server-Side Credit & Usage Metering Engine Integration & Unit
     });
 
     const token = regRes.body.data.token;
-    const userId = regRes.body.data.user.id;
+    const userId = regRes.body.data.user._id || regRes.body.data.user.id;
 
     // Deduct twice
     await CreditService.deductCredits({ userId, amount: 5, description: 'Action 1' });

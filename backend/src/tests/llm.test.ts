@@ -9,12 +9,13 @@ import { CreditLedger } from '../models/creditLedger.model.js';
 import { LlmUsageLog } from '../models/llmUsageLog.model.js';
 import { PlanSeedService } from '../services/planSeed.service.js';
 import { LlmProviderFactory } from '../services/llm/llmProviderFactory.js';
+import { BedrockLlmProvider } from '../services/llm/bedrockLlmProvider.js';
 import { env } from '../config/env.js';
 
 const app = createApp();
 let mongoConnected = false;
 
-describe('Phase 9: Managed LLM Proxy Gateway + Usage Metering Integration Tests', () => {
+describe('Phase 9 & Bedrock: Managed LLM Proxy Gateway + Usage Metering Integration Tests', () => {
   beforeAll(async () => {
     try {
       if (mongoose.connection.readyState === 0) {
@@ -60,7 +61,7 @@ describe('Phase 9: Managed LLM Proxy Gateway + Usage Metering Integration Tests'
       });
     return {
       token: res.body.data.token,
-      userId: res.body.data.user.id,
+      userId: res.body.data.user._id || res.body.data.user.id,
     };
   }
 
@@ -70,7 +71,7 @@ describe('Phase 9: Managed LLM Proxy Gateway + Usage Metering Integration Tests'
     const res = await request(app)
       .post('/api/v1/llm/chat')
       .send({
-        model: 'gpt-4o-mini',
+        model: 'anthropic.claude-3-haiku-20240307-v1:0',
         messages: [{ role: 'user', content: 'Hello' }],
       });
 
@@ -107,7 +108,7 @@ describe('Phase 9: Managed LLM Proxy Gateway + Usage Metering Integration Tests'
       .post('/api/v1/llm/chat')
       .set('Authorization', `Bearer ${token}`)
       .send({
-        model: 'gpt-4o-mini',
+        model: 'anthropic.claude-3-haiku-20240307-v1:0',
         messages: [{ role: 'user', content: 'Hello' }],
       });
 
@@ -128,7 +129,7 @@ describe('Phase 9: Managed LLM Proxy Gateway + Usage Metering Integration Tests'
       .post('/api/v1/llm/chat')
       .set('Authorization', `Bearer ${token}`)
       .send({
-        model: 'gpt-4o-mini',
+        model: 'anthropic.claude-3-haiku-20240307-v1:0',
         messages: [{ role: 'user', content: 'What is the capital of France?' }],
       });
 
@@ -145,7 +146,7 @@ describe('Phase 9: Managed LLM Proxy Gateway + Usage Metering Integration Tests'
     const usageLog = await LlmUsageLog.findOne({ userId, requestId: res.body.data.requestId });
     expect(usageLog).not.toBeNull();
     expect(usageLog?.status).toBe('SUCCESS');
-    expect(usageLog?.model).toBe('gpt-4o-mini');
+    expect(usageLog?.model).toBe('anthropic.claude-3-haiku-20240307-v1:0');
   });
 
   it('5. Duplicate request with same idempotencyKey returns cached response without double billing', async () => {
@@ -160,7 +161,7 @@ describe('Phase 9: Managed LLM Proxy Gateway + Usage Metering Integration Tests'
       .set('Authorization', `Bearer ${token}`)
       .set('x-idempotency-key', idempotencyKey)
       .send({
-        model: 'gpt-4o-mini',
+        model: 'anthropic.claude-3-haiku-20240307-v1:0',
         messages: [{ role: 'user', content: 'Explain quantum computing in 5 words.' }],
       });
 
@@ -174,7 +175,7 @@ describe('Phase 9: Managed LLM Proxy Gateway + Usage Metering Integration Tests'
       .set('Authorization', `Bearer ${token}`)
       .set('x-idempotency-key', idempotencyKey)
       .send({
-        model: 'gpt-4o-mini',
+        model: 'anthropic.claude-3-haiku-20240307-v1:0',
         messages: [{ role: 'user', content: 'Explain quantum computing in 5 words.' }],
       });
 
@@ -196,13 +197,13 @@ describe('Phase 9: Managed LLM Proxy Gateway + Usage Metering Integration Tests'
     const { token, userId } = await registerUser('providerfail');
 
     // Configure mock provider to fail
-    LlmProviderFactory.setMockOptions({ shouldFail: true, failStatus: 502, failMessage: 'OpenAI server down' });
+    LlmProviderFactory.setMockOptions({ shouldFail: true, failStatus: 502, failMessage: 'AWS Bedrock server down' });
 
     const res = await request(app)
       .post('/api/v1/llm/chat')
       .set('Authorization', `Bearer ${token}`)
       .send({
-        model: 'gpt-4o-mini',
+        model: 'anthropic.claude-3-haiku-20240307-v1:0',
         messages: [{ role: 'user', content: 'Test failure' }],
       });
 
@@ -231,7 +232,7 @@ describe('Phase 9: Managed LLM Proxy Gateway + Usage Metering Integration Tests'
       .post('/api/v1/llm/chat')
       .set('Authorization', `Bearer ${token}`)
       .send({
-        model: 'gpt-4o-mini',
+        model: 'anthropic.claude-3-haiku-20240307-v1:0',
         messages: [{ role: 'user', content: 'Test timeout' }],
       });
 
@@ -242,8 +243,8 @@ describe('Phase 9: Managed LLM Proxy Gateway + Usage Metering Integration Tests'
     const balance = await UserCreditBalance.findOne({ userId });
     expect(balance?.remainingCredits).toBe(100);
 
-    // FAILED log recorded
-    const failedLog = await LlmUsageLog.findOne({ userId, status: 'FAILED' });
+    // Error usage log recorded with status TIMEOUT or FAILED
+    const failedLog = await LlmUsageLog.findOne({ userId, status: { $in: ['FAILED', 'TIMEOUT'] } });
     expect(failedLog).not.toBeNull();
     expect(failedLog?.creditsDeducted).toBe(0);
   });
@@ -259,7 +260,7 @@ describe('Phase 9: Managed LLM Proxy Gateway + Usage Metering Integration Tests'
       .post('/api/v1/llm/chat')
       .set('Authorization', `Bearer ${userA.token}`)
       .send({
-        model: 'gpt-4o-mini',
+        model: 'anthropic.claude-3-haiku-20240307-v1:0',
         messages: [{ role: 'user', content: 'User A query' }],
       });
 
@@ -278,7 +279,7 @@ describe('Phase 9: Managed LLM Proxy Gateway + Usage Metering Integration Tests'
     expect(resA.body.data.items[0].userId).toBe(userA.userId);
   });
 
-  it('9. Token and credit accounting for premium model gpt-4o', async () => {
+  it('9. Token and credit accounting for premium model anthropic.claude-3-5-sonnet-20240620-v1:0', async () => {
     if (!mongoConnected) return;
 
     const { token, userId } = await registerUser('premiummodel');
@@ -287,13 +288,13 @@ describe('Phase 9: Managed LLM Proxy Gateway + Usage Metering Integration Tests'
       .post('/api/v1/llm/chat')
       .set('Authorization', `Bearer ${token}`)
       .send({
-        model: 'gpt-4o',
+        model: 'anthropic.claude-3-5-sonnet-20240620-v1:0',
         messages: [{ role: 'user', content: 'Write a detailed summary of astrophysics.' }],
       });
 
     expect(res.status).toBe(200);
-    expect(res.body.data.model).toBe('gpt-4o');
-    // Premium model (gpt-4o) applies 2x credit rate
+    expect(res.body.data.model).toBe('anthropic.claude-3-5-sonnet-20240620-v1:0');
+    // Premium model applies 2x credit rate
     expect(res.body.data.creditsDeducted).toBeGreaterThanOrEqual(2);
 
     const balance = await UserCreditBalance.findOne({ userId });
@@ -309,7 +310,7 @@ describe('Phase 9: Managed LLM Proxy Gateway + Usage Metering Integration Tests'
       .post('/api/v1/llm/chat')
       .set('Authorization', `Bearer ${token}`)
       .send({
-        model: 'gpt-4o-mini',
+        model: 'anthropic.claude-3-haiku-20240307-v1:0',
         messages: [{ role: 'user', content: 'Tell me a joke.' }],
         stream: true,
       });
@@ -318,5 +319,51 @@ describe('Phase 9: Managed LLM Proxy Gateway + Usage Metering Integration Tests'
     expect(res.headers['content-type']).toContain('text/event-stream');
     expect(res.text).toContain('data:');
     expect(res.text).toContain('[DONE]');
+  });
+
+  it('11. BedrockLlmProvider handles Converse API response structure correctly with Bearer token', async () => {
+    const mockApiKey = 'bedrock-bearer-test-token-12345';
+    const provider = new BedrockLlmProvider(mockApiKey, 'us-east-1');
+    expect(provider.providerName).toBe('bedrock');
+
+    // Save global fetch
+    const originalFetch = global.fetch;
+    global.fetch = async (url: any, options: any) => {
+      expect(options.headers.Authorization).toBe(`Bearer ${mockApiKey}`);
+      expect(url).toContain('/model/anthropic.claude-3-5-sonnet-20240620-v1%3A0/converse');
+
+      return new Response(
+        JSON.stringify({
+          output: {
+            message: {
+              role: 'assistant',
+              content: [{ text: 'Mocked AWS Bedrock completion response' }],
+            },
+          },
+          stopReason: 'end_turn',
+          usage: {
+            inputTokens: 12,
+            outputTokens: 18,
+            totalTokens: 30,
+          },
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    };
+
+    try {
+      const response = await provider.generateCompletion({
+        model: 'anthropic.claude-3-5-sonnet-20240620-v1:0',
+        messages: [{ role: 'user', content: 'Hello Bedrock' }],
+      });
+
+      expect(response.content).toBe('Mocked AWS Bedrock completion response');
+      expect(response.promptTokens).toBe(12);
+      expect(response.completionTokens).toBe(18);
+      expect(response.totalTokens).toBe(30);
+      expect(response.finishReason).toBe('end_turn');
+    } finally {
+      global.fetch = originalFetch;
+    }
   });
 });

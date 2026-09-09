@@ -1,6 +1,12 @@
 import { z } from 'zod';
 
-export const ALLOWED_MODELS = ['gpt-4o', 'gpt-4o-mini', 'gpt-3.5-turbo', 'claude-3-5-sonnet', 'deepseek-chat'] as const;
+export const ALLOWED_MODELS = [
+  'anthropic.claude-3-5-sonnet-20240620-v1:0',
+  'anthropic.claude-3-haiku-20240307-v1:0',
+  'amazon.nova-micro-v1:0',
+  'amazon.nova-lite-v1:0',
+  'amazon.nova-pro-v1:0',
+] as const;
 
 export type AllowedModel = (typeof ALLOWED_MODELS)[number];
 

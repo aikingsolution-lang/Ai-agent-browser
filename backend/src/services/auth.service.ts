@@ -86,8 +86,17 @@ export class AuthService {
         return { user, token, subscription };
       } catch (error: any) {
         if (session) {
-          await session.abortTransaction();
+          try {
+            await session.abortTransaction();
+          } catch {}
           await session.endSession();
+        }
+        if (
+          error.message?.includes('Transaction numbers are only allowed') ||
+          error.codeName === 'TransactionNumbersNotSupported'
+        ) {
+          // Fallback for standalone MongoDB deployments (e.g. local dev / non-replica set test environments)
+          return this.registerUserStandalone(input, normalizedEmail, passwordHash);
         }
         if (error.code === 11000 || error.message?.includes('E11000')) {
           throw new AppError('Email address is already registered', 409, 'EMAIL_EXISTS');
@@ -95,39 +104,46 @@ export class AuthService {
         throw error;
       }
     } else {
-      // Fallback for standalone MongoDB deployments:
-      // Step 1: Create User
-      let user;
-      try {
-        user = await User.create({
-          name: input.name.trim(),
-          email: normalizedEmail,
-          passwordHash,
-          role: 'user',
-          status: 'active',
-        });
-      } catch (error: any) {
-        if (error.code === 11000 || error.message?.includes('E11000')) {
-          throw new AppError('Email address is already registered', 409, 'EMAIL_EXISTS');
-        }
-        throw error;
-      }
+      return this.registerUserStandalone(input, normalizedEmail, passwordHash);
+    }
+  }
 
-      // Step 2: Create Free Trial Subscription & Allocate Credits
-      try {
-        const subscription = await TrialService.createFreeTrial(user._id);
-        const token = this.generateToken(user);
-        return { user, token, subscription };
-      } catch (trialError) {
-        // Complete compensating cleanup for standalone MongoDB fallback
-        await Promise.all([
-          User.findByIdAndDelete(user._id),
-          Subscription.deleteMany({ userId: user._id }),
-          UserCreditBalance.deleteMany({ userId: user._id }),
-          CreditLedger.deleteMany({ userId: user._id }),
-        ]);
-        throw trialError;
+  private static async registerUserStandalone(
+    input: RegisterInput,
+    normalizedEmail: string,
+    passwordHash: string,
+  ): Promise<AuthResult> {
+    // Step 1: Create User
+    let user;
+    try {
+      user = await User.create({
+        name: input.name.trim(),
+        email: normalizedEmail,
+        passwordHash,
+        role: 'user',
+        status: 'active',
+      });
+    } catch (error: any) {
+      if (error.code === 11000 || error.message?.includes('E11000')) {
+        throw new AppError('Email address is already registered', 409, 'EMAIL_EXISTS');
       }
+      throw error;
+    }
+
+    // Step 2: Create Free Trial Subscription & Allocate Credits
+    try {
+      const subscription = await TrialService.createFreeTrial(user._id);
+      const token = this.generateToken(user);
+      return { user, token, subscription };
+    } catch (trialError) {
+      // Complete compensating cleanup for standalone MongoDB fallback
+      await Promise.all([
+        User.findByIdAndDelete(user._id),
+        Subscription.deleteMany({ userId: user._id }),
+        UserCreditBalance.deleteMany({ userId: user._id }),
+        CreditLedger.deleteMany({ userId: user._id }),
+      ]);
+      throw trialError;
     }
   }
 

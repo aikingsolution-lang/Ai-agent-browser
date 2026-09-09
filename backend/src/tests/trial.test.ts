@@ -1,40 +1,23 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import request from 'supertest';
 import mongoose from 'mongoose';
-import { createApp } from '../app.js';
+import { v1Router } from '../routes/index.js';
+import { authenticate } from '../middleware/auth.middleware.js';
+import { checkEntitlement } from '../middleware/entitlement.middleware.js';
 import { User } from '../models/user.model.js';
 import { Subscription } from '../models/subscription.model.js';
 import { Plan } from '../models/plan.model.js';
 import { PlanSeedService } from '../services/planSeed.service.js';
 import { TrialService } from '../services/trial.service.js';
-import { checkEntitlement } from '../middleware/entitlement.middleware.js';
 import { env } from '../config/env.js';
+import { createApp } from '../app.js';
+
+// Setup protected dummy route on v1Router BEFORE createApp() initializes Express app
+v1Router.use('/test-protected-feature', authenticate, checkEntitlement, (_req, res) => {
+  res.status(200).json({ success: true, message: 'Access granted to premium feature' });
+});
 
 const app = createApp();
-
-// Setup a dummy protected test route using checkEntitlement middleware
-app.get(
-  '/api/v1/test-protected-feature',
-  (req, res, next) => {
-    // Inject mock authenticated user if auth header is present
-    const authHeader = req.headers.authorization;
-    if (authHeader && authHeader.startsWith('Bearer ')) {
-      const token = authHeader.split(' ')[1];
-      try {
-        const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64').toString());
-        (req as any).user = { id: payload.sub, role: payload.role };
-      } catch {
-        // ignore malformed token for test harness
-      }
-    }
-    next();
-  },
-  checkEntitlement as any,
-  (_req, res) => {
-    res.status(200).json({ success: true, message: 'Access granted to premium feature' });
-  },
-);
-
 let mongoConnected = false;
 
 describe('Phase 6: Server-Side Free Trial Engine Integration & Unit Tests', () => {
@@ -54,7 +37,6 @@ describe('Phase 6: Server-Side Free Trial Engine Integration & Unit Tests', () =
     if (mongoConnected) {
       await User.deleteMany({ email: /@trialtest\.com$/ });
       await Subscription.deleteMany({});
-      await Plan.deleteMany({ code: 'free-trial' });
       await mongoose.connection.close();
     }
   });
@@ -95,7 +77,8 @@ describe('Phase 6: Server-Side Free Trial Engine Integration & Unit Tests', () =
     expect(res.body.data.subscription.status).toBe('TRIALING');
     expect(res.body.data.subscription.isTrial).toBe(true);
 
-    const subscription = await Subscription.findOne({ userId: res.body.data.user.id });
+    const userId = res.body.data.user._id || res.body.data.user.id;
+    const subscription = await Subscription.findOne({ userId });
     expect(subscription).not.toBeNull();
     expect(subscription?.status).toBe('TRIALING');
     expect(subscription?.planCodeSnapshot).toBe('free-trial');
@@ -116,7 +99,7 @@ describe('Phase 6: Server-Side Free Trial Engine Integration & Unit Tests', () =
       password: 'Password123!',
     });
 
-    const userId = res.body.data.user.id;
+    const userId = res.body.data.user._id || res.body.data.user.id;
 
     // Attempt direct creation of a second free trial
     await expect(TrialService.createFreeTrial(userId)).rejects.toThrow(
@@ -133,7 +116,7 @@ describe('Phase 6: Server-Side Free Trial Engine Integration & Unit Tests', () =
       password: 'Password123!',
     });
 
-    const userId = res.body.data.user.id;
+    const userId = res.body.data.user._id || res.body.data.user.id;
 
     // Manually push trialEndDate to 1 hour in the past
     const pastDate = new Date(Date.now() - 3600 * 1000);
@@ -160,7 +143,7 @@ describe('Phase 6: Server-Side Free Trial Engine Integration & Unit Tests', () =
     });
 
     const token = res.body.data.token;
-    const userId = res.body.data.user.id;
+    const userId = res.body.data.user._id || res.body.data.user.id;
 
     // 1. Access protected route while trialing -> 200 OK
     const accessRes1 = await request(app).get('/api/v1/test-protected-feature').set('Authorization', `Bearer ${token}`);
@@ -186,7 +169,7 @@ describe('Phase 6: Server-Side Free Trial Engine Integration & Unit Tests', () =
       password: 'Password123!',
     });
 
-    const userId = regRes.body.data.user.id;
+    const userId = regRes.body.data.user._id || regRes.body.data.user.id;
 
     // Expire trial
     const pastDate = new Date(Date.now() - 3600 * 1000);
@@ -223,7 +206,7 @@ describe('Phase 6: Server-Side Free Trial Engine Integration & Unit Tests', () =
     });
 
     const token = regRes.body.data.token;
-    const userId = regRes.body.data.user.id;
+    const userId = regRes.body.data.user._id || regRes.body.data.user.id;
 
     // Transition to ACTIVE with cancelAtPeriodEnd = true, currentPeriodEnd in the future
     const futureDate = new Date(Date.now() + 86400 * 1000);
@@ -289,7 +272,7 @@ describe('Phase 6: Server-Side Free Trial Engine Integration & Unit Tests', () =
       password: 'Password123!',
     });
 
-    const userId = regRes.body.data.user.id;
+    const userId = regRes.body.data.user._id || regRes.body.data.user.id;
     const pastDate = new Date(Date.now() - 1000);
     await Subscription.updateOne({ userId }, { $set: { trialEndDate: pastDate, currentPeriodEnd: pastDate } });
 

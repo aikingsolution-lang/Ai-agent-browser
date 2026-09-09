@@ -63,7 +63,7 @@ describe('Phase 11: Production Hardening, Observability & Readiness Audit Tests'
       });
     return {
       token: res.body.data.token,
-      userId: res.body.data.user.id,
+      userId: res.body.data.user._id || res.body.data.user.id,
     };
   }
 
@@ -141,7 +141,7 @@ describe('Phase 11: Production Hardening, Observability & Readiness Audit Tests'
       .post('/api/v1/llm/chat')
       .set('Authorization', `Bearer ${token}`)
       .send({
-        model: 'gpt-4o-mini',
+        model: 'anthropic.claude-3-haiku-20240307-v1:0',
         messages: [{ role: 'user', content: 'Test timeout status' }],
       });
 

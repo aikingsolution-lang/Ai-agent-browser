@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import request from 'supertest';
 import mongoose from 'mongoose';
@@ -62,13 +63,16 @@ describe('Phase 10: End-to-End Client & Extension Integration Test Suite', () =>
 
     expect(regRes.status).toBe(201);
     const token = regRes.body.data.token;
-    const userId = regRes.body.data.user.id;
+    const userId = regRes.body.data.user._id || regRes.body.data.user.id;
 
-    // B. Check Me
+    // B. Check Me & Subscription Me
     const meRes = await request(app).get('/api/v1/auth/me').set('Authorization', `Bearer ${token}`);
     expect(meRes.status).toBe(200);
     expect(meRes.body.data.user.email).toBe('user@e2etest.com');
-    expect(meRes.body.data.subscription.status).toBe('TRIALING');
+
+    const subRes = await request(app).get('/api/v1/subscription/me').set('Authorization', `Bearer ${token}`);
+    expect(subRes.status).toBe(200);
+    expect(subRes.body.data.subscription.status).toBe('TRIALING');
 
     // C. View Credits Balance
     const creditRes = await request(app).get('/api/v1/credits/balance').set('Authorization', `Bearer ${token}`);
@@ -87,17 +91,23 @@ describe('Phase 10: End-to-End Client & Extension Integration Test Suite', () =>
       .send({ planCode: 'pro', idempotencyKey: 'e2e-checkout-key-1' });
 
     expect(checkoutRes.status).toBe(200);
-    const razorpaySubId = checkoutRes.body.data.razorpaySubscriptionId;
+    const razorpaySubId = checkoutRes.body.data.subscriptionId || checkoutRes.body.data.razorpaySubscriptionId;
     expect(razorpaySubId).toBeDefined();
 
     // F. Verify Payment
+    const e2ePaymentId = 'pay_e2e_mock_123';
+    const e2eSignature = crypto
+      .createHmac('sha256', env.RAZORPAY_KEY_SECRET)
+      .update(`${e2ePaymentId}|${razorpaySubId}`)
+      .digest('hex');
+
     const verifyRes = await request(app)
       .post('/api/v1/subscription/verify-payment')
       .set('Authorization', `Bearer ${token}`)
       .send({
         razorpaySubscriptionId: razorpaySubId,
-        razorpayPaymentId: 'pay_e2e_mock_123',
-        razorpaySignature: 'sig_e2e_mock_456',
+        razorpayPaymentId: e2ePaymentId,
+        razorpaySignature: e2eSignature,
       });
 
     expect(verifyRes.status).toBe(200);
@@ -108,7 +118,7 @@ describe('Phase 10: End-to-End Client & Extension Integration Test Suite', () =>
       .post('/api/v1/llm/chat')
       .set('Authorization', `Bearer ${token}`)
       .send({
-        model: 'gpt-4o-mini',
+        model: 'anthropic.claude-3-haiku-20240307-v1:0',
         messages: [{ role: 'user', content: 'Run web automation task.' }],
         idempotencyKey: 'e2e-llm-chat-key-1',
       });
@@ -145,7 +155,7 @@ describe('Phase 10: End-to-End Client & Extension Integration Test Suite', () =>
     });
 
     const token = regRes.body.data.token;
-    const userId = regRes.body.data.user.id;
+    const userId = regRes.body.data.user._id || regRes.body.data.user.id;
 
     // Set remaining credits to 0
     await UserCreditBalance.updateOne({ userId }, { $set: { remainingCredits: 0, usedCredits: 100 } });
@@ -154,7 +164,7 @@ describe('Phase 10: End-to-End Client & Extension Integration Test Suite', () =>
       .post('/api/v1/llm/chat')
       .set('Authorization', `Bearer ${token}`)
       .send({
-        model: 'gpt-4o-mini',
+        model: 'anthropic.claude-3-haiku-20240307-v1:0',
         messages: [{ role: 'user', content: 'Low credit check' }],
       });
 

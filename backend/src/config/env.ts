@@ -21,8 +21,10 @@ const envSchema = z
     RAZORPAY_KEY_ID: z.string().default('rzp_test_mock_key_id_12345'),
     RAZORPAY_KEY_SECRET: z.string().default('rzp_test_mock_key_secret_67890'),
     RAZORPAY_WEBHOOK_SECRET: z.string().default('rzp_test_mock_webhook_secret_abcde'),
-    OPENAI_API_KEY: z.string().default('mock_openai_api_key'),
-    LLM_DEFAULT_MODEL: z.string().default('gpt-4o-mini'),
+    AWS_BEDROCK_API_KEY: z.string().default('mock_bedrock_api_key'),
+    AWS_BEDROCK_REGION: z.string().default('us-east-1'),
+    OPENAI_API_KEY: z.string().optional(),
+    LLM_DEFAULT_MODEL: z.string().default('anthropic.claude-3-5-sonnet-20240620-v1:0'),
   })
   .refine(
     data => {
@@ -31,16 +33,16 @@ const envSchema = z
           data.RAZORPAY_KEY_ID.includes('mock') ||
           data.RAZORPAY_KEY_SECRET.includes('mock') ||
           data.RAZORPAY_WEBHOOK_SECRET.includes('mock');
-        const isMockOpenAi = data.OPENAI_API_KEY.includes('mock');
+        const isMockBedrock = !data.AWS_BEDROCK_API_KEY || data.AWS_BEDROCK_API_KEY.includes('mock');
         const isDefaultJwt = data.JWT_SECRET.includes('must_be_changed_in_production');
 
-        return !isMockRazorpay && !isMockOpenAi && !isDefaultJwt;
+        return !isMockRazorpay && !isMockBedrock && !isDefaultJwt;
       }
       return true;
     },
     {
       message:
-        'In production mode, real non-mock Razorpay secrets, real OPENAI_API_KEY, and secure JWT_SECRET must be configured',
+        'In production mode, real non-mock Razorpay secrets, real AWS_BEDROCK_API_KEY, and secure JWT_SECRET must be configured',
     },
   );
 

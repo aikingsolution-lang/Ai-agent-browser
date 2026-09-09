@@ -41,7 +41,7 @@ export class LlmService {
    * Helper to calculate credits based on model multiplier and total tokens.
    */
   public static calculateRequiredCredits(model: string, totalTokens: number): number {
-    const isPremium = model === 'gpt-4o' || model === 'claude-3-5-sonnet';
+    const isPremium = model.includes('claude-3-5-sonnet') || model.includes('nova-pro');
     const ratePerThousand = isPremium ? 2 : 1;
     const minimumCredits = ratePerThousand;
     return Math.max(minimumCredits, Math.ceil((totalTokens / 1000) * ratePerThousand));

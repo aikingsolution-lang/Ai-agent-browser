@@ -1,7 +1,7 @@
 import { env } from '../../config/env.js';
 import type { ILlmProvider } from './llmProvider.interface.js';
 import { MockLlmProvider, type MockLlmOptions } from './mockLlmProvider.js';
-import { OpenAiLlmProvider } from './openAiLlmProvider.js';
+import { BedrockLlmProvider } from './bedrockLlmProvider.js';
 
 let mockProviderInstance: MockLlmProvider | null = null;
 let overrideProvider: ILlmProvider | null = null;
@@ -12,14 +12,14 @@ export class LlmProviderFactory {
       return overrideProvider;
     }
 
-    if (env.NODE_ENV === 'test' || !env.OPENAI_API_KEY || env.OPENAI_API_KEY.startsWith('mock')) {
+    if (env.NODE_ENV === 'test' || !env.AWS_BEDROCK_API_KEY || env.AWS_BEDROCK_API_KEY.startsWith('mock')) {
       if (!mockProviderInstance) {
         mockProviderInstance = new MockLlmProvider();
       }
       return mockProviderInstance;
     }
 
-    return new OpenAiLlmProvider(env.OPENAI_API_KEY);
+    return new BedrockLlmProvider(env.AWS_BEDROCK_API_KEY, env.AWS_BEDROCK_REGION);
   }
 
   public static setMockOptions(options: MockLlmOptions): MockLlmProvider {
