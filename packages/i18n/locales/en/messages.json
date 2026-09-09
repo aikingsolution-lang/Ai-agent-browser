@@ -208,6 +208,18 @@
   "options_tabs_firewall": {
     "message": "Firewall"
   },
+  "options_tabs_apiMode": {
+    "message": "API Mode"
+  },
+  "options_tabs_premiumPlans": {
+    "message": "Premium Plans"
+  },
+  "options_tabs_team": {
+    "message": "Team Seats"
+  },
+  "options_tabs_stripe": {
+    "message": "Stripe Billing"
+  },
   "options_tabs_help": {
     "message": "Help"
   },

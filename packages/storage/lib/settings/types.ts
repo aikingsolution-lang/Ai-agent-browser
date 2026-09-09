@@ -155,3 +155,62 @@ export const llmProviderParameters = {
     },
   },
 };
+
+export type ApiMode = 'free' | 'premium';
+
+export interface SubscriptionPlan {
+  planId: 'free' | 'pro' | 'enterprise';
+  status: 'active' | 'inactive' | 'cancelled';
+  billingInterval: 'monthly' | 'yearly';
+  renewalDate: number;
+}
+
+export interface CloudConfig {
+  provider: 'aws' | 'gcp';
+  region?: string;
+  bucketName?: string;
+  projectId?: string;
+  cloudApiKey?: string;
+  awsSecretName?: string;
+  gcpSecretId?: string;
+  secretRotationInterval?: number;
+  awsAccessKeyId?: string;
+  awsSecretAccessKey?: string;
+}
+
+export interface PremiumUsage {
+  taskCount: number;
+  taskLimit: number; // default 1000
+  resetTimestamp: number;
+}
+
+export interface TeamMember {
+  id: string;
+  email: string;
+  role: 'owner' | 'admin' | 'member';
+  status: 'active' | 'invited';
+  addedAt: number;
+}
+
+export interface TeamConfig {
+  teamName: string;
+  maxSeats: number;
+  licenseKey: string;
+  members: TeamMember[];
+}
+
+export interface StripeConfig {
+  environment: 'sandbox' | 'live';
+  publishableKey: string;
+  webhookSecret?: string;
+  customerPortalUrl?: string;
+}
+
+export interface CloudApiSettingsConfig {
+  apiMode: ApiMode;
+  subscription: SubscriptionPlan;
+  cloudConfig: CloudConfig;
+  usage: PremiumUsage;
+  team: TeamConfig;
+  stripeConfig: StripeConfig;
+}

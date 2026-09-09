@@ -3,17 +3,35 @@ import '@src/Options.css';
 import { Button } from '@extension/ui';
 import { withErrorBoundary, withSuspense } from '@extension/shared';
 import { t } from '@extension/i18n';
-import { FiSettings, FiCpu, FiShield, FiTrendingUp, FiHelpCircle } from 'react-icons/fi';
+import {
+  FiSettings,
+  FiCpu,
+  FiShield,
+  FiTrendingUp,
+  FiHelpCircle,
+  FiKey,
+  FiZap,
+  FiUsers,
+  FiCreditCard,
+} from 'react-icons/fi';
 import { GeneralSettings } from './components/GeneralSettings';
 import { ModelSettings } from './components/ModelSettings';
 import { FirewallSettings } from './components/FirewallSettings';
 import { AnalyticsSettings } from './components/AnalyticsSettings';
+import { APIModeSelector } from './components/APIModeSelector';
+import { PremiumPlans } from './components/PremiumPlans';
+import { TeamManagement } from './components/TeamManagement';
+import { StripeSettings } from './components/StripeSettings';
 
-type TabTypes = 'general' | 'models' | 'firewall' | 'analytics' | 'help';
+type TabTypes = 'general' | 'models' | 'api-mode' | 'premium' | 'team' | 'stripe' | 'firewall' | 'analytics' | 'help';
 
 const TABS: { id: TabTypes; icon: React.ComponentType<{ className?: string }>; label: string }[] = [
   { id: 'general', icon: FiSettings, label: t('options_tabs_general') },
   { id: 'models', icon: FiCpu, label: t('options_tabs_models') },
+  { id: 'api-mode', icon: FiKey, label: t('options_tabs_apiMode') },
+  { id: 'premium', icon: FiZap, label: t('options_tabs_premiumPlans') },
+  { id: 'team', icon: FiUsers, label: t('options_tabs_team') },
+  { id: 'stripe', icon: FiCreditCard, label: t('options_tabs_stripe') },
   { id: 'firewall', icon: FiShield, label: t('options_tabs_firewall') },
   { id: 'analytics', icon: FiTrendingUp, label: 'Analytics' },
   { id: 'help', icon: FiHelpCircle, label: t('options_tabs_help') },
@@ -50,6 +68,14 @@ const Options = () => {
         return <GeneralSettings isDarkMode={isDarkMode} />;
       case 'models':
         return <ModelSettings isDarkMode={isDarkMode} />;
+      case 'api-mode':
+        return <APIModeSelector isDarkMode={isDarkMode} onNavigateToPremium={() => setActiveTab('premium')} />;
+      case 'premium':
+        return <PremiumPlans isDarkMode={isDarkMode} />;
+      case 'team':
+        return <TeamManagement isDarkMode={isDarkMode} />;
+      case 'stripe':
+        return <StripeSettings isDarkMode={isDarkMode} />;
       case 'firewall':
         return <FirewallSettings isDarkMode={isDarkMode} />;
       case 'analytics':

@@ -208,6 +208,18 @@
   "options_tabs_firewall": {
     "message": "防火牆"
   },
+  "options_tabs_apiMode": {
+    "message": "API 模式"
+  },
+  "options_tabs_premiumPlans": {
+    "message": "高級方案"
+  },
+  "options_tabs_team": {
+    "message": "團隊席位"
+  },
+  "options_tabs_stripe": {
+    "message": "Stripe 計費"
+  },
   "options_tabs_help": {
     "message": "說明"
   },

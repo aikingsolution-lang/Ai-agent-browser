@@ -1,10 +1,18 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { RxDiscordLogo } from 'react-icons/rx';
-import { FiSettings } from 'react-icons/fi';
+import { FiSettings, FiZap } from 'react-icons/fi';
 import { PiPlusBold } from 'react-icons/pi';
 import { GrHistory } from 'react-icons/gr';
-import { type Message, Actors, chatHistoryStore, agentModelStore, generalSettingsStore } from '@extension/storage';
+import {
+  type Message,
+  Actors,
+  chatHistoryStore,
+  agentModelStore,
+  generalSettingsStore,
+  cloudApiSettingsStore,
+  type CloudApiSettingsConfig,
+} from '@extension/storage';
 import favoritesStorage, { type FavoritePrompt } from '@extension/storage/lib/prompt/favorites';
 import { t } from '@extension/i18n';
 import MessageList from './components/MessageList';
@@ -38,6 +46,7 @@ const SidePanel = () => {
   const [isProcessingSpeech, setIsProcessingSpeech] = useState(false);
   const [isReplaying, setIsReplaying] = useState(false);
   const [replayEnabled, setReplayEnabled] = useState(false);
+  const [cloudSettings, setCloudSettings] = useState<CloudApiSettingsConfig | null>(null);
   const sessionIdRef = useRef<string | null>(null);
   const isReplayingRef = useRef<boolean>(false);
   const portRef = useRef<chrome.runtime.Port | null>(null);
@@ -60,6 +69,24 @@ const SidePanel = () => {
     darkModeMediaQuery.addEventListener('change', handleChange);
     return () => darkModeMediaQuery.removeEventListener('change', handleChange);
   }, []);
+
+  // Load cloud API settings
+  const loadCloudSettings = useCallback(async () => {
+    try {
+      const settings = await cloudApiSettingsStore.getSettings();
+      setCloudSettings(settings);
+    } catch (error) {
+      console.error('Error loading cloud settings:', error);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadCloudSettings();
+    const unsubscribe = cloudApiSettingsStore.subscribe(loadCloudSettings);
+    return () => {
+      unsubscribe();
+    };
+  }, [loadCloudSettings]);
 
   // Check if models are configured
   const checkModelConfiguration = useCallback(async () => {
@@ -557,6 +584,17 @@ const SidePanel = () => {
 
     if (!trimmedText) return;
 
+    // Check Premium monthly task usage quota
+    const usageStatus = await cloudApiSettingsStore.checkUsageLimit();
+    if (!usageStatus.allowed) {
+      appendMessage({
+        actor: Actors.SYSTEM,
+        content: `Monthly Premium task limit reached (${usageStatus.count}/${usageStatus.limit} tasks). Please switch to Free Mode or upgrade your plan in Settings.`,
+        timestamp: Date.now(),
+      });
+      return;
+    }
+
     // Check if the input is a command (starts with /)
     if (trimmedText.startsWith('/')) {
       // Process command and return if it was handled
@@ -569,6 +607,9 @@ const SidePanel = () => {
       console.log('Cannot send messages in historical sessions');
       return;
     }
+
+    // Increment usage for premium tasks
+    await cloudApiSettingsStore.incrementUsage();
 
     try {
       const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -1004,7 +1045,7 @@ const SidePanel = () => {
       <div
         className={`flex h-screen flex-col ${isDarkMode ? 'bg-slate-900' : "bg-[url('/bg.jpg')] bg-cover bg-no-repeat"} overflow-hidden border ${isDarkMode ? 'border-sky-800' : 'border-[rgb(186,230,253)]'} rounded-2xl`}>
         <header className="header relative">
-          <div className="header-logo">
+          <div className="header-logo flex items-center space-x-2">
             {showHistory ? (
               <button
                 type="button"
@@ -1014,7 +1055,27 @@ const SidePanel = () => {
                 {t('nav_back')}
               </button>
             ) : (
-              <img src="/icon-128.png" alt="Extension Logo" className="size-6" />
+              <>
+                <img src="/icon-128.png" alt="Extension Logo" className="size-6" />
+                {cloudSettings && (
+                  <button
+                    type="button"
+                    onClick={() => chrome.runtime.openOptionsPage()}
+                    className={`inline-flex items-center space-x-1 rounded-full px-2 py-0.5 text-[10px] font-bold cursor-pointer transition-transform hover:scale-105 ${
+                      cloudSettings.apiMode === 'premium'
+                        ? 'bg-gradient-to-r from-sky-500 to-indigo-600 text-white shadow-sm'
+                        : 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-300'
+                    }`}
+                    title={
+                      cloudSettings.apiMode === 'premium'
+                        ? `Premium Mode (${cloudSettings.usage?.taskCount || 0}/${cloudSettings.usage?.taskLimit || 1000} tasks used)`
+                        : 'Free Mode (Using own API keys)'
+                    }>
+                    <FiZap className="h-3 w-3" />
+                    <span>{cloudSettings.apiMode === 'premium' ? 'PRO' : 'Free'}</span>
+                  </button>
+                )}
+              </>
             )}
           </div>
           <div className="header-icons">

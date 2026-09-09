@@ -114,7 +114,7 @@ Agent logic is under `chrome-extension/src/background/agent/`.
 - Content scripts inject into web pages for DOM access
 - Multi-agent coordination happens through Chrome messaging APIs
 - Distribution zips are written to `dist-zip/`
-- Build flags: set `__DEV__=true` for watch builds; 
+- Build flags: set `__DEV__=true` for watch builds;
 - Do not edit generated outputs: `dist/**`, `build/**`, `packages/i18n/lib/**`
 
 ## Unit Tests
@@ -272,7 +272,7 @@ Use Chrome i18n placeholder format with proper definitions:
 - Turbo manages task dependencies and caching across workspaces
 - Extension builds to `dist/` directory which is loaded as unpacked extension
 - Zipped distributions are written to `dist-zip/`
-- Only supports Chrome/Edge 
+- Only supports Chrome/Edge
 - Keep diffs minimal and scoped; avoid mass refactors or reformatting unrelated files
 - Do not modify generated artifacts (`dist/**`, `build/**`, `packages/i18n/lib/**`)
   or workspace/global configs (`turbo.json`, `pnpm-workspace.yaml`, `tsconfig*`)
@@ -286,6 +286,6 @@ Use Chrome i18n placeholder format with proper definitions:
  - Only use scripts defined in `package.json`; do not invent new commands
  - Change policy: ask first for new deps, file renames/moves/deletes, or
    global/workspace config changes; allowed without asking: read/list files,
-   workspace‑scoped lint/format/type-check/build, and small focused patches
+   workspace-scoped lint/format/type-check/build, and small focused patches
  - Reuse existing building blocks: `packages/ui` components and
    `packages/tailwind-config` tokens instead of re-implementing

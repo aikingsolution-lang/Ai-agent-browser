@@ -1,0 +1,31 @@
+services:
+  - type: web
+    name: nanobrowser-backend
+    env: node
+    rootDir: .
+    buildCommand: pnpm install && pnpm -F @nanobrowser/backend build
+    startCommand: pnpm -F @nanobrowser/backend start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: MONGODB_URI
+        sync: false
+      - key: JWT_SECRET
+        generateValue: true
+      - key: JWT_EXPIRES_IN
+        value: 7d
+      - key: RAZORPAY_KEY_ID
+        sync: false
+      - key: RAZORPAY_KEY_SECRET
+        sync: false
+      - key: RAZORPAY_WEBHOOK_SECRET
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: LLM_DEFAULT_MODEL
+        value: gpt-4o-mini
+      - key: CORS_ORIGIN
+        value: '*'

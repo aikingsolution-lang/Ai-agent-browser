@@ -6,6 +6,8 @@ import {
   generalSettingsStore,
   llmProviderStore,
   analyticsSettingsStore,
+  cloudApiSettingsStore,
+  ProviderTypeEnum,
 } from '@extension/storage';
 import { t } from '@extension/i18n';
 import BrowserContext from './browser/context';
@@ -13,6 +15,7 @@ import { Executor } from './agent/executor';
 import { createLogger } from './log';
 import { ExecutionState } from './agent/event/types';
 import { createChatModel } from './agent/helper';
+import { cloudApiClient } from './services/cloud-api-client';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { DEFAULT_AGENT_OPTIONS } from './agent/types';
 import { SpeechToTextService } from './services/speechToText';

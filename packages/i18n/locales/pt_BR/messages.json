@@ -208,6 +208,18 @@
   "options_tabs_firewall": {
     "message": "Firewall"
   },
+  "options_tabs_apiMode": {
+    "message": "Modo API"
+  },
+  "options_tabs_premiumPlans": {
+    "message": "Planos Premium"
+  },
+  "options_tabs_team": {
+    "message": "Equipe"
+  },
+  "options_tabs_stripe": {
+    "message": "Faturamento Stripe"
+  },
   "options_tabs_help": {
     "message": "Ajuda"
   },

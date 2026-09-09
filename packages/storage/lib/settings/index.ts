@@ -5,3 +5,5 @@ export * from './generalSettings';
 export * from './firewall';
 export * from './speechToText';
 export * from './analyticsSettings';
+export * from './keys';
+export * from './cloudApiSettings';
