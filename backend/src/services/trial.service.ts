@@ -22,11 +22,7 @@ export class TrialService {
     userId: string | mongoose.Types.ObjectId,
     session?: mongoose.ClientSession,
   ): Promise<ISubscription> {
-    let planQuery = Plan.findOne({ code: 'free-trial' });
-    if (session) {
-      planQuery = planQuery.session(session);
-    }
-    let plan = await planQuery;
+    let plan = await Plan.findOne({ code: 'free-trial' });
 
     if (!plan) {
       plan = await PlanSeedService.seedDefaultPlans();

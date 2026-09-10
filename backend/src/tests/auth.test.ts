@@ -294,4 +294,30 @@ describe('Auth System Integration & Unit Tests', () => {
     expect(res.body.success).toBe(true);
     expect(res.body.message).toBe('Successfully logged out');
   });
+
+  it('18. Registration automatically provisions 5-day free trial subscription and 100 credits', async () => {
+    if (!mongoConnected) return;
+
+    const regRes = await request(app).post('/api/v1/auth/register').send({
+      name: 'Trial User',
+      email: 'trialuser@test.com',
+      password: 'Password123!',
+    });
+
+    expect(regRes.status).toBe(201);
+    const token = regRes.body.data.token;
+
+    // Verify GET /subscription/me immediately returns status TRIALING
+    const subRes = await request(app).get('/api/v1/subscription/me').set('Authorization', `Bearer ${token}`);
+    expect(subRes.status).toBe(200);
+    expect(subRes.body.data.status).toBe('TRIALING');
+    expect(subRes.body.data.subscription.isTrial).toBe(true);
+    expect(subRes.body.data.hasActiveEntitlement).toBe(true);
+
+    // Verify GET /credits/balance immediately returns 100 allocated credits
+    const balanceRes = await request(app).get('/api/v1/credits/balance').set('Authorization', `Bearer ${token}`);
+    expect(balanceRes.status).toBe(200);
+    expect(balanceRes.body.data.allocatedCredits).toBe(100);
+    expect(balanceRes.body.data.remainingCredits).toBe(100);
+  });
 });

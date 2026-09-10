@@ -17,5 +17,8 @@ subscriptionRouter.post('/checkout', authenticate, CheckoutController.checkout);
 // POST /api/v1/subscription/verify-payment (requires authentication)
 subscriptionRouter.post('/verify-payment', authenticate, CheckoutController.verifyPayment);
 
+// POST /api/v1/subscription/trial/activate (requires authentication)
+subscriptionRouter.post('/trial/activate', authenticate, SubscriptionController.activateFreeTrial);
+
 // POST /api/v1/subscription/cancel (requires authentication)
 subscriptionRouter.post('/cancel', authenticate, CheckoutController.cancel);

@@ -21,7 +21,16 @@ export class SubscriptionController {
       await TrialService.expireSubscriptionIfEnded(userId);
 
       // 2. Fetch latest subscription for user
-      const subscription = await Subscription.findOne({ userId }).sort({ createdAt: -1 });
+      let subscription = await Subscription.findOne({ userId }).sort({ createdAt: -1 });
+
+      if (!subscription) {
+        // Auto-provision 5-day free trial for users missing a subscription record
+        try {
+          subscription = await TrialService.createFreeTrial(userId);
+        } catch (trialErr) {
+          subscription = await Subscription.findOne({ userId }).sort({ createdAt: -1 });
+        }
+      }
 
       if (!subscription) {
         res.status(200).json({
@@ -67,6 +76,35 @@ export class SubscriptionController {
       res.status(200).json({
         success: true,
         data: { plans },
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  /**
+   * POST /api/v1/subscription/trial/activate
+   * Manually activates/provisions 5-day free trial for users who registered without a trial.
+   */
+  public static async activateFreeTrial(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const userId = req.user?._id?.toString();
+      if (!userId) {
+        throw new AppError('Authentication required', 401, 'UNAUTHORIZED');
+      }
+
+      const subscription = await TrialService.createFreeTrial(userId);
+      const trialInfo = TrialService.calculateTrialRemaining(subscription.trialEndDate!);
+
+      res.status(200).json({
+        success: true,
+        message: 'Free trial activated successfully',
+        data: {
+          subscription,
+          status: subscription.status,
+          hasActiveEntitlement: true,
+          trialInfo,
+        },
       });
     } catch (error) {
       next(error);
