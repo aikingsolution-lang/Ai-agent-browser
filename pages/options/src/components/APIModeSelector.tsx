@@ -258,11 +258,11 @@ export const APIModeSelector: React.FC<APIModeSelectorProps> = ({ isDarkMode, on
               </li>
               <li className="flex items-center space-x-2">
                 <span className="text-indigo-500">•</span>
-                <span>Instant access to Claude 3.5, GPT-4o, Gemini Pro</span>
+                <span>Instant access to AWS Bedrock Nova Models (amazon.nova-lite-v1:0)</span>
               </li>
               <li className="flex items-center space-x-2">
                 <span className="text-indigo-500">•</span>
-                <span>Backed by AWS Secrets Manager & GCP Secret Manager</span>
+                <span>Backed by AWS Bedrock Bearer Key & AWS Secrets Manager</span>
               </li>
             </ul>
           </div>
@@ -278,7 +278,7 @@ export const APIModeSelector: React.FC<APIModeSelectorProps> = ({ isDarkMode, on
                   Subscription Required for Premium Mode
                 </h4>
                 <p className={`text-[11px] ${isDarkMode ? 'text-amber-200/70' : 'text-amber-700'}`}>
-                  Subscribe to a Pro plan ($19/mo) to unlock built-in Cloud API access and 1,000 tasks/month.
+                  Subscribe to a paid plan (Starter ₹299/mo or Pro ₹699/mo) to unlock built-in Cloud API access.
                 </p>
               </div>
             </div>

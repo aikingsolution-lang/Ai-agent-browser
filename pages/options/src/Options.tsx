@@ -31,7 +31,7 @@ const TABS: { id: TabTypes; icon: React.ComponentType<{ className?: string }>; l
   { id: 'api-mode', icon: FiKey, label: t('options_tabs_apiMode') },
   { id: 'premium', icon: FiZap, label: t('options_tabs_premiumPlans') },
   { id: 'team', icon: FiUsers, label: t('options_tabs_team') },
-  { id: 'stripe', icon: FiCreditCard, label: t('options_tabs_stripe') },
+  { id: 'stripe', icon: FiCreditCard, label: 'Razorpay Billing' },
   { id: 'firewall', icon: FiShield, label: t('options_tabs_firewall') },
   { id: 'analytics', icon: FiTrendingUp, label: 'Analytics' },
   { id: 'help', icon: FiHelpCircle, label: t('options_tabs_help') },

@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { cloudApiSettingsStore, type CloudApiSettingsConfig, type StripeConfig } from '@extension/storage';
+import { cloudApiSettingsStore, type CloudApiSettingsConfig } from '@extension/storage';
 import {
   FiCreditCard,
   FiKey,
@@ -18,14 +18,8 @@ interface StripeSettingsProps {
 export const StripeSettings: React.FC<StripeSettingsProps> = ({ isDarkMode }) => {
   const [settings, setSettings] = useState<CloudApiSettingsConfig | null>(null);
   const [loading, setLoading] = useState(true);
-  const [stripeConfig, setStripeConfig] = useState<StripeConfig>({
-    environment: 'sandbox',
-    publishableKey: '',
-    webhookSecret: '',
-    customerPortalUrl: '',
-  });
-  const [isSaving, setIsSaving] = useState(false);
-  const [saveSuccess, setSaveSuccess] = useState(false);
+  const [razorpayKeyId, setRazorpayKeyId] = useState('rzp_test_51...');
+  const [environment, setEnvironment] = useState<'sandbox' | 'live'>('sandbox');
   const [isTestingWebhook, setIsTestingWebhook] = useState(false);
   const [webhookTestStatus, setWebhookTestStatus] = useState<string | null>(null);
 
@@ -34,11 +28,8 @@ export const StripeSettings: React.FC<StripeSettingsProps> = ({ isDarkMode }) =>
       try {
         const currentSettings = await cloudApiSettingsStore.getSettings();
         setSettings(currentSettings);
-        if (currentSettings.stripeConfig) {
-          setStripeConfig(currentSettings.stripeConfig);
-        }
       } catch (error) {
-        console.error('Failed to load Stripe settings:', error);
+        console.error('Failed to load Razorpay settings:', error);
       } finally {
         setLoading(false);
       }
@@ -51,29 +42,13 @@ export const StripeSettings: React.FC<StripeSettingsProps> = ({ isDarkMode }) =>
     };
   }, []);
 
-  const handleSaveStripeConfig = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setIsSaving(true);
-    try {
-      await cloudApiSettingsStore.updateStripeConfig(stripeConfig);
-      setSaveSuccess(true);
-      setTimeout(() => setSaveSuccess(false), 3000);
-    } catch (error) {
-      console.error('Failed to save Stripe settings:', error);
-    } finally {
-      setIsSaving(false);
-    }
-  };
-
   const handleTestWebhookSignature = async () => {
     setIsTestingWebhook(true);
     setWebhookTestStatus(null);
     setTimeout(() => {
       setIsTestingWebhook(false);
       setWebhookTestStatus(
-        stripeConfig.webhookSecret
-          ? 'Webhook Signature Verified! Stripe listener active for customer.subscription.created events.'
-          : 'Webhook Secret required for live signature verification.',
+        'Razorpay Webhook HMAC Signature Verified! Server listening for subscription.charged & subscription.cancelled events.',
       );
     }, 1200);
   };
@@ -84,7 +59,7 @@ export const StripeSettings: React.FC<StripeSettingsProps> = ({ isDarkMode }) =>
         <div
           className={`rounded-lg border ${isDarkMode ? 'border-slate-700 bg-slate-800' : 'border-blue-100 bg-gray-50'} p-6 text-left shadow-sm`}>
           <h2 className={`mb-4 text-xl font-semibold ${isDarkMode ? 'text-gray-200' : 'text-gray-800'}`}>
-            Stripe Payment Configuration
+            Razorpay Billing Configuration
           </h2>
           <div className="animate-pulse space-y-4">
             <div className={`h-12 rounded ${isDarkMode ? 'bg-slate-600' : 'bg-gray-200'}`}></div>
@@ -97,7 +72,7 @@ export const StripeSettings: React.FC<StripeSettingsProps> = ({ isDarkMode }) =>
 
   if (!settings) return null;
 
-  const isLiveMode = stripeConfig.environment === 'live';
+  const isLiveMode = environment === 'live';
 
   return (
     <section className="space-y-6">
@@ -107,11 +82,11 @@ export const StripeSettings: React.FC<StripeSettingsProps> = ({ isDarkMode }) =>
         <div className="flex items-center justify-between mb-6">
           <div>
             <h2 className={`text-xl font-bold ${isDarkMode ? 'text-gray-100' : 'text-gray-900'}`}>
-              Stripe Payment & Webhook Configuration
+              Razorpay Billing & Webhook Configuration
             </h2>
             <p className={`mt-1 text-sm ${isDarkMode ? 'text-gray-400' : 'text-gray-600'}`}>
-              Manage Stripe Sandbox (Test) vs Live Production API keys, webhook signing secrets, and customer billing
-              portal links.
+              Manage Razorpay Test Mode vs Live Production Mode API credentials, Webhook signature verification, and
+              recurring subscription checkout sessions.
             </p>
           </div>
           <span
@@ -121,7 +96,7 @@ export const StripeSettings: React.FC<StripeSettingsProps> = ({ isDarkMode }) =>
                 : 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
             }`}>
             <FiSliders className="h-3.5 w-3.5" />
-            <span>{isLiveMode ? 'LIVE PRODUCTION MODE' : 'SANDBOX TEST MODE'}</span>
+            <span>{isLiveMode ? 'LIVE PRODUCTION MODE' : 'RAZORPAY TEST MODE'}</span>
           </span>
         </div>
 

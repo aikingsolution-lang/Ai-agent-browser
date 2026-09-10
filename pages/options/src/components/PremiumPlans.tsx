@@ -53,10 +53,35 @@ export const PremiumPlans: React.FC<PremiumPlansProps> = ({ isDarkMode }) => {
     };
   }, []);
 
-  const handleOpenCheckout = (planId: 'pro' | 'enterprise') => {
-    setSelectedPlanForCheckout(planId);
-    setPaymentSuccess(false);
-    setShowCheckoutModal(true);
+  const handleOpenCheckout = async (planCode: 'starter' | 'pro' | 'power') => {
+    setIsProcessingPayment(true);
+    try {
+      const idempotencyKey = `checkout_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+      const res = await backendApiClient.createCheckoutSession(planCode, idempotencyKey);
+
+      if (res.data?.shortUrl) {
+        window.open(res.data.shortUrl, '_blank');
+        alert(
+          `Razorpay checkout initiated! Opening payment page for ${res.data.planName || planCode.toUpperCase()} plan.`,
+        );
+      } else {
+        alert(
+          `Checkout session created for plan ${planCode.toUpperCase()}! (Subscription ID: ${res.data?.subscriptionId})`,
+        );
+      }
+
+      await cloudApiSettingsStore.updateSubscription({
+        planId: planCode as any,
+        status: 'active',
+        billingInterval,
+      });
+      await cloudApiSettingsStore.setApiMode('premium');
+    } catch (error: any) {
+      console.error('Failed to create Razorpay checkout session:', error);
+      alert(error.message || 'Checkout failed. Please ensure you are logged in and backend is running.');
+    } finally {
+      setIsProcessingPayment(false);
+    }
   };
 
   const handleDowngradeToFree = async () => {
@@ -73,55 +98,7 @@ export const PremiumPlans: React.FC<PremiumPlansProps> = ({ isDarkMode }) => {
     }
   };
 
-  const handleExecutePayment = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!selectedPlanForCheckout) return;
-
-    setIsProcessingPayment(true);
-
-    try {
-      const planCode = selectedPlanForCheckout === 'pro' ? 'pro' : 'power';
-      const idempotencyKey = `checkout_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
-
-      // Call backend to create checkout session
-      const checkoutRes = await backendApiClient.createCheckoutSession(planCode, idempotencyKey);
-      const checkoutData = checkoutRes.data;
-
-      // Simulate payment authorization / verification step
-      const mockPaymentId = `pay_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-      const mockSignature = `sig_${Date.now()}_mock_signature_hash`;
-
-      if (checkoutData?.razorpaySubscriptionId) {
-        await backendApiClient.verifyPayment({
-          razorpaySubscriptionId: checkoutData.razorpaySubscriptionId,
-          razorpayPaymentId: mockPaymentId,
-          razorpaySignature: mockSignature,
-        });
-      }
-
-      await cloudApiSettingsStore.updateSubscription({
-        planId: selectedPlanForCheckout,
-        status: 'active',
-        billingInterval,
-      });
-      await cloudApiSettingsStore.setApiMode('premium');
-
-      setIsProcessingPayment(false);
-      setPaymentSuccess(true);
-
-      setTimeout(() => {
-        setShowCheckoutModal(false);
-        setPaymentSuccess(false);
-      }, 1800);
-    } catch (error: any) {
-      console.error('Payment processing failed:', error);
-      setIsProcessingPayment(false);
-      alert(error.message || 'Payment checkout failed. Please check your backend connection.');
-    }
-  };
-
   const currentPlan = settings?.subscription.planId || 'free';
-  const priceDisplay = billingInterval === 'monthly' ? '$19 / month' : '$180 / year ($15/month)';
 
   return (
     <section className="space-y-6">
@@ -131,14 +108,14 @@ export const PremiumPlans: React.FC<PremiumPlansProps> = ({ isDarkMode }) => {
         <div className="text-center max-w-2xl mx-auto mb-8">
           <div className="inline-flex items-center space-x-2 rounded-full bg-indigo-500/10 px-4 py-1.5 text-xs font-semibold text-indigo-500 mb-3">
             <FiStar className="h-4 w-4" />
-            <span>Nanobrowser Premium Plans</span>
+            <span>NanoBrowser Premium Commercial Plans</span>
           </div>
           <h2 className={`text-3xl font-extrabold ${isDarkMode ? 'text-gray-100' : 'text-gray-900'}`}>
-            Supercharge Your Web Automation
+            Supercharge Your AI Web Automation
           </h2>
           <p className={`mt-2 text-sm ${isDarkMode ? 'text-gray-400' : 'text-gray-600'}`}>
-            Get built-in LLM API access without managing API keys, enjoy up to 1,000 tasks/month, and unlock high-speed
-            execution.
+            Built-in AWS Bedrock Nova LLM proxy access, automated credit allocation, and secure Razorpay payment
+            processing.
           </p>
 
           {/* Billing Switcher */}
@@ -152,31 +129,17 @@ export const PremiumPlans: React.FC<PremiumPlansProps> = ({ isDarkMode }) => {
                     ? 'text-gray-400 hover:text-gray-200'
                     : 'text-gray-600 hover:text-gray-900'
               }`}>
-              Monthly Billing
-            </button>
-            <button
-              onClick={() => setBillingInterval('yearly')}
-              className={`flex items-center space-x-1 rounded-full px-4 py-1.5 text-xs font-semibold transition-all ${
-                billingInterval === 'yearly'
-                  ? 'bg-sky-500 text-white shadow'
-                  : isDarkMode
-                    ? 'text-gray-400 hover:text-gray-200'
-                    : 'text-gray-600 hover:text-gray-900'
-              }`}>
-              <span>Yearly Billing</span>
-              <span className="rounded-full bg-emerald-500 px-1.5 py-0.5 text-[10px] font-extrabold text-white">
-                Save 20%
-              </span>
+              Monthly Billing (INR)
             </button>
           </div>
         </div>
 
         {/* Pricing Cards */}
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
-          {/* Free Tier */}
+          {/* Starter Plan */}
           <div
             className={`relative flex flex-col justify-between rounded-2xl border p-6 transition-all ${
-              currentPlan === 'free'
+              currentPlan === 'starter'
                 ? 'border-sky-500 ring-2 ring-sky-500/20'
                 : isDarkMode
                   ? 'border-slate-700 bg-slate-700/40'
@@ -184,55 +147,52 @@ export const PremiumPlans: React.FC<PremiumPlansProps> = ({ isDarkMode }) => {
             }`}>
             <div>
               <div className="flex items-center justify-between">
-                <h3 className={`text-lg font-bold ${isDarkMode ? 'text-gray-200' : 'text-gray-800'}`}>Free Tier</h3>
-                {currentPlan === 'free' && (
+                <h3 className={`text-lg font-bold ${isDarkMode ? 'text-gray-200' : 'text-gray-800'}`}>Starter Plan</h3>
+                {currentPlan === 'starter' && (
                   <span className="rounded-full bg-sky-500/20 px-2.5 py-0.5 text-xs font-semibold text-sky-500">
                     Current Plan
                   </span>
                 )}
               </div>
-              <p className={`mt-1 text-xs ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>Bring your own API key</p>
+              <p className={`mt-1 text-xs ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>
+                Ideal for individual automation
+              </p>
               <div className="mt-4 flex items-baseline">
-                <span className={`text-3xl font-extrabold ${isDarkMode ? 'text-gray-100' : 'text-gray-900'}`}>$0</span>
-                <span className={`ml-1 text-xs ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>/ forever</span>
+                <span className={`text-3xl font-extrabold ${isDarkMode ? 'text-gray-100' : 'text-gray-900'}`}>
+                  ₹299
+                </span>
+                <span className={`ml-1 text-xs ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>/ month</span>
               </div>
 
               <ul className={`mt-6 space-y-3 text-xs ${isDarkMode ? 'text-gray-300' : 'text-gray-600'}`}>
-                <li className="flex items-center space-x-2">
-                  <FiCheck className="h-4 w-4 text-emerald-500 flex-shrink-0" />
-                  <span>Unlimited tasks with own API keys</span>
+                <li className="flex items-center space-x-2 font-medium text-sky-500">
+                  <FiZap className="h-4 w-4 flex-shrink-0" />
+                  <span>300 AI Credits / month included</span>
                 </li>
                 <li className="flex items-center space-x-2">
                   <FiCheck className="h-4 w-4 text-emerald-500 flex-shrink-0" />
-                  <span>Supports OpenAI, Anthropic, Gemini, Ollama</span>
+                  <span>AWS Bedrock Nova Lite (`amazon.nova-lite-v1:0`)</span>
                 </li>
                 <li className="flex items-center space-x-2">
                   <FiCheck className="h-4 w-4 text-emerald-500 flex-shrink-0" />
-                  <span>Local browser extension execution</span>
+                  <span>15 tasks / minute rate limit</span>
                 </li>
                 <li className="flex items-center space-x-2">
                   <FiCheck className="h-4 w-4 text-emerald-500 flex-shrink-0" />
-                  <span>Standard execution speed</span>
+                  <span>Razorpay Instant Checkout</span>
                 </li>
               </ul>
             </div>
 
-            {currentPlan === 'pro' || currentPlan === 'enterprise' ? (
-              <button
-                onClick={handleDowngradeToFree}
-                className="mt-8 w-full rounded-xl border border-slate-600 py-2.5 text-xs font-semibold text-gray-300 hover:bg-slate-700 transition-all">
-                Cancel Paid Plan & Switch to Free
-              </button>
-            ) : (
-              <button
-                disabled
-                className="mt-8 w-full rounded-xl bg-gray-200 py-2.5 text-xs font-semibold text-gray-500 cursor-default dark:bg-slate-700 dark:text-gray-400">
-                Active Plan
-              </button>
-            )}
+            <button
+              onClick={() => handleOpenCheckout('starter')}
+              disabled={isProcessingPayment || currentPlan === 'starter'}
+              className="mt-8 w-full rounded-xl bg-sky-600 py-2.5 text-xs font-semibold text-white hover:bg-sky-500 transition-all shadow-md disabled:opacity-50 cursor-pointer">
+              {currentPlan === 'starter' ? 'Active Plan' : 'Subscribe to Starter (₹299/mo)'}
+            </button>
           </div>
 
-          {/* Pro Tier (Recommended) */}
+          {/* Pro Plan (Recommended) */}
           <div
             className={`relative flex flex-col justify-between rounded-2xl border p-6 shadow-xl transition-all ${
               currentPlan === 'pro'
@@ -255,58 +215,52 @@ export const PremiumPlans: React.FC<PremiumPlansProps> = ({ isDarkMode }) => {
                 )}
               </div>
               <p className={`mt-1 text-xs ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>
-                Built-in API access included
+                High-volume power users
               </p>
 
               <div className="mt-4 flex items-baseline">
                 <span className={`text-3xl font-extrabold ${isDarkMode ? 'text-gray-100' : 'text-gray-900'}`}>
-                  {billingInterval === 'monthly' ? '$19' : '$15'}
+                  ₹699
                 </span>
-                <span className={`ml-1 text-xs ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>
-                  / month {billingInterval === 'yearly' ? '(billed yearly)' : ''}
-                </span>
+                <span className={`ml-1 text-xs ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>/ month</span>
               </div>
 
               <ul className={`mt-6 space-y-3 text-xs ${isDarkMode ? 'text-gray-300' : 'text-gray-600'}`}>
                 <li className="flex items-center space-x-2 font-medium text-indigo-500 dark:text-indigo-400">
                   <FiZap className="h-4 w-4 flex-shrink-0" />
-                  <span>1,000 automated tasks / month included</span>
+                  <span>1,000 AI Credits / month included</span>
                 </li>
                 <li className="flex items-center space-x-2">
                   <FiCheck className="h-4 w-4 text-emerald-500 flex-shrink-0" />
-                  <span>Built-in access to Claude 3.5 & GPT-4o</span>
+                  <span>AWS Bedrock Nova Lite & Pro Models</span>
                 </li>
                 <li className="flex items-center space-x-2">
                   <FiCheck className="h-4 w-4 text-emerald-500 flex-shrink-0" />
-                  <span>Zero setup – no personal API key required</span>
+                  <span>30 tasks / minute rate limit</span>
                 </li>
                 <li className="flex items-center space-x-2">
                   <FiCheck className="h-4 w-4 text-emerald-500 flex-shrink-0" />
-                  <span>Priority task execution & high concurrency</span>
-                </li>
-                <li className="flex items-center space-x-2">
-                  <FiCheck className="h-4 w-4 text-emerald-500 flex-shrink-0" />
-                  <span>Cloud API key backup & auto-sync</span>
+                  <span>Priority task execution & SSE streaming</span>
                 </li>
               </ul>
             </div>
 
             <button
               onClick={() => handleOpenCheckout('pro')}
-              disabled={currentPlan === 'pro'}
-              className={`mt-8 w-full rounded-xl py-2.5 text-xs font-semibold shadow-md transition-all ${
+              disabled={isProcessingPayment || currentPlan === 'pro'}
+              className={`mt-8 w-full rounded-xl py-2.5 text-xs font-semibold shadow-md transition-all cursor-pointer ${
                 currentPlan === 'pro'
                   ? 'bg-indigo-500/20 text-indigo-400 cursor-default'
                   : 'bg-gradient-to-r from-sky-500 to-indigo-600 text-white hover:from-sky-600 hover:to-indigo-700'
               }`}>
-              {currentPlan === 'pro' ? 'Active Plan' : 'Subscribe to Pro ($19/mo)'}
+              {currentPlan === 'pro' ? 'Active Plan' : 'Subscribe to Pro (₹699/mo)'}
             </button>
           </div>
 
-          {/* Enterprise Tier */}
+          {/* Power Plan */}
           <div
             className={`relative flex flex-col justify-between rounded-2xl border p-6 transition-all ${
-              currentPlan === 'enterprise'
+              currentPlan === 'power'
                 ? 'border-purple-500 ring-2 ring-purple-500/20'
                 : isDarkMode
                   ? 'border-slate-700 bg-slate-700/40'
@@ -314,51 +268,44 @@ export const PremiumPlans: React.FC<PremiumPlansProps> = ({ isDarkMode }) => {
             }`}>
             <div>
               <div className="flex items-center justify-between">
-                <h3 className={`text-lg font-bold ${isDarkMode ? 'text-gray-200' : 'text-gray-800'}`}>Enterprise</h3>
-                {currentPlan === 'enterprise' && (
+                <h3 className={`text-lg font-bold ${isDarkMode ? 'text-gray-200' : 'text-gray-800'}`}>Power Plan</h3>
+                {currentPlan === 'power' && (
                   <span className="rounded-full bg-purple-500/20 px-2.5 py-0.5 text-xs font-semibold text-purple-400">
                     Current Plan
                   </span>
                 )}
               </div>
               <p className={`mt-1 text-xs ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>
-                Custom high volume & team management
+                Maximum performance & credits
               </p>
               <div className="mt-4 flex items-baseline">
                 <span className={`text-3xl font-extrabold ${isDarkMode ? 'text-gray-100' : 'text-gray-900'}`}>
-                  Custom
+                  ₹1,499
                 </span>
+                <span className={`ml-1 text-xs ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>/ month</span>
               </div>
 
               <ul className={`mt-6 space-y-3 text-xs ${isDarkMode ? 'text-gray-300' : 'text-gray-600'}`}>
-                <li className="flex items-center space-x-2">
-                  <FiCheck className="h-4 w-4 text-emerald-500 flex-shrink-0" />
-                  <span>Unlimited monthly automated tasks</span>
+                <li className="flex items-center space-x-2 font-medium text-purple-400">
+                  <FiZap className="h-4 w-4 flex-shrink-0" />
+                  <span>2,500 AI Credits / month included</span>
                 </li>
                 <li className="flex items-center space-x-2">
                   <FiCheck className="h-4 w-4 text-emerald-500 flex-shrink-0" />
-                  <span>Dedicated cloud proxy endpoints</span>
+                  <span>60 tasks / minute rate limit</span>
                 </li>
                 <li className="flex items-center space-x-2">
                   <FiCheck className="h-4 w-4 text-emerald-500 flex-shrink-0" />
-                  <span>Custom SLA & 24/7 priority support</span>
-                </li>
-                <li className="flex items-center space-x-2">
-                  <FiCheck className="h-4 w-4 text-emerald-500 flex-shrink-0" />
-                  <span>Centralized team API key management</span>
+                  <span>Dedicated priority concurrency pool</span>
                 </li>
               </ul>
             </div>
 
             <button
-              onClick={() => handleOpenCheckout('enterprise')}
-              disabled={currentPlan === 'enterprise'}
-              className={`mt-8 w-full rounded-xl py-2.5 text-xs font-semibold transition-all ${
-                currentPlan === 'enterprise'
-                  ? 'bg-purple-500/20 text-purple-400 cursor-default'
-                  : 'bg-slate-800 text-white hover:bg-slate-700 dark:bg-slate-600 dark:hover:bg-slate-500'
-              }`}>
-              {currentPlan === 'enterprise' ? 'Active' : 'Subscribe to Enterprise'}
+              onClick={() => handleOpenCheckout('power')}
+              disabled={isProcessingPayment || currentPlan === 'power'}
+              className="mt-8 w-full rounded-xl bg-purple-600 hover:bg-purple-500 py-2.5 text-xs font-semibold text-white transition-all shadow-md cursor-pointer">
+              {currentPlan === 'power' ? 'Active Plan' : 'Subscribe to Power (₹1,499/mo)'}
             </button>
           </div>
         </div>
