@@ -1,7 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { RxDiscordLogo } from 'react-icons/rx';
-import { FiSettings, FiZap } from 'react-icons/fi';
+import { FiSettings, FiZap, FiUser, FiLogOut } from 'react-icons/fi';
 import { PiPlusBold } from 'react-icons/pi';
 import { GrHistory } from 'react-icons/gr';
 import {
@@ -24,7 +24,6 @@ import ChatHistoryList from './components/ChatHistoryList';
 import BookmarkList from './components/BookmarkList';
 import { AuthModal } from './components/AuthModal';
 import { EventType, type AgentEvent, ExecutionState } from './types/event';
-import { FiSettings, FiZap, FiUser, FiLogOut } from 'react-icons/fi';
 import './SidePanel.css';
 
 // Declare chrome API types

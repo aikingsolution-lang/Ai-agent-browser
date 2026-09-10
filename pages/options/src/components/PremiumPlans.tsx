@@ -22,16 +22,14 @@ interface PremiumPlansProps {
 export const PremiumPlans: React.FC<PremiumPlansProps> = ({ isDarkMode }) => {
   const [settings, setSettings] = useState<CloudApiSettingsConfig | null>(null);
   const [billingInterval, setBillingInterval] = useState<'monthly' | 'yearly'>('monthly');
-  const [showCheckoutModal, setShowCheckoutModal] = useState(false);
-  const [selectedPlanForCheckout, setSelectedPlanForCheckout] = useState<'pro' | 'enterprise' | null>(null);
   const [isProcessingPayment, setIsProcessingPayment] = useState(false);
-  const [paymentSuccess, setPaymentSuccess] = useState(false);
-
-  // Form fields for mock payment
-  const [cardName, setCardName] = useState('Alex Morgan');
-  const [cardNumber, setCardNumber] = useState('4242 •••• •••• 4242');
-  const [cardExpiry, setCardExpiry] = useState('12/28');
-  const [cardCvc, setCardCvc] = useState('888');
+  const [livePlans, setLivePlans] = useState<
+    Array<{ code: string; name: string; amount: number; creditsPerBillingPeriod: number }>
+  >([
+    { code: 'starter', name: 'Starter Plan', amount: 49900, creditsPerBillingPeriod: 1000 },
+    { code: 'pro', name: 'Pro Plan', amount: 149900, creditsPerBillingPeriod: 5000 },
+    { code: 'power', name: 'Power Plan', amount: 499900, creditsPerBillingPeriod: 25000 },
+  ]);
 
   useEffect(() => {
     const loadSettings = async () => {
@@ -46,7 +44,22 @@ export const PremiumPlans: React.FC<PremiumPlansProps> = ({ isDarkMode }) => {
       }
     };
 
+    const loadLivePlans = async () => {
+      try {
+        const res = await backendApiClient.getSubscriptionPlans();
+        if (res.data?.plans && res.data.plans.length > 0) {
+          const paidPlans = res.data.plans.filter((p: any) => p.code !== 'free-trial');
+          if (paidPlans.length > 0) {
+            setLivePlans(paidPlans);
+          }
+        }
+      } catch (err) {
+        console.log('Using default plan pricing fallback:', err);
+      }
+    };
+
     loadSettings();
+    loadLivePlans();
     const unsubscribe = cloudApiSettingsStore.subscribe(loadSettings);
     return () => {
       unsubscribe();
@@ -99,6 +112,18 @@ export const PremiumPlans: React.FC<PremiumPlansProps> = ({ isDarkMode }) => {
   };
 
   const currentPlan = settings?.subscription.planId || 'free';
+
+  const getPlanDetails = (code: string, defaultPrice: number, defaultCredits: number) => {
+    const found = livePlans.find(p => p.code === code);
+    return {
+      price: found ? found.amount / 100 : defaultPrice,
+      credits: found ? found.creditsPerBillingPeriod : defaultCredits,
+    };
+  };
+
+  const starter = getPlanDetails('starter', 499, 1000);
+  const pro = getPlanDetails('pro', 1499, 5000);
+  const power = getPlanDetails('power', 4999, 25000);
 
   return (
     <section className="space-y-6">
@@ -159,7 +184,7 @@ export const PremiumPlans: React.FC<PremiumPlansProps> = ({ isDarkMode }) => {
               </p>
               <div className="mt-4 flex items-baseline">
                 <span className={`text-3xl font-extrabold ${isDarkMode ? 'text-gray-100' : 'text-gray-900'}`}>
-                  ₹299
+                  ₹{starter.price}
                 </span>
                 <span className={`ml-1 text-xs ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>/ month</span>
               </div>
@@ -167,7 +192,7 @@ export const PremiumPlans: React.FC<PremiumPlansProps> = ({ isDarkMode }) => {
               <ul className={`mt-6 space-y-3 text-xs ${isDarkMode ? 'text-gray-300' : 'text-gray-600'}`}>
                 <li className="flex items-center space-x-2 font-medium text-sky-500">
                   <FiZap className="h-4 w-4 flex-shrink-0" />
-                  <span>300 AI Credits / month included</span>
+                  <span>{starter.credits.toLocaleString()} AI Credits / month included</span>
                 </li>
                 <li className="flex items-center space-x-2">
                   <FiCheck className="h-4 w-4 text-emerald-500 flex-shrink-0" />
@@ -175,7 +200,7 @@ export const PremiumPlans: React.FC<PremiumPlansProps> = ({ isDarkMode }) => {
                 </li>
                 <li className="flex items-center space-x-2">
                   <FiCheck className="h-4 w-4 text-emerald-500 flex-shrink-0" />
-                  <span>15 tasks / minute rate limit</span>
+                  <span>120 tasks / minute rate limit</span>
                 </li>
                 <li className="flex items-center space-x-2">
                   <FiCheck className="h-4 w-4 text-emerald-500 flex-shrink-0" />
@@ -188,7 +213,7 @@ export const PremiumPlans: React.FC<PremiumPlansProps> = ({ isDarkMode }) => {
               onClick={() => handleOpenCheckout('starter')}
               disabled={isProcessingPayment || currentPlan === 'starter'}
               className="mt-8 w-full rounded-xl bg-sky-600 py-2.5 text-xs font-semibold text-white hover:bg-sky-500 transition-all shadow-md disabled:opacity-50 cursor-pointer">
-              {currentPlan === 'starter' ? 'Active Plan' : 'Subscribe to Starter (₹299/mo)'}
+              {currentPlan === 'starter' ? 'Active Plan' : `Subscribe to Starter (₹${starter.price}/mo)`}
             </button>
           </div>
 
@@ -220,7 +245,7 @@ export const PremiumPlans: React.FC<PremiumPlansProps> = ({ isDarkMode }) => {
 
               <div className="mt-4 flex items-baseline">
                 <span className={`text-3xl font-extrabold ${isDarkMode ? 'text-gray-100' : 'text-gray-900'}`}>
-                  ₹699
+                  ₹{pro.price.toLocaleString()}
                 </span>
                 <span className={`ml-1 text-xs ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>/ month</span>
               </div>
@@ -228,7 +253,7 @@ export const PremiumPlans: React.FC<PremiumPlansProps> = ({ isDarkMode }) => {
               <ul className={`mt-6 space-y-3 text-xs ${isDarkMode ? 'text-gray-300' : 'text-gray-600'}`}>
                 <li className="flex items-center space-x-2 font-medium text-indigo-500 dark:text-indigo-400">
                   <FiZap className="h-4 w-4 flex-shrink-0" />
-                  <span>1,000 AI Credits / month included</span>
+                  <span>{pro.credits.toLocaleString()} AI Credits / month included</span>
                 </li>
                 <li className="flex items-center space-x-2">
                   <FiCheck className="h-4 w-4 text-emerald-500 flex-shrink-0" />
@@ -236,7 +261,7 @@ export const PremiumPlans: React.FC<PremiumPlansProps> = ({ isDarkMode }) => {
                 </li>
                 <li className="flex items-center space-x-2">
                   <FiCheck className="h-4 w-4 text-emerald-500 flex-shrink-0" />
-                  <span>30 tasks / minute rate limit</span>
+                  <span>300 tasks / minute rate limit</span>
                 </li>
                 <li className="flex items-center space-x-2">
                   <FiCheck className="h-4 w-4 text-emerald-500 flex-shrink-0" />
@@ -253,7 +278,7 @@ export const PremiumPlans: React.FC<PremiumPlansProps> = ({ isDarkMode }) => {
                   ? 'bg-indigo-500/20 text-indigo-400 cursor-default'
                   : 'bg-gradient-to-r from-sky-500 to-indigo-600 text-white hover:from-sky-600 hover:to-indigo-700'
               }`}>
-              {currentPlan === 'pro' ? 'Active Plan' : 'Subscribe to Pro (₹699/mo)'}
+              {currentPlan === 'pro' ? 'Active Plan' : `Subscribe to Pro (₹${pro.price.toLocaleString()}/mo)`}
             </button>
           </div>
 
@@ -280,7 +305,7 @@ export const PremiumPlans: React.FC<PremiumPlansProps> = ({ isDarkMode }) => {
               </p>
               <div className="mt-4 flex items-baseline">
                 <span className={`text-3xl font-extrabold ${isDarkMode ? 'text-gray-100' : 'text-gray-900'}`}>
-                  ₹1,499
+                  ₹{power.price.toLocaleString()}
                 </span>
                 <span className={`ml-1 text-xs ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>/ month</span>
               </div>
@@ -288,11 +313,11 @@ export const PremiumPlans: React.FC<PremiumPlansProps> = ({ isDarkMode }) => {
               <ul className={`mt-6 space-y-3 text-xs ${isDarkMode ? 'text-gray-300' : 'text-gray-600'}`}>
                 <li className="flex items-center space-x-2 font-medium text-purple-400">
                   <FiZap className="h-4 w-4 flex-shrink-0" />
-                  <span>2,500 AI Credits / month included</span>
+                  <span>{power.credits.toLocaleString()} AI Credits / month included</span>
                 </li>
                 <li className="flex items-center space-x-2">
                   <FiCheck className="h-4 w-4 text-emerald-500 flex-shrink-0" />
-                  <span>60 tasks / minute rate limit</span>
+                  <span>600 tasks / minute rate limit</span>
                 </li>
                 <li className="flex items-center space-x-2">
                   <FiCheck className="h-4 w-4 text-emerald-500 flex-shrink-0" />
@@ -305,7 +330,7 @@ export const PremiumPlans: React.FC<PremiumPlansProps> = ({ isDarkMode }) => {
               onClick={() => handleOpenCheckout('power')}
               disabled={isProcessingPayment || currentPlan === 'power'}
               className="mt-8 w-full rounded-xl bg-purple-600 hover:bg-purple-500 py-2.5 text-xs font-semibold text-white transition-all shadow-md cursor-pointer">
-              {currentPlan === 'power' ? 'Active Plan' : 'Subscribe to Power (₹1,499/mo)'}
+              {currentPlan === 'power' ? 'Active Plan' : `Subscribe to Power (₹${power.price.toLocaleString()}/mo)`}
             </button>
           </div>
         </div>
