@@ -55,6 +55,22 @@ const SidePanel = () => {
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
   const [userCredits, setUserCredits] = useState<{ remainingCredits: number; allocatedCredits: number } | null>(null);
 
+  // Check if models are configured OR user is authenticated with Cloud API
+  const checkModelConfiguration = useCallback(async () => {
+    try {
+      const configuredAgents = await agentModelStore.getConfiguredAgents();
+      const session = await authStorage.getSession();
+
+      // Check if at least one agent is configured locally OR user is logged in with Cloud API token
+      const hasCloudAuth = Boolean(session?.token);
+      const hasAtLeastOneModel = configuredAgents.length > 0 || hasCloudAuth;
+      setHasConfiguredModels(hasAtLeastOneModel);
+    } catch (error) {
+      console.error('Error checking model configuration:', error);
+      setHasConfiguredModels(false);
+    }
+  }, []);
+
   // Load Auth Session & Credits
   const loadAuth = useCallback(async () => {
     try {
@@ -77,16 +93,12 @@ const SidePanel = () => {
       } else {
         setUserCredits(null);
       }
+      checkModelConfiguration();
     } catch (error) {
       console.error('Error loading auth session:', error);
     }
-  }, []);
+  }, [checkModelConfiguration]);
 
-  useEffect(() => {
-    loadAuth();
-    const unsubscribe = authStorage.subscribe(loadAuth);
-    return () => unsubscribe();
-  }, [loadAuth]);
   const sessionIdRef = useRef<string | null>(null);
   const isReplayingRef = useRef<boolean>(false);
   const portRef = useRef<chrome.runtime.Port | null>(null);
@@ -96,51 +108,6 @@ const SidePanel = () => {
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const recordingTimerRef = useRef<number | null>(null);
-
-  // Check for dark mode preference
-  useEffect(() => {
-    const darkModeMediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
-    setIsDarkMode(darkModeMediaQuery.matches);
-
-    const handleChange = (e: MediaQueryListEvent) => {
-      setIsDarkMode(e.matches);
-    };
-
-    darkModeMediaQuery.addEventListener('change', handleChange);
-    return () => darkModeMediaQuery.removeEventListener('change', handleChange);
-  }, []);
-
-  // Load cloud API settings
-  const loadCloudSettings = useCallback(async () => {
-    try {
-      const settings = await cloudApiSettingsStore.getSettings();
-      setCloudSettings(settings);
-    } catch (error) {
-      console.error('Error loading cloud settings:', error);
-    }
-  }, []);
-
-  useEffect(() => {
-    loadCloudSettings();
-    const unsubscribe = cloudApiSettingsStore.subscribe(loadCloudSettings);
-    return () => {
-      unsubscribe();
-    };
-  }, [loadCloudSettings]);
-
-  // Check if models are configured
-  const checkModelConfiguration = useCallback(async () => {
-    try {
-      const configuredAgents = await agentModelStore.getConfiguredAgents();
-
-      // Check if at least one agent (preferably Navigator) is configured
-      const hasAtLeastOneModel = configuredAgents.length > 0;
-      setHasConfiguredModels(hasAtLeastOneModel);
-    } catch (error) {
-      console.error('Error checking model configuration:', error);
-      setHasConfiguredModels(false);
-    }
-  }, []);
 
   // Load general settings to check if replay is enabled
   const loadGeneralSettings = useCallback(async () => {

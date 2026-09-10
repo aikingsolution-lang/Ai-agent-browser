@@ -8,6 +8,7 @@ import {
   analyticsSettingsStore,
   cloudApiSettingsStore,
   ProviderTypeEnum,
+  authStorage,
 } from '@extension/storage';
 import { t } from '@extension/i18n';
 import BrowserContext from './browser/context';
@@ -17,6 +18,7 @@ import { ExecutionState } from './agent/event/types';
 import { createChatModel } from './agent/helper';
 import { cloudApiClient } from './services/cloud-api-client';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
+import { ChatOpenAI } from '@langchain/openai';
 import { DEFAULT_AGENT_OPTIONS } from './agent/types';
 import { SpeechToTextService } from './services/speechToText';
 import { injectBuildDomTreeScripts } from './browser/dom/service';
@@ -270,36 +272,61 @@ chrome.runtime.onConnect.addListener(port => {
 
 async function setupExecutor(taskId: string, task: string, browserContext: BrowserContext) {
   const providers = await llmProviderStore.getAllProviders();
-  // if no providers, need to display the options page
-  if (Object.keys(providers).length === 0) {
+  const session = await authStorage.getSession();
+
+  const hasCloudAuth = Boolean(session?.token);
+  const hasLocalProviders = Object.keys(providers).length > 0;
+
+  if (!hasLocalProviders && !hasCloudAuth) {
     throw new Error(t('bg_setup_noApiKeys'));
   }
 
-  // Clean up any legacy validator settings for backward compatibility
-  await agentModelStore.cleanupLegacyValidatorSettings();
-
-  const agentModels = await agentModelStore.getAllAgentModels();
-  // verify if every provider used in the agent models exists in the providers
-  for (const agentModel of Object.values(agentModels)) {
-    if (!providers[agentModel.provider]) {
-      throw new Error(t('bg_setup_noProvider', [agentModel.provider]));
-    }
-  }
-
-  const navigatorModel = agentModels[AgentNameEnum.Navigator];
-  if (!navigatorModel) {
-    throw new Error(t('bg_setup_noNavigatorModel'));
-  }
-  // Log the provider config being used for the navigator
-  const navigatorProviderConfig = providers[navigatorModel.provider];
-  const navigatorLLM = createChatModel(navigatorProviderConfig, navigatorModel);
-
+  let navigatorLLM: BaseChatModel;
   let plannerLLM: BaseChatModel | null = null;
-  const plannerModel = agentModels[AgentNameEnum.Planner];
-  if (plannerModel) {
-    // Log the provider config being used for the planner
-    const plannerProviderConfig = providers[plannerModel.provider];
-    plannerLLM = createChatModel(plannerProviderConfig, plannerModel);
+
+  if (hasCloudAuth) {
+    logger.info('Using Backend Managed LLM Gateway (/api/v1/llm/chat) for logged-in user');
+    const backendBaseUrl = 'http://localhost:5000/api/v1/llm';
+    const backendToken = session!.token;
+
+    navigatorLLM = new ChatOpenAI({
+      modelName: 'amazon.nova-lite-v1:0',
+      apiKey: backendToken || undefined,
+      configuration: {
+        baseURL: backendBaseUrl,
+        defaultHeaders: {
+          Authorization: `Bearer ${backendToken}`,
+        },
+      },
+      temperature: 0.1,
+    });
+    plannerLLM = navigatorLLM;
+  } else {
+    // Clean up any legacy validator settings for backward compatibility
+    await agentModelStore.cleanupLegacyValidatorSettings();
+
+    const agentModels = await agentModelStore.getAllAgentModels();
+    // verify if every provider used in the agent models exists in the providers
+    for (const agentModel of Object.values(agentModels)) {
+      if (!providers[agentModel.provider]) {
+        throw new Error(t('bg_setup_noProvider', [agentModel.provider]));
+      }
+    }
+
+    const navigatorModel = agentModels[AgentNameEnum.Navigator];
+    if (!navigatorModel) {
+      throw new Error(t('bg_setup_noNavigatorModel'));
+    }
+    // Log the provider config being used for the navigator
+    const navigatorProviderConfig = providers[navigatorModel.provider];
+    navigatorLLM = createChatModel(navigatorProviderConfig, navigatorModel);
+
+    const plannerModel = agentModels[AgentNameEnum.Planner];
+    if (plannerModel) {
+      // Log the provider config being used for the planner
+      const plannerProviderConfig = providers[plannerModel.provider];
+      plannerLLM = createChatModel(plannerProviderConfig, plannerModel);
+    }
   }
 
   // Apply firewall settings to browser context

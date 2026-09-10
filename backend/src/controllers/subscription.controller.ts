@@ -21,7 +21,7 @@ export class SubscriptionController {
       await TrialService.expireSubscriptionIfEnded(userId);
 
       // 2. Fetch latest subscription for user
-      let subscription = await Subscription.findOne({ userId }).sort({ createdAt: -1 });
+      let subscription: any = await Subscription.findOne({ userId }).sort({ createdAt: -1 });
 
       if (!subscription) {
         // Auto-provision 5-day free trial for users missing a subscription record
