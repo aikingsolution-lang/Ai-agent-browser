@@ -13,47 +13,26 @@ import { LlmProviderFactory } from '../services/llm/llmProviderFactory.js';
 import { env } from '../config/env.js';
 
 const app = createApp();
-let mongoConnected = false;
+import { setupTestDatabase, type TestDbInstance } from './setupTestDb.js';
+
+let testDb: TestDbInstance;
 
 describe('Phase 10: End-to-End Client & Extension Integration Test Suite', () => {
   beforeAll(async () => {
-    try {
-      if (mongoose.connection.readyState === 0) {
-        await mongoose.connect(env.MONGO_URI, { serverSelectionTimeoutMS: 2000 });
-      }
-      mongoConnected = true;
-      await PlanSeedService.seedDefaultPlans();
-    } catch {
-      mongoConnected = false;
-    }
+    testDb = await setupTestDatabase();
   });
 
   afterAll(async () => {
-    if (mongoConnected) {
-      await User.deleteMany({ email: /@e2etest\.com$/ });
-      await Subscription.deleteMany({});
-      await UserCreditBalance.deleteMany({});
-      await CreditLedger.deleteMany({});
-      await LlmUsageLog.deleteMany({});
-      await mongoose.connection.close();
-    }
+    await testDb.stop();
   });
 
   beforeEach(async () => {
     LlmProviderFactory.reset();
-    if (mongoConnected) {
-      await User.deleteMany({ email: /@e2etest\.com$/ });
-      await Subscription.deleteMany({});
-      await UserCreditBalance.deleteMany({});
-      await CreditLedger.deleteMany({});
-      await LlmUsageLog.deleteMany({});
-      await PlanSeedService.seedDefaultPlans();
-    }
+    await testDb.clearCollections();
+    await PlanSeedService.seedDefaultPlans();
   });
 
   it('1. Complete User Lifecycle: Register -> Check Me -> View Credits -> Checkout -> Verify -> Use LLM -> Check Usage', async () => {
-    if (!mongoConnected) return;
-
     // A. Register
     const regRes = await request(app).post('/api/v1/auth/register').send({
       name: 'E2E User',
@@ -135,8 +114,6 @@ describe('Phase 10: End-to-End Client & Extension Integration Test Suite', () =>
   });
 
   it('2. 401 Session Handling & Expired Token Rejection', async () => {
-    if (!mongoConnected) return;
-
     const invalidToken = 'bearer.invalid.token.str';
 
     const res = await request(app).get('/api/v1/auth/me').set('Authorization', `Bearer ${invalidToken}`);
@@ -146,8 +123,6 @@ describe('Phase 10: End-to-End Client & Extension Integration Test Suite', () =>
   });
 
   it('3. 402 Insufficient Credits handling on LLM Request', async () => {
-    if (!mongoConnected) return;
-
     const regRes = await request(app).post('/api/v1/auth/register').send({
       name: 'Low Credit User',
       email: 'lowcredit@e2etest.com',

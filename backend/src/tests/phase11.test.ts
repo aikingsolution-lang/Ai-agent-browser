@@ -13,44 +13,23 @@ import { LlmProviderFactory } from '../services/llm/llmProviderFactory.js';
 import { env } from '../config/env.js';
 
 const app = createApp();
-let mongoConnected = false;
+import { setupTestDatabase, type TestDbInstance } from './setupTestDb.js';
+
+let testDb: TestDbInstance;
 
 describe('Phase 11: Production Hardening, Observability & Readiness Audit Tests', () => {
   beforeAll(async () => {
-    try {
-      if (mongoose.connection.readyState === 0) {
-        await mongoose.connect(env.MONGO_URI, { serverSelectionTimeoutMS: 2000 });
-      }
-      mongoConnected = true;
-      await PlanSeedService.seedDefaultPlans();
-    } catch {
-      mongoConnected = false;
-    }
+    testDb = await setupTestDatabase();
   });
 
   afterAll(async () => {
-    if (mongoConnected) {
-      await User.deleteMany({ email: /@phase11test\.com$/ });
-      await Subscription.deleteMany({});
-      await UserCreditBalance.deleteMany({});
-      await CreditLedger.deleteMany({});
-      await LlmUsageLog.deleteMany({});
-      await WebhookLedger.deleteMany({});
-      await mongoose.connection.close();
-    }
+    await testDb.stop();
   });
 
   beforeEach(async () => {
     LlmProviderFactory.reset();
-    if (mongoConnected) {
-      await User.deleteMany({ email: /@phase11test\.com$/ });
-      await Subscription.deleteMany({});
-      await UserCreditBalance.deleteMany({});
-      await CreditLedger.deleteMany({});
-      await LlmUsageLog.deleteMany({});
-      await WebhookLedger.deleteMany({});
-      await PlanSeedService.seedDefaultPlans();
-    }
+    await testDb.clearCollections();
+    await PlanSeedService.seedDefaultPlans();
   });
 
   async function registerUser(emailPrefix: string) {
@@ -92,7 +71,6 @@ describe('Phase 11: Production Hardening, Observability & Readiness Audit Tests'
   });
 
   it('4. Readiness probes (/ready & /health/ready) return 200 OK when DB is connected', async () => {
-    if (!mongoConnected) return;
     const res1 = await request(app).get('/ready');
     expect(res1.status).toBe(200);
     expect(res1.body.data.status).toBe('ready');
@@ -112,7 +90,6 @@ describe('Phase 11: Production Hardening, Observability & Readiness Audit Tests'
   });
 
   it('6. Secret leakage prevention: auth / user responses never expose passwordHash', async () => {
-    if (!mongoConnected) return;
     const { token } = await registerUser('secretcheck');
 
     const meRes = await request(app).get('/api/v1/auth/me').set('Authorization', `Bearer ${token}`);
@@ -122,7 +99,6 @@ describe('Phase 11: Production Hardening, Observability & Readiness Audit Tests'
   });
 
   it('7. CreditLedger entries record balanceBefore and balanceAfter', async () => {
-    if (!mongoConnected) return;
     const { userId } = await registerUser('ledgeraudit');
 
     const ledger = await CreditLedger.findOne({ userId, type: 'TRIAL_ALLOCATION' });
@@ -132,7 +108,6 @@ describe('Phase 11: Production Hardening, Observability & Readiness Audit Tests'
   });
 
   it('8. LLM TIMEOUT error status is logged in LlmUsageLog with 0 credits deducted', async () => {
-    if (!mongoConnected) return;
     const { token, userId } = await registerUser('timeoutaudit');
 
     LlmProviderFactory.setMockOptions({ shouldTimeout: true });

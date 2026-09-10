@@ -27,6 +27,7 @@ export async function checkEntitlement(req: Request, _res: Response, next: NextF
 
     // Real-time check & atomic expiration of trial, 72h past_due, or ended cancelled subscriptions
     await TrialService.expireSubscriptionIfEnded(userId);
+    await TrialService.healUserTrialSubscriptionIfEligible(userId);
 
     // Fetch current active, trialing, or past_due subscription (latest first)
     const subscription = await Subscription.findOne({

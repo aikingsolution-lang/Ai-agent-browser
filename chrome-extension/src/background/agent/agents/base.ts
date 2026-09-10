@@ -157,15 +157,20 @@ export abstract class BaseAgent<T extends z.ZodType, M = unknown> {
           throw error;
         }
 
-        // Try to extract JSON from raw response manually if possible
+        // Try to extract JSON from raw response or error message manually if possible
         const errorMessage = error instanceof Error ? error.message : String(error);
-        if (
-          errorMessage.includes('is not valid JSON') &&
-          response?.raw?.content &&
-          typeof response.raw.content === 'string'
-        ) {
-          const parsed = this.manuallyParseResponse(response.raw.content);
+        let contentToParse = response?.raw?.content;
+        if (!contentToParse && typeof errorMessage === 'string') {
+          const match = errorMessage.match(/```(?:json)?\s*([\s\S]*?)\s*```/) || errorMessage.match(/(\{[\s\S]*\})/);
+          if (match) {
+            contentToParse = match[1];
+          }
+        }
+
+        if (typeof contentToParse === 'string') {
+          const parsed = this.manuallyParseResponse(contentToParse);
           if (parsed) {
+            logger.info(`[${this.modelName}] Recovered structured output via manual JSON parsing`);
             return parsed;
           }
         }

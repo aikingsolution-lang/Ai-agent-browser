@@ -36,45 +36,25 @@ app.get(
   },
 );
 
-let mongoConnected = false;
+import { setupTestDatabase, type TestDbInstance } from './setupTestDb.js';
+
+let testDb: TestDbInstance;
 
 describe('Phase 7: Server-Side Credit & Usage Metering Engine Integration & Unit Tests', () => {
   beforeAll(async () => {
-    try {
-      if (mongoose.connection.readyState === 0) {
-        await mongoose.connect(env.MONGO_URI, { serverSelectionTimeoutMS: 2000 });
-      }
-      mongoConnected = true;
-      await PlanSeedService.seedDefaultPlans();
-    } catch {
-      mongoConnected = false;
-    }
+    testDb = await setupTestDatabase();
   });
 
   afterAll(async () => {
-    if (mongoConnected) {
-      await User.deleteMany({ email: /@credittest\.com$/ });
-      await Subscription.deleteMany({});
-      await UserCreditBalance.deleteMany({});
-      await CreditLedger.deleteMany({});
-      await Plan.deleteMany({ code: 'free-trial' });
-      await mongoose.connection.close();
-    }
+    await testDb.stop();
   });
 
   beforeEach(async () => {
-    if (mongoConnected) {
-      await User.deleteMany({ email: /@credittest\.com$/ });
-      await Subscription.deleteMany({});
-      await UserCreditBalance.deleteMany({});
-      await CreditLedger.deleteMany({});
-      await PlanSeedService.seedDefaultPlans();
-    }
+    await testDb.clearCollections();
+    await PlanSeedService.seedDefaultPlans();
   });
 
   it('1. Registration initializes credit balance from plan snapshot (100 credits)', async () => {
-    if (!mongoConnected) return;
-
     const res = await request(app).post('/api/v1/auth/register').send({
       name: 'Credit User',
       email: 'user1@credittest.com',
@@ -99,8 +79,6 @@ describe('Phase 7: Server-Side Credit & Usage Metering Engine Integration & Unit
   });
 
   it('2. Credit deduction via Service updates balance and logs ledger entry', async () => {
-    if (!mongoConnected) return;
-
     const regRes = await request(app).post('/api/v1/auth/register').send({
       name: 'Deduct User',
       email: 'deduct@credittest.com',
@@ -123,8 +101,6 @@ describe('Phase 7: Server-Side Credit & Usage Metering Engine Integration & Unit
   });
 
   it('3. Deducting more credits than available fails with 402 INSUFFICIENT_CREDITS', async () => {
-    if (!mongoConnected) return;
-
     const regRes = await request(app).post('/api/v1/auth/register').send({
       name: 'Exceed User',
       email: 'exceed@credittest.com',
@@ -148,8 +124,6 @@ describe('Phase 7: Server-Side Credit & Usage Metering Engine Integration & Unit
   });
 
   it('4. Concurrent credit deductions with different keys prevent negative balance and enforce atomicity', async () => {
-    if (!mongoConnected) return;
-
     const regRes = await request(app).post('/api/v1/auth/register').send({
       name: 'Concurrent User',
       email: 'concurrent@credittest.com',
@@ -182,8 +156,6 @@ describe('Phase 7: Server-Side Credit & Usage Metering Engine Integration & Unit
   });
 
   it('5. Truly concurrent requests with SAME idempotencyKey deduct credits exactly ONCE without divergence', async () => {
-    if (!mongoConnected) return;
-
     const regRes = await request(app).post('/api/v1/auth/register').send({
       name: 'Concurrent Same Key User',
       email: 'concurrentsamekey@credittest.com',
@@ -226,8 +198,6 @@ describe('Phase 7: Server-Side Credit & Usage Metering Engine Integration & Unit
   });
 
   it('6. Sequential idempotency key retry returns cached response without duplicate deduction', async () => {
-    if (!mongoConnected) return;
-
     const regRes = await request(app).post('/api/v1/auth/register').send({
       name: 'Idempotent User',
       email: 'idempotent@credittest.com',
@@ -265,8 +235,6 @@ describe('Phase 7: Server-Side Credit & Usage Metering Engine Integration & Unit
   });
 
   it('7. checkCredits middleware allows access when balance >= required and rejects 402 when low', async () => {
-    if (!mongoConnected) return;
-
     const regRes = await request(app).post('/api/v1/auth/register').send({
       name: 'Middleware User',
       email: 'middleware@credittest.com',
@@ -290,8 +258,6 @@ describe('Phase 7: Server-Side Credit & Usage Metering Engine Integration & Unit
   });
 
   it('8. GET /api/v1/credits/balance returns credit info and low balance warning', async () => {
-    if (!mongoConnected) return;
-
     const regRes = await request(app).post('/api/v1/auth/register').send({
       name: 'Balance API User',
       email: 'balanceapi@credittest.com',
@@ -317,8 +283,6 @@ describe('Phase 7: Server-Side Credit & Usage Metering Engine Integration & Unit
   });
 
   it('9. GET /api/v1/credits/history returns paginated audit entries in reverse chronological order', async () => {
-    if (!mongoConnected) return;
-
     const regRes = await request(app).post('/api/v1/auth/register').send({
       name: 'History API User',
       email: 'historyapi@credittest.com',
@@ -343,8 +307,6 @@ describe('Phase 7: Server-Side Credit & Usage Metering Engine Integration & Unit
   });
 
   it('10. POST /api/v1/credits/deduct is removed from public API surface (returns 404)', async () => {
-    if (!mongoConnected) return;
-
     const regRes = await request(app).post('/api/v1/auth/register').send({
       name: 'Removed Endpoint User',
       email: 'removedep@credittest.com',

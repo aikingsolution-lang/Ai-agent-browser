@@ -164,7 +164,9 @@ export class OpenAiLlmProvider implements ILlmProvider {
         }
       }
 
-      const promptText = request.messages.map(m => m.content).join(' ');
+      const promptText = request.messages
+        .map(m => (typeof m.content === 'string' ? m.content : JSON.stringify(m.content || '')))
+        .join(' ');
       const promptTokens = Math.max(1, Math.ceil(promptText.length / 4));
       const completionTokens = Math.max(1, Math.ceil(fullContent.length / 4));
       const totalTokens = promptTokens + completionTokens;

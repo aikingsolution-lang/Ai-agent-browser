@@ -7,26 +7,23 @@ import { User } from '../models/user.model.js';
 import { Subscription } from '../models/subscription.model.js';
 import { PlanSeedService } from '../services/planSeed.service.js';
 
+import { setupTestDatabase, type TestDbInstance } from './setupTestDb.js';
+
 const app = createApp();
-
-let mongoServer: MongoMemoryServer;
-
-beforeAll(async () => {
-  mongoServer = await MongoMemoryServer.create();
-  const uri = mongoServer.getUri();
-  await mongoose.connect(uri);
-  await PlanSeedService.seedDefaultPlans();
-});
-
-afterAll(async () => {
-  await mongoose.disconnect();
-  await mongoServer.stop();
-});
+let testDb: TestDbInstance;
 
 describe('Trial Abuse Prevention & Expiration Integrity Tests', () => {
+  beforeAll(async () => {
+    testDb = await setupTestDatabase();
+  });
+
+  afterAll(async () => {
+    await testDb.stop();
+  });
+
   beforeEach(async () => {
-    await User.deleteMany({});
-    await Subscription.deleteMany({});
+    await testDb.clearCollections();
+    await PlanSeedService.seedDefaultPlans();
   });
 
   it('1. Registration automatically sets hasUsedTrial = true on User model', async () => {
@@ -60,7 +57,12 @@ describe('Trial Abuse Prevention & Expiration Integrity Tests', () => {
     expect(initialSubCount).toBe(1);
 
     // Step 2: Manually expire the trial subscription (simulate 5-day trial period passing)
-    await Subscription.updateMany({ userId }, { $set: { status: 'EXPIRED', endedAt: new Date() } });
+    const pastDate = new Date(Date.now() - 6 * 24 * 3600 * 1000);
+    await Subscription.updateMany(
+      { userId },
+      { $set: { status: 'EXPIRED', trialEndDate: pastDate, endedAt: pastDate } },
+    );
+    await User.findByIdAndUpdate(userId, { $set: { trialUsedAt: pastDate } });
 
     // Step 3: Call GET /api/v1/subscription/me
     const meRes = await request(app).get('/api/v1/subscription/me').set('Authorization', `Bearer ${token}`);
@@ -106,7 +108,9 @@ describe('Trial Abuse Prevention & Expiration Integrity Tests', () => {
     const token = registerRes.body.data.token;
     const userId = registerRes.body.data.user._id;
 
-    // Simulate edge-case where subscription document is missing/deleted
+    // Simulate edge-case where subscription document is missing/deleted after 5-day trial period passed
+    const pastDate = new Date(Date.now() - 6 * 24 * 3600 * 1000);
+    await User.findByIdAndUpdate(userId, { $set: { trialUsedAt: pastDate } });
     await Subscription.deleteMany({ userId });
 
     const meRes = await request(app).get('/api/v1/subscription/me').set('Authorization', `Bearer ${token}`);

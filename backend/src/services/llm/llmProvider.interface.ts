@@ -1,6 +1,10 @@
 export interface LlmMessage {
-  role: 'system' | 'user' | 'assistant';
+  role: 'system' | 'user' | 'assistant' | 'tool' | 'function' | string;
   content: string;
+  name?: string;
+  tool_call_id?: string;
+  tool_calls?: any[];
+  function_call?: any;
 }
 
 export interface LlmCompletionRequest {

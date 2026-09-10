@@ -11,14 +11,21 @@ export const ALLOWED_MODELS = [
 export type AllowedModel = (typeof ALLOWED_MODELS)[number];
 
 export const llmChatMessageSchema = z.object({
-  role: z.enum(['system', 'user', 'assistant'], {
+  role: z.string({
     required_error: 'Message role is required',
-    invalid_type_error: "Role must be 'system', 'user', or 'assistant'",
   }),
   content: z
-    .string()
-    .min(1, 'Message content cannot be empty')
-    .max(20000, 'Message content exceeds maximum character limit (20,000)'),
+    .union([z.string(), z.array(z.any()), z.null()])
+    .optional()
+    .transform(val => {
+      if (typeof val === 'string') return val;
+      if (val === null || val === undefined) return '';
+      return JSON.stringify(val);
+    }),
+  name: z.string().optional(),
+  tool_call_id: z.string().optional(),
+  tool_calls: z.array(z.any()).optional(),
+  function_call: z.any().optional(),
 });
 
 export const llmChatCompletionSchema = z.object({

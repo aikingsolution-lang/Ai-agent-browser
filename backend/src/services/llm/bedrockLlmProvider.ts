@@ -19,17 +19,53 @@ export class BedrockLlmProvider implements ILlmProvider {
     const bedrockMessages: { role: 'user' | 'assistant'; content: { text: string }[] }[] = [];
 
     for (const msg of messages) {
+      const rawContent = msg.content;
+      const textContent =
+        typeof rawContent === 'string' ? rawContent : JSON.stringify(rawContent || msg.tool_calls || '');
+
       if (msg.role === 'system') {
-        systemMessages.push({ text: msg.content });
+        systemMessages.push({ text: textContent || 'System Prompt' });
+      } else if (msg.role === 'tool') {
+        bedrockMessages.push({
+          role: 'user',
+          content: [{ text: `[Tool Output ${msg.name || msg.tool_call_id || ''}]: ${textContent || 'Success'}` }],
+        });
       } else {
         bedrockMessages.push({
           role: msg.role === 'assistant' ? 'assistant' : 'user',
-          content: [{ text: msg.content }],
+          content: [{ text: textContent || ' ' }],
         });
       }
     }
 
     return { systemMessages, bedrockMessages };
+  }
+
+  private cleanJsonMarkdown(text: string): string {
+    if (!text || typeof text !== 'string') return '';
+    let cleaned = text.trim();
+    // Strip think/thought XML blocks if present
+    cleaned = cleaned.replace(/<(?:think|thought)>[\s\S]*?<\/(?:think|thought)>/gi, '').trim();
+    // Strip XML opening/closing tags like <plan>...</plan> or <json>...</json>
+    cleaned = cleaned
+      .replace(/^<[a-z0-9_-]+>\s*/i, '')
+      .replace(/\s*<\/[a-z0-9_-]+>$/i, '')
+      .trim();
+    // Strip markdown codeblocks
+    if (cleaned.startsWith('```')) {
+      cleaned = cleaned
+        .replace(/^```(?:json)?\s*/i, '')
+        .replace(/\s*```$/i, '')
+        .trim();
+    }
+    // If JSON is wrapped inside leftover text/XML, extract first { ... } or [ ... ]
+    if (!cleaned.startsWith('{') && !cleaned.startsWith('[')) {
+      const match = cleaned.match(/(\{[\s\S]*\}|\[[\s\S]*\])/);
+      if (match) {
+        cleaned = match[1];
+      }
+    }
+    return cleaned.trim();
   }
 
   public async generateCompletion(request: LlmCompletionRequest): Promise<LlmCompletionResponse> {
@@ -81,7 +117,8 @@ export class BedrockLlmProvider implements ILlmProvider {
       }
 
       const data: any = await response.json();
-      const messageContent = data.output?.message?.content?.[0]?.text || '';
+      const rawMessageContent = data.output?.message?.content?.[0]?.text || '';
+      const messageContent = this.cleanJsonMarkdown(rawMessageContent);
       const usage = data.usage || {};
       const promptTokens = usage.inputTokens || 0;
       const completionTokens = usage.outputTokens || 0;
@@ -201,7 +238,9 @@ export class BedrockLlmProvider implements ILlmProvider {
         }
       }
 
-      const promptText = request.messages.map(m => m.content).join(' ');
+      const promptText = request.messages
+        .map(m => (typeof m.content === 'string' ? m.content : JSON.stringify(m.content || '')))
+        .join(' ');
       const promptTokens = Math.max(1, Math.ceil(promptText.length / 4));
       const completionTokens = Math.max(1, Math.ceil(fullContent.length / 4));
       const totalTokens = promptTokens + completionTokens;

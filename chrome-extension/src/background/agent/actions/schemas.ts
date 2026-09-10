@@ -10,8 +10,17 @@ export const doneActionSchema: ActionSchema = {
   name: 'done',
   description: 'Complete task',
   schema: z.object({
-    text: z.string(),
-    success: z.boolean(),
+    text: z.string().optional().default('').describe('summary or final output text'),
+    success: z.boolean().optional().default(true),
+  }),
+};
+
+export const submitFormActionSchema: ActionSchema = {
+  name: 'submit_form',
+  description: 'Submit form or search input element',
+  schema: z.object({
+    intent: z.string().default('').describe('purpose of this action'),
+    index: z.number().int().optional().default(0).describe('index of the element to submit'),
   }),
 };
 
@@ -59,7 +68,7 @@ export const inputTextActionSchema: ActionSchema = {
   schema: z.object({
     intent: z.string().default('').describe('purpose of this action'),
     index: z.number().int().describe('index of the element'),
-    text: z.string().describe('text to input'),
+    text: z.string().optional().default('').describe('text to input'),
     xpath: z.string().nullable().optional().describe('xpath of the element'),
   }),
 };

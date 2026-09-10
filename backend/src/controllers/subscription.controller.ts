@@ -18,8 +18,9 @@ export class SubscriptionController {
         throw new AppError('Authentication required', 401, 'UNAUTHORIZED');
       }
 
-      // 1. On-demand subscription expiration check
+      // 1. On-demand subscription expiration check & auto-healing for 5-day trial window
       await TrialService.expireSubscriptionIfEnded(userId);
+      await TrialService.healUserTrialSubscriptionIfEligible(userId);
 
       // 2. Fetch user document to verify trial eligibility flag
       const user = await User.findById(userId);

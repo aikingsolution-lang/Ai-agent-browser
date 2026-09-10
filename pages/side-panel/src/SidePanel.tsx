@@ -71,33 +71,49 @@ const SidePanel = () => {
     }
   }, []);
 
-  // Load Auth Session & Credits
-  const loadAuth = useCallback(async () => {
+  // 1. Pure Local Storage Sync (Does NOT make HTTP API calls, preventing storage subscription infinite loops)
+  const syncAuthFromStorage = useCallback(async () => {
     try {
       const session = await authStorage.getSession();
       setAuthSession(session);
-      if (session.token) {
-        backendApiClient.setToken(session.token);
-        try {
-          const creditsRes = await backendApiClient.getCreditsBalance();
-          if (creditsRes.data) {
-            setUserCredits({
-              remainingCredits: creditsRes.data.remainingCredits,
-              allocatedCredits: creditsRes.data.allocatedCredits,
-            });
-            await authStorage.setSession({ credits: creditsRes.data });
-          }
-        } catch {
-          // Token expired or backend offline
-        }
+      if (session.credits) {
+        setUserCredits({
+          remainingCredits: session.credits.remainingCredits,
+          allocatedCredits: session.credits.allocatedCredits,
+        });
       } else {
         setUserCredits(null);
       }
+      if (session.token) {
+        backendApiClient.setToken(session.token);
+      }
       checkModelConfiguration();
     } catch (error) {
-      console.error('Error loading auth session:', error);
+      console.error('Error syncing auth state from storage:', error);
     }
   }, [checkModelConfiguration]);
+
+  // 2. Controlled API Credits Fetcher (Only called on mount, task finish, tab focus, or controlled 60s interval)
+  const fetchCreditsBalance = useCallback(async () => {
+    try {
+      const session = await authStorage.getSession();
+      if (!session?.token) {
+        setUserCredits(null);
+        return;
+      }
+      backendApiClient.setToken(session.token);
+      const creditsRes = await backendApiClient.getCreditsBalance();
+      if (creditsRes.data) {
+        setUserCredits({
+          remainingCredits: creditsRes.data.remainingCredits,
+          allocatedCredits: creditsRes.data.allocatedCredits,
+        });
+        await authStorage.setSession({ credits: creditsRes.data });
+      }
+    } catch (error) {
+      console.error('Error fetching credits balance from API:', error);
+    }
+  }, []);
 
   const sessionIdRef = useRef<string | null>(null);
   const isReplayingRef = useRef<boolean>(false);
@@ -120,37 +136,44 @@ const SidePanel = () => {
     }
   }, []);
 
-  // Check model configuration & auth on mount
+  // Sync state from storage on mount & subscribe to storage changes (NO API calls inside listener!)
   useEffect(() => {
-    loadAuth();
-    checkModelConfiguration();
-    loadGeneralSettings();
-  }, [loadAuth, checkModelConfiguration, loadGeneralSettings]);
-
-  // Subscribe to authStorage changes so auth state stays synced
-  useEffect(() => {
+    syncAuthFromStorage();
     const unsubscribe = authStorage.subscribe(() => {
-      loadAuth();
+      syncAuthFromStorage();
     });
     return () => {
       unsubscribe();
     };
-  }, [loadAuth]);
+  }, [syncAuthFromStorage]);
 
-  // Re-check model configuration when the side panel becomes visible again
+  // Controlled initial remote fetch & 60-second polling interval
+  useEffect(() => {
+    fetchCreditsBalance();
+    checkModelConfiguration();
+    loadGeneralSettings();
+
+    const intervalId = setInterval(() => {
+      fetchCreditsBalance();
+    }, 60000); // 60s controlled polling interval
+
+    return () => {
+      clearInterval(intervalId);
+    };
+  }, [fetchCreditsBalance, checkModelConfiguration, loadGeneralSettings]);
+
+  // Refresh credits balance when side panel becomes visible or gains focus
   useEffect(() => {
     const handleVisibilityChange = () => {
       if (!document.hidden) {
-        // Panel became visible, re-check configuration, auth and settings
-        loadAuth();
+        fetchCreditsBalance();
         checkModelConfiguration();
         loadGeneralSettings();
       }
     };
 
     const handleFocus = () => {
-      // Panel gained focus, re-check configuration, auth and settings
-      loadAuth();
+      fetchCreditsBalance();
       checkModelConfiguration();
       loadGeneralSettings();
     };
@@ -162,7 +185,7 @@ const SidePanel = () => {
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       window.removeEventListener('focus', handleFocus);
     };
-  }, [loadAuth, checkModelConfiguration, loadGeneralSettings]);
+  }, [fetchCreditsBalance, checkModelConfiguration, loadGeneralSettings]);
 
   useEffect(() => {
     sessionIdRef.current = currentSessionId;
@@ -213,6 +236,7 @@ const SidePanel = () => {
               setInputEnabled(true);
               setShowStopButton(false);
               setIsReplaying(false);
+              fetchCreditsBalance();
               break;
             case ExecutionState.TASK_FAIL:
               setIsFollowUpMode(true);
@@ -220,6 +244,7 @@ const SidePanel = () => {
               setShowStopButton(false);
               setIsReplaying(false);
               skip = false;
+              fetchCreditsBalance();
               break;
             case ExecutionState.TASK_CANCEL:
               setIsFollowUpMode(false);
@@ -227,6 +252,7 @@ const SidePanel = () => {
               setShowStopButton(false);
               setIsReplaying(false);
               skip = false;
+              fetchCreditsBalance();
               break;
             case ExecutionState.TASK_PAUSE:
               break;
@@ -1318,7 +1344,14 @@ const SidePanel = () => {
         )}
       </div>
 
-      <AuthModal isOpen={isAuthModalOpen} onClose={() => setIsAuthModalOpen(false)} onSuccess={loadAuth} />
+      <AuthModal
+        isOpen={isAuthModalOpen}
+        onClose={() => setIsAuthModalOpen(false)}
+        onSuccess={async () => {
+          await syncAuthFromStorage();
+          await fetchCreditsBalance();
+        }}
+      />
     </div>
   );
 };

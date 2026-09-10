@@ -150,6 +150,120 @@ export class TrialService {
   }
 
   /**
+   * Auto-heals / restores free trial subscription and credit allocation if a user is
+   * within their 5-day trial window (time is the ultimate source of truth).
+   */
+  public static async healUserTrialSubscriptionIfEligible(
+    userId: string | mongoose.Types.ObjectId,
+  ): Promise<ISubscription | null> {
+    const user = await User.findById(userId);
+    if (!user || !user.hasUsedTrial) {
+      return null;
+    }
+
+    const now = new Date();
+    const FIVE_DAYS_MS = 5 * 24 * 60 * 60 * 1000;
+    const trialStartDate = user.trialUsedAt || user.createdAt;
+    const trialEndDate = new Date(trialStartDate.getTime() + FIVE_DAYS_MS);
+
+    // If 5-day window has already passed, no auto-healing eligible
+    if (now >= trialEndDate) {
+      return null;
+    }
+
+    // User IS within their 5-day free trial window!
+    let subscription = await Subscription.findOne({ userId }).sort({ createdAt: -1 });
+
+    if (subscription && subscription.isTrial) {
+      let isModified = false;
+
+      const subStartDate = subscription.trialStartDate || trialStartDate;
+      const expectedEndDate = new Date(subStartDate.getTime() + FIVE_DAYS_MS);
+
+      // 1. Data Integrity Check & Correction:
+      // If trialEndDate is missing or invalid (trialEndDate <= subStartDate)
+      const wasCorrupt = !subscription.trialEndDate || subscription.trialEndDate <= subStartDate;
+      if (wasCorrupt) {
+        subscription.trialStartDate = subStartDate;
+        subscription.trialEndDate = expectedEndDate;
+        if (subscription.status === 'TRIALING') {
+          subscription.currentPeriodStart = subStartDate;
+          subscription.currentPeriodEnd = expectedEndDate;
+        }
+        isModified = true;
+        logger.warn(`Fixed corrupted trialEndDate for user ${userId} to ${expectedEndDate.toISOString()}`);
+      }
+
+      // 2. Status Auto-Healing:
+      // Restores TRIALING status ONLY if the subscription dates were corrupted (trialEndDate <= subStartDate)
+      // AND current time is within the 5-day window from subStartDate
+      if (wasCorrupt && now < expectedEndDate) {
+        subscription.status = 'TRIALING';
+        subscription.endedAt = undefined;
+        isModified = true;
+        logger.info(`Auto-healed incorrectly expired trial status back to TRIALING for user ${userId}`);
+      }
+
+      if (isModified) {
+        await subscription.save();
+      }
+    } else if (!subscription && now < trialEndDate) {
+      // Subscription document was lost/missing. Auto-restore trial subscription!
+      let plan = await Plan.findOne({ code: 'free-trial' });
+      if (!plan) {
+        plan = await PlanSeedService.seedDefaultPlans();
+      }
+      if (plan) {
+        try {
+          const subscriptionDocs = await Subscription.create([
+            {
+              userId,
+              planId: plan._id,
+              planCodeSnapshot: plan.code,
+              planNameSnapshot: plan.name,
+              amountSnapshot: plan.amount,
+              currencySnapshot: plan.currency,
+              billingIntervalSnapshot: plan.billingInterval,
+              creditsSnapshot: plan.creditsPerBillingPeriod,
+              rateLimitSnapshot: plan.rateLimitPerMinute,
+              provider: 'manual',
+              status: 'TRIALING',
+              isTrial: true,
+              currentPeriodStart: trialStartDate,
+              currentPeriodEnd: trialEndDate,
+              trialStartDate,
+              trialEndDate,
+              cancelAtPeriodEnd: false,
+            },
+          ]);
+          subscription = subscriptionDocs[0];
+          logger.info(`Auto-restored missing trial subscription ${subscription._id} for user ${userId}`);
+        } catch (createErr) {
+          subscription = await Subscription.findOne({ userId }).sort({ createdAt: -1 });
+        }
+      }
+    }
+
+    if (subscription) {
+      // Ensure user credit balance exists
+      const balance = await CreditService.getCreditBalance(userId);
+      if (!balance) {
+        await CreditService.initializeCreditsForSubscription({
+          userId,
+          subscriptionId: subscription._id,
+          allocatedCredits: subscription.creditsSnapshot,
+          periodStart: trialStartDate,
+          periodEnd: trialEndDate,
+          description: `Auto-restored ${subscription.planNameSnapshot} credit allocation`,
+          type: 'TRIAL_ALLOCATION',
+        });
+      }
+    }
+
+    return subscription;
+  }
+
+  /**
    * Alias for expireTrialIfEnded for general subscription lifecycle checks.
    */
   public static async expireSubscriptionIfEnded(

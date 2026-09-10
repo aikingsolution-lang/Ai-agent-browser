@@ -5,45 +5,26 @@ import { Subscription } from '../models/subscription.model.js';
 import { User } from '../models/user.model.js';
 import { env } from '../config/env.js';
 
-let mongoConnected = false;
+import { setupTestDatabase, type TestDbInstance } from './setupTestDb.js';
+
+let testDb: TestDbInstance;
 
 describe('Phase 5 Mongoose Schemas & Indexes Unit Tests', () => {
   beforeAll(async () => {
-    try {
-      if (mongoose.connection.readyState === 0) {
-        await mongoose.connect(env.MONGO_URI, { serverSelectionTimeoutMS: 2000 });
-        mongoConnected = true;
-      } else {
-        mongoConnected = true;
-      }
-    } catch {
-      mongoConnected = false;
-    }
+    testDb = await setupTestDatabase();
   });
 
   afterAll(async () => {
-    if (mongoConnected) {
-      await Subscription.deleteMany({});
-      await Plan.deleteMany({});
-      await User.deleteMany({ email: /@schematest\.com$/ });
-      await mongoose.connection.close();
-    }
+    await testDb.stop();
   });
 
   beforeEach(async () => {
-    if (mongoConnected) {
-      await Subscription.deleteMany({});
-      await Plan.deleteMany({});
-      await User.deleteMany({ email: /@schematest\.com$/ });
-      // Ensure indexes are synchronized
-      await Plan.syncIndexes();
-      await Subscription.syncIndexes();
-    }
+    await testDb.clearCollections();
+    await Plan.syncIndexes();
+    await Subscription.syncIndexes();
   });
 
   it('1. Creates a valid free-trial Plan (amount=0, billingInterval="none")', async () => {
-    if (!mongoConnected) return;
-
     await Plan.deleteOne({ code: 'test-free-trial' });
 
     const trialPlan = await Plan.create({
@@ -65,8 +46,6 @@ describe('Phase 5 Mongoose Schemas & Indexes Unit Tests', () => {
   });
 
   it('2. Creates a valid paid Plan (amount=29900, billingInterval="monthly")', async () => {
-    if (!mongoConnected) return;
-
     await Plan.deleteOne({ code: 'test-starter' });
 
     const paidPlan = await Plan.create({
@@ -87,8 +66,6 @@ describe('Phase 5 Mongoose Schemas & Indexes Unit Tests', () => {
   });
 
   it('3. Creates a valid trial Subscription (status="TRIALING", isTrial=true)', async () => {
-    if (!mongoConnected) return;
-
     const user = await User.create({
       name: 'Trial User',
       email: 'trial@schematest.com',
@@ -135,8 +112,6 @@ describe('Phase 5 Mongoose Schemas & Indexes Unit Tests', () => {
   });
 
   it('4. Creates a valid paid Subscription (status="ACTIVE", amountSnapshot=29900)', async () => {
-    if (!mongoConnected) return;
-
     const user = await User.create({
       name: 'Paid User',
       email: 'paid@schematest.com',
@@ -180,8 +155,6 @@ describe('Phase 5 Mongoose Schemas & Indexes Unit Tests', () => {
   });
 
   it('5. Rejects duplicate ACTIVE subscriptions for the same user', async () => {
-    if (!mongoConnected) return;
-
     const userId = new Types.ObjectId();
     const planId = new Types.ObjectId();
     const now = new Date();
@@ -222,8 +195,6 @@ describe('Phase 5 Mongoose Schemas & Indexes Unit Tests', () => {
   });
 
   it('6. Rejects concurrent TRIALING and ACTIVE subscriptions for the same user', async () => {
-    if (!mongoConnected) return;
-
     const userId = new Types.ObjectId();
     const planId = new Types.ObjectId();
     const now = new Date();
@@ -266,8 +237,6 @@ describe('Phase 5 Mongoose Schemas & Indexes Unit Tests', () => {
   });
 
   it('7. Rejects a second historical free trial for the same user (isTrial = true partial index)', async () => {
-    if (!mongoConnected) return;
-
     const userId = new Types.ObjectId();
     const planId = new Types.ObjectId();
     const now = new Date();
@@ -311,8 +280,6 @@ describe('Phase 5 Mongoose Schemas & Indexes Unit Tests', () => {
   });
 
   it('8. Allows multiple EXPIRED subscription records for the same user', async () => {
-    if (!mongoConnected) return;
-
     const userId = new Types.ObjectId();
     const planId = new Types.ObjectId();
     const now = new Date();
@@ -355,8 +322,6 @@ describe('Phase 5 Mongoose Schemas & Indexes Unit Tests', () => {
   });
 
   it('9. Rejects invalid subscription status and billing interval enum values', async () => {
-    if (!mongoConnected) return;
-
     const userId = new Types.ObjectId();
     const planId = new Types.ObjectId();
     const now = new Date();
@@ -393,8 +358,6 @@ describe('Phase 5 Mongoose Schemas & Indexes Unit Tests', () => {
   });
 
   it('10. Rejects invalid floating-point amount values (must be integer paise)', async () => {
-    if (!mongoConnected) return;
-
     await expect(
       Plan.create({
         code: 'float-plan',
@@ -431,8 +394,6 @@ describe('Phase 5 Mongoose Schemas & Indexes Unit Tests', () => {
   });
 
   it('11. Enforces currency format validation (3-letter ISO code)', async () => {
-    if (!mongoConnected) return;
-
     await expect(
       Plan.create({
         code: 'bad-currency',
@@ -448,8 +409,6 @@ describe('Phase 5 Mongoose Schemas & Indexes Unit Tests', () => {
   });
 
   it('12. Enforces positive credits and positive rate limits (>= 1)', async () => {
-    if (!mongoConnected) return;
-
     await expect(
       Plan.create({
         code: 'zero-credits',
@@ -476,8 +435,6 @@ describe('Phase 5 Mongoose Schemas & Indexes Unit Tests', () => {
   });
 
   it('13. Enforces required fields validation for Plan and Subscription', async () => {
-    if (!mongoConnected) return;
-
     // Missing code on Plan
     await expect(
       Plan.create({
@@ -509,8 +466,6 @@ describe('Phase 5 Mongoose Schemas & Indexes Unit Tests', () => {
   });
 
   it('14. Enforces date ordering validation (currentPeriodEnd > currentPeriodStart & trialEndDate > trialStartDate)', async () => {
-    if (!mongoConnected) return;
-
     const userId = new Types.ObjectId();
     const planId = new Types.ObjectId();
     const start = new Date('2026-09-07T12:00:00Z');
@@ -555,8 +510,6 @@ describe('Phase 5 Mongoose Schemas & Indexes Unit Tests', () => {
   });
 
   it('15. Verifies default values (isActive=true, isTrial=false, cancelAtPeriodEnd=false, currency="INR")', async () => {
-    if (!mongoConnected) return;
-
     const plan = await Plan.create({
       code: 'default-test',
       name: 'Default Test Plan',
@@ -594,8 +547,6 @@ describe('Phase 5 Mongoose Schemas & Indexes Unit Tests', () => {
   });
 
   it('16. Verifies Plan code normalization (lowercases and trims code)', async () => {
-    if (!mongoConnected) return;
-
     const plan = await Plan.create({
       code: '  STARTER-LOWER  ',
       name: 'Lower Plan',
@@ -610,8 +561,6 @@ describe('Phase 5 Mongoose Schemas & Indexes Unit Tests', () => {
   });
 
   it('17. Enforces unique sparse Razorpay Plan ID and Subscription ID indexes', async () => {
-    if (!mongoConnected) return;
-
     // Duplicate razorpayPlanId
     await Plan.create({
       code: 'rzp-plan-1',

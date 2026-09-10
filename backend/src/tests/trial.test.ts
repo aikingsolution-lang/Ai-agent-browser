@@ -18,40 +18,25 @@ v1Router.use('/test-protected-feature', authenticate, checkEntitlement, (_req, r
 });
 
 const app = createApp();
-let mongoConnected = false;
+import { setupTestDatabase, type TestDbInstance } from './setupTestDb.js';
+
+let testDb: TestDbInstance;
 
 describe('Phase 6: Server-Side Free Trial Engine Integration & Unit Tests', () => {
   beforeAll(async () => {
-    try {
-      if (mongoose.connection.readyState === 0) {
-        await mongoose.connect(env.MONGO_URI, { serverSelectionTimeoutMS: 2000 });
-      }
-      mongoConnected = true;
-      await PlanSeedService.seedDefaultPlans();
-    } catch {
-      mongoConnected = false;
-    }
+    testDb = await setupTestDatabase();
   });
 
   afterAll(async () => {
-    if (mongoConnected) {
-      await User.deleteMany({ email: /@trialtest\.com$/ });
-      await Subscription.deleteMany({});
-      await mongoose.connection.close();
-    }
+    await testDb.stop();
   });
 
   beforeEach(async () => {
-    if (mongoConnected) {
-      await User.deleteMany({ email: /@trialtest\.com$/ });
-      await Subscription.deleteMany({});
-      await PlanSeedService.seedDefaultPlans();
-    }
+    await testDb.clearCollections();
+    await PlanSeedService.seedDefaultPlans();
   });
 
   it('1. Idempotent default plan seeding creates free-trial plan', async () => {
-    if (!mongoConnected) return;
-
     const plan1 = await PlanSeedService.seedDefaultPlans();
     const plan2 = await PlanSeedService.seedDefaultPlans();
 
@@ -62,8 +47,6 @@ describe('Phase 6: Server-Side Free Trial Engine Integration & Unit Tests', () =
   });
 
   it('2. User registration automatically creates a 5-day free trial subscription', async () => {
-    if (!mongoConnected) return;
-
     const res = await request(app).post('/api/v1/auth/register').send({
       name: 'Trial User',
       email: 'user1@trialtest.com',
@@ -91,8 +74,6 @@ describe('Phase 6: Server-Side Free Trial Engine Integration & Unit Tests', () =
   });
 
   it('3. Attempting to create a second free trial for the same user throws 409 TRIAL_ALREADY_EXISTS', async () => {
-    if (!mongoConnected) return;
-
     const res = await request(app).post('/api/v1/auth/register').send({
       name: 'Single Trial User',
       email: 'singletrial@trialtest.com',
@@ -108,8 +89,6 @@ describe('Phase 6: Server-Side Free Trial Engine Integration & Unit Tests', () =
   });
 
   it('4. On-demand trial expiration transitions status to EXPIRED when trialEndDate is past', async () => {
-    if (!mongoConnected) return;
-
     const res = await request(app).post('/api/v1/auth/register').send({
       name: 'Expiring Trial User',
       email: 'expiring@trialtest.com',
@@ -118,9 +97,13 @@ describe('Phase 6: Server-Side Free Trial Engine Integration & Unit Tests', () =
 
     const userId = res.body.data.user._id || res.body.data.user.id;
 
-    // Manually push trialEndDate to 1 hour in the past
+    // Manually push trialEndDate to 1 hour in the past (keeping 5-day duration)
     const pastDate = new Date(Date.now() - 3600 * 1000);
-    await Subscription.updateOne({ userId }, { $set: { trialEndDate: pastDate, currentPeriodEnd: pastDate } });
+    const pastStart = new Date(pastDate.getTime() - 5 * 24 * 3600 * 1000);
+    await Subscription.updateOne(
+      { userId },
+      { $set: { trialStartDate: pastStart, trialEndDate: pastDate, currentPeriodEnd: pastDate } },
+    );
 
     // Trigger on-demand expiration
     const expiredSub = await TrialService.expireTrialIfEnded(userId);
@@ -133,8 +116,6 @@ describe('Phase 6: Server-Side Free Trial Engine Integration & Unit Tests', () =
   });
 
   it('5. checkEntitlement middleware permits active trialing user and blocks expired user with 403', async () => {
-    if (!mongoConnected) return;
-
     // Register active user
     const res = await request(app).post('/api/v1/auth/register').send({
       name: 'Entitlement User',
@@ -150,9 +131,13 @@ describe('Phase 6: Server-Side Free Trial Engine Integration & Unit Tests', () =
     expect(accessRes1.status).toBe(200);
     expect(accessRes1.body.message).toBe('Access granted to premium feature');
 
-    // 2. Expire trial in database
+    // 2. Expire trial in database (keeping 5-day duration)
     const pastDate = new Date(Date.now() - 1000);
-    await Subscription.updateOne({ userId }, { $set: { trialEndDate: pastDate, currentPeriodEnd: pastDate } });
+    const pastStart = new Date(pastDate.getTime() - 5 * 24 * 3600 * 1000);
+    await Subscription.updateOne(
+      { userId },
+      { $set: { trialStartDate: pastStart, trialEndDate: pastDate, currentPeriodEnd: pastDate } },
+    );
 
     // 3. Access protected route after trial expiration -> 403 Forbidden
     const accessRes2 = await request(app).get('/api/v1/test-protected-feature').set('Authorization', `Bearer ${token}`);
@@ -161,8 +146,6 @@ describe('Phase 6: Server-Side Free Trial Engine Integration & Unit Tests', () =
   });
 
   it('6. Expired trial users can still authenticate, call /auth/me, and view /subscription/me', async () => {
-    if (!mongoConnected) return;
-
     const regRes = await request(app).post('/api/v1/auth/register').send({
       name: 'Expired Auth User',
       email: 'expiredauth@trialtest.com',
@@ -171,9 +154,13 @@ describe('Phase 6: Server-Side Free Trial Engine Integration & Unit Tests', () =
 
     const userId = regRes.body.data.user._id || regRes.body.data.user.id;
 
-    // Expire trial
+    // Expire trial (keeping 5-day duration)
     const pastDate = new Date(Date.now() - 3600 * 1000);
-    await Subscription.updateOne({ userId }, { $set: { status: 'EXPIRED', trialEndDate: pastDate } });
+    const pastStart = new Date(pastDate.getTime() - 5 * 24 * 3600 * 1000);
+    await Subscription.updateOne(
+      { userId },
+      { $set: { status: 'EXPIRED', trialStartDate: pastStart, trialEndDate: pastDate } },
+    );
 
     // Login still succeeds -> 200 OK
     const loginRes = await request(app).post('/api/v1/auth/login').send({
@@ -197,8 +184,6 @@ describe('Phase 6: Server-Side Free Trial Engine Integration & Unit Tests', () =
   });
 
   it('7. Normal cancellation (ACTIVE + cancelAtPeriodEnd) retains entitlement until currentPeriodEnd', async () => {
-    if (!mongoConnected) return;
-
     const regRes = await request(app).post('/api/v1/auth/register').send({
       name: 'Cancelled User',
       email: 'cancelled@trialtest.com',
@@ -235,8 +220,6 @@ describe('Phase 6: Server-Side Free Trial Engine Integration & Unit Tests', () =
   });
 
   it('8. Server startup / bulk reconciliation expires past-due trials in bulk', async () => {
-    if (!mongoConnected) return;
-
     // Register 3 users
     for (let i = 1; i <= 3; i++) {
       await request(app)
@@ -248,24 +231,28 @@ describe('Phase 6: Server-Side Free Trial Engine Integration & Unit Tests', () =
         });
     }
 
-    // Set trialEndDate in the past for all 3
+    // Set trialEndDate in the past for all 3 bulk users (keeping 5-day duration)
+    const bulkUsers = await User.find({ email: /bulk.*@trialtest\.com$/ }).select('_id');
+    const bulkUserIds = bulkUsers.map(u => u._id);
     const pastDate = new Date(Date.now() - 3600 * 1000);
-    await Subscription.updateMany({ isTrial: true }, { $set: { trialEndDate: pastDate, currentPeriodEnd: pastDate } });
+    const pastStart = new Date(pastDate.getTime() - 5 * 24 * 3600 * 1000);
+    await Subscription.updateMany(
+      { userId: { $in: bulkUserIds }, isTrial: true },
+      { $set: { trialStartDate: pastStart, trialEndDate: pastDate, currentPeriodEnd: pastDate } },
+    );
 
     // Run bulk reconciliation
     const count = await TrialService.reconcileExpiredTrials();
     expect(count).toBe(3);
 
-    const activeTrials = await Subscription.countDocuments({ status: 'TRIALING' });
+    const activeTrials = await Subscription.countDocuments({ userId: { $in: bulkUserIds }, status: 'TRIALING' });
     expect(activeTrials).toBe(0);
 
-    const expiredTrials = await Subscription.countDocuments({ status: 'EXPIRED' });
+    const expiredTrials = await Subscription.countDocuments({ userId: { $in: bulkUserIds }, status: 'EXPIRED' });
     expect(expiredTrials).toBe(3);
   });
 
   it('9. Concurrent expireTrialIfEnded calls execute safely without duplicate errors', async () => {
-    if (!mongoConnected) return;
-
     const regRes = await request(app).post('/api/v1/auth/register').send({
       name: 'Concurrent User',
       email: 'concurrent@trialtest.com',
@@ -274,7 +261,11 @@ describe('Phase 6: Server-Side Free Trial Engine Integration & Unit Tests', () =
 
     const userId = regRes.body.data.user._id || regRes.body.data.user.id;
     const pastDate = new Date(Date.now() - 1000);
-    await Subscription.updateOne({ userId }, { $set: { trialEndDate: pastDate, currentPeriodEnd: pastDate } });
+    const pastStart = new Date(pastDate.getTime() - 5 * 24 * 3600 * 1000);
+    await Subscription.updateOne(
+      { userId },
+      { $set: { trialStartDate: pastStart, trialEndDate: pastDate, currentPeriodEnd: pastDate } },
+    );
 
     // Run 5 concurrent expiration attempts
     const results = await Promise.all([

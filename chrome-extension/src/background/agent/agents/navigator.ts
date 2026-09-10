@@ -113,15 +113,20 @@ export class NavigatorAgent extends BaseAgent<z.ZodType, NavigatorResult> {
           throw error;
         }
 
-        // Try to extract JSON from markdown code blocks if parsing failed
+        // Try to extract JSON from raw response or error message manually if possible
         const errorMessage = error instanceof Error ? error.message : String(error);
-        if (
-          errorMessage.includes('is not valid JSON') &&
-          response?.raw?.content &&
-          typeof response.raw.content === 'string'
-        ) {
-          const parsed = this.manuallyParseResponse(response.raw.content);
+        let contentToParse = response?.raw?.content;
+        if (!contentToParse && typeof errorMessage === 'string') {
+          const match = errorMessage.match(/```(?:json)?\s*([\s\S]*?)\s*```/) || errorMessage.match(/(\{[\s\S]*\})/);
+          if (match) {
+            contentToParse = match[1];
+          }
+        }
+
+        if (typeof contentToParse === 'string') {
+          const parsed = this.manuallyParseResponse(contentToParse);
           if (parsed) {
+            logger.info(`[${this.modelName}] Navigator recovered structured output via manual JSON parsing`);
             return parsed;
           }
         }
@@ -129,7 +134,7 @@ export class NavigatorAgent extends BaseAgent<z.ZodType, NavigatorResult> {
       }
 
       // Use type assertion to access the properties
-      const rawResponse = response.raw as BaseMessage & {
+      const rawResponse = response?.raw as BaseMessage & {
         tool_calls?: Array<{
           args: {
             currentState: typeof agentBrainSchema._type;
@@ -139,7 +144,7 @@ export class NavigatorAgent extends BaseAgent<z.ZodType, NavigatorResult> {
       };
 
       // sometimes LLM returns an empty content, but with one or more tool calls, so we need to check the tool calls
-      if (rawResponse.tool_calls && rawResponse.tool_calls.length > 0) {
+      if (rawResponse?.tool_calls && rawResponse.tool_calls.length > 0) {
         logger.info('Navigator structuredLlm tool call with empty content', rawResponse.tool_calls);
         // only use the first tool call
         const toolCall = rawResponse.tool_calls[0];
@@ -148,6 +153,27 @@ export class NavigatorAgent extends BaseAgent<z.ZodType, NavigatorResult> {
           action: [...toolCall.args.action],
         };
       }
+
+      // Try manual parsing of raw response content if neither parsed nor tool_calls were returned
+      let contentToParse: string | undefined = undefined;
+      if (typeof rawResponse?.content === 'string') {
+        contentToParse = rawResponse.content;
+      } else if (Array.isArray(rawResponse?.content)) {
+        contentToParse = (rawResponse.content as Array<{ type?: string; text?: string }>)
+          .map(part => part.text || '')
+          .join('\n');
+      }
+
+      if (contentToParse && contentToParse.trim()) {
+        const parsed = this.manuallyParseResponse(contentToParse);
+        if (parsed) {
+          logger.info(
+            `[${this.modelName}] Navigator recovered structured output via manual JSON parsing from raw content`,
+          );
+          return parsed;
+        }
+      }
+
       throw new ResponseParseError('Could not parse navigator response');
     }
 

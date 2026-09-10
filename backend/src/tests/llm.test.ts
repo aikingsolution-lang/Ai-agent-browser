@@ -13,42 +13,23 @@ import { BedrockLlmProvider } from '../services/llm/bedrockLlmProvider.js';
 import { env } from '../config/env.js';
 
 const app = createApp();
-let mongoConnected = false;
+import { setupTestDatabase, type TestDbInstance } from './setupTestDb.js';
+
+let testDb: TestDbInstance;
 
 describe('Phase 9 & Bedrock: Managed LLM Proxy Gateway + Usage Metering Integration Tests', () => {
   beforeAll(async () => {
-    try {
-      if (mongoose.connection.readyState === 0) {
-        await mongoose.connect(env.MONGO_URI, { serverSelectionTimeoutMS: 2000 });
-      }
-      mongoConnected = true;
-      await PlanSeedService.seedDefaultPlans();
-    } catch {
-      mongoConnected = false;
-    }
+    testDb = await setupTestDatabase();
   });
 
   afterAll(async () => {
-    if (mongoConnected) {
-      await User.deleteMany({ email: /@llmtest\.com$/ });
-      await Subscription.deleteMany({});
-      await UserCreditBalance.deleteMany({});
-      await CreditLedger.deleteMany({});
-      await LlmUsageLog.deleteMany({});
-      await mongoose.connection.close();
-    }
+    await testDb.stop();
   });
 
   beforeEach(async () => {
     LlmProviderFactory.reset();
-    if (mongoConnected) {
-      await User.deleteMany({ email: /@llmtest\.com$/ });
-      await Subscription.deleteMany({});
-      await UserCreditBalance.deleteMany({});
-      await CreditLedger.deleteMany({});
-      await LlmUsageLog.deleteMany({});
-      await PlanSeedService.seedDefaultPlans();
-    }
+    await testDb.clearCollections();
+    await PlanSeedService.seedDefaultPlans();
   });
 
   async function registerUser(emailPrefix: string) {
@@ -66,8 +47,6 @@ describe('Phase 9 & Bedrock: Managed LLM Proxy Gateway + Usage Metering Integrat
   }
 
   it('1. Unauthenticated request to /api/v1/llm/chat is rejected with 401', async () => {
-    if (!mongoConnected) return;
-
     const res = await request(app)
       .post('/api/v1/llm/chat')
       .send({
@@ -80,8 +59,6 @@ describe('Phase 9 & Bedrock: Managed LLM Proxy Gateway + Usage Metering Integrat
   });
 
   it('2. Request with invalid model is rejected with 400 Bad Request', async () => {
-    if (!mongoConnected) return;
-
     const { token } = await registerUser('invalidmodel');
 
     const res = await request(app)
@@ -97,8 +74,6 @@ describe('Phase 9 & Bedrock: Managed LLM Proxy Gateway + Usage Metering Integrat
   });
 
   it('3. Insufficient credits rejected with 402 INSUFFICIENT_CREDITS before calling provider', async () => {
-    if (!mongoConnected) return;
-
     const { token, userId } = await registerUser('nocredits');
 
     // Drain user credits to 0
@@ -121,8 +96,6 @@ describe('Phase 9 & Bedrock: Managed LLM Proxy Gateway + Usage Metering Integrat
   });
 
   it('4. Successful LLM chat request deducts credits and records usage log', async () => {
-    if (!mongoConnected) return;
-
     const { token, userId } = await registerUser('success');
 
     const res = await request(app)
@@ -150,8 +123,6 @@ describe('Phase 9 & Bedrock: Managed LLM Proxy Gateway + Usage Metering Integrat
   });
 
   it('5. Duplicate request with same idempotencyKey returns cached response without double billing', async () => {
-    if (!mongoConnected) return;
-
     const { token, userId } = await registerUser('idempotent');
     const idempotencyKey = 'llm-key-9999';
 
@@ -192,8 +163,6 @@ describe('Phase 9 & Bedrock: Managed LLM Proxy Gateway + Usage Metering Integrat
   });
 
   it('6. Provider failure returns 502 Provider Error and deducts 0 credits', async () => {
-    if (!mongoConnected) return;
-
     const { token, userId } = await registerUser('providerfail');
 
     // Configure mock provider to fail
@@ -221,8 +190,6 @@ describe('Phase 9 & Bedrock: Managed LLM Proxy Gateway + Usage Metering Integrat
   });
 
   it('7. Provider timeout returns 504 Gateway Timeout and deducts 0 credits', async () => {
-    if (!mongoConnected) return;
-
     const { token, userId } = await registerUser('providertimeout');
 
     // Configure mock provider to timeout
@@ -250,8 +217,6 @@ describe('Phase 9 & Bedrock: Managed LLM Proxy Gateway + Usage Metering Integrat
   });
 
   it('8. User isolation: User A cannot see User B usage logs via GET /api/v1/llm/usage', async () => {
-    if (!mongoConnected) return;
-
     const userA = await registerUser('usera');
     const userB = await registerUser('userb');
 
@@ -280,8 +245,6 @@ describe('Phase 9 & Bedrock: Managed LLM Proxy Gateway + Usage Metering Integrat
   });
 
   it('9. Token and credit accounting for premium model anthropic.claude-3-5-sonnet-20240620-v1:0', async () => {
-    if (!mongoConnected) return;
-
     const { token, userId } = await registerUser('premiummodel');
 
     const res = await request(app)
@@ -302,8 +265,6 @@ describe('Phase 9 & Bedrock: Managed LLM Proxy Gateway + Usage Metering Integrat
   });
 
   it('10. SSE Streaming chat completion returns text/event-stream chunks', async () => {
-    if (!mongoConnected) return;
-
     const { token } = await registerUser('streaming');
 
     const res = await request(app)
@@ -365,5 +326,26 @@ describe('Phase 9 & Bedrock: Managed LLM Proxy Gateway + Usage Metering Integrat
     } finally {
       global.fetch = originalFetch;
     }
+  });
+
+  it("12. Accepts multi-turn chat messages with role = 'tool', empty content, and tool_calls without validation errors", async () => {
+    const { token } = await registerUser('toolmessages');
+
+    const res = await request(app)
+      .post('/api/v1/llm/chat/completions')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        model: 'amazon.nova-lite-v1:0',
+        messages: [
+          { role: 'user', content: 'Go to google.com' },
+          { role: 'assistant', content: 'I will navigate to google.com' },
+          { role: 'assistant', content: '', tool_calls: [{ id: 'call_1', name: 'navigate' }] },
+          { role: 'tool', content: 'Successfully navigated', tool_call_id: 'call_1' },
+        ],
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.object).toBe('chat.completion');
+    expect(res.body.choices).toBeDefined();
   });
 });

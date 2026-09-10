@@ -21,41 +21,22 @@ v1Router.use('/test-entitled-feature', authenticate, checkEntitlement, (_req, re
 });
 
 const app = createApp();
-let mongoConnected = false;
+import { setupTestDatabase, type TestDbInstance } from './setupTestDb.js';
+
+let testDb: TestDbInstance;
 
 describe('Phase 8: Commercial Payment & Subscription Lifecycle Engine Integration Tests', () => {
   beforeAll(async () => {
-    try {
-      if (mongoose.connection.readyState === 0) {
-        await mongoose.connect(env.MONGO_URI, { serverSelectionTimeoutMS: 2000 });
-      }
-      mongoConnected = true;
-      await PlanSeedService.seedDefaultPlans();
-    } catch {
-      mongoConnected = false;
-    }
+    testDb = await setupTestDatabase();
   });
 
   afterAll(async () => {
-    if (mongoConnected) {
-      await User.deleteMany({ email: /@paytest\.com$/ });
-      await Subscription.deleteMany({});
-      await UserCreditBalance.deleteMany({});
-      await CreditLedger.deleteMany({});
-      await WebhookLedger.deleteMany({});
-      await mongoose.connection.close();
-    }
+    await testDb.stop();
   });
 
   beforeEach(async () => {
-    if (mongoConnected) {
-      await User.deleteMany({ email: /@paytest\.com$/ });
-      await Subscription.deleteMany({});
-      await UserCreditBalance.deleteMany({});
-      await CreditLedger.deleteMany({});
-      await WebhookLedger.deleteMany({});
-      await PlanSeedService.seedDefaultPlans();
-    }
+    await testDb.clearCollections();
+    await PlanSeedService.seedDefaultPlans();
   });
 
   it('1. HMAC Checkout Signature Verification passes for valid signatures and rejects tampered ones', () => {
@@ -77,8 +58,6 @@ describe('Phase 8: Commercial Payment & Subscription Lifecycle Engine Integratio
   });
 
   it('3. Dedicated raw-body webhook route handles signature check over raw Buffer', async () => {
-    if (!mongoConnected) return;
-
     const payloadObj = {
       event_id: 'evt_raw_001',
       event: 'subscription.charged',
@@ -109,8 +88,6 @@ describe('Phase 8: Commercial Payment & Subscription Lifecycle Engine Integratio
   });
 
   it('4. POST /api/v1/subscription/checkout resolves DB Plan source of truth for paid plans', async () => {
-    if (!mongoConnected) return;
-
     const regRes = await request(app).post('/api/v1/auth/register').send({
       name: 'Checkout User',
       email: 'checkout@paytest.com',
@@ -141,8 +118,6 @@ describe('Phase 8: Commercial Payment & Subscription Lifecycle Engine Integratio
   });
 
   it('5. Checkout session idempotency & concurrency returns existing session on retry', async () => {
-    if (!mongoConnected) return;
-
     const regRes = await request(app).post('/api/v1/auth/register').send({
       name: 'Checkout Idempotency User',
       email: 'checkoutidem@paytest.com',
@@ -175,8 +150,6 @@ describe('Phase 8: Commercial Payment & Subscription Lifecycle Engine Integratio
   });
 
   it('6. Verify payment transitions trial subscription to ACTIVE and allocates paid credits', async () => {
-    if (!mongoConnected) return;
-
     const regRes = await request(app).post('/api/v1/auth/register').send({
       name: 'Verify User',
       email: 'verify@paytest.com',
@@ -219,8 +192,6 @@ describe('Phase 8: Commercial Payment & Subscription Lifecycle Engine Integratio
   });
 
   it('7. Duplicate payment verification is idempotent', async () => {
-    if (!mongoConnected) return;
-
     const regRes = await request(app).post('/api/v1/auth/register').send({
       name: 'Dup Verify User',
       email: 'dupverify@paytest.com',
@@ -265,8 +236,6 @@ describe('Phase 8: Commercial Payment & Subscription Lifecycle Engine Integratio
   });
 
   it('8. Cross-user payment verification attempt is rejected with 403 FORBIDDEN (H2 Fix)', async () => {
-    if (!mongoConnected) return;
-
     // Register User A
     const userARes = await request(app).post('/api/v1/auth/register').send({
       name: 'User A',
@@ -311,8 +280,6 @@ describe('Phase 8: Commercial Payment & Subscription Lifecycle Engine Integratio
   });
 
   it('9. PAST_DUE subscription past 72h is expired and entitlement is revoked (C1 Fix)', async () => {
-    if (!mongoConnected) return;
-
     const regRes = await request(app).post('/api/v1/auth/register').send({
       name: 'PastDue 72h User',
       email: 'pastdue72h@paytest.com',
@@ -324,13 +291,17 @@ describe('Phase 8: Commercial Payment & Subscription Lifecycle Engine Integratio
 
     // Set status to PAST_DUE with pastDueStartedAt 73 hours in the past
     const past73Hours = new Date(Date.now() - 73 * 3600 * 1000);
+    const pastStart = new Date(past73Hours.getTime() - 5 * 24 * 3600 * 1000);
     await Subscription.updateOne(
       { userId },
       {
         $set: {
           status: 'PAST_DUE',
+          isTrial: false,
           pastDueStartedAt: past73Hours,
+          trialStartDate: pastStart,
           trialEndDate: past73Hours,
+          currentPeriodStart: pastStart,
           currentPeriodEnd: past73Hours,
         },
       },
@@ -348,8 +319,6 @@ describe('Phase 8: Commercial Payment & Subscription Lifecycle Engine Integratio
   });
 
   it('10. PAST_DUE subscription within 72h retains active entitlement (C1 Fix)', async () => {
-    if (!mongoConnected) return;
-
     const regRes = await request(app).post('/api/v1/auth/register').send({
       name: 'PastDue Within 72h User',
       email: 'pastdue2h@paytest.com',
@@ -370,8 +339,6 @@ describe('Phase 8: Commercial Payment & Subscription Lifecycle Engine Integratio
   });
 
   it('11. ACTIVE subscription with cancelAtPeriodEnd=true expires after period end (C1 Fix)', async () => {
-    if (!mongoConnected) return;
-
     const regRes = await request(app).post('/api/v1/auth/register').send({
       name: 'Cancelled Ended User',
       email: 'canceledended@paytest.com',
@@ -383,9 +350,20 @@ describe('Phase 8: Commercial Payment & Subscription Lifecycle Engine Integratio
 
     // Set status to ACTIVE, cancelAtPeriodEnd = true, currentPeriodEnd in the past
     const past1Hour = new Date(Date.now() - 3600 * 1000);
+    const pastStart = new Date(past1Hour.getTime() - 5 * 24 * 3600 * 1000);
     await Subscription.updateOne(
       { userId },
-      { $set: { status: 'ACTIVE', cancelAtPeriodEnd: true, currentPeriodEnd: past1Hour, trialEndDate: past1Hour } },
+      {
+        $set: {
+          status: 'ACTIVE',
+          isTrial: false,
+          cancelAtPeriodEnd: true,
+          currentPeriodStart: pastStart,
+          currentPeriodEnd: past1Hour,
+          trialStartDate: pastStart,
+          trialEndDate: past1Hour,
+        },
+      },
     );
 
     // Access protected route -> 403 SUBSCRIPTION_EXPIRED
@@ -399,8 +377,6 @@ describe('Phase 8: Commercial Payment & Subscription Lifecycle Engine Integratio
   });
 
   it('12. Stuck PROCESSING webhook event (> 2 mins) is reclaimed and reprocessed safely (H3 Fix)', async () => {
-    if (!mongoConnected) return;
-
     const eventId = 'evt_stuck_001';
     const stuckTime = new Date(Date.now() - 150000); // 2.5 minutes ago
 

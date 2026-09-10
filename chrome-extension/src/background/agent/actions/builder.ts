@@ -3,6 +3,7 @@ import { t } from '@extension/i18n';
 import {
   clickElementActionSchema,
   doneActionSchema,
+  submitFormActionSchema,
   goBackActionSchema,
   goToUrlActionSchema,
   inputTextActionSchema,
@@ -298,6 +299,29 @@ export class ActionBuilder {
       true,
     );
     actions.push(inputText);
+
+    const submitForm = new Action(
+      async (input: z.infer<typeof submitFormActionSchema.schema>) => {
+        const intent = input.intent || 'Submit form';
+        this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_START, intent);
+        const page = await this.context.browserContext.getCurrentPage();
+        if (input.index && input.index > 0) {
+          const state = await page.getState();
+          const elementNode = state?.selectorMap.get(input.index);
+          if (elementNode) {
+            await page.clickElementNode(this.context.options.useVision, elementNode);
+          }
+        } else {
+          await page.sendKeys('Enter');
+        }
+        const msg = 'Submitted form successfully';
+        this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_OK, msg);
+        return new ActionResult({ extractedContent: msg, includeInMemory: true });
+      },
+      submitFormActionSchema,
+      true,
+    );
+    actions.push(submitForm);
 
     // Tab Management Actions
     const switchTab = new Action(async (input: z.infer<typeof switchTabActionSchema.schema>) => {

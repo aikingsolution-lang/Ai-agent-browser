@@ -163,6 +163,24 @@ const subscriptionSchema = new Schema<ISubscription>(
   },
 );
 
+// Data Integrity Guard: Auto-populate trialEndDate if missing, while enforcing trialEndDate > trialStartDate via schema validator
+subscriptionSchema.pre('validate', function (next) {
+  if (this.isTrial && this.trialStartDate) {
+    const FIVE_DAYS_MS = 5 * 24 * 60 * 60 * 1000;
+    const expectedEndDate = new Date(this.trialStartDate.getTime() + FIVE_DAYS_MS);
+
+    if (!this.trialEndDate) {
+      this.trialEndDate = expectedEndDate;
+    }
+
+    if (this.status === 'TRIALING' && !this.currentPeriodEnd) {
+      this.currentPeriodStart = this.trialStartDate;
+      this.currentPeriodEnd = this.trialEndDate;
+    }
+  }
+  next();
+});
+
 // Partial Unique Index 1: Max 1 concurrent entitled subscription per user (TRIALING, ACTIVE, PAST_DUE)
 subscriptionSchema.index(
   { userId: 1 },

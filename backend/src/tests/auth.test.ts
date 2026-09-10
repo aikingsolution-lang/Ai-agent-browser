@@ -6,39 +6,25 @@ import { createApp } from '../app.js';
 import { User } from '../models/user.model.js';
 import { env } from '../config/env.js';
 
+import { setupTestDatabase, type TestDbInstance } from './setupTestDb.js';
+
 const app = createApp();
-let mongoConnected = false;
+let testDb: TestDbInstance;
 
 describe('Auth System Integration & Unit Tests', () => {
   beforeAll(async () => {
-    try {
-      if (mongoose.connection.readyState === 0) {
-        await mongoose.connect(env.MONGO_URI, { serverSelectionTimeoutMS: 2000 });
-        mongoConnected = true;
-      } else {
-        mongoConnected = true;
-      }
-    } catch {
-      mongoConnected = false;
-    }
+    testDb = await setupTestDatabase();
   });
 
   afterAll(async () => {
-    if (mongoConnected) {
-      await User.deleteMany({ email: /@test\.com$/ });
-      await mongoose.connection.close();
-    }
+    await testDb.stop();
   });
 
   beforeEach(async () => {
-    if (mongoConnected) {
-      await User.deleteMany({ email: /@test\.com$/ });
-    }
+    await testDb.clearCollections();
   });
 
   it('1. Successful registration returns 201 Created and JWT token', async () => {
-    if (!mongoConnected) return;
-
     const res = await request(app).post('/api/v1/auth/register').send({
       name: 'Test User',
       email: 'register@test.com',
@@ -53,8 +39,6 @@ describe('Auth System Integration & Unit Tests', () => {
   });
 
   it('2. Duplicate email registration returns 409 Conflict', async () => {
-    if (!mongoConnected) return;
-
     await request(app).post('/api/v1/auth/register').send({
       name: 'User One',
       email: 'duplicate@test.com',
@@ -72,8 +56,6 @@ describe('Auth System Integration & Unit Tests', () => {
   });
 
   it('3. Email normalization trims whitespace and lowercases email', async () => {
-    if (!mongoConnected) return;
-
     const res = await request(app).post('/api/v1/auth/register').send({
       name: 'Normal User',
       email: '  NORMALIZE@TEST.COM  ',
@@ -130,8 +112,6 @@ describe('Auth System Integration & Unit Tests', () => {
   });
 
   it('6. Successful login returns 200 OK and token', async () => {
-    if (!mongoConnected) return;
-
     await request(app).post('/api/v1/auth/register').send({
       name: 'Login User',
       email: 'login@test.com',
@@ -149,8 +129,6 @@ describe('Auth System Integration & Unit Tests', () => {
   });
 
   it('7. Invalid password returns generic 401 Unauthorized', async () => {
-    if (!mongoConnected) return;
-
     await request(app).post('/api/v1/auth/register').send({
       name: 'Invalid Pass',
       email: 'invalidpass@test.com',
@@ -199,8 +177,6 @@ describe('Auth System Integration & Unit Tests', () => {
   });
 
   it('12. Suspended user cannot access protected endpoints', async () => {
-    if (!mongoConnected) return;
-
     const reg = await request(app).post('/api/v1/auth/register').send({
       name: 'Suspended User',
       email: 'suspended@test.com',
@@ -220,8 +196,6 @@ describe('Auth System Integration & Unit Tests', () => {
   });
 
   it('13. Successful /auth/me returns current user details', async () => {
-    if (!mongoConnected) return;
-
     const reg = await request(app).post('/api/v1/auth/register').send({
       name: 'Me User',
       email: 'me@test.com',
@@ -237,8 +211,6 @@ describe('Auth System Integration & Unit Tests', () => {
   });
 
   it('14. /auth/me must never expose passwordHash', async () => {
-    if (!mongoConnected) return;
-
     const reg = await request(app).post('/api/v1/auth/register').send({
       name: 'Safe User',
       email: 'safe@test.com',
@@ -254,8 +226,6 @@ describe('Auth System Integration & Unit Tests', () => {
   });
 
   it('15. JWT contains only expected claims (sub, role, iat, exp)', async () => {
-    if (!mongoConnected) return;
-
     const reg = await request(app).post('/api/v1/auth/register').send({
       name: 'Claims User',
       email: 'claims@test.com',
@@ -296,8 +266,6 @@ describe('Auth System Integration & Unit Tests', () => {
   });
 
   it('18. Registration automatically provisions 5-day free trial subscription and 100 credits', async () => {
-    if (!mongoConnected) return;
-
     const regRes = await request(app).post('/api/v1/auth/register').send({
       name: 'Trial User',
       email: 'trialuser@test.com',

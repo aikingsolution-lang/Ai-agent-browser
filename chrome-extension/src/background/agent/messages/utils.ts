@@ -48,86 +48,126 @@ export function removeThinkTags(text: string): string {
  */
 export function extractJsonFromModelOutput(content: string): Record<string, unknown> {
   try {
-    let processedContent = content;
+    let processedContent = content.trim();
+
+    // Strip <think>...</think> or <thought>...</thought> tags
+    processedContent = processedContent.replace(/<(?:think|thought)>[\s\S]*?<\/(?:think|thought)>/gi, '').trim();
 
     // Handle Llama's tool call format first
     if (processedContent.includes('<|tool_call_start_id|>')) {
-      // Extract content between tool call tags
       const startTag = '<|tool_call_start_id|>';
       const endTag = '<|tool_call_end_id|>';
       const startIndex = processedContent.indexOf(startTag) + startTag.length;
       let endIndex = processedContent.indexOf(endTag);
-
-      if (endIndex === -1) {
-        // If no end tag found, take everything after start tag
-        endIndex = processedContent.length;
-      }
+      if (endIndex === -1) endIndex = processedContent.length;
 
       processedContent = processedContent.substring(startIndex, endIndex).trim();
-
-      // Parse the tool call structure
       const toolCall = JSON.parse(processedContent);
-
-      // Extract the actual parameters (which contains the agent output)
       if (toolCall.parameters) {
-        // The parameters field contains an escaped JSON string
-        const parametersJson = JSON.parse(toolCall.parameters);
-        return parametersJson;
+        return typeof toolCall.parameters === 'string' ? JSON.parse(toolCall.parameters) : toolCall.parameters;
       }
-
       throw new Error('Tool call structure does not contain parameters');
     }
 
     // Handle Llama's python tag format
     if (processedContent.includes('<|python_tag|>')) {
-      // Extract content between python tags
       const startTag = '<|python_tag|>';
       const endTag = '<|/python_tag|>';
       const startIndex = processedContent.indexOf(startTag) + startTag.length;
       let endIndex = processedContent.indexOf(endTag);
-
-      if (endIndex === -1) {
-        // If no end tag found, take everything after start tag
-        endIndex = processedContent.length;
-      }
+      if (endIndex === -1) endIndex = processedContent.length;
 
       processedContent = processedContent.substring(startIndex, endIndex).trim();
-
-      // Parse the python tag structure
       const pythonCall = JSON.parse(processedContent);
-
-      // Extract the actual parameters (which contains the agent output)
       if (pythonCall.parameters && pythonCall.parameters.output) {
-        // Try to parse the output if it's a JSON string
         if (typeof pythonCall.parameters.output === 'string') {
           try {
-            const outputJson = JSON.parse(pythonCall.parameters.output);
-            return outputJson;
+            return JSON.parse(pythonCall.parameters.output);
           } catch (e) {
-            // If it's not valid JSON, return as is
             return { output: pythonCall.parameters.output };
           }
         }
-
         return pythonCall.parameters;
       }
-
       throw new Error('Python tag structure does not contain valid parameters');
     }
 
     // If content is wrapped in code blocks, extract just the JSON part
     if (processedContent.includes('```')) {
-      // Find the JSON content between code blocks
-      const parts = processedContent.split('```');
-      processedContent = parts[1];
-
-      // Remove language identifier if present (e.g., 'json\n')
-      if (processedContent.startsWith('json')) {
-        processedContent = processedContent.substring(4).trim();
+      const match = processedContent.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+      if (match && match[1]) {
+        processedContent = match[1].trim();
+      } else {
+        const parts = processedContent.split('```');
+        if (parts.length >= 2) {
+          processedContent = parts[1].replace(/^json\s*/i, '').trim();
+        }
       }
     }
 
-    // Parse the cleaned content
+    // Strip XML opening/closing tags like <plan>...</plan> or <json>...</json>
+    processedContent = processedContent
+      .replace(/^<[a-z0-9_-]+>\s*/i, '')
+      .replace(/\s*<\/[a-z0-9_-]+>$/i, '')
+      .trim();
+
+    // Balanced Bracket Extractor: Find first '{' or '[' and extract until matching closing '}' or ']'
+    const firstObjIndex = processedContent.indexOf('{');
+    const firstArrIndex = processedContent.indexOf('[');
+
+    let startPos = -1;
+    let openChar = '{';
+    let closeChar = '}';
+
+    if (firstObjIndex !== -1 && (firstArrIndex === -1 || firstObjIndex < firstArrIndex)) {
+      startPos = firstObjIndex;
+      openChar = '{';
+      closeChar = '}';
+    } else if (firstArrIndex !== -1) {
+      startPos = firstArrIndex;
+      openChar = '[';
+      closeChar = ']';
+    }
+
+    if (startPos !== -1) {
+      let depth = 0;
+      let inString = false;
+      let escape = false;
+      let endPos = -1;
+
+      for (let i = startPos; i < processedContent.length; i++) {
+        const char = processedContent[i];
+        if (inString) {
+          if (escape) {
+            escape = false;
+          } else if (char === '\\') {
+            escape = true;
+          } else if (char === '"') {
+            inString = false;
+          }
+        } else {
+          if (char === '"') {
+            inString = true;
+          } else if (char === openChar) {
+            depth++;
+          } else if (char === closeChar) {
+            depth--;
+            if (depth === 0) {
+              endPos = i;
+              break;
+            }
+          }
+        }
+      }
+
+      if (endPos !== -1) {
+        processedContent = processedContent.substring(startPos, endPos + 1).trim();
+      }
+    }
+
+    // Fix trailing commas in objects or arrays
+    processedContent = processedContent.replace(/,\s*([}\]])/g, '$1');
+
     return JSON.parse(processedContent);
   } catch (e) {
     throw new ResponseParseError(`Could not manually extract JSON from model output`);
