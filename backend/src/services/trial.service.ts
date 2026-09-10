@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import { User } from '../models/user.model.js';
 import { Plan } from '../models/plan.model.js';
 import { Subscription, type ISubscription } from '../models/subscription.model.js';
 import { AppError } from '../middleware/errorHandler.js';
@@ -16,12 +17,26 @@ export interface TrialRemainingInfo {
 export class TrialService {
   /**
    * Creates a 5-day free trial subscription for a user and allocates initial trial credits.
-   * Enforces single free trial per user via partial unique index.
+   * Enforces single free trial per user via permanent user flag & partial unique index.
    */
   public static async createFreeTrial(
     userId: string | mongoose.Types.ObjectId,
     session?: mongoose.ClientSession,
   ): Promise<ISubscription> {
+    // Check if user has already used a free trial permanently
+    const user = await User.findById(userId).session(session || null);
+    if (!user) {
+      throw new AppError('User not found', 444, 'USER_NOT_FOUND');
+    }
+
+    if (user.hasUsedTrial) {
+      throw new AppError(
+        'User has already used their free trial and is not eligible for another one.',
+        409,
+        'TRIAL_ALREADY_EXISTS',
+      );
+    }
+
     let plan = await Plan.findOne({ code: 'free-trial' });
 
     if (!plan) {
@@ -63,6 +78,13 @@ export class TrialService {
 
       const subscription = subscriptionDocs[0];
 
+      // Mark user as having permanently consumed their trial allocation
+      await User.findByIdAndUpdate(
+        userId,
+        { $set: { hasUsedTrial: true, trialUsedAt: now } },
+        session ? { session } : {},
+      );
+
       // Initialize credits from subscription plan snapshot
       await CreditService.initializeCreditsForSubscription({
         userId,
@@ -94,7 +116,7 @@ export class TrialService {
   /**
    * On-demand real-time check to expire subscriptions whose duration/grace period has ended.
    * Atomically transitions status to 'EXPIRED' for:
-   * 1. TRIALING subscriptions where trialEndDate <= now
+   * 1. TRIALING subscriptions where trialEndDate <= now (and trialEndDate is not null)
    * 2. PAST_DUE subscriptions where pastDueStartedAt <= now - 72 hours
    * 3. ACTIVE subscriptions with cancelAtPeriodEnd=true where currentPeriodEnd <= now
    */
@@ -107,9 +129,9 @@ export class TrialService {
         userId,
         status: { $ne: 'EXPIRED' },
         $or: [
-          { status: 'TRIALING', trialEndDate: { $lte: now } },
-          { status: 'PAST_DUE', pastDueStartedAt: { $lte: pastDueCutoff } },
-          { status: 'ACTIVE', cancelAtPeriodEnd: true, currentPeriodEnd: { $lte: now } },
+          { status: 'TRIALING', trialEndDate: { $exists: true, $ne: null, $lte: now } },
+          { status: 'PAST_DUE', pastDueStartedAt: { $exists: true, $ne: null, $lte: pastDueCutoff } },
+          { status: 'ACTIVE', cancelAtPeriodEnd: true, currentPeriodEnd: { $exists: true, $ne: null, $lte: now } },
         ],
       },
       {
@@ -147,15 +169,15 @@ export class TrialService {
 
     const [res1, res2, res3] = await Promise.all([
       Subscription.updateMany(
-        { status: 'TRIALING', trialEndDate: { $lte: now } },
+        { status: 'TRIALING', trialEndDate: { $exists: true, $ne: null, $lte: now } },
         { $set: { status: 'EXPIRED', endedAt: now } },
       ),
       Subscription.updateMany(
-        { status: 'PAST_DUE', pastDueStartedAt: { $lte: pastDueCutoff } },
+        { status: 'PAST_DUE', pastDueStartedAt: { $exists: true, $ne: null, $lte: pastDueCutoff } },
         { $set: { status: 'EXPIRED', endedAt: now } },
       ),
       Subscription.updateMany(
-        { status: 'ACTIVE', cancelAtPeriodEnd: true, currentPeriodEnd: { $lte: now } },
+        { status: 'ACTIVE', cancelAtPeriodEnd: true, currentPeriodEnd: { $exists: true, $ne: null, $lte: now } },
         { $set: { status: 'EXPIRED', endedAt: now } },
       ),
     ]);

@@ -8,6 +8,8 @@ export interface IUser extends Document {
   passwordHash: string;
   role: 'user' | 'admin';
   status: 'active' | 'suspended';
+  hasUsedTrial: boolean;
+  trialUsedAt?: Date;
   createdAt: Date;
   updatedAt: Date;
   comparePassword(password: string): Promise<boolean>;
@@ -44,6 +46,14 @@ const userSchema = new Schema<IUser>(
       type: String,
       enum: ['active', 'suspended'],
       default: 'active',
+    },
+    hasUsedTrial: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
+    trialUsedAt: {
+      type: Date,
     },
   },
   {

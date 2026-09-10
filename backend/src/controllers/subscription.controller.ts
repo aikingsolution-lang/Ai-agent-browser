@@ -1,6 +1,7 @@
 import type { Request, Response, NextFunction } from 'express';
 import { Subscription } from '../models/subscription.model.js';
 import { Plan } from '../models/plan.model.js';
+import { User } from '../models/user.model.js';
 import { TrialService } from '../services/trial.service.js';
 import { AppError } from '../middleware/errorHandler.js';
 
@@ -20,11 +21,14 @@ export class SubscriptionController {
       // 1. On-demand subscription expiration check
       await TrialService.expireSubscriptionIfEnded(userId);
 
-      // 2. Fetch latest subscription for user
+      // 2. Fetch user document to verify trial eligibility flag
+      const user = await User.findById(userId);
+
+      // 3. Fetch latest subscription for user
       let subscription: any = await Subscription.findOne({ userId }).sort({ createdAt: -1 });
 
-      if (!subscription) {
-        // Auto-provision 5-day free trial for users missing a subscription record
+      if (!subscription && !user?.hasUsedTrial) {
+        // Auto-provision 5-day free trial ONLY for brand-new users who have NEVER used a trial before
         try {
           subscription = await TrialService.createFreeTrial(userId);
         } catch (trialErr) {
@@ -37,9 +41,12 @@ export class SubscriptionController {
           success: true,
           data: {
             subscription: null,
-            status: 'NONE',
+            status: user?.hasUsedTrial ? 'EXPIRED' : 'NONE',
             hasActiveEntitlement: false,
             trialInfo: null,
+            message: user?.hasUsedTrial
+              ? 'Your free trial has already been used. Please subscribe to a paid plan to continue.'
+              : undefined,
           },
         });
         return;
