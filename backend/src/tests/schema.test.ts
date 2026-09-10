@@ -44,8 +44,10 @@ describe('Phase 5 Mongoose Schemas & Indexes Unit Tests', () => {
   it('1. Creates a valid free-trial Plan (amount=0, billingInterval="none")', async () => {
     if (!mongoConnected) return;
 
+    await Plan.deleteOne({ code: 'test-free-trial' });
+
     const trialPlan = await Plan.create({
-      code: 'free-trial',
+      code: 'test-free-trial',
       name: 'Free Trial Plan',
       description: '5-day evaluation trial',
       amount: 0,
@@ -57,7 +59,7 @@ describe('Phase 5 Mongoose Schemas & Indexes Unit Tests', () => {
     });
 
     expect(trialPlan._id).toBeDefined();
-    expect(trialPlan.code).toBe('free-trial');
+    expect(trialPlan.code).toBe('test-free-trial');
     expect(trialPlan.amount).toBe(0);
     expect(trialPlan.billingInterval).toBe('none');
   });
@@ -65,8 +67,10 @@ describe('Phase 5 Mongoose Schemas & Indexes Unit Tests', () => {
   it('2. Creates a valid paid Plan (amount=29900, billingInterval="monthly")', async () => {
     if (!mongoConnected) return;
 
+    await Plan.deleteOne({ code: 'test-starter' });
+
     const paidPlan = await Plan.create({
-      code: 'starter',
+      code: 'test-starter',
       name: 'Starter Plan',
       description: 'Monthly starter subscription',
       amount: 29900, // ₹299 = 29900 paise
@@ -77,7 +81,7 @@ describe('Phase 5 Mongoose Schemas & Indexes Unit Tests', () => {
       features: ['Full AI Automation', 'Priority Tasks'],
     });
 
-    expect(paidPlan.code).toBe('starter');
+    expect(paidPlan.code).toBe('test-starter');
     expect(paidPlan.amount).toBe(29900);
     expect(paidPlan.billingInterval).toBe('monthly');
   });
@@ -91,8 +95,10 @@ describe('Phase 5 Mongoose Schemas & Indexes Unit Tests', () => {
       passwordHash: 'hash123',
     });
 
+    await Plan.deleteOne({ code: 'test-free-trial' });
+
     const plan = await Plan.create({
-      code: 'free-trial',
+      code: 'test-free-trial',
       name: 'Free Trial Plan',
       description: 'Trial Plan',
       amount: 0,
@@ -137,8 +143,10 @@ describe('Phase 5 Mongoose Schemas & Indexes Unit Tests', () => {
       passwordHash: 'hash123',
     });
 
+    await Plan.deleteOne({ code: 'test-starter' });
+
     const plan = await Plan.create({
-      code: 'starter',
+      code: 'test-starter',
       name: 'Starter Plan',
       description: 'Starter',
       amount: 29900,
