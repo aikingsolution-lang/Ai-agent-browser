@@ -120,24 +120,37 @@ const SidePanel = () => {
     }
   }, []);
 
-  // Check model configuration on mount
+  // Check model configuration & auth on mount
   useEffect(() => {
+    loadAuth();
     checkModelConfiguration();
     loadGeneralSettings();
-  }, [checkModelConfiguration, loadGeneralSettings]);
+  }, [loadAuth, checkModelConfiguration, loadGeneralSettings]);
+
+  // Subscribe to authStorage changes so auth state stays synced
+  useEffect(() => {
+    const unsubscribe = authStorage.subscribe(() => {
+      loadAuth();
+    });
+    return () => {
+      unsubscribe();
+    };
+  }, [loadAuth]);
 
   // Re-check model configuration when the side panel becomes visible again
   useEffect(() => {
     const handleVisibilityChange = () => {
       if (!document.hidden) {
-        // Panel became visible, re-check configuration and settings
+        // Panel became visible, re-check configuration, auth and settings
+        loadAuth();
         checkModelConfiguration();
         loadGeneralSettings();
       }
     };
 
     const handleFocus = () => {
-      // Panel gained focus, re-check configuration and settings
+      // Panel gained focus, re-check configuration, auth and settings
+      loadAuth();
       checkModelConfiguration();
       loadGeneralSettings();
     };
@@ -149,7 +162,7 @@ const SidePanel = () => {
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       window.removeEventListener('focus', handleFocus);
     };
-  }, [checkModelConfiguration, loadGeneralSettings]);
+  }, [loadAuth, checkModelConfiguration, loadGeneralSettings]);
 
   useEffect(() => {
     sessionIdRef.current = currentSessionId;
@@ -591,8 +604,11 @@ const SidePanel = () => {
 
     if (!trimmedText) return;
 
-    // Check if user is authenticated before sending task
-    if (!authSession?.token) {
+    // Check if user is authenticated before sending task (fresh check from storage)
+    const session = await authStorage.getSession();
+    setAuthSession(session);
+
+    if (!session?.token) {
       setIsAuthModalOpen(true);
       appendMessage({
         actor: Actors.SYSTEM,

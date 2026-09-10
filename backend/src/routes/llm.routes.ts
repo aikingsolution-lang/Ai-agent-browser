@@ -8,13 +8,15 @@ import { LlmController } from '../controllers/llm.controller.js';
 
 export const llmRouter: Router = Router();
 
-llmRouter.post(
-  '/chat',
+const chatHandlers = [
   authenticate,
   checkEntitlement,
   llmRateLimiter,
   validate(llmChatCompletionSchema),
   LlmController.chatCompletion,
-);
+];
+
+llmRouter.post('/chat', ...chatHandlers);
+llmRouter.post('/chat/completions', ...chatHandlers);
 
 llmRouter.get('/usage', authenticate, LlmController.getUsageHistory);

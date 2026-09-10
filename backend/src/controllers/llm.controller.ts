@@ -83,6 +83,31 @@ export class LlmController {
         idempotencyKey,
       });
 
+      if (req.path.endsWith('/completions')) {
+        res.status(200).json({
+          id: result.requestId,
+          object: 'chat.completion',
+          created: Math.floor(Date.now() / 1000),
+          model: result.model,
+          choices: [
+            {
+              index: 0,
+              message: {
+                role: 'assistant',
+                content: result.content,
+              },
+              finish_reason: 'stop',
+            },
+          ],
+          usage: {
+            prompt_tokens: result.usage.promptTokens,
+            completion_tokens: result.usage.completionTokens,
+            total_tokens: result.usage.totalTokens,
+          },
+        });
+        return;
+      }
+
       sendSuccess(res, result, 'LLM chat completion successful', 200);
     } catch (error) {
       next(error);
