@@ -59,11 +59,19 @@ export class SubscriptionLifecycleService {
 
     const razorpayPlanId = plan.razorpayPlanId || `plan_rzp_mock_${plan.code}`;
 
-    // 1. Check if user already has an active subscription for this exact plan/subscription
-    const existingSubscription = await Subscription.findOne({
+    // 1. Check if user already has a subscription with a providerSubscriptionId
+    let existingSubscription = await Subscription.findOne({
       userId,
+      providerSubscriptionId: { $exists: true, $ne: null },
       status: { $in: ['TRIALING', 'ACTIVE', 'PAST_DUE'] },
-    });
+    }).sort({ createdAt: -1 });
+
+    if (!existingSubscription) {
+      existingSubscription = await Subscription.findOne({
+        userId,
+        status: { $in: ['TRIALING', 'ACTIVE', 'PAST_DUE'] },
+      }).sort({ createdAt: -1 });
+    }
 
     if (existingSubscription && existingSubscription.providerSubscriptionId) {
       return {
@@ -89,9 +97,28 @@ export class SubscriptionLifecycleService {
 
     // 3. Update or link subscription record with providerSubscriptionId
     if (existingSubscription) {
-      existingSubscription.providerSubscriptionId = rzpSub.id;
-      existingSubscription.provider = 'razorpay';
-      await existingSubscription.save();
+      const updatedSub = await Subscription.findOneAndUpdate(
+        {
+          _id: existingSubscription._id,
+          $or: [{ providerSubscriptionId: { $exists: false } }, { providerSubscriptionId: null }],
+        },
+        { $set: { providerSubscriptionId: rzpSub.id, provider: 'razorpay' } },
+        { new: true },
+      );
+      if (!updatedSub) {
+        const recheckSub = await Subscription.findById(existingSubscription._id);
+        if (recheckSub?.providerSubscriptionId) {
+          return {
+            subscriptionId: recheckSub.providerSubscriptionId,
+            razorpayPlanId,
+            planCode: plan.code,
+            planName: plan.name,
+            amount: plan.amount,
+            currency: plan.currency,
+            keyId: env.RAZORPAY_KEY_ID,
+          };
+        }
+      }
     }
 
     return {
@@ -130,7 +157,9 @@ export class SubscriptionLifecycleService {
     }
 
     // 3. Fetch Subscription for current User
-    let subscription = await Subscription.findOne({ userId });
+    let subscription =
+      (await Subscription.findOne({ providerSubscriptionId: subscriptionId })) ||
+      (await Subscription.findOne({ userId }).sort({ createdAt: -1 }));
     if (!subscription) {
       throw new AppError('Subscription not found for user', 404, 'SUBSCRIPTION_NOT_FOUND');
     }

@@ -93,7 +93,8 @@ describe('Trial Abuse Prevention & Expiration Integrity Tests', () => {
 
     expect(activateRes.status).toBe(409);
     expect(activateRes.body.success).toBe(false);
-    expect(activateRes.body.code).toBe('TRIAL_ALREADY_EXISTS');
+    const errorCode = activateRes.body.error?.code || activateRes.body.code;
+    expect(errorCode).toBe('TRIAL_ALREADY_EXISTS');
   });
 
   it('4. Even if subscription documents are deleted, hasUsedTrial = true prevents new trial creation via /subscription/me', async () => {

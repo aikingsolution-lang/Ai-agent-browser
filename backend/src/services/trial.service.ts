@@ -31,7 +31,7 @@ export class TrialService {
 
     if (user.hasUsedTrial) {
       throw new AppError(
-        'User has already used their free trial and is not eligible for another one.',
+        'User is not eligible for a free trial or already has an active subscription',
         409,
         'TRIAL_ALREADY_EXISTS',
       );
