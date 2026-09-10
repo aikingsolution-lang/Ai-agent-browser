@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import { User } from '../models/user.model.js';
 import { Plan } from '../models/plan.model.js';
 import { Subscription, type ISubscription } from '../models/subscription.model.js';
 import { WebhookLedger } from '../models/webhookLedger.model.js';
@@ -77,8 +78,12 @@ export class SubscriptionLifecycleService {
     }
 
     // 2. Call Razorpay API to create subscription session
+    const user = await User.findById(userId).select('email').lean();
     const rzpSub = await RazorpayService.createRazorpaySubscription({
       planId: razorpayPlanId,
+      totalCount: plan.billingInterval === 'yearly' ? 10 : 12,
+      customerNotify: 0,
+      notifyInfo: user?.email ? { email: user.email } : undefined,
       notes: { userId: userId.toString(), planCode: plan.code },
     });
 

@@ -75,6 +75,8 @@ export class RazorpayService {
   public static async createRazorpaySubscription(params: {
     planId: string;
     totalCount?: number;
+    customerNotify?: number;
+    notifyInfo?: { email?: string; phone?: string };
     notes?: Record<string, string>;
   }): Promise<RazorpaySubscriptionResponse> {
     const isMockKey =
@@ -103,19 +105,30 @@ export class RazorpayService {
     // Real Razorpay API HTTP Request
     try {
       const authHeader = `Basic ${Buffer.from(`${env.RAZORPAY_KEY_ID}:${env.RAZORPAY_KEY_SECRET}`).toString('base64')}`;
+
+      const payload: Record<string, any> = {
+        plan_id: params.planId,
+        total_count: params.totalCount || 12,
+        quantity: 1,
+        customer_notify: params.customerNotify !== undefined ? params.customerNotify : 0,
+        notes: params.notes || {},
+      };
+
+      if (params.notifyInfo && (params.notifyInfo.email || params.notifyInfo.phone)) {
+        payload.notify_info = params.notifyInfo;
+      }
+
+      logger.info(
+        `[Real Razorpay API Request Payload] ${JSON.stringify({ ...payload, keyId: `${env.RAZORPAY_KEY_ID.slice(0, 8)}...` })}`,
+      );
+
       const response = await fetch('https://api.razorpay.com/v1/subscriptions', {
         method: 'POST',
         headers: {
           Authorization: authHeader,
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({
-          plan_id: params.planId,
-          total_count: params.totalCount || 12,
-          quantity: 1,
-          customer_notify: 1,
-          notes: params.notes || {},
-        }),
+        body: JSON.stringify(payload),
       });
 
       const data = (await response.json()) as Record<string, any>;
