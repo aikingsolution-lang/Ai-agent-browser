@@ -22,11 +22,24 @@ export function createApp(): express.Application {
 
   // CORS Configuration
   const allowedOrigins = env.CORS_ORIGIN.split(',').map(o => o.trim());
+  const originRegexes = allowedOrigins.map(pattern => {
+    const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
+    return new RegExp(`^${escaped}$`);
+  });
+
   app.use(
     cors({
       origin: (origin, callback) => {
-        // Allow requests with no origin (e.g. mobile apps, curl, extension background worker)
-        if (!origin || allowedOrigins.includes('*') || allowedOrigins.includes(origin)) {
+        // Allow requests with no origin (e.g. mobile apps, curl, extension background worker),
+        // any Chrome extension origin (chrome-extension://...),
+        // or origins matching allowed list / wildcard patterns.
+        if (
+          !origin ||
+          allowedOrigins.includes('*') ||
+          origin.startsWith('chrome-extension://') ||
+          allowedOrigins.includes(origin) ||
+          originRegexes.some(regex => regex.test(origin))
+        ) {
           callback(null, true);
         } else {
           callback(new Error(`Origin ${origin} not allowed by CORS`));

@@ -147,6 +147,8 @@ export class BackendApiClient {
       amount: number;
       currency: string;
       planCode: string;
+      shortUrl?: string;
+      planName?: string;
     }>('/subscription/checkout', {
       method: 'POST',
       headers,

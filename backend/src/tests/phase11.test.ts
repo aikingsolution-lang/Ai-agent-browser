@@ -152,4 +152,11 @@ describe('Phase 11: Production Hardening, Observability & Readiness Audit Tests'
     expect(log).not.toBeNull();
     expect(log?.creditsDeducted).toBe(0);
   });
+
+  it('9. CORS header dynamically allows any chrome-extension:// origin', async () => {
+    const randomExtensionOrigin = 'chrome-extension://nffgienjkailamlolbllolenkbaakpff';
+    const res = await request(app).get('/health').set('Origin', randomExtensionOrigin);
+    expect(res.status).toBe(200);
+    expect(res.headers['access-control-allow-origin']).toBe(randomExtensionOrigin);
+  });
 });
