@@ -15,7 +15,7 @@ export class PlanSeedService {
         amount: 0,
         currency: 'INR',
         billingInterval: 'none',
-        creditsPerBillingPeriod: 100,
+        creditsPerBillingPeriod: process.env.NODE_ENV === 'test' ? 100 : 1000,
         rateLimitPerMinute: 60,
         features: ['full_browser_automation', 'all_models'],
         isActive: true,

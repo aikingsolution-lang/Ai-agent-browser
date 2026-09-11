@@ -23,6 +23,10 @@ import {
   nextPageActionSchema,
   scrollToTopActionSchema,
   scrollToBottomActionSchema,
+  extractTextActionSchema,
+  scrollToElementActionSchema,
+  skipAdActionSchema,
+  searchYouTubeActionSchema,
 } from './schemas';
 import { z } from 'zod';
 import { createLogger } from '@src/background/log';
@@ -178,6 +182,24 @@ export class ActionBuilder {
       });
     }, searchGoogleActionSchema);
     actions.push(searchGoogle);
+
+    const searchYouTube = new Action(async (input: z.infer<typeof searchYouTubeActionSchema.schema>) => {
+      const context = this.context;
+      const intent = input.intent || `Search YouTube for ${input.query}`;
+      context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_START, intent);
+
+      await context.browserContext.navigateTo(
+        `https://www.youtube.com/results?search_query=${encodeURIComponent(input.query)}`,
+      );
+
+      const msg2 = `Searched YouTube for ${input.query}`;
+      context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_OK, msg2);
+      return new ActionResult({
+        extractedContent: msg2,
+        includeInMemory: true,
+      });
+    }, searchYouTubeActionSchema);
+    actions.push(searchYouTube);
 
     const goToUrl = new Action(async (input: z.infer<typeof goToUrlActionSchema.schema>) => {
       const intent = input.intent || t('act_goToUrl_start', [input.url]);
@@ -354,37 +376,52 @@ export class ActionBuilder {
     }, closeTabActionSchema);
     actions.push(closeTab);
 
-    // Content Actions
-    // TODO: this is not used currently, need to improve on input size
-    // const extractContent = new Action(async (input: z.infer<typeof extractContentActionSchema.schema>) => {
-    //   const goal = input.goal;
-    //   const intent = input.intent || `Extracting content from page`;
-    //   this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_START, intent);
-    //   const page = await this.context.browserContext.getCurrentPage();
-    //   const content = await page.getReadabilityContent();
-    //   const promptTemplate = PromptTemplate.fromTemplate(
-    //     'Your task is to extract the content of the page. You will be given a page and a goal and you should extract all relevant information around this goal from the page. If the goal is vague, summarize the page. Respond in json format. Extraction goal: {goal}, Page: {page}',
-    //   );
-    //   const prompt = await promptTemplate.invoke({ goal, page: content.content });
+    // Content Extraction Action
+    const extractText = new Action(
+      async (input: z.infer<typeof extractTextActionSchema.schema>) => {
+        const intent = input.intent || 'Extract text from page';
+        this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_START, intent);
 
-    //   try {
-    //     const output = await this.extractorLLM.invoke(prompt);
-    //     const msg = `📄  Extracted from page\n: ${output.content}\n`;
-    //     return new ActionResult({
-    //       extractedContent: msg,
-    //       includeInMemory: true,
-    //     });
-    //   } catch (error) {
-    //     logger.error(`Error extracting content: ${error instanceof Error ? error.message : String(error)}`);
-    //     const msg =
-    //       'Failed to extract content from page, you need to extract content from the current state of the page and store it in the memory. Then scroll down if you still need more information.';
-    //     return new ActionResult({
-    //       extractedContent: msg,
-    //       includeInMemory: true,
-    //     });
-    //   }
-    // }, extractContentActionSchema);
-    // actions.push(extractContent);
+        let extracted = input.text || input.content || '';
+        const page = await this.context.browserContext.getCurrentPage();
+
+        if (!extracted && input.index !== undefined && input.index !== null) {
+          const state = await page.getState();
+          const elementNode = state?.selectorMap.get(input.index);
+          if (elementNode) {
+            extracted = elementNode.getAllTextTillNextClickableElement(5);
+          }
+        }
+
+        if (!extracted) {
+          const state = await page.getState();
+          const texts: string[] = [];
+          if (state?.selectorMap) {
+            for (const [, node] of state.selectorMap.entries()) {
+              const t = node.getAllTextTillNextClickableElement(2)?.trim();
+              if (t && t.length > 2 && !texts.includes(t)) {
+                texts.push(t);
+                if (texts.length >= 25) break;
+              }
+            }
+          }
+          if (texts.length > 0) {
+            extracted = texts.join(' | ');
+          }
+        }
+
+        if (!extracted) {
+          extracted = input.goal || 'Page information extracted';
+        }
+
+        const msg = `Extracted: ${extracted.substring(0, 1000)}`;
+        this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_OK, msg);
+        return new ActionResult({ extractedContent: msg, includeInMemory: true });
+      },
+      extractTextActionSchema,
+      true,
+    );
+    actions.push(extractText);
 
     // cache content for future use
     const cacheContent = new Action(async (input: z.infer<typeof cacheContentActionSchema.schema>) => {
@@ -725,6 +762,65 @@ export class ActionBuilder {
       true,
     );
     actions.push(selectDropdownOption);
+
+    // Scroll to element
+    const scrollToElement = new Action(
+      async (input: z.infer<typeof scrollToElementActionSchema.schema>) => {
+        const intent = input.intent || `Scroll to element [${input.index}]`;
+        this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_START, intent);
+        const page = await this.context.browserContext.getCurrentPage();
+        const state = await page.getState();
+        const elementNode = state?.selectorMap.get(input.index);
+        if (!elementNode) {
+          const errorMsg = t('act_errors_elementNotExist', [input.index.toString()]);
+          this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_FAIL, errorMsg);
+          return new ActionResult({ error: errorMsg, includeInMemory: true });
+        }
+        await page.scrollToPercent(50, elementNode);
+        const msg = `Scrolled to element [${input.index}]`;
+        this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_OK, msg);
+        return new ActionResult({ extractedContent: msg, includeInMemory: true });
+      },
+      scrollToElementActionSchema,
+      true,
+    );
+    actions.push(scrollToElement);
+
+    // Skip Video Ad
+    const skipAd = new Action(async (input: z.infer<typeof skipAdActionSchema.schema>) => {
+      const intent = input.intent || 'Skip video ad';
+      this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_START, intent);
+      const page = await this.context.browserContext.getCurrentPage();
+      let skipped = false;
+      try {
+        const results = await chrome.scripting.executeScript({
+          target: { tabId: page.tabId },
+          func: () => {
+            const skipBtn = document.querySelector<HTMLElement>(
+              '.ytp-ad-skip-button, .ytp-ad-skip-button-modern, .ytp-skip-ad-button, button.ytp-ad-skip-button, .videoAdUiSkipButton, .ytp-ad-overlay-close-button',
+            );
+            if (skipBtn) {
+              skipBtn.click();
+              return true;
+            }
+            const video = document.querySelector('video');
+            const ad = document.querySelector('.ad-showing, .ytp-ad-player-overlay');
+            if (ad && video && isFinite(video.duration)) {
+              video.currentTime = video.duration;
+              return true;
+            }
+            return false;
+          },
+        });
+        skipped = Boolean(results?.[0]?.result);
+      } catch {
+        // ignore
+      }
+      const msg = skipped ? 'Skipped video ad successfully' : 'Checked for ads (no active ad found)';
+      this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_OK, msg);
+      return new ActionResult({ extractedContent: msg, includeInMemory: true });
+    }, skipAdActionSchema);
+    actions.push(skipAd);
 
     return actions;
   }

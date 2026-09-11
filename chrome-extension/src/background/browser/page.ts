@@ -1129,56 +1129,73 @@ export default class Page {
         logger.debug(`Non-critical error preparing element: ${e}`);
       }
 
-      // Get element properties to determine input method
-      const tagName = await element.evaluate(el => el.tagName.toLowerCase());
-      const isContentEditable = await element.evaluate(el => {
-        if (el instanceof HTMLElement) {
-          return el.isContentEditable;
+      // Robust input setting that handles inputs, textareas, contenteditables, and container wrappers (e.g. YouTube searchbox, Google, Flipkart divs)
+      await element.evaluate((el, value) => {
+        // Find target input element: el itself or nested input/textarea/contenteditable
+        let target: HTMLElement | null = null;
+        if (
+          el instanceof HTMLInputElement ||
+          el instanceof HTMLTextAreaElement ||
+          (el instanceof HTMLElement && el.isContentEditable)
+        ) {
+          target = el;
+        } else {
+          // Check shadow root if web component (e.g., ytd-searchbox)
+          const shadowRoot = (el as HTMLElement).shadowRoot;
+          if (shadowRoot) {
+            target = shadowRoot.querySelector('input:not([type="hidden"]), textarea, [contenteditable="true"]');
+          }
+          if (!target) {
+            target = el.querySelector('input:not([type="hidden"]), textarea, [contenteditable="true"]');
+          }
         }
-        return false;
-      });
-      const isReadOnly = await element.evaluate(el => {
-        if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
-          return el.readOnly;
-        }
-        return false;
-      });
-      const isDisabled = await element.evaluate(el => {
-        if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
-          return el.disabled;
-        }
-        return false;
-      });
 
-      // Choose appropriate input method based on element properties
-      if ((isContentEditable || tagName === 'input') && !isReadOnly && !isDisabled) {
-        // Clear content and set value directly
-        await element.evaluate(el => {
-          if (el instanceof HTMLElement) {
-            el.textContent = '';
+        if (!target) {
+          target = el as HTMLElement;
+        }
+
+        try {
+          target.focus();
+          if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
+            // Use native prototype setter to ensure React / Angular / Polymer / Vue state updates
+            const prototype =
+              target instanceof HTMLInputElement ? HTMLInputElement.prototype : HTMLTextAreaElement.prototype;
+            const nativeSetter = Object.getOwnPropertyDescriptor(prototype, 'value')?.set;
+            if (nativeSetter) {
+              nativeSetter.call(target, value);
+            } else {
+              target.value = value;
+            }
+
+            target.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+            target.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+          } else if (target instanceof HTMLElement && target.isContentEditable) {
+            target.textContent = value;
+            target.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+            target.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
           }
-          if ('value' in el) {
-            (el as HTMLInputElement).value = '';
-          }
-          // Dispatch events
-          el.dispatchEvent(new Event('input', { bubbles: true }));
-          el.dispatchEvent(new Event('change', { bubbles: true }));
+        } catch (e) {
+          console.error('Failed to set input value directly:', e);
+        }
+      }, text);
+
+      // Attempt Puppeteer typing if element or its child is active
+      try {
+        const canType = await element.evaluate(el => {
+          const active = document.activeElement;
+          return (
+            active instanceof HTMLInputElement ||
+            active instanceof HTMLTextAreaElement ||
+            (active as HTMLElement)?.isContentEditable
+          );
         });
-
-        // Type the text with a small delay between keypresses
-        await element.type(text, { delay: 50 });
-      } else {
-        // Use direct value setting for other types of elements
-        await element.evaluate((el, value) => {
-          if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
-            el.value = value;
-          } else if (el instanceof HTMLElement && el.isContentEditable) {
-            el.textContent = value;
-          }
-          // Dispatch events
-          el.dispatchEvent(new Event('input', { bubbles: true }));
-          el.dispatchEvent(new Event('change', { bubbles: true }));
-        }, text);
+        if (!canType) {
+          // Try clicking the element to focus it, then select all and type
+          await element.click().catch(() => {});
+          await element.type(text, { delay: 30 }).catch(() => {});
+        }
+      } catch (typeErr) {
+        logger.debug(`Puppeteer type attempt completed or skipped: ${typeErr}`);
       }
 
       // Wait for page stability after input
@@ -1313,10 +1330,20 @@ export default class Page {
         if (error instanceof URLNotAllowedError) {
           throw error;
         }
-        // Second attempt: Use evaluate to perform a direct click
+        // Second attempt: Use evaluate to perform a direct click, with anchor fallback
         logger.info('Failed to click element, trying again', error);
         try {
-          await element.evaluate(el => (el as HTMLElement).click());
+          await element.evaluate(el => {
+            const htmlEl = el as HTMLElement;
+            htmlEl.click();
+            const anchor = (
+              htmlEl.tagName.toLowerCase() === 'a' ? htmlEl : htmlEl.closest('a') || htmlEl.querySelector('a')
+            ) as HTMLAnchorElement | null;
+            if (anchor && anchor.href && anchor.href.startsWith('http')) {
+              window.location.href = anchor.href;
+            }
+          });
+          await this._checkAndHandleNavigation();
         } catch (secondError) {
           // if URLNotAllowedError, throw it
           if (secondError instanceof URLNotAllowedError) {

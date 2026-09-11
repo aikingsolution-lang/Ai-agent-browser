@@ -348,4 +348,200 @@ describe('Phase 9 & Bedrock: Managed LLM Proxy Gateway + Usage Metering Integrat
     expect(res.body.object).toBe('chat.completion');
     expect(res.body.choices).toBeDefined();
   });
+
+  it('13. cleanJsonMarkdown extracts valid JSON from raw Nova Lite response prefixed with [Tool Output ...]', () => {
+    const provider = new BedrockLlmProvider('test-key', 'us-east-1');
+
+    // Fixture 1: Nova Lite outputting [Tool Output 1]: { ... }
+    const rawFixture1 = `[Tool Output 1]: {
+      "current_state": {
+        "evaluation_previous_goal": "Successfully opened Amazon homepage",
+        "memory": "Navigated to amazon.in",
+        "next_goal": "Search for earphones under 5000"
+      },
+      "action": [
+        { "input_text": { "index": 22, "text": "earphones" } }
+      ]
+    }`;
+
+    const cleaned1 = provider.cleanJsonMarkdown(rawFixture1);
+    const parsed1 = JSON.parse(cleaned1);
+    expect(parsed1.current_state.evaluation_previous_goal).toBe('Successfully opened Amazon homepage');
+    expect(parsed1.action).toHaveLength(1);
+    expect(parsed1.action[0].input_text.text).toBe('earphones');
+
+    // Fixture 2: Conversational preamble + [Tool Output]: + JSON + trailing text
+    const rawFixture2 = `Based on the current page:\n[Tool Output]: {"current_state": {"memory": "step 2"}, "actions": [{"click_element": {"index": 5}}]}\nNote: click the search button next.`;
+    const cleaned2 = provider.cleanJsonMarkdown(rawFixture2);
+    const parsed2 = JSON.parse(cleaned2);
+    expect(parsed2.current_state.memory).toBe('step 2');
+    expect(parsed2.actions[0].click_element.index).toBe(5);
+
+    // Fixture 3: Codeblock with think tags
+    const rawFixture3 = `<think>I need to search on amazon.</think>\`\`\`json\n{"current_state": {"next_goal": "done"}, "action": [{"done": {"text": "task complete"}}]}\n\`\`\``;
+    const cleaned3 = provider.cleanJsonMarkdown(rawFixture3);
+    const parsed3 = JSON.parse(cleaned3);
+    expect(parsed3.current_state.next_goal).toBe('done');
+    expect(parsed3.action[0].done.text).toBe('task complete');
+  });
+
+  it('14. End-to-end LLM proxy cleans [Tool Output] Bedrock response so client receives valid JSON and credits are deducted', async () => {
+    const { token, userId } = await registerUser('bedrocktoolfixture');
+
+    const bedrockProvider = new BedrockLlmProvider('test-key', 'us-east-1');
+    LlmProviderFactory.setOverrideProvider(bedrockProvider);
+
+    const originalFetch = global.fetch;
+    const rawBedrockPayload = `[Tool Output]: {
+      "current_state": {
+        "evaluation_previous_goal": "On search page",
+        "memory": "Filtering price under 5000",
+        "next_goal": "Select rating above 4"
+      },
+      "action": [
+        { "click_element": { "index": 42 } }
+      ]
+    }`;
+
+    global.fetch = async () => {
+      return new Response(
+        JSON.stringify({
+          output: {
+            message: {
+              role: 'assistant',
+              content: [{ text: rawBedrockPayload }],
+            },
+          },
+          stopReason: 'end_turn',
+          usage: {
+            inputTokens: 150,
+            outputTokens: 75,
+            totalTokens: 225,
+          },
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    };
+
+    try {
+      const res = await request(app)
+        .post('/api/v1/llm/chat/completions')
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          model: 'amazon.nova-lite-v1:0',
+          messages: [{ role: 'user', content: 'Filter earphones under 5000' }],
+        });
+
+      expect(res.status).toBe(200);
+      const returnedContent = res.body.choices[0].message.content;
+
+      // Crucial: returned content must NOT start with [Tool Output] and must parse as valid JSON directly
+      expect(returnedContent.startsWith('[Tool Output]')).toBe(false);
+      const parsed = JSON.parse(returnedContent);
+      expect(parsed.current_state.next_goal).toBe('Select rating above 4');
+      expect(parsed.action[0].click_element.index).toBe(42);
+
+      // Verify credits were properly deducted for successful response
+      const balance = await UserCreditBalance.findOne({ userId });
+      expect(balance?.remainingCredits).toBeLessThan(100);
+    } finally {
+      global.fetch = originalFetch;
+      LlmProviderFactory.reset();
+    }
+  });
+
+  it('15. Multi-turn execution after input_text merges consecutive user messages into strictly alternating Bedrock turns', () => {
+    const provider = new BedrockLlmProvider('test-key', 'us-east-1');
+
+    // Simulate multi-turn scenario where input_text just executed
+    const messages = [
+      { role: 'system', content: 'You are a browser automation assistant.' },
+      { role: 'user', content: 'Turn 1: Initial task - find earphones on amazon' },
+      {
+        role: 'assistant',
+        content: JSON.stringify({
+          current_state: { next_goal: 'Type query into search input' },
+          action: [{ input_text: { index: 12, text: 'earphone under 5000' } }],
+        }),
+      },
+      // Consecutive user messages representing action execution result + updated DOM snapshot
+      { role: 'user', content: 'Turn 3: Action result: Typed "earphone under 5000" into element [12]' },
+      { role: 'user', content: 'Turn 4: Current browser state: Amazon search suggestions popup visible [33, 34, 35]' },
+    ];
+
+    const { systemMessages, bedrockMessages } = provider.formatBedrockMessages(messages);
+
+    // 1. System message formatted correctly
+    expect(systemMessages.length).toBe(1);
+    expect(systemMessages[0].text).toBe('You are a browser automation assistant.');
+
+    // 2. Turns must strictly alternate: user -> assistant -> user (length 3, NOT 4)
+    expect(bedrockMessages.length).toBe(3);
+    expect(bedrockMessages[0].role).toBe('user');
+    expect(bedrockMessages[1].role).toBe('assistant');
+    expect(bedrockMessages[2].role).toBe('user');
+
+    // 3. Consecutive user messages (Turn 3 and 4) were merged into multiple content blocks in the final turn
+    expect(bedrockMessages[2].content.length).toBe(2);
+    expect(bedrockMessages[2].content[0].text).toContain('Action result: Typed');
+    expect(bedrockMessages[2].content[1].text).toContain('Current browser state: Amazon search suggestions');
+  });
+
+  it('16. Bedrock empty response (length: 0) throws 502 PROVIDER_EMPTY_RESPONSE and deducts 0 credits', async () => {
+    const { token, userId } = await registerUser('bedrockemptyuser');
+
+    const bedrockProvider = new BedrockLlmProvider('test-key', 'us-east-1');
+    LlmProviderFactory.setOverrideProvider(bedrockProvider);
+
+    const originalFetch = global.fetch;
+
+    // Simulate Bedrock returning empty output message content (length: 0)
+    global.fetch = async () => {
+      return new Response(
+        JSON.stringify({
+          output: {
+            message: {
+              role: 'assistant',
+              content: [{ text: '' }],
+            },
+          },
+          stopReason: 'end_turn',
+          usage: {
+            inputTokens: 2500,
+            outputTokens: 0,
+            totalTokens: 2500,
+          },
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    };
+
+    try {
+      const balanceBefore = await UserCreditBalance.findOne({ userId });
+      expect(balanceBefore?.remainingCredits).toBe(100);
+
+      const res = await request(app)
+        .post('/api/v1/llm/chat/completions')
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          model: 'amazon.nova-lite-v1:0',
+          messages: [
+            { role: 'user', content: 'Turn 1' },
+            { role: 'assistant', content: 'Turn 2' },
+            { role: 'user', content: 'Turn 3' },
+          ],
+        });
+
+      // Must fail with 502 Bad Gateway and PROVIDER_EMPTY_RESPONSE code
+      expect(res.status).toBe(502);
+      expect(res.body.error.code).toBe('PROVIDER_EMPTY_RESPONSE');
+
+      // Crucial: 0 credits should be deducted when provider returns empty response!
+      const balanceAfter = await UserCreditBalance.findOne({ userId });
+      expect(balanceAfter?.remainingCredits).toBe(100);
+    } finally {
+      global.fetch = originalFetch;
+      LlmProviderFactory.reset();
+    }
+  });
 });

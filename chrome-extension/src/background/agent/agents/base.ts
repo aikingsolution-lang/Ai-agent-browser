@@ -226,6 +226,7 @@ export abstract class BaseAgent<T extends z.ZodType, M = unknown> {
       return this.validateModelOutput(extractedJson);
     } catch (error) {
       logger.warning('manuallyParseResponse failed', error);
+      console.error('[BaseAgent] manuallyParseResponse failed. Full content was:\n', content, error);
       return undefined;
     }
   }

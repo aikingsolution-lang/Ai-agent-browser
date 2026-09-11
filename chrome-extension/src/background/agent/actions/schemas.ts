@@ -15,12 +15,29 @@ export const doneActionSchema: ActionSchema = {
   }),
 };
 
+const flexibleIndex = z.union([z.number(), z.string(), z.array(z.union([z.number(), z.string()]))]).transform(val => {
+  if (Array.isArray(val)) return val.length > 0 ? Math.round(Number(val[0])) : 0;
+  const n = Number(val);
+  return isNaN(n) ? 0 : Math.round(n);
+});
+
+const optionalFlexibleIndex = z
+  .union([z.number(), z.string(), z.array(z.union([z.number(), z.string()]))])
+  .nullable()
+  .optional()
+  .transform(val => {
+    if (val === undefined || val === null) return undefined;
+    if (Array.isArray(val)) return val.length > 0 ? Math.round(Number(val[0])) : undefined;
+    const n = Number(val);
+    return isNaN(n) ? undefined : Math.round(n);
+  });
+
 export const submitFormActionSchema: ActionSchema = {
   name: 'submit_form',
   description: 'Submit form or search input element',
   schema: z.object({
     intent: z.string().default('').describe('purpose of this action'),
-    index: z.number().int().optional().default(0).describe('index of the element to submit'),
+    index: optionalFlexibleIndex.default(0).describe('index of the element to submit'),
   }),
 };
 
@@ -32,6 +49,16 @@ export const searchGoogleActionSchema: ActionSchema = {
   schema: z.object({
     intent: z.string().default('').describe('purpose of this action'),
     query: z.string(),
+  }),
+};
+
+export const searchYouTubeActionSchema: ActionSchema = {
+  name: 'search_youtube',
+  description:
+    'Search for videos or songs on YouTube in the current tab. Use concrete search queries (e.g. song name, artist).',
+  schema: z.object({
+    intent: z.string().default('').describe('purpose of this action'),
+    query: z.string().describe('YouTube search query or song title'),
   }),
 };
 
@@ -57,7 +84,7 @@ export const clickElementActionSchema: ActionSchema = {
   description: 'Click element by index',
   schema: z.object({
     intent: z.string().default('').describe('purpose of this action'),
-    index: z.number().int().describe('index of the element'),
+    index: flexibleIndex.describe('index of the element'),
     xpath: z.string().nullable().optional().describe('xpath of the element'),
   }),
 };
@@ -67,20 +94,25 @@ export const inputTextActionSchema: ActionSchema = {
   description: 'Input text into an interactive input element',
   schema: z.object({
     intent: z.string().default('').describe('purpose of this action'),
-    index: z.number().int().describe('index of the element'),
+    index: flexibleIndex.describe('index of the element'),
     text: z.string().optional().default('').describe('text to input'),
     xpath: z.string().nullable().optional().describe('xpath of the element'),
   }),
 };
 
-// Tab Management Actions
 export const switchTabActionSchema: ActionSchema = {
   name: 'switch_tab',
   description: 'Switch to tab by tab id',
-  schema: z.object({
-    intent: z.string().default('').describe('purpose of this action'),
-    tab_id: z.number().int().describe('id of the tab to switch to'),
-  }),
+  schema: z
+    .object({
+      intent: z.string().default('').describe('purpose of this action'),
+      tab_id: z.number().int().optional().describe('id of the tab to switch to'),
+      tabId: z.number().int().optional().describe('id of the tab to switch to'),
+    })
+    .transform(data => ({
+      intent: data.intent,
+      tab_id: data.tab_id !== undefined ? data.tab_id : data.tabId !== undefined ? data.tabId : 0,
+    })),
 };
 
 export const openTabActionSchema: ActionSchema = {
@@ -88,28 +120,36 @@ export const openTabActionSchema: ActionSchema = {
   description: 'Open URL in new tab',
   schema: z.object({
     intent: z.string().default('').describe('purpose of this action'),
-    url: z.string().describe('url to open'),
+    url: z.string().optional().default('https://www.google.com').describe('url to open'),
   }),
 };
 
 export const closeTabActionSchema: ActionSchema = {
   name: 'close_tab',
   description: 'Close tab by tab id',
-  schema: z.object({
-    intent: z.string().default('').describe('purpose of this action'),
-    tab_id: z.number().int().describe('id of the tab'),
-  }),
+  schema: z
+    .object({
+      intent: z.string().default('').describe('purpose of this action'),
+      tab_id: z.number().int().optional().describe('id of the tab'),
+      tabId: z.number().int().optional().describe('id of the tab'),
+    })
+    .transform(data => ({
+      intent: data.intent,
+      tab_id: data.tab_id !== undefined ? data.tab_id : data.tabId !== undefined ? data.tabId : 0,
+    })),
 };
 
-// Content Actions, not used currently
-// export const extractContentActionSchema: ActionSchema = {
-//   name: 'extract_content',
-//   description:
-//     'Extract page content to retrieve specific information from the page, e.g. all company names, a specific description, all information about, links with companies in structured format or simply links',
-//   schema: z.object({
-//     goal: z.string(),
-//   }),
-// };
+export const extractTextActionSchema: ActionSchema = {
+  name: 'extract_text',
+  description: 'Extract text or information from an element or the current page',
+  schema: z.object({
+    intent: z.string().default('').describe('purpose of this action'),
+    index: optionalFlexibleIndex.describe('optional index of the element to extract text from'),
+    text: z.string().optional().default('').describe('extracted text or observation'),
+    content: z.string().optional().default('').describe('content to extract or record'),
+    goal: z.string().optional().default('').describe('information goal to extract'),
+  }),
+};
 
 // Cache Actions
 export const cacheContentActionSchema: ActionSchema = {
@@ -121,6 +161,15 @@ export const cacheContentActionSchema: ActionSchema = {
   }),
 };
 
+export const scrollToElementActionSchema: ActionSchema = {
+  name: 'scroll_to_element',
+  description: 'Scroll an element into view by its index',
+  schema: z.object({
+    intent: z.string().default('').describe('purpose of this action'),
+    index: flexibleIndex.describe('index of the element to scroll to'),
+  }),
+};
+
 export const scrollToPercentActionSchema: ActionSchema = {
   name: 'scroll_to_percent',
   description:
@@ -128,7 +177,7 @@ export const scrollToPercentActionSchema: ActionSchema = {
   schema: z.object({
     intent: z.string().default('').describe('purpose of this action'),
     yPercent: z.number().int().describe('percentage to scroll to - min 0, max 100; 0 is top, 100 is bottom'),
-    index: z.number().int().nullable().optional().describe('index of the element'),
+    index: optionalFlexibleIndex.describe('index of the element'),
   }),
 };
 
@@ -137,7 +186,7 @@ export const scrollToTopActionSchema: ActionSchema = {
   description: 'Scroll the document in the window or an element to the top',
   schema: z.object({
     intent: z.string().default('').describe('purpose of this action'),
-    index: z.number().int().nullable().optional().describe('index of the element'),
+    index: optionalFlexibleIndex.describe('index of the element'),
   }),
 };
 
@@ -146,7 +195,7 @@ export const scrollToBottomActionSchema: ActionSchema = {
   description: 'Scroll the document in the window or an element to the bottom',
   schema: z.object({
     intent: z.string().default('').describe('purpose of this action'),
-    index: z.number().int().nullable().optional().describe('index of the element'),
+    index: optionalFlexibleIndex.describe('index of the element'),
   }),
 };
 
@@ -156,7 +205,7 @@ export const previousPageActionSchema: ActionSchema = {
     'Scroll the document in the window or an element to the previous page. If no index is specified, scroll the whole document.',
   schema: z.object({
     intent: z.string().default('').describe('purpose of this action'),
-    index: z.number().int().nullable().optional().describe('index of the element'),
+    index: optionalFlexibleIndex.describe('index of the element'),
   }),
 };
 
@@ -166,7 +215,7 @@ export const nextPageActionSchema: ActionSchema = {
     'Scroll the document in the window or an element to the next page. If no index is specified, scroll the whole document.',
   schema: z.object({
     intent: z.string().default('').describe('purpose of this action'),
-    index: z.number().int().nullable().optional().describe('index of the element'),
+    index: optionalFlexibleIndex.describe('index of the element'),
   }),
 };
 
@@ -200,7 +249,7 @@ export const getDropdownOptionsActionSchema: ActionSchema = {
   description: 'Get all options from a native dropdown',
   schema: z.object({
     intent: z.string().default('').describe('purpose of this action'),
-    index: z.number().int().describe('index of the dropdown element'),
+    index: flexibleIndex.describe('index of the dropdown element'),
   }),
 };
 
@@ -209,16 +258,36 @@ export const selectDropdownOptionActionSchema: ActionSchema = {
   description: 'Select dropdown option for interactive element index by the text of the option you want to select',
   schema: z.object({
     intent: z.string().default('').describe('purpose of this action'),
-    index: z.number().int().describe('index of the dropdown element'),
+    index: flexibleIndex.describe('index of the dropdown element'),
     text: z.string().describe('text of the option'),
+  }),
+};
+
+export const skipAdActionSchema: ActionSchema = {
+  name: 'skip_ad',
+  description: 'Skip ad on video player if an ad or skip button is present',
+  schema: z.object({
+    intent: z.string().default('Skip video ad').describe('purpose of this action'),
   }),
 };
 
 export const waitActionSchema: ActionSchema = {
   name: 'wait',
   description: 'Wait for x seconds default 3, do NOT use this action unless user asks to wait explicitly',
-  schema: z.object({
-    intent: z.string().default('').describe('purpose of this action'),
-    seconds: z.number().int().default(3).describe('amount of seconds'),
-  }),
+  schema: z
+    .object({
+      intent: z.string().default('').describe('purpose of this action'),
+      seconds: z.union([z.number(), z.string()]).optional().describe('amount of seconds'),
+      time: z.union([z.number(), z.string()]).optional().describe('amount of seconds'),
+      timeout: z.union([z.number(), z.string()]).optional().describe('timeout'),
+    })
+    .transform(data => {
+      const raw = data.seconds ?? data.time ?? data.timeout ?? 3;
+      const n = Number(raw);
+      const sec = isNaN(n) ? 3 : Math.min(Math.round(n > 100 ? n / 1000 : n), 30);
+      return {
+        intent: data.intent,
+        seconds: Math.max(1, sec),
+      };
+    }),
 };

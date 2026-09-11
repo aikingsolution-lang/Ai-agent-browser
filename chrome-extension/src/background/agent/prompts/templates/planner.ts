@@ -30,6 +30,12 @@ ${commonSecurityRules}
     - Scrolling is your LAST resort unless you are explicitly required to do so by the task
     - NEVER suggest scrolling through the entire page, only scroll maximum ONE PAGE at a time.
     - If sign in or credentials are required to complete the task, you should mark as done and ask user to sign in/fill credentials by themselves in final answer
+    - For shopping / e-commerce tasks (Flipkart, Amazon, etc.) where a user requests adding clothes, shoes, or products to cart with a specific size or variant (e.g. 'M size', 'color'):
+      * ALWAYS instruct to click and select the required size/variant button FIRST on the product page before clicking 'Add to Cart'.
+    - When user asks to play a song/music or video on YouTube (e.g. 'play song on youtube', 'play kesariya on youtube'):
+      * ALWAYS extract or pick a specific title (if unspecified, use 'Arijit Singh hit songs') and instruct to navigate directly to 'https://www.youtube.com/results?search_query=...' or use search_youtube action.
+      * Instruct navigator to click the first video result directly without scrolling down.
+      * Once the video watch page (/watch?v=...) is loaded, the song is playing - mark the task as DONE immediately. Do NOT click video playback controls or recommended videos.
     - When you set done to true, you must:
       * Provide the final answer to the user's task in the "final_answer" field
       * Set "next_steps" to empty string (since the task is complete)

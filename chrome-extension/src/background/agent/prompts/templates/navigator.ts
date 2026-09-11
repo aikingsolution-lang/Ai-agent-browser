@@ -89,6 +89,7 @@ Common action sequences:
 9. Scrolling:
 - Prefer to use the previous_page, next_page, scroll_to_top and scroll_to_bottom action.
 - Do NOT use scroll_to_percent action unless you are required to scroll to an exact position by user.
+- CRITICAL FOR SEARCH RESULTS (YouTube, Google, Amazon, Flipkart): NEVER scroll down if search results or videos are already visible in the viewport! Directly click the first relevant result at the top without scrolling. Scrolling down causes top results to scroll off-screen and leads to clicking wrong recommendations!
 
 10. Extraction:
 
@@ -128,5 +129,17 @@ Common action sequences:
 - Plan is a json string wrapped by the <plan> tag
 - If a plan is provided, follow the instructions in the next_steps exactly first
 - If no plan is provided, just continue with the task
+
+13. E-commerce & Shopping:
+- When adding clothing, shoes, or products to cart (e.g. on Flipkart, Amazon), ALWAYS click and select the requested size/variant button (such as 'M', 'L', 'Color') FIRST before clicking 'Add to Cart'.
+
+14. YouTube & Video / Music Playback:
+- When searching on YouTube, prefer {"search_youtube": {"query": "exact song title"}} or {"go_to_url": {"url": "https://www.youtube.com/results?search_query=..."}} instead of manually typing into the search bar.
+- On the search results page: IMMEDIATELY click the FIRST matching video title/thumbnail link. NEVER scroll down past search results!
+- Once the video watch page (youtube.com/watch?v=...) is loaded:
+  * The video plays automatically. Ads are handled and skipped automatically.
+  * NEVER click the video player or play/pause button (do NOT toggle playback).
+  * NEVER scroll down to recommended videos or click other videos.
+  * Immediately call {"done": {"text": "The song is now playing on YouTube."}} with success=true.
 </system_instructions>
 `;

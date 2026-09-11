@@ -2,6 +2,9 @@ import { type BaseMessage, AIMessage, HumanMessage, SystemMessage, ToolMessage }
 
 import { guardrails } from '@src/background/services/guardrails';
 import { ResponseParseError } from '../agents/errors';
+import { createLogger } from '@src/background/log';
+
+const logger = createLogger('Utils');
 
 /**
  * Tag for untrusted content
@@ -111,65 +114,91 @@ export function extractJsonFromModelOutput(content: string): Record<string, unkn
       .replace(/\s*<\/[a-z0-9_-]+>$/i, '')
       .trim();
 
-    // Balanced Bracket Extractor: Find first '{' or '[' and extract until matching closing '}' or ']'
-    const firstObjIndex = processedContent.indexOf('{');
-    const firstArrIndex = processedContent.indexOf('[');
+    // Strip bracket-prefixed headers like [Tool Output 1]:, [Action]:, [Tool Use]: etc.
+    processedContent = processedContent
+      .replace(/^\[(?:Tool\s+Output|Tool\s+Use|Tool|Action|Observation|Result|Call|Response)[^\]]*\]:?\s*/i, '')
+      .trim();
 
-    let startPos = -1;
-    let openChar = '{';
-    let closeChar = '}';
-
-    if (firstObjIndex !== -1 && (firstArrIndex === -1 || firstObjIndex < firstArrIndex)) {
-      startPos = firstObjIndex;
-      openChar = '{';
-      closeChar = '}';
-    } else if (firstArrIndex !== -1) {
-      startPos = firstArrIndex;
-      openChar = '[';
-      closeChar = ']';
+    // Try direct parse first
+    try {
+      return JSON.parse(processedContent);
+    } catch {
+      // Continue to candidate extraction
     }
 
-    if (startPos !== -1) {
-      let depth = 0;
-      let inString = false;
-      let escape = false;
-      let endPos = -1;
+    // Generic balanced candidate JSON extractor
+    // Find all candidate JSON starting positions ('{' or '[')
+    const candidates: string[] = [];
+    for (let i = 0; i < processedContent.length; i++) {
+      const char = processedContent[i];
+      if (char === '{' || char === '[') {
+        const openChar = char;
+        const closeChar = char === '{' ? '}' : ']';
+        let depth = 0;
+        let inString = false;
+        let escape = false;
 
-      for (let i = startPos; i < processedContent.length; i++) {
-        const char = processedContent[i];
-        if (inString) {
-          if (escape) {
-            escape = false;
-          } else if (char === '\\') {
-            escape = true;
-          } else if (char === '"') {
-            inString = false;
-          }
-        } else {
-          if (char === '"') {
-            inString = true;
-          } else if (char === openChar) {
-            depth++;
-          } else if (char === closeChar) {
-            depth--;
-            if (depth === 0) {
-              endPos = i;
-              break;
+        for (let j = i; j < processedContent.length; j++) {
+          const c = processedContent[j];
+          if (inString) {
+            if (escape) {
+              escape = false;
+            } else if (c === '\\') {
+              escape = true;
+            } else if (c === '"') {
+              inString = false;
+            }
+          } else {
+            if (c === '"') {
+              inString = true;
+            } else if (c === openChar) {
+              depth++;
+            } else if (c === closeChar) {
+              depth--;
+              if (depth === 0) {
+                candidates.push(processedContent.substring(i, j + 1));
+                break;
+              }
             }
           }
         }
       }
+    }
 
-      if (endPos !== -1) {
-        processedContent = processedContent.substring(startPos, endPos + 1).trim();
+    // Try candidate strings to find one that parses cleanly
+    for (const cand of candidates) {
+      try {
+        const parsed = JSON.parse(cand);
+        if (parsed && typeof parsed === 'object') {
+          return parsed;
+        }
+      } catch {
+        // Try fixing trailing commas
+        try {
+          const fixed = cand.replace(/,\s*([}\]])/g, '$1');
+          const parsed = JSON.parse(fixed);
+          if (parsed && typeof parsed === 'object') {
+            return parsed;
+          }
+        } catch {
+          // not valid JSON candidate
+        }
       }
     }
 
-    // Fix trailing commas in objects or arrays
-    processedContent = processedContent.replace(/,\s*([}\]])/g, '$1');
+    // Fallback: if any candidate exists, try the largest one with trailing comma fix
+    const objCandidates = candidates.filter(c => c.startsWith('{') && c.endsWith('}'));
+    const targetCandidate =
+      objCandidates.length > 0 ? objCandidates.sort((a, b) => b.length - a.length)[0] : candidates[0];
 
-    return JSON.parse(processedContent);
+    if (targetCandidate) {
+      const fixed = targetCandidate.replace(/,\s*([}\]])/g, '$1');
+      return JSON.parse(fixed);
+    }
+
+    throw new Error('No valid JSON candidate found in model output');
   } catch (e) {
+    logger.error('[extractJsonFromModelOutput] Could not extract JSON. Full content was:\n', content, e);
     throw new ResponseParseError(`Could not manually extract JSON from model output`);
   }
 }

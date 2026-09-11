@@ -299,6 +299,7 @@ async function setupExecutor(taskId: string, task: string, browserContext: Brows
         },
       },
       temperature: 0.1,
+      maxTokens: 4096,
     });
     plannerLLM = navigatorLLM;
   } else {

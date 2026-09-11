@@ -56,7 +56,71 @@ export class NavigatorActionRegistry {
   }
 
   getAction(name: string): Action | undefined {
-    return this.actions[name];
+    // Direct lookup
+    if (this.actions[name]) {
+      return this.actions[name];
+    }
+    // Alias map for common LLM hallucinations (Nova Lite / smaller models often use wrong names)
+    const ALIASES: Record<string, string> = {
+      open_url: 'go_to_url',
+      navigate_to: 'go_to_url',
+      navigate_to_url: 'go_to_url',
+      navigate_url: 'go_to_url',
+      goto_url: 'go_to_url',
+      go_to: 'go_to_url',
+      browse_to_url: 'go_to_url',
+      visit_url: 'go_to_url',
+      open_new_tab: 'open_tab',
+      new_tab: 'open_tab',
+      open_new_tab_with_url: 'open_tab',
+      switch_to_tab: 'switch_tab',
+      switch_tabs: 'switch_tab',
+      close_current_tab: 'close_tab',
+      search: 'search_google',
+      google_search: 'search_google',
+      search_in_google: 'search_google',
+      type_text: 'input_text',
+      type: 'input_text',
+      fill_text: 'input_text',
+      click: 'click_element',
+      press_key: 'send_keys',
+      extract_text: 'extract_text',
+      extract_content: 'extract_text',
+      get_text: 'extract_text',
+      read_text: 'extract_text',
+      extract: 'extract_text',
+      scroll_to_element: 'scroll_to_element',
+      scroll_element: 'scroll_to_element',
+      scroll_to: 'scroll_to_element',
+      scroll_into_view: 'scroll_to_element',
+      scroll_down: 'next_page',
+      scrolldown: 'next_page',
+      scroll_page_down: 'next_page',
+      scroll_up: 'previous_page',
+      scrollup: 'previous_page',
+      scroll_page_up: 'previous_page',
+      skip_ad: 'skip_ad',
+      skip_ads: 'skip_ad',
+      skip_youtube_ad: 'skip_ad',
+      search_youtube: 'search_youtube',
+      youtube_search: 'search_youtube',
+      search_in_youtube: 'search_youtube',
+      search_video: 'search_youtube',
+      play_song: 'search_youtube',
+      play_video: 'search_youtube',
+      wait_for_page_load: 'wait',
+      wait_page_load: 'wait',
+      wait_for_load: 'wait',
+      wait_for_page: 'wait',
+      wait_page: 'wait',
+      wait_for_element: 'wait',
+      sleep: 'wait',
+    };
+    const canonical = ALIASES[name];
+    if (canonical && this.actions[canonical]) {
+      return this.actions[canonical];
+    }
+    return undefined;
   }
 
   setupModelOutputSchema(): z.ZodType {
@@ -105,7 +169,7 @@ export class NavigatorAgent extends BaseAgent<z.ZodType, NavigatorResult> {
           ...this.callOptions,
         });
 
-        if (response.parsed) {
+        if (response?.parsed) {
           return response.parsed;
         }
       } catch (error) {
@@ -113,8 +177,12 @@ export class NavigatorAgent extends BaseAgent<z.ZodType, NavigatorResult> {
           throw error;
         }
 
-        // Try to extract JSON from raw response or error message manually if possible
         const errorMessage = error instanceof Error ? error.message : String(error);
+        logger.warning(`[${this.modelName}] structuredLlm invoke failed: ${errorMessage}`);
+        console.error(`[NavigatorAgent] structuredLlm invocation failed. Error:`, error);
+        console.error(`[NavigatorAgent] Raw response object at failure:`, response);
+
+        // Try to extract JSON from raw response or error message manually if possible
         let contentToParse = response?.raw?.content;
         if (!contentToParse && typeof errorMessage === 'string') {
           const match = errorMessage.match(/```(?:json)?\s*([\s\S]*?)\s*```/) || errorMessage.match(/(\{[\s\S]*\})/);
@@ -126,11 +194,21 @@ export class NavigatorAgent extends BaseAgent<z.ZodType, NavigatorResult> {
         if (typeof contentToParse === 'string') {
           const parsed = this.manuallyParseResponse(contentToParse);
           if (parsed) {
-            logger.info(`[${this.modelName}] Navigator recovered structured output via manual JSON parsing`);
+            logger.info(
+              `[${this.modelName}] Navigator recovered structured output via manual JSON parsing from error/raw`,
+            );
             return parsed;
           }
         }
-        throw new Error(`Failed to invoke ${this.modelName} with structured output: \n${errorMessage}`);
+
+        // Fallback to calling base chatLLM directly and extracting JSON manually
+        try {
+          logger.info(`[${this.modelName}] Falling back to standard chatLLM invoke without structured output`);
+          return await super.invoke(inputMessages);
+        } catch (fallbackError) {
+          logger.error(`[${this.modelName}] Fallback to standard chatLLM also failed:`, fallbackError);
+          throw new Error(`Failed to invoke ${this.modelName} with structured output: \n${errorMessage}`);
+        }
       }
 
       // Use type assertion to access the properties
@@ -174,7 +252,13 @@ export class NavigatorAgent extends BaseAgent<z.ZodType, NavigatorResult> {
         }
       }
 
-      throw new ResponseParseError('Could not parse navigator response');
+      // Last resort: try super.invoke()
+      try {
+        logger.info(`[${this.modelName}] Unparsed response without tool_calls, attempting standard super.invoke()`);
+        return await super.invoke(inputMessages);
+      } catch {
+        throw new ResponseParseError('Could not parse navigator response');
+      }
     }
 
     // Fallback to parent class manual JSON extraction for models without structured output support
@@ -227,7 +311,17 @@ export class NavigatorAgent extends BaseAgent<z.ZodType, NavigatorResult> {
       this.addModelOutputToMemory(modelOutput);
 
       // take the actions
-      actionResults = await this.doMultiAction(actions);
+      if (actions.length === 0) {
+        logger.warning('No valid actions found to execute in model output');
+        actionResults = [
+          new ActionResult({
+            error: 'No valid action found in model output. Please provide an action array with valid actions.',
+            includeInMemory: true,
+          }),
+        ];
+      } else {
+        actionResults = await this.doMultiAction(actions);
+      }
       // logger.info('Action results', JSON.stringify(actionResults, null, 2));
 
       this.context.actionResults = actionResults;
@@ -360,31 +454,61 @@ export class NavigatorAgent extends BaseAgent<z.ZodType, NavigatorResult> {
    */
   private fixActions(response: this['ModelOutput']): Record<string, unknown>[] {
     let actions: Record<string, unknown>[] = [];
-    if (Array.isArray(response.action)) {
-      // if the item is null, skip it
-      actions = response.action.filter((item: unknown) => item !== null);
+    if (!response) {
+      logger.warning('fixActions: response is null or undefined');
+      return [];
+    }
+
+    // Support both 'action' and 'actions' (common LLM variation)
+    const rawAction = response.action ?? (response as any).actions;
+
+    if (!rawAction) {
+      logger.warning('fixActions: no action or actions found in response', response);
+      return [];
+    }
+
+    if (Array.isArray(rawAction)) {
+      actions = rawAction.filter(
+        (item: unknown): item is Record<string, unknown> =>
+          item !== null && item !== undefined && typeof item === 'object' && Object.keys(item).length > 0,
+      );
       if (actions.length === 0) {
-        logger.warning('No valid actions found', response.action);
+        logger.warning('No valid actions found in array', rawAction);
       }
-    } else if (typeof response.action === 'string') {
+    } else if (typeof rawAction === 'string') {
       try {
-        logger.warning('Unexpected action format', response.action);
-        // First try to parse the action string directly
-        actions = JSON.parse(response.action);
+        logger.warning('Unexpected action format (string)', rawAction);
+        const parsed = JSON.parse(rawAction);
+        if (Array.isArray(parsed)) {
+          actions = parsed.filter(
+            (item: unknown): item is Record<string, unknown> =>
+              item !== null && item !== undefined && typeof item === 'object' && Object.keys(item).length > 0,
+          );
+        } else if (parsed && typeof parsed === 'object' && Object.keys(parsed).length > 0) {
+          actions = [parsed as Record<string, unknown>];
+        }
       } catch (parseError) {
         try {
-          // If direct parsing fails, try to fix the JSON first
-          const fixedAction = repairJsonString(response.action);
-          logger.info('Fixed action string', fixedAction);
-          actions = JSON.parse(fixedAction);
+          const fixedAction = repairJsonString(rawAction);
+          const parsed = JSON.parse(fixedAction);
+          if (Array.isArray(parsed)) {
+            actions = parsed.filter(
+              (item: unknown): item is Record<string, unknown> =>
+                item !== null && item !== undefined && typeof item === 'object' && Object.keys(item).length > 0,
+            );
+          } else if (parsed && typeof parsed === 'object' && Object.keys(parsed).length > 0) {
+            actions = [parsed as Record<string, unknown>];
+          }
         } catch (error) {
-          logger.error('Invalid action format even after repair attempt', response.action);
+          logger.error('Invalid action format even after repair attempt', rawAction);
           throw new Error('Invalid action output format');
         }
       }
+    } else if (typeof rawAction === 'object' && Object.keys(rawAction).length > 0) {
+      actions = [rawAction as Record<string, unknown>];
     } else {
-      // if the action is neither an array nor a string, it should be an object
-      actions = [response.action];
+      logger.warning('fixActions: action is not an object or array', rawAction);
+      actions = [];
     }
     return actions;
   }
@@ -401,7 +525,14 @@ export class NavigatorAgent extends BaseAgent<z.ZodType, NavigatorResult> {
     await browserContext.removeHighlight();
 
     for (const [i, action] of actions.entries()) {
-      const actionName = Object.keys(action)[0];
+      if (!action || typeof action !== 'object') {
+        continue;
+      }
+      const keys = Object.keys(action);
+      if (keys.length === 0) {
+        continue;
+      }
+      const actionName = keys[0];
       const actionArgs = action[actionName];
       try {
         // check if the task is paused or stopped
