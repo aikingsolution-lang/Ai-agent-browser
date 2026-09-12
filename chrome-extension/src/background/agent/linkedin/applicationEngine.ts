@@ -1,23 +1,29 @@
 /**
  * LinkedIn Easy Apply — ApplicationEngine
  *
- * Blueprint class with method signatures only.
- * Full implementation will be added in subsequent steps.
+ * Core Engine orchestrating LinkedIn Easy Apply Automation.
  *
  * Technical considerations:
- * - LinkedIn's React-DOM frequently re-renders — all element interactions
- *   use retryWithBackoff() (3 retries, exponential backoff) instead of
- *   throwing 'stale element' immediately.
- * - Job descriptions are sanitized/summarized before LLM calls (cost control).
- * - PDF resume generation happens on the backend (resumeGenerator.service.ts),
- *   NOT in the extension.
+ * - Session validation via chrome.cookies (li_at, JSESSIONID).
+ * - Pre-flight health check for profile icon (div.global-nav__me) before execution.
+ * - Dry-Run mode logging framework (default ON) for recording 'would have applied' actions.
+ * - React re-render resiliency via retryWithBackoff (3 retries, exponential backoff).
+ * - Job descriptions are sanitized/summarized before LLM calls.
+ * - PDF resume generation happens on the backend (resumeGenerator.service.ts).
  */
 
+import { createLogger } from '@src/background/log';
+import type Page from '@src/background/browser/page';
+import { validateLinkedInSession, type LinkedInSessionStatus } from './sessionValidator';
+import { LinkedInHealthChecker, type HealthCheckResult } from './healthCheck';
+import { dryRunLogger, DryRunLogger, type IDryRunRecord, type IDryRunStats } from './dryRunLogger';
 import type { IJobData, IApplicationState, IScreeningQuestion, IFitScoreResult, JobApplicationStatus } from './types';
+
+const logger = createLogger('LinkedInApplicationEngine');
 
 /** Configuration options for the ApplicationEngine */
 export interface ApplicationEngineConfig {
-  /** Whether to actually submit the application or just dry-run */
+  /** Whether to actually submit the application or just dry-run (Default: true) */
   dryRun: boolean;
   /** Maximum number of retries for stale element recovery */
   maxRetries: number;
@@ -32,7 +38,7 @@ export interface ApplicationEngineConfig {
 }
 
 export const DEFAULT_ENGINE_CONFIG: ApplicationEngineConfig = {
-  dryRun: false,
+  dryRun: true, // Default ON for safety
   maxRetries: 3,
   baseRetryDelayMs: 1000,
   minFitScore: 60,
@@ -42,32 +48,81 @@ export const DEFAULT_ENGINE_CONFIG: ApplicationEngineConfig = {
 
 /**
  * ApplicationEngine orchestrates the LinkedIn Easy Apply flow.
- *
- * Lifecycle:
- *   initialize() → scanJobListing() → evaluateFitScore()
- *   → startApplication() → handleScreeningQuestions()
- *   → submitApplication()
- *
- * State can be queried at any point via getApplicationState().
- * All DOM interactions use retryWithBackoff() for resilience
- * against LinkedIn's frequent React re-renders.
  */
 export class ApplicationEngine {
   private config: ApplicationEngineConfig;
   private state: IApplicationState | null;
+  private page: Page | null = null;
+  private healthChecker: LinkedInHealthChecker;
+  private loggerService: DryRunLogger;
 
   constructor(config: Partial<ApplicationEngineConfig> = {}) {
     this.config = { ...DEFAULT_ENGINE_CONFIG, ...config };
     this.state = null;
+    this.healthChecker = new LinkedInHealthChecker(this.config.maxRetries, this.config.baseRetryDelayMs);
+    this.loggerService = dryRunLogger;
   }
 
   /**
    * Initialize the engine with a browser page context.
-   * Sets up event listeners and prepares for job scanning.
+   * Performs:
+   * 1. Cookie-based session validation (chrome.cookies)
+   * 2. DOM-based pre-flight health check (profile icon detection)
+   *
+   * @throws Error with a user-friendly pause message if unauthenticated
    */
-  async initialize(): Promise<void> {
-    // TODO: Step 2 — Accept page/browser context, set up listeners
-    throw new Error('Not implemented — awaiting Step 2');
+  async initialize(page?: Page): Promise<void> {
+    logger.info('Initializing ApplicationEngine (Dry-Run:', this.config.dryRun, ')...');
+
+    if (page) {
+      this.page = page;
+    }
+
+    // 1. Validate session cookies
+    const cookieStatus: LinkedInSessionStatus = await validateLinkedInSession();
+    if (!cookieStatus.isValid) {
+      logger.warning('Session validation failed:', cookieStatus.message);
+      throw new Error(cookieStatus.message);
+    }
+
+    // 2. Perform DOM health check if page context is provided
+    if (this.page) {
+      const healthStatus: HealthCheckResult = await this.healthChecker.runPreFlightCheck(this.page);
+      if (!healthStatus.isLoggedIn) {
+        logger.warning('Pre-flight health check failed:', healthStatus.message);
+        throw new Error(healthStatus.message);
+      }
+    }
+
+    logger.info('ApplicationEngine initialized successfully.');
+  }
+
+  /**
+   * Sets or updates the active Page instance.
+   */
+  setPage(page: Page): void {
+    this.page = page;
+  }
+
+  /**
+   * Logs a dry-run / simulated application record.
+   */
+  async logDryRunRecord(params: {
+    jobData: IJobData;
+    wouldHaveApplied: boolean;
+    fitScore?: number;
+    screeningAnswers?: IScreeningQuestion[];
+    blockedReason?: string;
+    notes?: string;
+  }): Promise<IDryRunRecord> {
+    return this.loggerService.logDryRun(params);
+  }
+
+  /**
+   * Gets dry run statistics.
+   */
+  async getDryRunStats(): Promise<IDryRunStats> {
+    return this.loggerService.getDryRunStats();
   }
 
   /**
@@ -77,8 +132,8 @@ export class ApplicationEngine {
    * @returns Extracted and sanitized job data
    */
   async scanJobListing(): Promise<IJobData> {
-    // TODO: Step 2 — DOM scraping with retry, description sanitization
-    throw new Error('Not implemented — awaiting Step 2');
+    // TODO: Step 3 — DOM scraping with retry, description sanitization
+    throw new Error('Not implemented — awaiting Step 3');
   }
 
   /**
@@ -101,8 +156,8 @@ export class ApplicationEngine {
    * @returns Initial application state
    */
   async startApplication(jobData: IJobData): Promise<IApplicationState> {
-    // TODO: Step 2 — Click Easy Apply, detect modal steps
-    throw new Error('Not implemented — awaiting Step 2');
+    // TODO: Step 3 — Click Easy Apply, detect modal steps
+    throw new Error('Not implemented — awaiting Step 3');
   }
 
   /**
@@ -119,14 +174,14 @@ export class ApplicationEngine {
 
   /**
    * Submit the application (or complete dry-run).
-   * In dry-run mode, validates all fields are filled but does not click Submit.
-   * Sets appliedAt timestamp and updates status accordingly.
+   * In dry-run mode, validates all fields are filled and logs to dryRunLogger
+   * without clicking the final submit button.
    *
    * @returns Final application status after submission attempt
    */
   async submitApplication(): Promise<JobApplicationStatus> {
-    // TODO: Step 2 — Submit button click (or dry-run validation)
-    throw new Error('Not implemented — awaiting Step 2');
+    // TODO: Step 3 — Submit button click (or dry-run validation)
+    throw new Error('Not implemented — awaiting Step 3');
   }
 
   /**
