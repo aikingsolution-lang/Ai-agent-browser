@@ -38,7 +38,7 @@ function initYouTubeAdSkipper() {
     }
 
     // 2. Scan buttons with text content starting with "Skip"
-    const buttons = document.querySelectorAll('button');
+    const buttons = Array.from(document.querySelectorAll('button'));
     for (const btn of buttons) {
       const text = btn.innerText?.trim() || btn.textContent?.trim() || '';
       if (text && (/^skip/i.test(text) || text.includes('Skip ad') || text.includes('Skip Ad'))) {

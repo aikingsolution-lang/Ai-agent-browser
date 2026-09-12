@@ -1407,7 +1407,7 @@ export default class Page {
         }
 
         // 2. Generic pattern matching on button/clickable text
-        const candidates = document.querySelectorAll<HTMLElement>('button, [role="button"], a');
+        const candidates = Array.from(document.querySelectorAll<HTMLElement>('button, [role="button"], a'));
         for (const el of candidates) {
           const text = (el.innerText || el.textContent || '').trim().toLowerCase();
           const aria = (el.getAttribute('aria-label') || '').toLowerCase();

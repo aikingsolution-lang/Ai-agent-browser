@@ -123,7 +123,7 @@ export class Executor {
       const verification = verifyTaskResult(currentTask, {
         url,
         title,
-        lastActionExtractedContent: lastAction?.extractedContent,
+        lastActionExtractedContent: lastAction?.extractedContent ?? undefined,
       });
 
       if (!verification.isComplete) {
