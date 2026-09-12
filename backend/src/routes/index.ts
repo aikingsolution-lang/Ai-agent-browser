@@ -5,6 +5,8 @@ import { subscriptionRouter } from './subscription.routes.js';
 import { creditRouter } from './credit.routes.js';
 import { webhookRouter } from './webhook.routes.js';
 import { llmRouter } from './llm.routes.js';
+import { resumeRouter } from './resume.routes.js';
+import { jobApplicationRouter } from './jobApplication.routes.js';
 import { env } from '../config/env.js';
 import { authenticate } from '../middleware/auth.middleware.js';
 import { checkEntitlement } from '../middleware/entitlement.middleware.js';
@@ -19,6 +21,8 @@ v1Router.use('/subscription', subscriptionRouter);
 v1Router.use('/credits', creditRouter);
 v1Router.use('/webhooks', webhookRouter);
 v1Router.use('/llm', llmRouter);
+v1Router.use('/resume', resumeRouter);
+v1Router.use('/job-applications', jobApplicationRouter);
 
 // Test harness endpoints for entitlement verification tests
 if (env.NODE_ENV === 'test') {

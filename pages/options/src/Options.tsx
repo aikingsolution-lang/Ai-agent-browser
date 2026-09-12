@@ -13,6 +13,7 @@ import {
   FiZap,
   FiUsers,
   FiCreditCard,
+  FiCheckCircle,
 } from 'react-icons/fi';
 import { GeneralSettings } from './components/GeneralSettings';
 import { ModelSettings } from './components/ModelSettings';
@@ -22,12 +23,24 @@ import { APIModeSelector } from './components/APIModeSelector';
 import { PremiumPlans } from './components/PremiumPlans';
 import { TeamManagement } from './components/TeamManagement';
 import { StripeSettings } from './components/StripeSettings';
+import { ResumeApprovals } from './components/ResumeApprovals';
 
-type TabTypes = 'general' | 'models' | 'api-mode' | 'premium' | 'team' | 'stripe' | 'firewall' | 'analytics' | 'help';
+type TabTypes =
+  | 'general'
+  | 'models'
+  | 'api-mode'
+  | 'premium'
+  | 'team'
+  | 'stripe'
+  | 'firewall'
+  | 'analytics'
+  | 'resume-approvals'
+  | 'help';
 
 const TABS: { id: TabTypes; icon: React.ComponentType<{ className?: string }>; label: string }[] = [
   { id: 'general', icon: FiSettings, label: t('options_tabs_general') },
   { id: 'models', icon: FiCpu, label: t('options_tabs_models') },
+  { id: 'resume-approvals', icon: FiCheckCircle, label: 'Resume Approvals' },
   { id: 'api-mode', icon: FiKey, label: t('options_tabs_apiMode') },
   { id: 'premium', icon: FiZap, label: t('options_tabs_premiumPlans') },
   { id: 'team', icon: FiUsers, label: t('options_tabs_team') },
@@ -80,6 +93,8 @@ const Options = () => {
         return <FirewallSettings isDarkMode={isDarkMode} />;
       case 'analytics':
         return <AnalyticsSettings isDarkMode={isDarkMode} />;
+      case 'resume-approvals':
+        return <ResumeApprovals />;
       default:
         return null;
     }

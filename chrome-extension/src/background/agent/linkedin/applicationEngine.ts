@@ -8,11 +8,11 @@
  * - Pre-flight health check for profile icon (div.global-nav__me) before execution.
  * - RAG-based Fit Scoring with JD sanitization (skips jobs with score < 75).
  * - Career Brain screening question solver & React-compatible form filling.
- * - Multi-step modal navigation with ARIA-first parsing and transition verification.
- * - Vision Fallback: Strictly triggered only when DOM confidence < 0.4 or UNKNOWN step.
- * - 'Unknown State' fallback: Never guess; sets NEEDS_MANUAL_REVIEW if step is unrecognised.
- * - Dry-Run mode logging framework (default ON) for recording 'would have applied' actions.
- * - React re-render resiliency via retryWithBackoff (3 retries, exponential backoff).
+ * - Human-Mimicry & Natural Pacing: Log-Normal delays & natural pseudo-typing.
+ * - Daily Rate-Limiting: 15/day quota enforcement with next-day resumption.
+ * - Resume Approval Gate: Generated resumes held in PENDING_RESUME_APPROVAL until user reviews.
+ * - MongoDB Tracking: Populates JobApplication records & prevents duplicate applies.
+ * - Live-Mode Ready: Submits application only when dryRun is explicitly set to false.
  */
 
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
@@ -27,6 +27,10 @@ import { stepNavigator, LinkedInStepNavigator } from './stepNavigator';
 import { evaluateJobFit, sanitizeJobDescription, MIN_FIT_SCORE_THRESHOLD } from './fitScorer';
 import { formFiller, LinkedInFormFiller } from './formFiller';
 import { visionFallback, LinkedInVisionFallback } from './visionFallback';
+import { HumanPacingSimulator } from './humanPacing';
+import { DailyQuotaManager } from './rateLimiter';
+import { ResumeApprovalGate } from './resumeApproval';
+import { LinkedInBackendClient } from './backendClient';
 import type {
   IJobData,
   IApplicationState,
@@ -55,6 +59,8 @@ export interface ApplicationEngineConfig {
   actionDelayRange: [number, number];
   /** Max modal steps before safety timeout */
   maxModalSteps: number;
+  /** Whether to generate and require tailored resume approval */
+  requireTailoredResume: boolean;
 }
 
 export const DEFAULT_ENGINE_CONFIG: ApplicationEngineConfig = {
@@ -65,6 +71,7 @@ export const DEFAULT_ENGINE_CONFIG: ApplicationEngineConfig = {
   maxDescriptionTokens: 1000,
   actionDelayRange: [800, 2500],
   maxModalSteps: 10,
+  requireTailoredResume: false,
 };
 
 /**
@@ -105,6 +112,14 @@ export class ApplicationEngine {
   setModels(models: { llm?: BaseChatModel; visionLLM?: BaseChatModel }): void {
     if (models.llm) this.llm = models.llm;
     if (models.visionLLM) this.visionLLM = models.visionLLM;
+  }
+
+  /**
+   * Updates configuration (e.g. toggling Live Mode vs Dry Run).
+   */
+  updateConfig(config: Partial<ApplicationEngineConfig>): void {
+    this.config = { ...this.config, ...config };
+    logger.info(`[ApplicationEngine] Config updated. Live Mode: ${!this.config.dryRun}`);
   }
 
   /**
@@ -182,7 +197,6 @@ export class ApplicationEngine {
 
   /**
    * Scan the current LinkedIn job listing page and extract structured job data.
-   * Sanitizes the job description for LLM consumption (respects maxDescriptionTokens).
    */
   async scanJobListing(): Promise<IJobData> {
     if (!this.page) throw new Error('Page not attached.');
@@ -239,17 +253,22 @@ export class ApplicationEngine {
 
   /**
    * Runs the complete Easy Apply pipeline for a job:
-   * 1. Evaluates Fit Score against Career Brain (skips if score < 75)
-   * 2. Opens Easy Apply modal
-   * 3. Multi-step form filling loop with Question Solver & Vision Fallback
-   * 4. Step transition verification and dry-run recording
+   * 1. Duplicate Prevention Check (MongoDB)
+   * 2. Daily Rate Limiting Quota Check (15/day)
+   * 3. RAG Fit Score Evaluation (<75 skip)
+   * 4. Resume Approval Gate (if tailored resume required)
+   * 5. Multi-Step Form Filling with Natural Pacing & Vision Fallback
+   * 6. Live Submission vs Dry-Run Logging
+   * 7. MongoDB JobApplication Tracking Persistence
    */
   async startApplication(jobData: IJobData): Promise<IApplicationState> {
     if (!this.page) {
       throw new Error('ApplicationEngine: Page context is required to start application.');
     }
 
-    logger.info(`Starting Easy Apply flow for job: "${jobData.title}" at "${jobData.company}"`);
+    logger.info(
+      `Starting Easy Apply flow for job: "${jobData.title}" at "${jobData.company}" (Live Mode: ${!this.config.dryRun})`,
+    );
 
     this.state = {
       jobData,
@@ -264,7 +283,29 @@ export class ApplicationEngine {
 
     const careerBrain = await careerBrainStore.getCareerBrain();
 
-    // ─── 1. RAG Fit Score Check ─────────────────────────────────────────────
+    // ─── 1. Duplicate Prevention Check ──────────────────────────────────────
+    const isDuplicate = await LinkedInBackendClient.checkDuplicateJob(jobData.jobId);
+    if (isDuplicate) {
+      const msg = `Job "${jobData.title}" at "${jobData.company}" was already processed/applied in database. Skipping.`;
+      logger.info(`[ApplicationEngine] ⏭️ ${msg}`);
+      this.state.status = 'APPLIED';
+      this.state.errors.push(msg);
+      this.state.completedAt = Date.now();
+      return this.state;
+    }
+
+    // ─── 2. Daily Quota Rate Limiting Check ──────────────────────────────────
+    const quotaCheck = await DailyQuotaManager.canApplyToday();
+    if (!quotaCheck.allowed) {
+      const msg = `Daily application quota reached (${quotaCheck.currentCount} applications today). Auto-resumed scheduled for tomorrow.`;
+      logger.warning(`[ApplicationEngine] 🛑 ${msg}`);
+      this.state.status = 'QUEUED';
+      this.state.errors.push(msg);
+      this.state.completedAt = Date.now();
+      return this.state;
+    }
+
+    // ─── 3. RAG Fit Score Check ─────────────────────────────────────────────
     const fitResult = await this.evaluateFitScore(jobData);
     logger.info(`Job Fit Score for "${jobData.title}": ${fitResult.score}/100 (Threshold: ${this.config.minFitScore})`);
 
@@ -275,6 +316,12 @@ export class ApplicationEngine {
       this.state.status = 'QUEUED';
       this.state.errors.push(skipReason);
       this.state.completedAt = Date.now();
+
+      await LinkedInBackendClient.recordJobApplication({
+        jobData,
+        fitScore: fitResult.score,
+        status: 'QUEUED',
+      });
 
       if (this.config.dryRun) {
         await this.logDryRunRecord({
@@ -289,7 +336,49 @@ export class ApplicationEngine {
       return this.state;
     }
 
-    // ─── 2. Open Easy Apply Modal ───────────────────────────────────────────
+    // ─── 4. Resume Approval Gate Check (If Tailored Resume Required) ─────────
+    if (this.config.requireTailoredResume) {
+      const approvedResume = await ResumeApprovalGate.getApprovedResumeForJob(jobData.jobId);
+
+      if (!approvedResume) {
+        logger.info('[ApplicationEngine] Requesting tailored resume from backend and pausing for user approval...');
+        const generated = await LinkedInBackendClient.requestTailoredResume({
+          candidateName: careerBrain.currentTitle || 'Candidate',
+          candidateEmail: careerBrain.email,
+          candidatePhone: careerBrain.phoneNumber,
+          currentTitle: careerBrain.currentTitle,
+          skills: careerBrain.skills,
+          targetKeywords: fitResult.matchedSkills,
+          jobTitle: jobData.title,
+          company: jobData.company,
+          backgroundNarrative: careerBrain.backgroundNarrative,
+        });
+
+        if (generated) {
+          await ResumeApprovalGate.enqueueResumeForApproval({
+            jobData,
+            fileName: generated.fileName,
+            fileSize: generated.fileSize,
+            base64Pdf: generated.base64Pdf,
+            highlightedKeywords: generated.highlightedKeywords,
+          });
+
+          this.state.status = 'PENDING_RESUME_APPROVAL';
+          this.state.errors.push('Tailored resume generated. Awaiting user approval in Options page.');
+          this.state.completedAt = Date.now();
+
+          await LinkedInBackendClient.recordJobApplication({
+            jobData,
+            fitScore: fitResult.score,
+            status: 'PENDING_RESUME_APPROVAL',
+          });
+
+          return this.state;
+        }
+      }
+    }
+
+    // ─── 5. Open Easy Apply Modal ───────────────────────────────────────────
     const puppeteerPage = this.page.puppeteerPage;
     if (!puppeteerPage) {
       throw new Error('Puppeteer page not attached.');
@@ -315,11 +404,12 @@ export class ApplicationEngine {
       }
     }, 'Open Easy Apply Modal');
 
-    await this.humanDelay();
+    // Natural pacing pause
+    await HumanPacingSimulator.naturalActionPause(1800);
 
-    // ─── 3. Multi-Step Form Fill Loop ───────────────────────────────────────
+    // ─── 6. Multi-Step Form Fill Loop ───────────────────────────────────────
     const collectedQuestions: IScreeningQuestion[] = [];
-    let modalFinished = false;
+    let reachedReview = false;
 
     for (let stepCount = 0; stepCount < this.config.maxModalSteps; stepCount++) {
       let stepResult = await this.stepDetectorService.detectCurrentStep(this.page);
@@ -343,7 +433,6 @@ export class ApplicationEngine {
             confidence: visionResult.confidence,
           };
         } else {
-          // Still unknown after vision fallback: Hault safely
           logger.warning('[ApplicationEngine] Unknown state could not be resolved. Flagging NEEDS_MANUAL_REVIEW.');
           this.state.status = 'NEEDS_MANUAL_REVIEW';
           this.state.errors.push('Unrecognized modal step state. Stopped safely.');
@@ -357,8 +446,7 @@ export class ApplicationEngine {
       // Check if we reached Review / Submit screen
       if (stepResult.stepType === 'REVIEW' || stepResult.buttons.hasSubmit) {
         logger.info('[ApplicationEngine] Reached application Review/Submit screen.');
-        this.state.status = this.config.dryRun ? 'DRY_RUN_SUCCESS' : 'NEEDS_MANUAL_REVIEW';
-        modalFinished = true;
+        reachedReview = true;
         break;
       }
 
@@ -376,7 +464,7 @@ export class ApplicationEngine {
         break;
       }
 
-      await this.humanDelay();
+      await HumanPacingSimulator.naturalActionPause(1500);
 
       // Advance to Next Step
       if (stepResult.buttons.hasNext || stepResult.buttons.hasReview) {
@@ -397,9 +485,38 @@ export class ApplicationEngine {
     }
 
     this.state.screeningQuestions = collectedQuestions;
+
+    // ─── 7. Final Submission / Dry-Run Outcome ──────────────────────────────
+    if (reachedReview) {
+      if (this.config.dryRun) {
+        // DRY RUN: Stop here and mark success
+        logger.info('[ApplicationEngine] [DRY-RUN] Simulation successful. Reached submit screen without applying.');
+        this.state.status = 'DRY_RUN_SUCCESS';
+      } else {
+        // LIVE MODE: Click actual Submit Application button
+        logger.info('[ApplicationEngine] 🚀 [LIVE MODE] Submitting actual job application...');
+        const submitted = await this.executeLiveSubmission();
+
+        if (submitted) {
+          this.state.status = 'APPLIED';
+          await DailyQuotaManager.incrementAppliedCount();
+        } else {
+          this.state.status = 'NEEDS_MANUAL_REVIEW';
+          this.state.errors.push('Final submit button could not be confirmed.');
+        }
+      }
+    }
+
     this.state.completedAt = Date.now();
 
-    // ─── 4. Log Dry Run Result ──────────────────────────────────────────────
+    // ─── 8. Persist to MongoDB & Dry-Run Logger ──────────────────────────────
+    await LinkedInBackendClient.recordJobApplication({
+      jobData,
+      fitScore: fitResult.score,
+      status: this.state.status,
+      appliedAt: this.state.status === 'APPLIED' ? new Date() : null,
+    });
+
     if (this.config.dryRun) {
       await this.logDryRunRecord({
         jobData,
@@ -412,6 +529,42 @@ export class ApplicationEngine {
     }
 
     return this.state;
+  }
+
+  /**
+   * Executes the real final submission click on LinkedIn Easy Apply.
+   */
+  private async executeLiveSubmission(): Promise<boolean> {
+    if (!this.page || !this.page.puppeteerPage) return false;
+
+    try {
+      await HumanPacingSimulator.naturalActionPause(2000);
+
+      const submitted = await this.page.puppeteerPage.evaluate(() => {
+        const modal = document.querySelector('div[role="dialog"][aria-modal="true"]');
+        if (!modal) return false;
+
+        const submitBtn = modal.querySelector<HTMLButtonElement>(
+          'button[aria-label*="Submit application" i], button.jobs-apply-button',
+        );
+
+        if (submitBtn && submitBtn.offsetParent !== null && !submitBtn.disabled) {
+          submitBtn.click();
+          return true;
+        }
+        return false;
+      });
+
+      if (submitted) {
+        // Wait for confirmation dialog
+        await HumanPacingSimulator.naturalActionPause(3000);
+        return true;
+      }
+      return false;
+    } catch (err) {
+      logger.error('Error during live submission execution:', err);
+      return false;
+    }
   }
 
   /**
@@ -453,8 +606,8 @@ export class ApplicationEngine {
       return 'DRY_RUN_SUCCESS';
     }
 
-    // Live submission wired in Step 5
-    throw new Error('Live submission not implemented — awaiting Step 5');
+    const success = await this.executeLiveSubmission();
+    return success ? 'APPLIED' : 'NEEDS_MANUAL_REVIEW';
   }
 
   /**
@@ -490,11 +643,5 @@ export class ApplicationEngine {
 
   private sleep(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms));
-  }
-
-  private async humanDelay(): Promise<void> {
-    const [min, max] = this.config.actionDelayRange;
-    const delay = Math.floor(Math.random() * (max - min + 1)) + min;
-    await this.sleep(delay);
   }
 }
