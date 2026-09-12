@@ -2,7 +2,7 @@
  * LinkedIn Easy Apply — TypeScript Interfaces
  *
  * Strict type definitions for job data, application state,
- * screening questions, and fit-score evaluation.
+ * screening questions, modal step detection, and fit-score evaluation.
  */
 
 // ─── Status ──────────────────────────────────────────────────────────────────
@@ -17,6 +17,86 @@ export const JOB_APPLICATION_STATUSES = [
 ] as const;
 
 export type JobApplicationStatus = (typeof JOB_APPLICATION_STATUSES)[number];
+
+// ─── Step Types ─────────────────────────────────────────────────────────────
+
+export const EASY_APPLY_STEP_TYPES = [
+  'CONTACT_INFO',
+  'HOME_ADDRESS',
+  'WORK_EXPERIENCE',
+  'EDUCATION',
+  'RESUME',
+  'SCREENING_QUESTIONS',
+  'ADDITIONAL_QUESTIONS',
+  'VOLUNTARY_DISCLOSURES',
+  'REVIEW',
+  'SUBMITTED',
+  'UNKNOWN',
+] as const;
+
+export type EasyApplyStepType = (typeof EASY_APPLY_STEP_TYPES)[number];
+
+// ─── Modal & Step Detection Results ─────────────────────────────────────────
+
+export interface IModalNavigationButtons {
+  /** 'Next' or 'Continue to next step' button present */
+  hasNext: boolean;
+  /** 'Review' or 'Review your application' button present */
+  hasReview: boolean;
+  /** 'Submit application' button present */
+  hasSubmit: boolean;
+  /** 'Back' button present */
+  hasBack: boolean;
+  /** 'Dismiss' or 'Close' modal button present */
+  hasDismiss: boolean;
+  /** ARIA label or text of the primary forward action button */
+  primaryActionLabel?: string;
+}
+
+export interface IModalErrorBanner {
+  hasError: boolean;
+  errorMessages: string[];
+}
+
+export interface IStepDetectionResult {
+  /** Identified semantic step category */
+  stepType: EasyApplyStepType;
+  /** Detected heading / title text for this step */
+  stepTitle: string;
+  /** Extracted raw header or legend text */
+  rawHeaderText: string;
+  /** Percentage completed from progress bar (0-100) if found */
+  progressPercent?: number;
+  /** Current step number from 'Step X of Y' or progress bar */
+  stepNumber?: number;
+  /** Total steps if declared in the modal */
+  totalSteps?: number;
+  /** Available navigation buttons in current step */
+  buttons: IModalNavigationButtons;
+  /** Form validation errors currently displayed on screen */
+  errors: IModalErrorBanner;
+  /** Whether the modal dialog is actively open in the DOM */
+  isModalOpen: boolean;
+  /** Confidence score of step identification (0 to 1) */
+  confidence: number;
+}
+
+export interface IStepTransitionResult {
+  /** Whether the transition to a new step succeeded */
+  success: boolean;
+  /** Previous step detected before click */
+  previousStep: EasyApplyStepType;
+  /** Current step detected after click */
+  currentStep: EasyApplyStepType;
+  /** Details of the step after transition */
+  stepDetails?: IStepDetectionResult;
+  /** Milliseconds taken for DOM transition to complete */
+  transitionTimeMs: number;
+  /** Error description if transition failed */
+  errorMessage?: string;
+  /** Whether an unknown state or unhandled blocking error was encountered */
+  needsManualReview?: boolean;
+}
 
 // ─── Job Data ────────────────────────────────────────────────────────────────
 
@@ -56,6 +136,8 @@ export interface IApplicationState {
   currentStep: number;
   /** Total number of steps detected in the Easy Apply modal */
   totalSteps: number;
+  /** Current step semantic type */
+  currentStepType?: EasyApplyStepType;
   /** Screening questions extracted from the application form */
   screeningQuestions: IScreeningQuestion[];
   /** Accumulated errors during the application process */

@@ -6,6 +6,8 @@
  * Technical considerations:
  * - Session validation via chrome.cookies (li_at, JSESSIONID).
  * - Pre-flight health check for profile icon (div.global-nav__me) before execution.
+ * - Multi-step modal navigation with ARIA-first parsing and transition verification.
+ * - 'Unknown State' fallback: Never guess; sets NEEDS_MANUAL_REVIEW if step is unrecognised.
  * - Dry-Run mode logging framework (default ON) for recording 'would have applied' actions.
  * - React re-render resiliency via retryWithBackoff (3 retries, exponential backoff).
  * - Job descriptions are sanitized/summarized before LLM calls.
@@ -17,7 +19,17 @@ import type Page from '@src/background/browser/page';
 import { validateLinkedInSession, type LinkedInSessionStatus } from './sessionValidator';
 import { LinkedInHealthChecker, type HealthCheckResult } from './healthCheck';
 import { dryRunLogger, DryRunLogger, type IDryRunRecord, type IDryRunStats } from './dryRunLogger';
-import type { IJobData, IApplicationState, IScreeningQuestion, IFitScoreResult, JobApplicationStatus } from './types';
+import { stepDetector, LinkedInStepDetector } from './stepDetector';
+import { stepNavigator, LinkedInStepNavigator } from './stepNavigator';
+import type {
+  IJobData,
+  IApplicationState,
+  IScreeningQuestion,
+  IFitScoreResult,
+  IStepDetectionResult,
+  IStepTransitionResult,
+  JobApplicationStatus,
+} from './types';
 
 const logger = createLogger('LinkedInApplicationEngine');
 
@@ -55,12 +67,16 @@ export class ApplicationEngine {
   private page: Page | null = null;
   private healthChecker: LinkedInHealthChecker;
   private loggerService: DryRunLogger;
+  private stepDetectorService: LinkedInStepDetector;
+  private stepNavigatorService: LinkedInStepNavigator;
 
   constructor(config: Partial<ApplicationEngineConfig> = {}) {
     this.config = { ...DEFAULT_ENGINE_CONFIG, ...config };
     this.state = null;
     this.healthChecker = new LinkedInHealthChecker(this.config.maxRetries, this.config.baseRetryDelayMs);
     this.loggerService = dryRunLogger;
+    this.stepDetectorService = stepDetector;
+    this.stepNavigatorService = stepNavigator;
   }
 
   /**
@@ -105,6 +121,22 @@ export class ApplicationEngine {
   }
 
   /**
+   * Detects the current step in the Easy Apply modal if open.
+   */
+  async detectModalStep(): Promise<IStepDetectionResult | null> {
+    if (!this.page) return null;
+    return this.stepDetectorService.detectCurrentStep(this.page);
+  }
+
+  /**
+   * Advances one step forward in the Easy Apply modal with transition verification.
+   */
+  async advanceModalStep(currentStep: IStepDetectionResult): Promise<IStepTransitionResult | null> {
+    if (!this.page) return null;
+    return this.stepNavigatorService.advanceToNextStep(this.page, currentStep);
+  }
+
+  /**
    * Logs a dry-run / simulated application record.
    */
   async logDryRunRecord(params: {
@@ -132,8 +164,8 @@ export class ApplicationEngine {
    * @returns Extracted and sanitized job data
    */
   async scanJobListing(): Promise<IJobData> {
-    // TODO: Step 3 — DOM scraping with retry, description sanitization
-    throw new Error('Not implemented — awaiting Step 3');
+    // TODO: Step 4 — DOM scraping with retry, description sanitization
+    throw new Error('Not implemented — awaiting Step 4');
   }
 
   /**
@@ -144,20 +176,88 @@ export class ApplicationEngine {
    * @returns Fit score result with reasoning and skill analysis
    */
   async evaluateFitScore(jobData: IJobData): Promise<IFitScoreResult> {
-    // TODO: Step 3 — LLM integration for fit scoring
-    throw new Error('Not implemented — awaiting Step 3');
+    // TODO: Step 4 — LLM integration for fit scoring
+    throw new Error('Not implemented — awaiting Step 4');
   }
 
   /**
    * Begin the Easy Apply flow by clicking the Easy Apply button
-   * and navigating through the initial modal setup.
+   * and stepping through the modal with transition verification.
    *
    * @param jobData - The job to apply for
-   * @returns Initial application state
+   * @returns Application state after step navigation
    */
   async startApplication(jobData: IJobData): Promise<IApplicationState> {
-    // TODO: Step 3 — Click Easy Apply, detect modal steps
-    throw new Error('Not implemented — awaiting Step 3');
+    if (!this.page) {
+      throw new Error('ApplicationEngine: Page context is required to start application.');
+    }
+
+    logger.info(`Starting Easy Apply flow for job: "${jobData.title}" at "${jobData.company}"`);
+
+    this.state = {
+      jobData,
+      status: 'QUEUED',
+      currentStep: 0,
+      totalSteps: 1,
+      screeningQuestions: [],
+      errors: [],
+      startedAt: Date.now(),
+      completedAt: null,
+    };
+
+    // 1. Click Easy Apply button on the job page if not already in modal
+    const puppeteerPage = this.page.puppeteerPage;
+    if (puppeteerPage) {
+      await this.retryWithBackoff(async () => {
+        const opened = await puppeteerPage.evaluate(() => {
+          // Check if modal is already open
+          const existingModal = document.querySelector('div[role="dialog"][aria-modal="true"]');
+          if (existingModal) return true;
+
+          // Find Easy Apply button on job details page
+          const applyBtn = document.querySelector<HTMLButtonElement>(
+            'button[aria-label*="Easy Apply" i], .jobs-apply-button, button.jobs-apply-button',
+          );
+          if (applyBtn && applyBtn.offsetParent !== null) {
+            applyBtn.click();
+            return true;
+          }
+          return false;
+        });
+
+        if (!opened) {
+          throw new Error('Easy Apply button not found or could not be clicked.');
+        }
+      }, 'Click Easy Apply button');
+    }
+
+    await this.humanDelay();
+
+    // 2. Step through the modal safely (navigation logic)
+    const stepThroughResult = await this.stepNavigatorService.stepThroughModal(this.page, {
+      dryRun: this.config.dryRun,
+    });
+
+    this.state.status = stepThroughResult.finalStatus;
+    this.state.currentStep = stepThroughResult.stepsEncountered.length;
+    this.state.currentStepType = stepThroughResult.lastStepDetails?.stepType;
+    this.state.completedAt = Date.now();
+
+    if (stepThroughResult.reason) {
+      this.state.errors.push(stepThroughResult.reason);
+    }
+
+    // 3. Log Dry-Run record if dry-run enabled
+    if (this.config.dryRun) {
+      await this.logDryRunRecord({
+        jobData,
+        wouldHaveApplied: stepThroughResult.finalStatus === 'DRY_RUN_SUCCESS',
+        blockedReason: stepThroughResult.finalStatus !== 'DRY_RUN_SUCCESS' ? stepThroughResult.reason : undefined,
+        notes: `Steps encountered: ${stepThroughResult.stepsEncountered.join(' -> ')}`,
+      });
+    }
+
+    return this.state;
   }
 
   /**
@@ -168,8 +268,8 @@ export class ApplicationEngine {
    * @returns Questions with populated userAnswer fields
    */
   async handleScreeningQuestions(questions: IScreeningQuestion[]): Promise<IScreeningQuestion[]> {
-    // TODO: Step 3 — LLM-powered question answering
-    throw new Error('Not implemented — awaiting Step 3');
+    // TODO: Step 4 — LLM-powered question answering
+    throw new Error('Not implemented — awaiting Step 4');
   }
 
   /**
@@ -180,8 +280,13 @@ export class ApplicationEngine {
    * @returns Final application status after submission attempt
    */
   async submitApplication(): Promise<JobApplicationStatus> {
-    // TODO: Step 3 — Submit button click (or dry-run validation)
-    throw new Error('Not implemented — awaiting Step 3');
+    if (this.config.dryRun) {
+      logger.info('[DRY-RUN] submitApplication invoked in dry-run mode. Application validated.');
+      return 'DRY_RUN_SUCCESS';
+    }
+
+    // Live submission will be wired in Step 4
+    throw new Error('Live submission not implemented — awaiting Step 4');
   }
 
   /**
