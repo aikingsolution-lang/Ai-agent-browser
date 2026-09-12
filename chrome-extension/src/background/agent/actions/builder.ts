@@ -312,8 +312,39 @@ export class ActionBuilder {
           throw new Error(t('act_errors_elementNotExist', [input.index.toString()]));
         }
 
+        const urlBefore = page.url();
+
+        // Check if element is a search field or if press_enter is requested
+        const isSearchField =
+          Boolean(input.press_enter) ||
+          /search/i.test(input.intent) ||
+          /search/i.test(elementNode.attributes?.type || '') ||
+          /search/i.test(elementNode.attributes?.name || '') ||
+          /search/i.test(elementNode.attributes?.placeholder || '') ||
+          /search/i.test(elementNode.attributes?.role || '') ||
+          /search/i.test(elementNode.attributes?.['aria-label'] || '') ||
+          /search/i.test(elementNode.attributes?.id || '');
+
         await page.inputTextElementNode(this.context.options.useVision, elementNode, input.text);
-        const msg = t('act_inputText_ok', [input.text, input.index.toString()]);
+
+        // If search input or press_enter was specified, automatically send Enter key to submit
+        if (isSearchField) {
+          await page.sendKeys('Enter').catch(() => {});
+          await page.waitForPageAndFramesLoad().catch(() => {});
+        }
+
+        const urlAfter = page.url();
+        const navigated = urlBefore !== urlAfter;
+
+        let msg = t('act_inputText_ok', [input.text, input.index.toString()]);
+        if (isSearchField) {
+          if (navigated) {
+            msg += ` - Search submitted! Page navigated to results: ${urlAfter}`;
+          } else {
+            msg += ` - Search query typed. [Verification Note: Page did not navigate to a new URL (${urlAfter}). If search results have not loaded, the search must be submitted by pressing Enter or clicking the Search button before claiming completion!]`;
+          }
+        }
+
         this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_OK, msg);
         return new ActionResult({ extractedContent: msg, includeInMemory: true });
       },
@@ -791,32 +822,8 @@ export class ActionBuilder {
       const intent = input.intent || 'Skip video ad';
       this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_START, intent);
       const page = await this.context.browserContext.getCurrentPage();
-      let skipped = false;
-      try {
-        const results = await chrome.scripting.executeScript({
-          target: { tabId: page.tabId },
-          func: () => {
-            const skipBtn = document.querySelector<HTMLElement>(
-              '.ytp-ad-skip-button, .ytp-ad-skip-button-modern, .ytp-skip-ad-button, button.ytp-ad-skip-button, .videoAdUiSkipButton, .ytp-ad-overlay-close-button',
-            );
-            if (skipBtn) {
-              skipBtn.click();
-              return true;
-            }
-            const video = document.querySelector('video');
-            const ad = document.querySelector('.ad-showing, .ytp-ad-player-overlay');
-            if (ad && video && isFinite(video.duration)) {
-              video.currentTime = video.duration;
-              return true;
-            }
-            return false;
-          },
-        });
-        skipped = Boolean(results?.[0]?.result);
-      } catch {
-        // ignore
-      }
-      const msg = skipped ? 'Skipped video ad successfully' : 'Checked for ads (no active ad found)';
+      const skipped = await page.detectAndSkipAd();
+      const msg = skipped ? 'Skipped video ad successfully' : 'Checked for ads (no active skip button found)';
       this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_OK, msg);
       return new ActionResult({ extractedContent: msg, includeInMemory: true });
     }, skipAdActionSchema);

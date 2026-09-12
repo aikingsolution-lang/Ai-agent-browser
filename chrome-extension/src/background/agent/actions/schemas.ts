@@ -91,12 +91,18 @@ export const clickElementActionSchema: ActionSchema = {
 
 export const inputTextActionSchema: ActionSchema = {
   name: 'input_text',
-  description: 'Input text into an interactive input element',
+  description:
+    'Input text into an interactive input element. For search inputs, set press_enter: true to submit the search automatically.',
   schema: z.object({
     intent: z.string().default('').describe('purpose of this action'),
     index: flexibleIndex.describe('index of the element'),
     text: z.string().optional().default('').describe('text to input'),
     xpath: z.string().nullable().optional().describe('xpath of the element'),
+    press_enter: z
+      .boolean()
+      .optional()
+      .default(false)
+      .describe('whether to press Enter after typing to submit the query/form'),
   }),
 };
 

@@ -1370,6 +1370,76 @@ export default class Page {
     return this._cachedState.selectorMap;
   }
 
+  /**
+   * Generic Ad Detection & Skip Handler
+   * Detects skip buttons (e.g. YouTube, media players, streaming sites, banners) and clicks them.
+   * Returns true if an ad skip button was found and clicked.
+   */
+  async detectAndSkipAd(): Promise<boolean> {
+    if (!this._puppeteerPage) {
+      return false;
+    }
+
+    try {
+      const skipped = await this._puppeteerPage.evaluate(() => {
+        // 1. Common platform skip ad selectors
+        const skipSelectors = [
+          '.ytp-ad-skip-button-modern',
+          '.ytp-skip-ad-button',
+          '.ytp-ad-skip-button',
+          '.ytp-ad-skip-button-slot button',
+          '.videoAdUiSkipButton',
+          '.ytp-ad-overlay-close-button',
+          'button.ytp-ad-skip-button',
+          'button.ytp-ad-skip-button-modern',
+          '[aria-label*="Skip Ad" i]',
+          '[aria-label*="Skip ad" i]',
+          '[aria-label*="skip advertisement" i]',
+          '[data-testid*="skip-ad" i]',
+        ];
+
+        for (const selector of skipSelectors) {
+          const el = document.querySelector<HTMLElement>(selector);
+          if (el && el.offsetParent !== null && !el.hasAttribute('disabled')) {
+            el.click();
+            return true;
+          }
+        }
+
+        // 2. Generic pattern matching on button/clickable text
+        const candidates = document.querySelectorAll<HTMLElement>('button, [role="button"], a');
+        for (const el of candidates) {
+          const text = (el.innerText || el.textContent || '').trim().toLowerCase();
+          const aria = (el.getAttribute('aria-label') || '').toLowerCase();
+          const isSkip =
+            text === 'skip' ||
+            text === 'skip ad' ||
+            text === 'skip ads' ||
+            text.startsWith('skip ad in') ||
+            aria.includes('skip ad') ||
+            aria.includes('skip advertisement');
+
+          if (isSkip && el.offsetParent !== null && !el.hasAttribute('disabled')) {
+            el.click();
+            return true;
+          }
+        }
+
+        return false;
+      });
+
+      if (skipped) {
+        logger.info('🎯 [AdDetector] Generic pattern-matcher detected and clicked an ad skip button');
+        await new Promise(r => setTimeout(r, 400));
+        return true;
+      }
+    } catch (e) {
+      logger.debug(`[AdDetector] Non-critical error while checking for ads: ${e}`);
+    }
+
+    return false;
+  }
+
   async getElementByIndex(index: number): Promise<ElementHandle | null> {
     const selectorMap = this.getSelectorMap();
     const element = selectorMap.get(index);

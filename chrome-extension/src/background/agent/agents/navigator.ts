@@ -278,6 +278,14 @@ export class NavigatorAgent extends BaseAgent<z.ZodType, NavigatorResult> {
     try {
       this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.STEP_START, 'Navigating...');
 
+      // Check and skip ads generically at the start of every step
+      try {
+        const page = await this.context.browserContext.getCurrentPage();
+        await page.detectAndSkipAd();
+      } catch (adError) {
+        logger.debug(`Pre-step ad skip check: ${adError}`);
+      }
+
       const messageManager = this.context.messageManager;
       // add the browser state message
       await this.addStateMessageToMemory();

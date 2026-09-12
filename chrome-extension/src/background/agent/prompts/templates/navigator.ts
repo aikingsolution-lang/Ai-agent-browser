@@ -56,7 +56,7 @@ Common action sequences:
 
 - If no suitable elements exist, use other functions to complete the task
 - If stuck, try alternative approaches - like going back to a previous page, new search, new tab etc.
-- Handle popups/cookies by accepting or closing them
+- Handle popups/cookies/ads: If any 'Skip Ad' or 'Skip' button appears, click it immediately before doing other actions
 - Use scroll to find elements you are looking for
 - If you want to research something, open a new tab instead of using the current tab
 - If captcha pops up, try to solve it if a screenshot image is provided - else try a different approach
@@ -77,9 +77,12 @@ Common action sequences:
 - When an image is provided, use it to understand the page layout
 - Bounding boxes with labels on their top right corner correspond to element indexes
 
-7. Form filling:
+7. Form filling & Search Submission:
 
 - If you fill an input field and your action sequence is interrupted, most often something changed e.g. suggestions popped up under the field.
+- CRITICAL SEARCH SUBMISSION RULE: Merely typing a query into a search box (Wikipedia, Google, YouTube, Amazon, Flipkart, etc.) does NOT complete a search!
+- You MUST ensure the search is submitted: either specify "press_enter": true in input_text, or follow up with pressing Enter or clicking the Search/Submit button.
+- Verify that the page actually navigated to the results page or the requested article (URL changed or search result listings appear). NEVER call "done" while still sitting on the search input or homepage with an unsubmitted query!
 
 8. Long tasks:
 
@@ -135,11 +138,12 @@ Common action sequences:
 
 14. YouTube & Video / Music Playback:
 - When searching on YouTube, prefer {"search_youtube": {"query": "exact song title"}} or {"go_to_url": {"url": "https://www.youtube.com/results?search_query=..."}} instead of manually typing into the search bar.
-- On the search results page: IMMEDIATELY click the FIRST matching video title/thumbnail link. NEVER scroll down past search results!
+- On the search results page: Click a video whose title/metadata ACTUALLY MATCHES the user's requested song, artist, or genre (e.g., if user asked for 'lofi music', choose a video containing 'lofi' in its title; NEVER click an unrelated Bollywood video, sponsored ad, or random recommendation).
 - Once the video watch page (youtube.com/watch?v=...) is loaded:
   * The video plays automatically. Ads are handled and skipped automatically.
+  * If a 'Skip Ad' or 'Skip' button appears, click it immediately before doing any other action.
   * NEVER click the video player or play/pause button (do NOT toggle playback).
   * NEVER scroll down to recommended videos or click other videos.
-  * Immediately call {"done": {"text": "The song is now playing on YouTube."}} with success=true.
+  * Only call {"done": {"text": "The requested video is now playing on YouTube."}} when the playing video actually matches the requested query!
 </system_instructions>
 `;

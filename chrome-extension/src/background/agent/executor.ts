@@ -25,6 +25,7 @@ import { chatHistoryStore } from '@extension/storage/lib/chat';
 import type { AgentStepHistory } from './history';
 import type { GeneralSettingsConfig } from '@extension/storage';
 import { analytics } from '../services/analytics';
+import { verifyTaskResult } from './evaluation';
 
 const logger = createLogger('Executor');
 
@@ -109,9 +110,31 @@ export class Executor {
   /**
    * Check if task is complete based on planner output and handle completion
    */
-  private checkTaskCompletion(planOutput: AgentOutput<PlannerOutput> | null): boolean {
+  private async checkTaskCompletion(planOutput: AgentOutput<PlannerOutput> | null): Promise<boolean> {
     if (planOutput?.result?.done) {
-      logger.info('✅ Planner confirms task completion');
+      // Guardrail against unsubmitted search inputs or intent mismatch
+      const page = await this.context.browserContext.getCurrentPage().catch(() => null);
+      const url = page ? page.url() : '';
+      const state = page ? await page.getState().catch(() => null) : null;
+      const title = state?.title || '';
+      const lastAction = this.context.actionResults[this.context.actionResults.length - 1];
+      const currentTask = this.tasks[this.tasks.length - 1] || '';
+
+      const verification = verifyTaskResult(currentTask, {
+        url,
+        title,
+        lastActionExtractedContent: lastAction?.extractedContent,
+      });
+
+      if (!verification.isComplete) {
+        logger.warning(`⚠️ Premature completion blocked: ${verification.reason}`);
+        planOutput.result.done = false;
+        planOutput.result.challenges = verification.reason || 'Verification failed';
+        planOutput.result.next_steps = verification.retryAction || 'Please verify the page state and retry.';
+        return false;
+      }
+
+      logger.info('✅ Planner confirms task completion and verification passed');
       if (planOutput.result.final_answer) {
         this.context.finalAnswer = planOutput.result.final_answer;
       }
@@ -159,7 +182,7 @@ export class Executor {
           latestPlanOutput = await this.runPlanner();
 
           // Check if task is complete after planner run
-          if (this.checkTaskCompletion(latestPlanOutput)) {
+          if (await this.checkTaskCompletion(latestPlanOutput)) {
             break;
           }
         }
