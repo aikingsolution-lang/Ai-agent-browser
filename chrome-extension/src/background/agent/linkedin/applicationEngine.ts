@@ -6,21 +6,27 @@
  * Technical considerations:
  * - Session validation via chrome.cookies (li_at, JSESSIONID).
  * - Pre-flight health check for profile icon (div.global-nav__me) before execution.
+ * - RAG-based Fit Scoring with JD sanitization (skips jobs with score < 75).
+ * - Career Brain screening question solver & React-compatible form filling.
  * - Multi-step modal navigation with ARIA-first parsing and transition verification.
+ * - Vision Fallback: Strictly triggered only when DOM confidence < 0.4 or UNKNOWN step.
  * - 'Unknown State' fallback: Never guess; sets NEEDS_MANUAL_REVIEW if step is unrecognised.
  * - Dry-Run mode logging framework (default ON) for recording 'would have applied' actions.
  * - React re-render resiliency via retryWithBackoff (3 retries, exponential backoff).
- * - Job descriptions are sanitized/summarized before LLM calls.
- * - PDF resume generation happens on the backend (resumeGenerator.service.ts).
  */
 
+import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { createLogger } from '@src/background/log';
 import type Page from '@src/background/browser/page';
+import { careerBrainStore, type ICareerBrain } from '@extension/storage';
 import { validateLinkedInSession, type LinkedInSessionStatus } from './sessionValidator';
 import { LinkedInHealthChecker, type HealthCheckResult } from './healthCheck';
 import { dryRunLogger, DryRunLogger, type IDryRunRecord, type IDryRunStats } from './dryRunLogger';
 import { stepDetector, LinkedInStepDetector } from './stepDetector';
 import { stepNavigator, LinkedInStepNavigator } from './stepNavigator';
+import { evaluateJobFit, sanitizeJobDescription, MIN_FIT_SCORE_THRESHOLD } from './fitScorer';
+import { formFiller, LinkedInFormFiller } from './formFiller';
+import { visionFallback, LinkedInVisionFallback } from './visionFallback';
 import type {
   IJobData,
   IApplicationState,
@@ -41,21 +47,24 @@ export interface ApplicationEngineConfig {
   maxRetries: number;
   /** Base delay in ms for exponential backoff (default: 1000) */
   baseRetryDelayMs: number;
-  /** Minimum fit score to proceed with auto-apply (0-100) */
+  /** Minimum fit score to proceed with auto-apply (0-100, default: 75) */
   minFitScore: number;
   /** Maximum token limit for job description sent to LLM */
   maxDescriptionTokens: number;
   /** Human-like delay range in ms between actions [min, max] */
   actionDelayRange: [number, number];
+  /** Max modal steps before safety timeout */
+  maxModalSteps: number;
 }
 
 export const DEFAULT_ENGINE_CONFIG: ApplicationEngineConfig = {
   dryRun: true, // Default ON for safety
   maxRetries: 3,
   baseRetryDelayMs: 1000,
-  minFitScore: 60,
-  maxDescriptionTokens: 2000,
+  minFitScore: MIN_FIT_SCORE_THRESHOLD, // 75
+  maxDescriptionTokens: 1000,
   actionDelayRange: [800, 2500],
+  maxModalSteps: 10,
 };
 
 /**
@@ -65,27 +74,41 @@ export class ApplicationEngine {
   private config: ApplicationEngineConfig;
   private state: IApplicationState | null;
   private page: Page | null = null;
+  private llm?: BaseChatModel;
+  private visionLLM?: BaseChatModel;
   private healthChecker: LinkedInHealthChecker;
   private loggerService: DryRunLogger;
   private stepDetectorService: LinkedInStepDetector;
   private stepNavigatorService: LinkedInStepNavigator;
+  private formFillerService: LinkedInFormFiller;
+  private visionFallbackService: LinkedInVisionFallback;
 
-  constructor(config: Partial<ApplicationEngineConfig> = {}) {
+  constructor(
+    config: Partial<ApplicationEngineConfig> = {},
+    options: { llm?: BaseChatModel; visionLLM?: BaseChatModel } = {},
+  ) {
     this.config = { ...DEFAULT_ENGINE_CONFIG, ...config };
     this.state = null;
+    this.llm = options.llm;
+    this.visionLLM = options.visionLLM || options.llm;
     this.healthChecker = new LinkedInHealthChecker(this.config.maxRetries, this.config.baseRetryDelayMs);
     this.loggerService = dryRunLogger;
     this.stepDetectorService = stepDetector;
     this.stepNavigatorService = stepNavigator;
+    this.formFillerService = formFiller;
+    this.visionFallbackService = visionFallback;
+  }
+
+  /**
+   * Sets or updates LLM models for scoring and vision.
+   */
+  setModels(models: { llm?: BaseChatModel; visionLLM?: BaseChatModel }): void {
+    if (models.llm) this.llm = models.llm;
+    if (models.visionLLM) this.visionLLM = models.visionLLM;
   }
 
   /**
    * Initialize the engine with a browser page context.
-   * Performs:
-   * 1. Cookie-based session validation (chrome.cookies)
-   * 2. DOM-based pre-flight health check (profile icon detection)
-   *
-   * @throws Error with a user-friendly pause message if unauthenticated
    */
   async initialize(page?: Page): Promise<void> {
     logger.info('Initializing ApplicationEngine (Dry-Run:', this.config.dryRun, ')...');
@@ -160,32 +183,66 @@ export class ApplicationEngine {
   /**
    * Scan the current LinkedIn job listing page and extract structured job data.
    * Sanitizes the job description for LLM consumption (respects maxDescriptionTokens).
-   *
-   * @returns Extracted and sanitized job data
    */
   async scanJobListing(): Promise<IJobData> {
-    // TODO: Step 4 — DOM scraping with retry, description sanitization
-    throw new Error('Not implemented — awaiting Step 4');
+    if (!this.page) throw new Error('Page not attached.');
+    const puppeteerPage = this.page.puppeteerPage;
+    if (!puppeteerPage) throw new Error('Puppeteer page not attached.');
+
+    const rawJob = await puppeteerPage.evaluate(() => {
+      const title =
+        document
+          .querySelector('.job-details-jobs-unified-top-card__job-title, h1.topcard__title, h1')
+          ?.textContent?.trim() || '';
+      const company =
+        document
+          .querySelector('.job-details-jobs-unified-top-card__company-name, a.topcard__org-name-link')
+          ?.textContent?.trim() || '';
+      const location =
+        document
+          .querySelector('.job-details-jobs-unified-top-card__bullet, .topcard__flavor--bullet')
+          ?.textContent?.trim() || '';
+      const description =
+        document
+          .querySelector('.jobs-description__content, #job-details, .show-more-less-html__markup')
+          ?.textContent?.trim() || '';
+      const isEasyApply = Boolean(document.querySelector('button[aria-label*="Easy Apply" i], .jobs-apply-button'));
+
+      return { title, company, location, description, isEasyApply };
+    });
+
+    const sanitizedDescription = sanitizeJobDescription(rawJob.description, this.config.maxDescriptionTokens);
+    const url = this.page.url() || '';
+    const jobId = Math.abs(url.split('').reduce((a, b) => ((a << 5) - a + b.charCodeAt(0)) | 0, 0)).toString(16);
+
+    return {
+      url,
+      jobId,
+      title: rawJob.title || 'Unknown Position',
+      company: rawJob.company || 'Unknown Company',
+      location: rawJob.location || '',
+      salaryRange: '',
+      description: sanitizedDescription,
+      jobType: 'Full-time',
+      experienceLevel: 'Mid-Senior level',
+      isEasyApply: rawJob.isEasyApply,
+    };
   }
 
   /**
-   * Evaluate how well the user's profile matches the job listing.
-   * Sends sanitized job description to LLM for analysis.
-   *
-   * @param jobData - The job data to evaluate against user profile
-   * @returns Fit score result with reasoning and skill analysis
+   * Evaluates how well the user's profile matches the job listing.
    */
   async evaluateFitScore(jobData: IJobData): Promise<IFitScoreResult> {
-    // TODO: Step 4 — LLM integration for fit scoring
-    throw new Error('Not implemented — awaiting Step 4');
+    const careerBrain = await careerBrainStore.getCareerBrain();
+    return evaluateJobFit(jobData, careerBrain, this.llm);
   }
 
   /**
-   * Begin the Easy Apply flow by clicking the Easy Apply button
-   * and stepping through the modal with transition verification.
-   *
-   * @param jobData - The job to apply for
-   * @returns Application state after step navigation
+   * Runs the complete Easy Apply pipeline for a job:
+   * 1. Evaluates Fit Score against Career Brain (skips if score < 75)
+   * 2. Opens Easy Apply modal
+   * 3. Multi-step form filling loop with Question Solver & Vision Fallback
+   * 4. Step transition verification and dry-run recording
    */
   async startApplication(jobData: IJobData): Promise<IApplicationState> {
     if (!this.page) {
@@ -205,55 +262,152 @@ export class ApplicationEngine {
       completedAt: null,
     };
 
-    // 1. Click Easy Apply button on the job page if not already in modal
-    const puppeteerPage = this.page.puppeteerPage;
-    if (puppeteerPage) {
-      await this.retryWithBackoff(async () => {
-        const opened = await puppeteerPage.evaluate(() => {
-          // Check if modal is already open
-          const existingModal = document.querySelector('div[role="dialog"][aria-modal="true"]');
-          if (existingModal) return true;
+    const careerBrain = await careerBrainStore.getCareerBrain();
 
-          // Find Easy Apply button on job details page
-          const applyBtn = document.querySelector<HTMLButtonElement>(
-            'button[aria-label*="Easy Apply" i], .jobs-apply-button, button.jobs-apply-button',
-          );
-          if (applyBtn && applyBtn.offsetParent !== null) {
-            applyBtn.click();
-            return true;
-          }
-          return false;
+    // ─── 1. RAG Fit Score Check ─────────────────────────────────────────────
+    const fitResult = await this.evaluateFitScore(jobData);
+    logger.info(`Job Fit Score for "${jobData.title}": ${fitResult.score}/100 (Threshold: ${this.config.minFitScore})`);
+
+    if (fitResult.score < this.config.minFitScore) {
+      const skipReason = `Skipped low fit (${fitResult.score} < ${this.config.minFitScore}): ${fitResult.reasoning}`;
+      logger.warning(`[ApplicationEngine] ⏭️ ${skipReason}`);
+
+      this.state.status = 'QUEUED';
+      this.state.errors.push(skipReason);
+      this.state.completedAt = Date.now();
+
+      if (this.config.dryRun) {
+        await this.logDryRunRecord({
+          jobData,
+          wouldHaveApplied: false,
+          fitScore: fitResult.score,
+          blockedReason: 'skipped_low_fit',
+          notes: skipReason,
         });
+      }
 
-        if (!opened) {
-          throw new Error('Easy Apply button not found or could not be clicked.');
-        }
-      }, 'Click Easy Apply button');
+      return this.state;
     }
+
+    // ─── 2. Open Easy Apply Modal ───────────────────────────────────────────
+    const puppeteerPage = this.page.puppeteerPage;
+    if (!puppeteerPage) {
+      throw new Error('Puppeteer page not attached.');
+    }
+
+    await this.retryWithBackoff(async () => {
+      const opened = await puppeteerPage.evaluate(() => {
+        const existingModal = document.querySelector('div[role="dialog"][aria-modal="true"]');
+        if (existingModal) return true;
+
+        const applyBtn = document.querySelector<HTMLButtonElement>(
+          'button[aria-label*="Easy Apply" i], .jobs-apply-button, button.jobs-apply-button',
+        );
+        if (applyBtn && applyBtn.offsetParent !== null) {
+          applyBtn.click();
+          return true;
+        }
+        return false;
+      });
+
+      if (!opened) {
+        throw new Error('Easy Apply button not found or could not be clicked.');
+      }
+    }, 'Open Easy Apply Modal');
 
     await this.humanDelay();
 
-    // 2. Step through the modal safely (navigation logic)
-    const stepThroughResult = await this.stepNavigatorService.stepThroughModal(this.page, {
-      dryRun: this.config.dryRun,
-    });
+    // ─── 3. Multi-Step Form Fill Loop ───────────────────────────────────────
+    const collectedQuestions: IScreeningQuestion[] = [];
+    let modalFinished = false;
 
-    this.state.status = stepThroughResult.finalStatus;
-    this.state.currentStep = stepThroughResult.stepsEncountered.length;
-    this.state.currentStepType = stepThroughResult.lastStepDetails?.stepType;
-    this.state.completedAt = Date.now();
+    for (let stepCount = 0; stepCount < this.config.maxModalSteps; stepCount++) {
+      let stepResult = await this.stepDetectorService.detectCurrentStep(this.page);
 
-    if (stepThroughResult.reason) {
-      this.state.errors.push(stepThroughResult.reason);
+      if (!stepResult.isModalOpen) {
+        this.state.status = 'NEEDS_MANUAL_REVIEW';
+        this.state.errors.push('Modal closed unexpectedly during application.');
+        break;
+      }
+
+      // Vision Fallback (Strictly fallback when confidence < 0.4 or UNKNOWN)
+      if (stepResult.stepType === 'UNKNOWN' || stepResult.confidence < 0.4) {
+        logger.warning(
+          `[ApplicationEngine] Low DOM confidence (${stepResult.confidence}). Triggering Vision Fallback...`,
+        );
+        const visionResult = await this.visionFallbackService.evaluateModalWithVision(this.page, this.visionLLM);
+        if (visionResult.stepType !== 'UNKNOWN') {
+          stepResult = {
+            ...stepResult,
+            stepType: visionResult.stepType,
+            confidence: visionResult.confidence,
+          };
+        } else {
+          // Still unknown after vision fallback: Hault safely
+          logger.warning('[ApplicationEngine] Unknown state could not be resolved. Flagging NEEDS_MANUAL_REVIEW.');
+          this.state.status = 'NEEDS_MANUAL_REVIEW';
+          this.state.errors.push('Unrecognized modal step state. Stopped safely.');
+          break;
+        }
+      }
+
+      this.state.currentStepType = stepResult.stepType;
+      this.state.currentStep = stepCount + 1;
+
+      // Check if we reached Review / Submit screen
+      if (stepResult.stepType === 'REVIEW' || stepResult.buttons.hasSubmit) {
+        logger.info('[ApplicationEngine] Reached application Review/Submit screen.');
+        this.state.status = this.config.dryRun ? 'DRY_RUN_SUCCESS' : 'NEEDS_MANUAL_REVIEW';
+        modalFinished = true;
+        break;
+      }
+
+      // Fill Form Fields for Current Step
+      const fillResult = await this.formFillerService.fillCurrentStep(this.page, stepResult, careerBrain, this.llm);
+
+      if (fillResult.questionsAnswered.length > 0) {
+        collectedQuestions.push(...fillResult.questionsAnswered);
+      }
+
+      if (fillResult.needsManualReview) {
+        logger.warning(`[ApplicationEngine] Manual review required: ${fillResult.reason}`);
+        this.state.status = 'NEEDS_MANUAL_REVIEW';
+        if (fillResult.reason) this.state.errors.push(fillResult.reason);
+        break;
+      }
+
+      await this.humanDelay();
+
+      // Advance to Next Step
+      if (stepResult.buttons.hasNext || stepResult.buttons.hasReview) {
+        const transition = await this.stepNavigatorService.advanceToNextStep(this.page, stepResult);
+
+        if (!transition.success) {
+          logger.warning(`[ApplicationEngine] Transition failed: ${transition.errorMessage}`);
+          this.state.status = 'NEEDS_MANUAL_REVIEW';
+          if (transition.errorMessage) this.state.errors.push(transition.errorMessage);
+          break;
+        }
+      } else {
+        logger.warning(`[ApplicationEngine] No forward action button found on step ${stepResult.stepType}.`);
+        this.state.status = 'NEEDS_MANUAL_REVIEW';
+        this.state.errors.push(`No forward action button on step ${stepResult.stepType}.`);
+        break;
+      }
     }
 
-    // 3. Log Dry-Run record if dry-run enabled
+    this.state.screeningQuestions = collectedQuestions;
+    this.state.completedAt = Date.now();
+
+    // ─── 4. Log Dry Run Result ──────────────────────────────────────────────
     if (this.config.dryRun) {
       await this.logDryRunRecord({
         jobData,
-        wouldHaveApplied: stepThroughResult.finalStatus === 'DRY_RUN_SUCCESS',
-        blockedReason: stepThroughResult.finalStatus !== 'DRY_RUN_SUCCESS' ? stepThroughResult.reason : undefined,
-        notes: `Steps encountered: ${stepThroughResult.stepsEncountered.join(' -> ')}`,
+        wouldHaveApplied: this.state.status === 'DRY_RUN_SUCCESS',
+        fitScore: fitResult.score,
+        screeningAnswers: collectedQuestions,
+        blockedReason: this.state.status !== 'DRY_RUN_SUCCESS' ? this.state.errors.join('; ') : undefined,
+        notes: `Fit: ${fitResult.score}/100. Status: ${this.state.status}`,
       });
     }
 
@@ -262,50 +416,56 @@ export class ApplicationEngine {
 
   /**
    * Extract and answer screening questions in the Easy Apply modal.
-   * Uses LLM to generate contextually appropriate answers.
-   *
-   * @param questions - Screening questions extracted from the form
-   * @returns Questions with populated userAnswer fields
    */
   async handleScreeningQuestions(questions: IScreeningQuestion[]): Promise<IScreeningQuestion[]> {
-    // TODO: Step 4 — LLM-powered question answering
-    throw new Error('Not implemented — awaiting Step 4');
+    const careerBrain = await careerBrainStore.getCareerBrain();
+    const answered: IScreeningQuestion[] = [];
+
+    for (const q of questions) {
+      const solution = await formFiller.fillCurrentStep(
+        this.page!,
+        {
+          stepType: 'SCREENING_QUESTIONS',
+          stepTitle: 'Screening',
+          rawHeaderText: 'Screening',
+          buttons: { hasNext: true, hasReview: false, hasSubmit: false, hasBack: false, hasDismiss: true },
+          errors: { hasError: false, errorMessages: [] },
+          isModalOpen: true,
+          confidence: 1,
+        },
+        careerBrain,
+        this.llm,
+      );
+      if (solution.questionsAnswered.length > 0) {
+        answered.push(...solution.questionsAnswered);
+      }
+    }
+
+    return answered;
   }
 
   /**
    * Submit the application (or complete dry-run).
-   * In dry-run mode, validates all fields are filled and logs to dryRunLogger
-   * without clicking the final submit button.
-   *
-   * @returns Final application status after submission attempt
    */
   async submitApplication(): Promise<JobApplicationStatus> {
     if (this.config.dryRun) {
-      logger.info('[DRY-RUN] submitApplication invoked in dry-run mode. Application validated.');
+      logger.info('[DRY-RUN] submitApplication in dry-run mode. Simulated application verified.');
       return 'DRY_RUN_SUCCESS';
     }
 
-    // Live submission will be wired in Step 4
-    throw new Error('Live submission not implemented — awaiting Step 4');
+    // Live submission wired in Step 5
+    throw new Error('Live submission not implemented — awaiting Step 5');
   }
 
   /**
-   * Get the current application state snapshot.
-   *
-   * @returns Current state or null if not initialized
+   * Get current application state.
    */
   getApplicationState(): IApplicationState | null {
     return this.state;
   }
 
   /**
-   * Retry a DOM interaction with exponential backoff.
-   * Handles LinkedIn's frequent React re-renders that cause stale element references.
-   *
-   * @param operation - The async operation to retry
-   * @param context - Description of the operation for error logging
-   * @returns The result of the successful operation
-   * @throws Error after maxRetries exhausted
+   * Retry operation with exponential backoff for React re-render handling.
    */
   async retryWithBackoff<T>(operation: () => Promise<T>, context: string): Promise<T> {
     let lastError: Error | null = null;
@@ -328,20 +488,10 @@ export class ApplicationEngine {
     );
   }
 
-  /**
-   * Sleep for a specified duration. Used for human-like pacing
-   * and exponential backoff delays.
-   *
-   * @param ms - Duration in milliseconds
-   */
   private sleep(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms));
   }
 
-  /**
-   * Add a random human-like delay between actions.
-   * Uses the configured actionDelayRange for natural pacing.
-   */
   private async humanDelay(): Promise<void> {
     const [min, max] = this.config.actionDelayRange;
     const delay = Math.floor(Math.random() * (max - min + 1)) + min;
