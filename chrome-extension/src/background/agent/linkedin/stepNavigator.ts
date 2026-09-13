@@ -81,10 +81,12 @@ export class LinkedInStepNavigator {
 
             return (
               aria.includes('continue to next step') ||
+              aria.includes('continue applying') ||
               aria.includes('next') ||
               aria.includes('review') ||
               text === 'next' ||
               text === 'continue' ||
+              text.includes('continue applying') ||
               text.startsWith('review')
             );
           });

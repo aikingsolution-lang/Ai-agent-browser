@@ -407,6 +407,30 @@ export class ApplicationEngine {
     // Natural pacing pause
     await HumanPacingSimulator.naturalActionPause(1800);
 
+    // Auto-dismiss LinkedIn 'Job search safety reminder' interstitial if present
+    await puppeteerPage.evaluate(() => {
+      const dialogs = Array.from(document.querySelectorAll<HTMLElement>('div[role="dialog"]'));
+      for (const dialog of dialogs) {
+        const text = (dialog.textContent || '').toLowerCase();
+        if (
+          text.includes('safety reminder') ||
+          text.includes('research the company') ||
+          text.includes('report suspicious')
+        ) {
+          const continueBtn = Array.from(dialog.querySelectorAll<HTMLButtonElement>('button')).find(btn => {
+            const btnText = (btn.textContent || '').trim().toLowerCase();
+            return btnText.includes('continue applying') || btnText.includes('continue');
+          });
+          if (continueBtn && continueBtn.offsetParent !== null) {
+            continueBtn.click();
+            break;
+          }
+        }
+      }
+    });
+
+    await HumanPacingSimulator.naturalActionPause(1000);
+
     // ─── 6. Multi-Step Form Fill Loop ───────────────────────────────────────
     const collectedQuestions: IScreeningQuestion[] = [];
     let reachedReview = false;
