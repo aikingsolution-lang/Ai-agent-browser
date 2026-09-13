@@ -8,18 +8,7 @@ import {
   DEFAULT_CAREER_BRAIN,
   DEFAULT_LINKEDIN_CONFIG,
 } from '@extension/storage';
-import {
-  FiUser,
-  FiBriefcase,
-  FiCode,
-  FiCheck,
-  FiAlertTriangle,
-  FiShield,
-  FiInfo,
-  FiPlus,
-  FiX,
-  FiSliders,
-} from 'react-icons/fi';
+import { FiUser, FiCode, FiCheck, FiAlertTriangle, FiShield, FiInfo, FiPlus, FiX, FiSliders } from 'react-icons/fi';
 
 interface CareerBrainSettingsProps {
   isDarkMode?: boolean;
@@ -65,17 +54,22 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
     }));
   };
 
-  const handleLiveModeToggle = (enableLive: boolean) => {
-    if (enableLive) {
-      // Prompt confirmation modal before enabling Live Mode
+  const handleLiveModeToggle = () => {
+    if (config.dryRun) {
+      // Currently in Safe Dry-Run -> user wants to enable Live Mode -> show confirmation safety modal
       setShowLiveConfirmModal(true);
     } else {
-      setConfig(prev => ({ ...prev, dryRun: true }));
+      // Currently in Live Mode -> user wants to revert to Safe Dry-Run -> update & persist immediately
+      const updatedConfig = { ...config, dryRun: true };
+      setConfig(updatedConfig);
+      linkedInConfigStore.updateConfig({ dryRun: true });
     }
   };
 
-  const confirmLiveMode = () => {
-    setConfig(prev => ({ ...prev, dryRun: false }));
+  const confirmLiveMode = async () => {
+    const updatedConfig = { ...config, dryRun: false };
+    setConfig(updatedConfig);
+    await linkedInConfigStore.updateConfig({ dryRun: false });
     setShowLiveConfirmModal(false);
   };
 
@@ -126,20 +120,26 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
           </div>
         </div>
 
-        <div className="flex items-center gap-2 shrink-0">
+        {/* Interactive Toggle Switch */}
+        <div className="flex items-center gap-2.5 shrink-0 cursor-pointer" onClick={handleLiveModeToggle}>
           <button
             type="button"
-            onClick={() => handleLiveModeToggle(!config.dryRun)}
-            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none ${
-              !config.dryRun ? 'bg-amber-500' : 'bg-slate-400'
+            role="switch"
+            aria-checked={!config.dryRun}
+            onClick={e => {
+              e.stopPropagation();
+              handleLiveModeToggle();
+            }}
+            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors cursor-pointer focus:outline-none focus:ring-2 focus:ring-sky-500 ${
+              !config.dryRun ? 'bg-amber-500' : 'bg-slate-400 dark:bg-slate-600'
             }`}>
             <span
-              className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+              className={`inline-block h-4 w-4 transform rounded-full bg-white shadow-md transition-transform ${
                 !config.dryRun ? 'translate-x-6' : 'translate-x-1'
               }`}
             />
           </button>
-          <span className="text-xs font-semibold text-gray-700 dark:text-gray-300">
+          <span className="text-xs font-semibold text-gray-700 dark:text-gray-300 select-none">
             {config.dryRun ? 'Dry-Run' : 'Live Mode'}
           </span>
         </div>
