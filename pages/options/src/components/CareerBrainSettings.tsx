@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Button } from '@extension/ui';
 import {
   careerBrainStore,
@@ -8,7 +8,19 @@ import {
   DEFAULT_CAREER_BRAIN,
   DEFAULT_LINKEDIN_CONFIG,
 } from '@extension/storage';
-import { FiUser, FiCode, FiCheck, FiAlertTriangle, FiShield, FiInfo, FiPlus, FiX, FiSliders } from 'react-icons/fi';
+import {
+  FiUser,
+  FiCode,
+  FiCheck,
+  FiShield,
+  FiInfo,
+  FiPlus,
+  FiX,
+  FiSliders,
+  FiLock,
+  FiCheckCircle,
+} from 'react-icons/fi';
+import { PREDEFINED_TECH_SKILLS } from '../constants/skillsList';
 
 interface CareerBrainSettingsProps {
   isDarkMode?: boolean;
@@ -16,34 +28,74 @@ interface CareerBrainSettingsProps {
 
 export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDarkMode = false }) => {
   const [careerBrain, setCareerBrain] = useState<ICareerBrain>(DEFAULT_CAREER_BRAIN);
-  const [config, setConfig] = useState<ILinkedInAutomationConfig>(DEFAULT_LINKEDIN_CONFIG);
+  const [config, setConfig] = useState<ILinkedInAutomationConfig>({ ...DEFAULT_LINKEDIN_CONFIG, dryRun: true });
   const [newSkill, setNewSkill] = useState<string>('');
   const [saveSuccess, setSaveSuccess] = useState<boolean>(false);
-  const [showLiveConfirmModal, setShowLiveConfirmModal] = useState<boolean>(false);
+  const [showSafetyModal, setShowSafetyModal] = useState<boolean>(false);
+
+  // Autocomplete dropdown state
+  const [showSuggestions, setShowSuggestions] = useState<boolean>(false);
+  const [highlightedIndex, setHighlightedIndex] = useState<number>(-1);
+  const skillInputContainerRef = useRef<HTMLDivElement>(null);
+  const skillInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     Promise.all([careerBrainStore.getCareerBrain(), linkedInConfigStore.getConfig()]).then(
       ([brainData, configData]) => {
         setCareerBrain(brainData);
-        setConfig(configData);
+        // Live-Mode is temporarily hardcode-disabled / locked for safety verification
+        setConfig({ ...configData, dryRun: true });
       },
     );
   }, []);
 
+  // Close suggestions on outside click
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (skillInputContainerRef.current && !skillInputContainerRef.current.contains(event.target as Node)) {
+        setShowSuggestions(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
   const handleSave = async () => {
-    await Promise.all([careerBrainStore.updateCareerBrain(careerBrain), linkedInConfigStore.updateConfig(config)]);
+    // Keep dryRun strictly locked to true for safety
+    const safeConfig: ILinkedInAutomationConfig = { ...config, dryRun: true };
+    await Promise.all([careerBrainStore.updateCareerBrain(careerBrain), linkedInConfigStore.updateConfig(safeConfig)]);
     setSaveSuccess(true);
     setTimeout(() => setSaveSuccess(false), 3000);
   };
 
-  const handleAddSkill = () => {
-    const trimmed = newSkill.trim();
-    if (trimmed && !careerBrain.skills.includes(trimmed)) {
+  // Compute filtered suggestions based on typed input
+  const query = newSkill.trim().toLowerCase();
+  const filteredSuggestions = query
+    ? PREDEFINED_TECH_SKILLS.filter(
+        skill =>
+          skill.toLowerCase().includes(query) &&
+          !careerBrain.skills.some(existing => existing.toLowerCase() === skill.toLowerCase()),
+      )
+        .sort((a, b) => {
+          const aStarts = a.toLowerCase().startsWith(query);
+          const bStarts = b.toLowerCase().startsWith(query);
+          if (aStarts && !bStarts) return -1;
+          if (!aStarts && bStarts) return 1;
+          return a.localeCompare(b);
+        })
+        .slice(0, 15)
+    : [];
+
+  const handleAddSkill = (skillToAdd?: string) => {
+    const skillName = (skillToAdd || newSkill).replace(/,/g, '').trim();
+    if (skillName && !careerBrain.skills.some(s => s.toLowerCase() === skillName.toLowerCase())) {
       setCareerBrain(prev => ({
         ...prev,
-        skills: [...prev.skills, trimmed],
+        skills: [...prev.skills, skillName],
       }));
       setNewSkill('');
+      setShowSuggestions(false);
+      setHighlightedIndex(-1);
     }
   };
 
@@ -54,23 +106,30 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
     }));
   };
 
-  const handleLiveModeToggle = () => {
-    if (config.dryRun) {
-      // Currently in Safe Dry-Run -> user wants to enable Live Mode -> show confirmation safety modal
-      setShowLiveConfirmModal(true);
-    } else {
-      // Currently in Live Mode -> user wants to revert to Safe Dry-Run -> update & persist immediately
-      const updatedConfig = { ...config, dryRun: true };
-      setConfig(updatedConfig);
-      linkedInConfigStore.updateConfig({ dryRun: true });
+  const handleSkillKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      if (filteredSuggestions.length > 0) {
+        setHighlightedIndex(prev => (prev < filteredSuggestions.length - 1 ? prev + 1 : 0));
+        setShowSuggestions(true);
+      }
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (filteredSuggestions.length > 0) {
+        setHighlightedIndex(prev => (prev > 0 ? prev - 1 : filteredSuggestions.length - 1));
+        setShowSuggestions(true);
+      }
+    } else if (e.key === 'Enter' || e.key === ',') {
+      e.preventDefault();
+      if (showSuggestions && highlightedIndex >= 0 && highlightedIndex < filteredSuggestions.length) {
+        handleAddSkill(filteredSuggestions[highlightedIndex]);
+      } else {
+        handleAddSkill();
+      }
+    } else if (e.key === 'Escape') {
+      setShowSuggestions(false);
+      setHighlightedIndex(-1);
     }
-  };
-
-  const confirmLiveMode = async () => {
-    const updatedConfig = { ...config, dryRun: false };
-    setConfig(updatedConfig);
-    await linkedInConfigStore.updateConfig({ dryRun: false });
-    setShowLiveConfirmModal(false);
   };
 
   return (
@@ -92,57 +151,37 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
         </Button>
       </div>
 
-      {/* Safety Mode Banner */}
-      <div
-        className={`p-4 rounded-xl border flex items-center justify-between ${
-          config.dryRun
-            ? 'bg-emerald-50/80 dark:bg-emerald-950/30 border-emerald-200 dark:border-emerald-800'
-            : 'bg-amber-50/80 dark:bg-amber-950/30 border-amber-300 dark:border-amber-700'
-        }`}>
+      {/* Safety Mode Banner — Hardcoded Safe Dry-Run */}
+      <div className="p-4 rounded-xl border flex items-center justify-between bg-emerald-50/80 dark:bg-emerald-950/30 border-emerald-200 dark:border-emerald-800">
         <div className="flex items-center gap-3">
-          <div
-            className={`p-2 rounded-lg ${
-              config.dryRun
-                ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/60 dark:text-emerald-300'
-                : 'bg-amber-100 text-amber-700 dark:bg-amber-900/60 dark:text-amber-300'
-            }`}>
-            {config.dryRun ? <FiShield className="w-5 h-5" /> : <FiAlertTriangle className="w-5 h-5" />}
+          <div className="p-2 rounded-lg bg-emerald-100 text-emerald-700 dark:bg-emerald-900/60 dark:text-emerald-300">
+            <FiShield className="w-5 h-5" />
           </div>
           <div>
-            <h4 className="text-sm font-bold text-gray-900 dark:text-white">
-              Current Mode: {config.dryRun ? '🛡️ Safe Dry-Run (Simulation)' : '🚀 Live Application Mode'}
-            </h4>
-            <p className="text-xs text-gray-600 dark:text-gray-300">
-              {config.dryRun
-                ? 'Automator navigates forms, fills screening answers, and tests fit score, but stops at the review screen without submitting.'
-                : 'Automator will submit actual real applications to LinkedIn on your behalf with your approved profile.'}
+            <div className="flex items-center gap-2">
+              <h4 className="text-sm font-bold text-gray-900 dark:text-white">
+                Current Mode: 🛡️ Safe Dry-Run (Simulation Active)
+              </h4>
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-semibold bg-emerald-100 text-emerald-800 dark:bg-emerald-900/70 dark:text-emerald-200 border border-emerald-300 dark:border-emerald-700">
+                <FiLock className="w-3 h-3" />
+                Live Mode Locked for Safety
+              </span>
+            </div>
+            <p className="text-xs text-gray-600 dark:text-gray-300 mt-0.5">
+              Automator navigates forms, fills screening answers, and tests fit scores, but stops at the review screen
+              without submitting.
             </p>
           </div>
         </div>
 
-        {/* Interactive Toggle Switch */}
-        <div className="flex items-center gap-2.5 shrink-0 cursor-pointer" onClick={handleLiveModeToggle}>
-          <button
-            type="button"
-            role="switch"
-            aria-checked={!config.dryRun}
-            onClick={e => {
-              e.stopPropagation();
-              handleLiveModeToggle();
-            }}
-            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors cursor-pointer focus:outline-none focus:ring-2 focus:ring-sky-500 ${
-              !config.dryRun ? 'bg-amber-500' : 'bg-slate-400 dark:bg-slate-600'
-            }`}>
-            <span
-              className={`inline-block h-4 w-4 transform rounded-full bg-white shadow-md transition-transform ${
-                !config.dryRun ? 'translate-x-6' : 'translate-x-1'
-              }`}
-            />
-          </button>
-          <span className="text-xs font-semibold text-gray-700 dark:text-gray-300 select-none">
-            {config.dryRun ? 'Dry-Run' : 'Live Mode'}
-          </span>
-        </div>
+        {/* Locked Safety Button / Trigger */}
+        <button
+          type="button"
+          onClick={() => setShowSafetyModal(true)}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-emerald-600 hover:bg-emerald-700 text-white shadow-xs transition-colors shrink-0 cursor-pointer">
+          <FiShield className="w-3.5 h-3.5" />
+          Safety Details
+        </button>
       </div>
 
       {/* Section 1: Background Narrative */}
@@ -299,7 +338,7 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
         </div>
       </div>
 
-      {/* Section 2: Core Skills List */}
+      {/* Section 2: Core Skills List with Autocomplete Dropdown */}
       <div
         className={`rounded-xl border ${
           isDarkMode ? 'border-slate-700 bg-slate-800' : 'border-gray-200 bg-white'
@@ -310,31 +349,79 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
         </div>
 
         <p className="text-xs text-gray-500 dark:text-gray-400">
-          Add skills that you are proficient in. These are evaluated during RAG Fit-Scoring and used to answer
-          years-of-experience screening questions.
+          Add skills you are proficient in. Start typing to see suggestions from over 200+ technologies or type any
+          custom skill.
         </p>
 
-        {/* Add Skill Input */}
-        <div className="flex items-center gap-2">
-          <input
-            type="text"
-            value={newSkill}
-            onChange={e => setNewSkill(e.target.value)}
-            onKeyDown={e => {
-              if (e.key === 'Enter') {
-                e.preventDefault();
-                handleAddSkill();
-              }
-            }}
-            placeholder="Type skill (e.g. React, Node.js, Python, AWS) and press Enter"
-            className={`flex-1 rounded-md border ${
-              isDarkMode ? 'border-slate-600 bg-slate-700 text-gray-100' : 'border-gray-300 bg-white text-gray-800'
-            } px-3 py-2 text-sm`}
-          />
-          <Button variant="secondary" onClick={handleAddSkill} className="flex items-center gap-1.5 px-3 py-2 text-sm">
-            <FiPlus className="w-4 h-4" />
-            Add
-          </Button>
+        {/* Autocomplete Input Box */}
+        <div className="relative" ref={skillInputContainerRef}>
+          <div className="flex items-center gap-2">
+            <div className="relative flex-1">
+              <input
+                ref={skillInputRef}
+                type="text"
+                value={newSkill}
+                onChange={e => {
+                  setNewSkill(e.target.value);
+                  setShowSuggestions(true);
+                  setHighlightedIndex(-1);
+                }}
+                onFocus={() => {
+                  if (newSkill.trim().length > 0) {
+                    setShowSuggestions(true);
+                  }
+                }}
+                onKeyDown={handleSkillKeyDown}
+                placeholder="Type skill (e.g. React, Python, AWS, Docker, Rust) and press Enter"
+                className={`w-full rounded-md border ${
+                  isDarkMode ? 'border-slate-600 bg-slate-700 text-gray-100' : 'border-gray-300 bg-white text-gray-800'
+                } px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500`}
+              />
+            </div>
+            <Button
+              variant="secondary"
+              onClick={() => handleAddSkill()}
+              className="flex items-center gap-1.5 px-3 py-2 text-sm cursor-pointer">
+              <FiPlus className="w-4 h-4" />
+              Add
+            </Button>
+          </div>
+
+          {/* Floating Autocomplete Suggestions Dropdown */}
+          {showSuggestions && filteredSuggestions.length > 0 && (
+            <div
+              className={`absolute left-0 right-16 top-full mt-1.5 z-30 max-h-60 overflow-y-auto rounded-lg shadow-xl border ${
+                isDarkMode ? 'bg-slate-800 border-slate-700 text-gray-100' : 'bg-white border-gray-200 text-gray-800'
+              }`}>
+              <div className="p-1.5 space-y-0.5">
+                <div className="px-2.5 py-1 text-[11px] font-semibold text-gray-400 uppercase tracking-wider">
+                  Matching Suggestions ({filteredSuggestions.length})
+                </div>
+                {filteredSuggestions.map((skill, index) => {
+                  const isHighlighted = index === highlightedIndex;
+                  return (
+                    <div
+                      key={skill}
+                      onMouseDown={e => {
+                        e.preventDefault();
+                        handleAddSkill(skill);
+                      }}
+                      onMouseEnter={() => setHighlightedIndex(index)}
+                      className={`flex items-center justify-between px-3 py-2 rounded-md text-sm cursor-pointer transition-colors ${
+                        isHighlighted
+                          ? 'bg-indigo-600 text-white font-medium'
+                          : isDarkMode
+                            ? 'hover:bg-slate-700 text-gray-200'
+                            : 'hover:bg-indigo-50 text-gray-800'
+                      }`}>
+                      <span>{skill}</span>
+                      <FiPlus className={`w-3.5 h-3.5 ${isHighlighted ? 'text-white' : 'text-gray-400'}`} />
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Skill Badges */}
@@ -347,7 +434,7 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
               <button
                 type="button"
                 onClick={() => handleRemoveSkill(skill)}
-                className="hover:text-red-500 rounded-full focus:outline-none">
+                className="hover:text-red-500 rounded-full focus:outline-none cursor-pointer">
                 <FiX className="w-3.5 h-3.5" />
               </button>
             </span>
@@ -447,40 +534,66 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
         </div>
       </div>
 
-      {/* Confirmation Modal for Live Mode */}
-      {showLiveConfirmModal && (
+      {/* Safety Mode Details Modal */}
+      {showSafetyModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4">
           <div
-            className={`max-w-md w-full rounded-2xl p-6 shadow-2xl border ${
-              isDarkMode ? 'bg-slate-800 border-amber-500/40 text-gray-100' : 'bg-white border-amber-400 text-gray-900'
+            className={`max-w-lg w-full rounded-2xl p-6 shadow-2xl border ${
+              isDarkMode
+                ? 'bg-slate-800 border-emerald-500/40 text-gray-100'
+                : 'bg-white border-emerald-400 text-gray-900'
             } space-y-4`}>
-            <div className="flex items-center gap-3 text-amber-600 dark:text-amber-400">
-              <div className="p-3 bg-amber-100 dark:bg-amber-950/60 rounded-xl">
-                <FiAlertTriangle className="w-6 h-6" />
+            <div className="flex items-center gap-3 text-emerald-600 dark:text-emerald-400">
+              <div className="p-3 bg-emerald-100 dark:bg-emerald-950/60 rounded-xl">
+                <FiShield className="w-6 h-6" />
               </div>
-              <h3 className="text-lg font-bold">Enable Live Application Mode?</h3>
+              <div>
+                <h3 className="text-lg font-bold">Safe Dry-Run Simulation Active</h3>
+                <p className="text-xs text-emerald-700 dark:text-emerald-300 font-medium">
+                  Live Submissions are locked for safety
+                </p>
+              </div>
             </div>
 
             <p className="text-sm text-gray-600 dark:text-gray-300 leading-relaxed">
-              In <strong>Live Mode</strong>, NanoBrowser will click the final <em>Submit application</em> button on
-              LinkedIn on your behalf.
+              NanoBrowser Easy Apply automation runs exclusively in <strong>Safe Dry-Run Simulation</strong> mode during
+              the verification phase.
             </p>
 
-            <ul className="text-xs text-gray-500 dark:text-gray-400 list-disc list-inside space-y-1">
-              <li>Ensure your candidate narrative and contact details are accurate.</li>
-              <li>Daily safe application limit ({config.dailyApplicationLimit}/day) will be strictly respected.</li>
-              <li>You can switch back to Dry-Run mode anytime.</li>
-            </ul>
+            <div className="space-y-2 text-xs text-gray-600 dark:text-gray-300 bg-emerald-50/50 dark:bg-emerald-950/20 p-3.5 rounded-xl border border-emerald-200 dark:border-emerald-800/60">
+              <div className="font-semibold text-emerald-800 dark:text-emerald-200 mb-1">
+                What Happens in Dry-Run Mode:
+              </div>
+              <div className="flex items-start gap-2">
+                <FiCheckCircle className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0 mt-0.5" />
+                <span>
+                  Validates active LinkedIn session cookies (<code>li_at</code>, <code>JSESSIONID</code>).
+                </span>
+              </div>
+              <div className="flex items-start gap-2">
+                <FiCheckCircle className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0 mt-0.5" />
+                <span>
+                  Sanitizes job descriptions and calculates RAG Fit Scores (skipping &lt; {config.minFitScore}%).
+                </span>
+              </div>
+              <div className="flex items-start gap-2">
+                <FiCheckCircle className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0 mt-0.5" />
+                <span>Solves screening questions with your Career Brain and navigates multi-step forms safely.</span>
+              </div>
+              <div className="flex items-start gap-2">
+                <FiCheckCircle className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0 mt-0.5" />
+                <span>
+                  <strong>Stops at the final review modal step without ever clicking the Submit button.</strong>
+                </span>
+              </div>
+            </div>
 
-            <div className="flex items-center justify-end gap-3 pt-2">
-              <Button variant="secondary" onClick={() => setShowLiveConfirmModal(false)} className="text-xs px-3 py-2">
-                Cancel (Keep Dry-Run)
-              </Button>
+            <div className="flex items-center justify-end pt-2">
               <Button
                 variant="primary"
-                onClick={confirmLiveMode}
-                className="bg-amber-600 hover:bg-amber-700 text-white text-xs px-3 py-2">
-                I Understand, Enable Live Mode
+                onClick={() => setShowSafetyModal(false)}
+                className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs px-4 py-2 cursor-pointer">
+                Understood (Keep Safe Dry-Run)
               </Button>
             </div>
           </div>
