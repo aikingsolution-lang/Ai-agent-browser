@@ -144,24 +144,27 @@ async function solveWithLLM(
   careerBrain: ICareerBrain,
   llm: BaseChatModel,
 ): Promise<QuestionSolution | null> {
-  const systemPrompt = `You are an AI Job Application Assistant answering screening questions on LinkedIn on behalf of the candidate.
-Rely strictly on the candidate's Career Brain background.
-If the candidate's background does NOT have enough information to answer truthfully and confidently, set "confidence": 0.2 and "isConfident": false. DO NOT GUESS OR FABRICATE.
+  const systemPrompt = `You are an elite, autonomous Job Application Assistant operating inside a strict automated pipeline. Your sole purpose is to analyze a candidate's background and answer specific job application screening questions.
 
-Respond ONLY with a JSON object:
+CRITICAL RULES:
+1. NO CHAT: You must NOT output any conversational text, greetings, markdown formatting, or preambles (do not say "Here is the answer" or use markdown code blocks).
+2. JSON ONLY: Your entire response MUST be a single, valid, parseable JSON object.
+3. STRICT TRUTH: Base your answers ONLY on the provided Candidate Profile ("Career Brain"). Do not hallucinate skills or experience. If the answer is unknown, make a logical safe guess or indicate low confidence.
+
+JSON SCHEMA REQUIREMENT:
 {
-  "answer": "<exact string answer to enter/select>",
-  "confidence": <number 0.0 to 1.0>,
-  "isConfident": <boolean, true ONLY if confidence >= 0.7>,
-  "reasoning": "<brief explanation>"
+  "question": "The exact question you are answering",
+  "answer": "The specific value to inject (e.g., '5', 'Yes', 'React')",
+  "confidenceScore": <number between 0 and 100>,
+  "requiresManualReview": <boolean, set to true if the question is highly subjective or missing from profile>
 }`;
 
-  const userPrompt = `Screening Question: "${question.questionText}"
+  const userPrompt = `Target Question: "${question.questionText}"
 Question Type: ${question.questionType}
 Available Options: ${question.options.length > 0 ? JSON.stringify(question.options) : 'Free text / numeric'}
 Required: ${question.required}
 
-Candidate Career Brain:
+Candidate Career Brain Profile:
 - Background Narrative: ${careerBrain.backgroundNarrative}
 - Skills: ${careerBrain.skills.join(', ')}
 - Years of Experience: ${careerBrain.yearsOfExperience}
@@ -170,7 +173,7 @@ Candidate Career Brain:
 - Work Authorization: ${careerBrain.workAuthorization}
 - Preferred Location: ${careerBrain.preferredLocation}
 
-Provide the best truthful answer matching one of the options if options are provided.`;
+Provide the response in the required JSON format. If options are provided, your "answer" must match one of the options.`;
 
   const response = await llm.invoke([new SystemMessage(systemPrompt), new HumanMessage(userPrompt)]);
 
@@ -184,15 +187,19 @@ Provide the best truthful answer matching one of the options if options are prov
   const jsonMatch = text.match(/\{[\s\S]*\}/);
   if (jsonMatch) {
     const parsed = JSON.parse(jsonMatch[0]);
-    const confidence = Number(parsed.confidence) || 0;
-    const isConfident = parsed.isConfident === true && confidence >= 0.7;
+    const score = Number(parsed.confidenceScore ?? parsed.confidence ?? 0);
+    // Normalize score to 0.0 - 1.0 range
+    const normalizedConfidence = score > 1 ? score / 100 : score;
+    const requiresReview = parsed.requiresManualReview === true || normalizedConfidence < 0.7;
 
     return {
       questionId: question.questionId,
       answer: String(parsed.answer || ''),
-      confidence,
-      isConfident,
-      reasoning: parsed.reasoning || 'Answered via Career Brain LLM reasoning.',
+      confidence: normalizedConfidence,
+      isConfident: !requiresReview,
+      reasoning:
+        parsed.reasoning ||
+        `Answered with confidence ${Math.round(normalizedConfidence * 100)}%. Requires review: ${requiresReview}`,
     };
   }
 
