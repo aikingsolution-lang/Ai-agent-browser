@@ -153,6 +153,20 @@ export function verifyTaskResult(
     taskLower.includes('easy apply');
 
   if (isLinkedInApplyTask) {
+    // If the planner explicitly concludes that it was unable to find/complete the task, allow graceful completion
+    const isExplicitInability =
+      taskLower.includes('unable to find') ||
+      lastMsg.toLowerCase().includes('unable to find') ||
+      lastMsg.toLowerCase().includes('could not find') ||
+      lastMsg.toLowerCase().includes('no suitable job') ||
+      lastMsg.toLowerCase().includes('task failed');
+
+    if (isExplicitInability) {
+      return {
+        isComplete: true,
+      };
+    }
+
     const validEngineStatusPhrases = [
       'linkedin easy apply result:',
       'dry_run_success',

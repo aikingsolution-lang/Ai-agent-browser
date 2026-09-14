@@ -119,11 +119,12 @@ export class Executor {
       const title = state?.title || '';
       const lastAction = this.context.actionResults[this.context.actionResults.length - 1];
       const currentTask = this.tasks[this.tasks.length - 1] || '';
+      const finalAnswer = planOutput.result.final_answer || '';
 
       const verification = verifyTaskResult(currentTask, {
         url,
         title,
-        lastActionExtractedContent: lastAction?.extractedContent ?? undefined,
+        lastActionExtractedContent: lastAction?.extractedContent || finalAnswer || undefined,
       });
 
       if (!verification.isComplete) {

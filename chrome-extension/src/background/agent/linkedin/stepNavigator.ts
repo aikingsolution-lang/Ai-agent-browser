@@ -9,7 +9,8 @@
 
 import { createLogger } from '@src/background/log';
 import type Page from '@src/background/browser/page';
-import { stepDetector, LinkedInStepDetector } from './stepDetector';
+import type { LinkedInStepDetector } from './stepDetector';
+import { stepDetector } from './stepDetector';
 import type { EasyApplyStepType, IStepDetectionResult, IStepTransitionResult, JobApplicationStatus } from './types';
 
 const logger = createLogger('LinkedInStepNavigator');
