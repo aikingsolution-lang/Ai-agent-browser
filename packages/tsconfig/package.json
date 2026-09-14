@@ -2,5 +2,10 @@
   "name": "@extension/tsconfig",
   "version": "0.1.13",
   "description": "chrome extension - tsconfig",
-  "private": true
+  "private": true,
+  "files": [
+    "base.json",
+    "utils.json",
+    "app.json"
+  ]
 }
