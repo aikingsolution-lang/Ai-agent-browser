@@ -324,7 +324,8 @@ export class ActionBuilder {
             const isDone =
               result.status === 'APPLIED' ||
               result.status === 'DRY_RUN_SUCCESS' ||
-              result.status === 'SKIPPED_JOB_REMOVED';
+              result.status === 'SKIPPED_JOB_REMOVED' ||
+              result.status === 'SKIPPED_MISSING_RESUME';
 
             this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_OK, statusMsg);
             return new ActionResult({
@@ -966,7 +967,10 @@ export class ActionBuilder {
 
         const statusMsg = `LinkedIn Easy Apply Result: ${result.status} | Job: "${jobData.title}" at "${jobData.company}" | Fit Score evaluated`;
         const isDone =
-          result.status === 'APPLIED' || result.status === 'DRY_RUN_SUCCESS' || result.status === 'SKIPPED_JOB_REMOVED';
+          result.status === 'APPLIED' ||
+          result.status === 'DRY_RUN_SUCCESS' ||
+          result.status === 'SKIPPED_JOB_REMOVED' ||
+          result.status === 'SKIPPED_MISSING_RESUME';
 
         this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_OK, statusMsg);
         return new ActionResult({

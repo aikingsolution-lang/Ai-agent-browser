@@ -533,6 +533,15 @@ export class ApplicationEngine {
         collectedQuestions.push(...fillResult.questionsAnswered);
       }
 
+      if (fillResult.isMissingResume) {
+        logger.warning(`[ApplicationEngine] 🛑 Missing pre-uploaded resume: ${fillResult.reason}`);
+        this.state.status = 'SKIPPED_MISSING_RESUME';
+        if (fillResult.reason) this.state.errors.push(fillResult.reason);
+        // Cleanly dismiss the modal so browser isn't left stuck with modal open
+        await this.stepNavigatorService.dismissModal(this.page).catch(() => {});
+        break;
+      }
+
       if (fillResult.needsManualReview) {
         logger.warning(`[ApplicationEngine] Manual review required: ${fillResult.reason}`);
         this.state.status = 'NEEDS_MANUAL_REVIEW';

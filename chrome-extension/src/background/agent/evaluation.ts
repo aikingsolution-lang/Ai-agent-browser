@@ -178,6 +178,7 @@ export function verifyTaskResult(
       'daily application quota reached',
       'skipped_external_site',
       'skipped_job_removed',
+      'skipped_missing_resume',
       'job removed or unavailable',
       'circuit breaker tripped',
     ];

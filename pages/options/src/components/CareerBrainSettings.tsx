@@ -19,6 +19,7 @@ import {
   FiSliders,
   FiLock,
   FiCheckCircle,
+  FiFileText,
 } from 'react-icons/fi';
 import { PREDEFINED_TECH_SKILLS } from '../constants/skillsList';
 
@@ -145,29 +146,29 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
         <Button
           variant="primary"
           onClick={handleSave}
-          className="flex items-center gap-2 bg-sky-600 hover:bg-sky-700 text-white px-4 py-2">
-          {saveSuccess ? <FiCheck className="w-4 h-4 text-green-300" /> : null}
+          className="flex items-center gap-2 bg-sky-600 px-4 py-2 text-white hover:bg-sky-700">
+          {saveSuccess ? <FiCheck className="size-4 text-green-300" /> : null}
           {saveSuccess ? 'Saved Successfully!' : 'Save Settings'}
         </Button>
       </div>
 
       {/* Safety Mode Banner — Hardcoded Safe Dry-Run */}
-      <div className="p-4 rounded-xl border flex items-center justify-between bg-emerald-50/80 dark:bg-emerald-950/30 border-emerald-200 dark:border-emerald-800">
+      <div className="flex items-center justify-between rounded-xl border border-emerald-200 bg-emerald-50/80 p-4 dark:border-emerald-800 dark:bg-emerald-950/30">
         <div className="flex items-center gap-3">
-          <div className="p-2 rounded-lg bg-emerald-100 text-emerald-700 dark:bg-emerald-900/60 dark:text-emerald-300">
-            <FiShield className="w-5 h-5" />
+          <div className="rounded-lg bg-emerald-100 p-2 text-emerald-700 dark:bg-emerald-900/60 dark:text-emerald-300">
+            <FiShield className="size-5" />
           </div>
           <div>
             <div className="flex items-center gap-2">
               <h4 className="text-sm font-bold text-gray-900 dark:text-white">
                 Current Mode: 🛡️ Safe Dry-Run (Simulation Active)
               </h4>
-              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-semibold bg-emerald-100 text-emerald-800 dark:bg-emerald-900/70 dark:text-emerald-200 border border-emerald-300 dark:border-emerald-700">
-                <FiLock className="w-3 h-3" />
+              <span className="inline-flex items-center gap-1 rounded border border-emerald-300 bg-emerald-100 px-2 py-0.5 text-[11px] font-semibold text-emerald-800 dark:border-emerald-700 dark:bg-emerald-900/70 dark:text-emerald-200">
+                <FiLock className="size-3" />
                 Live Mode Locked for Safety
               </span>
             </div>
-            <p className="text-xs text-gray-600 dark:text-gray-300 mt-0.5">
+            <p className="mt-0.5 text-xs text-gray-600 dark:text-gray-300">
               Automator navigates forms, fills screening answers, and tests fit scores, but stops at the review screen
               without submitting.
             </p>
@@ -178,19 +179,40 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
         <button
           type="button"
           onClick={() => setShowSafetyModal(true)}
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-emerald-600 hover:bg-emerald-700 text-white shadow-xs transition-colors shrink-0 cursor-pointer">
-          <FiShield className="w-3.5 h-3.5" />
+          className="shadow-xs flex shrink-0 cursor-pointer items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-emerald-700">
+          <FiShield className="size-3.5" />
           Safety Details
         </button>
+      </div>
+
+      {/* Step 1: User Education / Resume Setup Notice */}
+      <div className="flex items-start gap-3 rounded-xl border border-sky-200 bg-sky-50/80 p-4 dark:border-sky-800 dark:bg-sky-950/30">
+        <div className="rounded-lg bg-sky-100 p-2 text-sky-700 dark:bg-sky-900/60 dark:text-sky-300">
+          <FiFileText className="size-5" />
+        </div>
+        <div>
+          <h4 className="text-sm font-bold text-gray-900 dark:text-white">
+            📄 Seamless Automation Tip: One-Time Resume Setup
+          </h4>
+          <p className="mt-1 text-xs leading-relaxed text-gray-600 dark:text-gray-300">
+            Due to browser security sandbox rules, background agents cannot inject local files into web uploaders.
+            <strong className="font-semibold text-sky-700 dark:text-sky-300">
+              {' '}
+              Please ensure you have manually applied to at least one job on LinkedIn with your latest PDF resume.
+            </strong>{' '}
+            Our engine will automatically detect and select your most recent uploaded resume for all subsequent Easy
+            Apply applications.
+          </p>
+        </div>
       </div>
 
       {/* Section 1: Background Narrative */}
       <div
         className={`rounded-xl border ${
           isDarkMode ? 'border-slate-700 bg-slate-800' : 'border-gray-200 bg-white'
-        } p-6 shadow-sm space-y-4`}>
-        <div className="flex items-center gap-2.5 pb-2 border-b border-gray-100 dark:border-gray-700">
-          <FiUser className="w-5 h-5 text-sky-500" />
+        } space-y-4 p-6 shadow-sm`}>
+        <div className="flex items-center gap-2.5 border-b border-gray-100 pb-2 dark:border-gray-700">
+          <FiUser className="size-5 text-sky-500" />
           <h3 className="text-base font-bold text-gray-900 dark:text-white">Candidate Background Narrative</h3>
         </div>
 
@@ -201,8 +223,8 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
             </label>
             <span className="text-xs text-gray-400">{careerBrain.backgroundNarrative.length} characters</span>
           </div>
-          <p className="text-xs text-gray-500 dark:text-gray-400 flex items-center gap-1.5">
-            <FiInfo className="w-3.5 h-3.5 text-sky-500 shrink-0" />
+          <p className="flex items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400">
+            <FiInfo className="size-3.5 shrink-0 text-sky-500" />
             Write your background in natural paragraphs. The AI screening solver reads this context to truthfully answer
             custom questions (e.g., tech experience, leadership, project highlights).
           </p>
@@ -218,9 +240,9 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
         </div>
 
         {/* Structured Profile Fields Grid */}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2">
+        <div className="grid grid-cols-1 gap-4 pt-2 md:grid-cols-2">
           <div>
-            <label className="block text-xs font-semibold text-gray-700 dark:text-gray-300 mb-1">
+            <label className="mb-1 block text-xs font-semibold text-gray-700 dark:text-gray-300">
               Current / Target Job Title
             </label>
             <input
@@ -235,7 +257,7 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
           </div>
 
           <div>
-            <label className="block text-xs font-semibold text-gray-700 dark:text-gray-300 mb-1">
+            <label className="mb-1 block text-xs font-semibold text-gray-700 dark:text-gray-300">
               Total Years of Experience
             </label>
             <input
@@ -251,7 +273,7 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
           </div>
 
           <div>
-            <label className="block text-xs font-semibold text-gray-700 dark:text-gray-300 mb-1">
+            <label className="mb-1 block text-xs font-semibold text-gray-700 dark:text-gray-300">
               Notice Period / Availability
             </label>
             <input
@@ -266,7 +288,7 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
           </div>
 
           <div>
-            <label className="block text-xs font-semibold text-gray-700 dark:text-gray-300 mb-1">
+            <label className="mb-1 block text-xs font-semibold text-gray-700 dark:text-gray-300">
               Work Authorization Status
             </label>
             <input
@@ -281,7 +303,7 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
           </div>
 
           <div>
-            <label className="block text-xs font-semibold text-gray-700 dark:text-gray-300 mb-1">
+            <label className="mb-1 block text-xs font-semibold text-gray-700 dark:text-gray-300">
               Target Salary Expectation
             </label>
             <input
@@ -296,7 +318,7 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
           </div>
 
           <div>
-            <label className="block text-xs font-semibold text-gray-700 dark:text-gray-300 mb-1">
+            <label className="mb-1 block text-xs font-semibold text-gray-700 dark:text-gray-300">
               Preferred Location / Remote
             </label>
             <input
@@ -311,7 +333,7 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
           </div>
 
           <div>
-            <label className="block text-xs font-semibold text-gray-700 dark:text-gray-300 mb-1">Contact Phone</label>
+            <label className="mb-1 block text-xs font-semibold text-gray-700 dark:text-gray-300">Contact Phone</label>
             <input
               type="tel"
               value={careerBrain.phoneNumber}
@@ -324,7 +346,7 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
           </div>
 
           <div>
-            <label className="block text-xs font-semibold text-gray-700 dark:text-gray-300 mb-1">Contact Email</label>
+            <label className="mb-1 block text-xs font-semibold text-gray-700 dark:text-gray-300">Contact Email</label>
             <input
               type="email"
               value={careerBrain.email}
@@ -342,9 +364,9 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
       <div
         className={`rounded-xl border ${
           isDarkMode ? 'border-slate-700 bg-slate-800' : 'border-gray-200 bg-white'
-        } p-6 shadow-sm space-y-4`}>
-        <div className="flex items-center gap-2.5 pb-2 border-b border-gray-100 dark:border-gray-700">
-          <FiCode className="w-5 h-5 text-indigo-500" />
+        } space-y-4 p-6 shadow-sm`}>
+        <div className="flex items-center gap-2.5 border-b border-gray-100 pb-2 dark:border-gray-700">
+          <FiCode className="size-5 text-indigo-500" />
           <h3 className="text-base font-bold text-gray-900 dark:text-white">Core Skills & Tech Stack</h3>
         </div>
 
@@ -381,8 +403,8 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
             <Button
               variant="secondary"
               onClick={() => handleAddSkill()}
-              className="flex items-center gap-1.5 px-3 py-2 text-sm cursor-pointer">
-              <FiPlus className="w-4 h-4" />
+              className="flex cursor-pointer items-center gap-1.5 px-3 py-2 text-sm">
+              <FiPlus className="size-4" />
               Add
             </Button>
           </div>
@@ -390,11 +412,11 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
           {/* Floating Autocomplete Suggestions Dropdown */}
           {showSuggestions && filteredSuggestions.length > 0 && (
             <div
-              className={`absolute left-0 right-16 top-full mt-1.5 z-30 max-h-60 overflow-y-auto rounded-lg shadow-xl border ${
-                isDarkMode ? 'bg-slate-800 border-slate-700 text-gray-100' : 'bg-white border-gray-200 text-gray-800'
+              className={`absolute left-0 right-16 top-full z-30 mt-1.5 max-h-60 overflow-y-auto rounded-lg border shadow-xl ${
+                isDarkMode ? 'border-slate-700 bg-slate-800 text-gray-100' : 'border-gray-200 bg-white text-gray-800'
               }`}>
-              <div className="p-1.5 space-y-0.5">
-                <div className="px-2.5 py-1 text-[11px] font-semibold text-gray-400 uppercase tracking-wider">
+              <div className="space-y-0.5 p-1.5">
+                <div className="px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wider text-gray-400">
                   Matching Suggestions ({filteredSuggestions.length})
                 </div>
                 {filteredSuggestions.map((skill, index) => {
@@ -407,15 +429,15 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
                         handleAddSkill(skill);
                       }}
                       onMouseEnter={() => setHighlightedIndex(index)}
-                      className={`flex items-center justify-between px-3 py-2 rounded-md text-sm cursor-pointer transition-colors ${
+                      className={`flex cursor-pointer items-center justify-between rounded-md px-3 py-2 text-sm transition-colors ${
                         isHighlighted
-                          ? 'bg-indigo-600 text-white font-medium'
+                          ? 'bg-indigo-600 font-medium text-white'
                           : isDarkMode
-                            ? 'hover:bg-slate-700 text-gray-200'
-                            : 'hover:bg-indigo-50 text-gray-800'
+                            ? 'text-gray-200 hover:bg-slate-700'
+                            : 'text-gray-800 hover:bg-indigo-50'
                       }`}>
                       <span>{skill}</span>
-                      <FiPlus className={`w-3.5 h-3.5 ${isHighlighted ? 'text-white' : 'text-gray-400'}`} />
+                      <FiPlus className={`size-3.5 ${isHighlighted ? 'text-white' : 'text-gray-400'}`} />
                     </div>
                   );
                 })}
@@ -429,18 +451,18 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
           {careerBrain.skills.map(skill => (
             <span
               key={skill}
-              className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium bg-sky-100 text-sky-800 dark:bg-sky-900/60 dark:text-sky-200 border border-sky-200 dark:border-sky-800">
+              className="inline-flex items-center gap-1.5 rounded-full border border-sky-200 bg-sky-100 px-3 py-1 text-xs font-medium text-sky-800 dark:border-sky-800 dark:bg-sky-900/60 dark:text-sky-200">
               {skill}
               <button
                 type="button"
                 onClick={() => handleRemoveSkill(skill)}
-                className="hover:text-red-500 rounded-full focus:outline-none cursor-pointer">
-                <FiX className="w-3.5 h-3.5" />
+                className="cursor-pointer rounded-full hover:text-red-500 focus:outline-none">
+                <FiX className="size-3.5" />
               </button>
             </span>
           ))}
           {careerBrain.skills.length === 0 && (
-            <span className="text-xs text-gray-400 italic">No skills added yet. Type a skill above to add.</span>
+            <span className="text-xs italic text-gray-400">No skills added yet. Type a skill above to add.</span>
           )}
         </div>
       </div>
@@ -449,16 +471,16 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
       <div
         className={`rounded-xl border ${
           isDarkMode ? 'border-slate-700 bg-slate-800' : 'border-gray-200 bg-white'
-        } p-6 shadow-sm space-y-4`}>
-        <div className="flex items-center gap-2.5 pb-2 border-b border-gray-100 dark:border-gray-700">
-          <FiSliders className="w-5 h-5 text-purple-500" />
+        } space-y-4 p-6 shadow-sm`}>
+        <div className="flex items-center gap-2.5 border-b border-gray-100 pb-2 dark:border-gray-700">
+          <FiSliders className="size-5 text-purple-500" />
           <h3 className="text-base font-bold text-gray-900 dark:text-white">Job Search & Safeties Configuration</h3>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
           {/* Target Job Title */}
           <div>
-            <label className="block text-xs font-semibold text-gray-700 dark:text-gray-300 mb-1">
+            <label className="mb-1 block text-xs font-semibold text-gray-700 dark:text-gray-300">
               Target Search Role / Keywords
             </label>
             <input
@@ -474,7 +496,7 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
 
           {/* Target Location */}
           <div>
-            <label className="block text-xs font-semibold text-gray-700 dark:text-gray-300 mb-1">
+            <label className="mb-1 block text-xs font-semibold text-gray-700 dark:text-gray-300">
               Target Search Location
             </label>
             <input
@@ -490,7 +512,7 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
 
           {/* Min Fit Score Threshold */}
           <div>
-            <div className="flex items-center justify-between mb-1">
+            <div className="mb-1 flex items-center justify-between">
               <label className="text-xs font-semibold text-gray-700 dark:text-gray-300">
                 Minimum Fit Score Threshold
               </label>
@@ -503,16 +525,16 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
               step={5}
               value={config.minFitScore}
               onChange={e => setConfig(prev => ({ ...prev, minFitScore: Number(e.target.value) }))}
-              className="w-full accent-sky-600 cursor-pointer"
+              className="w-full cursor-pointer accent-sky-600"
             />
-            <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+            <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
               Jobs with RAG fit score below {config.minFitScore} are automatically skipped. (Default: 75)
             </p>
           </div>
 
           {/* Daily Application Limit */}
           <div>
-            <label className="block text-xs font-semibold text-gray-700 dark:text-gray-300 mb-1">
+            <label className="mb-1 block text-xs font-semibold text-gray-700 dark:text-gray-300">
               Daily Application Limit (Safe Quota)
             </label>
             <input
@@ -527,7 +549,7 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
                 isDarkMode ? 'border-slate-600 bg-slate-700 text-gray-100' : 'border-gray-300 bg-white text-gray-800'
               } px-3 py-2 text-sm`}
             />
-            <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+            <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
               Maximum applications per day. Automatically pauses and reschedules for next day upon limit.
             </p>
           </div>
@@ -536,52 +558,52 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
 
       {/* Safety Mode Details Modal */}
       {showSafetyModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4">
+        <div className="backdrop-blur-xs fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
           <div
-            className={`max-w-lg w-full rounded-2xl p-6 shadow-2xl border ${
+            className={`w-full max-w-lg rounded-2xl border p-6 shadow-2xl ${
               isDarkMode
-                ? 'bg-slate-800 border-emerald-500/40 text-gray-100'
-                : 'bg-white border-emerald-400 text-gray-900'
+                ? 'border-emerald-500/40 bg-slate-800 text-gray-100'
+                : 'border-emerald-400 bg-white text-gray-900'
             } space-y-4`}>
             <div className="flex items-center gap-3 text-emerald-600 dark:text-emerald-400">
-              <div className="p-3 bg-emerald-100 dark:bg-emerald-950/60 rounded-xl">
-                <FiShield className="w-6 h-6" />
+              <div className="rounded-xl bg-emerald-100 p-3 dark:bg-emerald-950/60">
+                <FiShield className="size-6" />
               </div>
               <div>
                 <h3 className="text-lg font-bold">Safe Dry-Run Simulation Active</h3>
-                <p className="text-xs text-emerald-700 dark:text-emerald-300 font-medium">
+                <p className="text-xs font-medium text-emerald-700 dark:text-emerald-300">
                   Live Submissions are locked for safety
                 </p>
               </div>
             </div>
 
-            <p className="text-sm text-gray-600 dark:text-gray-300 leading-relaxed">
+            <p className="text-sm leading-relaxed text-gray-600 dark:text-gray-300">
               NanoBrowser Easy Apply automation runs exclusively in <strong>Safe Dry-Run Simulation</strong> mode during
               the verification phase.
             </p>
 
-            <div className="space-y-2 text-xs text-gray-600 dark:text-gray-300 bg-emerald-50/50 dark:bg-emerald-950/20 p-3.5 rounded-xl border border-emerald-200 dark:border-emerald-800/60">
-              <div className="font-semibold text-emerald-800 dark:text-emerald-200 mb-1">
+            <div className="space-y-2 rounded-xl border border-emerald-200 bg-emerald-50/50 p-3.5 text-xs text-gray-600 dark:border-emerald-800/60 dark:bg-emerald-950/20 dark:text-gray-300">
+              <div className="mb-1 font-semibold text-emerald-800 dark:text-emerald-200">
                 What Happens in Dry-Run Mode:
               </div>
               <div className="flex items-start gap-2">
-                <FiCheckCircle className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0 mt-0.5" />
+                <FiCheckCircle className="mt-0.5 size-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
                 <span>
                   Validates active LinkedIn session cookies (<code>li_at</code>, <code>JSESSIONID</code>).
                 </span>
               </div>
               <div className="flex items-start gap-2">
-                <FiCheckCircle className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0 mt-0.5" />
+                <FiCheckCircle className="mt-0.5 size-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
                 <span>
                   Sanitizes job descriptions and calculates RAG Fit Scores (skipping &lt; {config.minFitScore}%).
                 </span>
               </div>
               <div className="flex items-start gap-2">
-                <FiCheckCircle className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0 mt-0.5" />
+                <FiCheckCircle className="mt-0.5 size-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
                 <span>Solves screening questions with your Career Brain and navigates multi-step forms safely.</span>
               </div>
               <div className="flex items-start gap-2">
-                <FiCheckCircle className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0 mt-0.5" />
+                <FiCheckCircle className="mt-0.5 size-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
                 <span>
                   <strong>Stops at the final review modal step without ever clicking the Submit button.</strong>
                 </span>
@@ -592,7 +614,7 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
               <Button
                 variant="primary"
                 onClick={() => setShowSafetyModal(false)}
-                className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs px-4 py-2 cursor-pointer">
+                className="cursor-pointer bg-emerald-600 px-4 py-2 text-xs text-white hover:bg-emerald-700">
                 Understood (Keep Safe Dry-Run)
               </Button>
             </div>

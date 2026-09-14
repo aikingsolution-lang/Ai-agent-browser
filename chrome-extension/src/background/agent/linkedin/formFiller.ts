@@ -19,6 +19,7 @@ export interface FormFillResult {
   success: boolean;
   questionsAnswered: IScreeningQuestion[];
   needsManualReview: boolean;
+  isMissingResume?: boolean;
   reason?: string;
 }
 
@@ -89,9 +90,9 @@ export class LinkedInFormFiller {
   }
 
   /**
-   * Handles the RESUME step.
-   * If existing uploaded resumes are listed, selects the top/latest one.
-   * If a file upload is required, prepares attachment.
+   * Handles the RESUME step (Option B: Sandbox Escape).
+   * Targets pre-uploaded resume radio buttons and cards with full React synthetic event dispatch.
+   * If no pre-uploaded resume exists, returns isMissingResume: true to trigger graceful SKIPPED_MISSING_RESUME.
    */
   private async handleResumeStep(page: Page, _careerBrain: ICareerBrain): Promise<FormFillResult> {
     const puppeteerPage = page.puppeteerPage;
@@ -102,46 +103,84 @@ export class LinkedInFormFiller {
         const modal = document.querySelector(
           'div[role="dialog"][aria-modal="true"], .jobs-easy-apply-modal, div[data-test-modal]',
         );
-        if (!modal) return { success: false, reason: 'Modal not found' };
+        if (!modal) return { success: false, reason: 'Modal not found', missingResume: true };
 
-        // Check for existing uploaded resume cards / radio options
+        // Full React-compatible click & change event simulator
+        const triggerReactSelection = (el: HTMLElement) => {
+          const clickEvents = ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'];
+          for (const ev of clickEvents) {
+            el.dispatchEvent(new MouseEvent(ev, { bubbles: true, cancelable: true, view: window }));
+          }
+
+          if (el instanceof HTMLInputElement && el.type === 'radio') {
+            el.checked = true;
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+          }
+        };
+
+        // 1. Check for existing uploaded resume cards / radio options (Modern & Legacy)
         const resumeRadios = Array.from(
           modal.querySelectorAll<HTMLInputElement>(
-            'input[type="radio"][name*="resume" i], .jobs-document-upload__file-input, .ui-attachment',
+            'input[type="radio"][name*="resume" i], input[type="radio"][id*="resume" i], .jobs-document-upload__file-input, .ui-attachment input[type="radio"]',
           ),
         );
 
         if (resumeRadios.length > 0) {
           // Select the first (most recent) resume option
           const targetRadio = resumeRadios[0];
-          targetRadio.click();
-          targetRadio.checked = true;
-          targetRadio.dispatchEvent(new Event('change', { bubbles: true }));
+          triggerReactSelection(targetRadio);
+
+          // Also trigger on label or closest clickable container if present
+          const parentLabel = targetRadio.closest('label') || targetRadio.parentElement;
+          if (parentLabel) triggerReactSelection(parentLabel);
+
           return { success: true, selectedExisting: true };
         }
 
-        // Check if there are clickable resume cards/items
+        // 2. Check for role="radio" or clickable resume cards/items
         const resumeCards = Array.from(
           modal.querySelectorAll<HTMLElement>(
-            'li.jobs-resume-picker__resume-list-item, div[data-test-resume-item], [aria-label*="resume" i]',
+            'li.jobs-resume-picker__resume-list-item, div[role="radio"], div[data-test-resume-item], .jobs-document-upload__file-info',
           ),
         );
 
         if (resumeCards.length > 0) {
-          resumeCards[0].click();
+          triggerReactSelection(resumeCards[0]);
           return { success: true, selectedExisting: true };
         }
 
-        // Check if file upload button is present
+        // 3. If only file input / upload button exists with 0 uploaded resumes
         const fileInput = modal.querySelector<HTMLInputElement>('input[type="file"]');
-        if (fileInput) {
-          return { success: true, needsUpload: true };
+        const uploadBtn = modal.querySelector<HTMLButtonElement>(
+          'button[aria-label*="Upload resume" i], .jobs-document-upload__upload-button',
+        );
+
+        if (fileInput || uploadBtn) {
+          return {
+            success: false,
+            missingResume: true,
+            reason: 'No pre-uploaded resume found on LinkedIn profile.',
+          };
         }
 
-        return { success: true, reason: 'Resume step has no selectable cards or already selected' };
+        return { success: true, reason: 'Resume step already pre-selected or no action required' };
       });
 
       logger.info('[FormFiller] Resume step evaluated:', resumeSelected);
+
+      if (resumeSelected.missingResume) {
+        logger.warning(
+          '[FormFiller] ⚠️ No pre-uploaded resume found in Easy Apply modal. Flagging SKIPPED_MISSING_RESUME.',
+        );
+        return {
+          success: false,
+          isMissingResume: true,
+          questionsAnswered: [],
+          needsManualReview: false,
+          reason: 'No pre-uploaded resume available on LinkedIn profile.',
+        };
+      }
 
       return {
         success: true,
@@ -163,7 +202,7 @@ export class LinkedInFormFiller {
         success: false,
         questionsAnswered: [],
         needsManualReview: true,
-        reason: 'Failed to process resume selection step.',
+        reason: `Resume selection error: ${err instanceof Error ? err.message : String(err)}`,
       };
     }
   }

@@ -16,6 +16,7 @@ export const JOB_APPLICATION_STATUSES = [
   'PENDING_RESUME_APPROVAL',
   'SKIPPED_EXTERNAL_SITE',
   'SKIPPED_JOB_REMOVED',
+  'SKIPPED_MISSING_RESUME',
 ] as const;
 
 export type JobApplicationStatus = (typeof JOB_APPLICATION_STATUSES)[number];
