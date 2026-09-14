@@ -190,6 +190,54 @@ export class Executor {
           const currentState = await currentPage.getState().catch(() => null);
           const currentTitle = currentState?.title || '';
 
+          // 0. Option A: The CAPTCHA & Security Shield (Anomaly Detector)
+          const captchaCheck = await currentPage.detectCaptchaOrSecurityCheck();
+          if (captchaCheck.isCaptcha) {
+            const pauseMsg = `🛡️ Security Challenge Detected: ${captchaCheck.type}. Pausing agent for human verification...`;
+            logger.warning(pauseMsg);
+            this.context.emitEvent(Actors.SYSTEM, ExecutionState.TASK_PAUSE, pauseMsg);
+
+            // Play audible beep or alert if available and notify user
+            this.context.pause();
+
+            // Wait until the human solves the CAPTCHA and page clears it
+            let solved = false;
+            for (let waitSec = 0; waitSec < 180; waitSec++) {
+              // Max 3 minutes wait
+              await new Promise(resolve => setTimeout(resolve, 2000));
+              const recheck = await currentPage.detectCaptchaOrSecurityCheck().catch(() => ({ isCaptcha: false }));
+              if (!recheck.isCaptcha) {
+                solved = true;
+                break;
+              }
+              // If user cancelled/stopped while waiting
+              if (this.context.stopped) {
+                break;
+              }
+            }
+
+            if (solved) {
+              logger.info('✅ Security Challenge cleared by user. Resuming autonomous pipeline...');
+              this.context.resume();
+              this.context.emitEvent(
+                Actors.SYSTEM,
+                ExecutionState.TASK_RESUME,
+                'Security verification passed. Agent resumed.',
+              );
+            } else if (!this.context.stopped) {
+              const failMsg =
+                'Security challenge was not resolved within timeout (3 minutes). Execution aborted safely.';
+              logger.error(failMsg);
+              this.context.finalAnswer = failMsg;
+              this.context.emitEvent(Actors.SYSTEM, ExecutionState.TASK_FAIL, failMsg);
+              if (latestPlanOutput?.result) {
+                latestPlanOutput.result.done = true;
+                latestPlanOutput.result.final_answer = this.context.finalAnswer;
+              }
+              break;
+            }
+          }
+
           // 1. Check for dead / removed job page signatures
           const deadPage = await currentPage.detectDeadJobOrErrorPage();
           if (deadPage.isDeadJob) {

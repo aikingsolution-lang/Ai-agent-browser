@@ -42,6 +42,7 @@ ${commonSecurityRules}
       * Navigate to the LinkedIn job listing page first.
       * Once on a job page with an Easy Apply button, instruct the navigator to use the 'linkedin_easy_apply' action.
       * CRITICAL DEAD END / REMOVED POSTING RULE: If the page displays an error like 'Unable to load the page', 'Job id provided may not be valid', 'Job posting has been removed', or 'No longer accepting applications', DO NOT attempt to find apply buttons or re-navigate to the dead job! IMMEDIATELY recognize this as a dead end. Set "done": true, set "next_steps": "", and state in "final_answer" that the target job posting has been removed or is unavailable on LinkedIn, or instruct navigator to proceed to the next job listing.
+      * CRITICAL SECURITY / CAPTCHA RULE: If a security verification or CAPTCHA appears (e.g. Arkose Labs, Quick security check, Let us know you are human), DO NOT attempt automated button clicks. The background engine will automatically pause execution for human resolution.
       * The Easy Apply engine handles fit scoring, form filling, screening questions, and submission automatically.
       * Only set done=true when the linkedin_easy_apply action returns a definitive result status (DRY_RUN_SUCCESS, APPLIED, NEEDS_MANUAL_REVIEW, SKIPPED_JOB_REMOVED, etc.) or if the job is confirmed dead/removed.
       * A simple button click alone does NOT constitute a successful application.

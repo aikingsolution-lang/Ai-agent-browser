@@ -64,7 +64,7 @@ Common action sequences:
   * DEAD END ERROR DETECTION: If the page says 'Unable to load the page', 'Job id provided may not be valid', or 'job posting has been removed', do NOT scroll or attempt to click buttons on this dead page. Immediately return the done action with success: false and explain that the job posting has been removed.
   * When on a LinkedIn job page to apply, ALWAYS use the 'linkedin_easy_apply' action. Do NOT use generic click on the Easy Apply button.
 - If you want to research something, open a new tab instead of using the current tab
-- If captcha pops up, try to solve it if a screenshot image is provided - else try a different approach
+- If captcha or security challenge pops up, the engine will automatically pause for human verification. Do not click random puzzle items or hallucinate actions.
 - If the page is not fully loaded, use wait action
 
 5. TASK COMPLETION:

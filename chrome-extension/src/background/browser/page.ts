@@ -1480,6 +1480,66 @@ export default class Page {
     }
   }
 
+  /**
+   * Option A: The CAPTCHA & Security Shield (Anomaly Detector)
+   * Detects Arkose Labs FunCAPTCHA, reCAPTCHA, Cloudflare challenge, or LinkedIn security verification check.
+   */
+  async detectCaptchaOrSecurityCheck(): Promise<{ isCaptcha: boolean; type?: string }> {
+    if (!this._puppeteerPage) {
+      return { isCaptcha: false };
+    }
+
+    try {
+      return await this._puppeteerPage.evaluate(() => {
+        // 1. Selector signatures for known CAPTCHA widgets & iframes
+        const captchaSelectors = [
+          'iframe[src*="arkoselabs"]',
+          'iframe[src*="funcaptcha"]',
+          'iframe[src*="recaptcha"]',
+          'iframe[src*="hcaptcha"]',
+          'iframe[src*="challenge"]',
+          'div#captcha-internal',
+          'div.checkpoint-challenge',
+          'div#app__container.checkpoint',
+          'form#checkpoint-challenge-form',
+          'div[data-callback*="captcha"]',
+          '.g-recaptcha',
+          '.h-captcha',
+        ];
+
+        for (const sel of captchaSelectors) {
+          const el = document.querySelector(sel);
+          if (el) {
+            return { isCaptcha: true, type: `Security widget (${sel})` };
+          }
+        }
+
+        // 2. Text signatures for LinkedIn Security Verification / Challenge
+        const bodyText = (document.body?.innerText || document.body?.textContent || '').toLowerCase();
+        const securityPhrases = [
+          'quick security check',
+          'let us know you are human',
+          'verify your identity',
+          'security verification',
+          'please solve this puzzle',
+          'unusual traffic from your computer network',
+          'press & hold',
+          'press and hold',
+        ];
+
+        for (const phrase of securityPhrases) {
+          if (bodyText.includes(phrase)) {
+            return { isCaptcha: true, type: phrase };
+          }
+        }
+
+        return { isCaptcha: false };
+      });
+    } catch {
+      return { isCaptcha: false };
+    }
+  }
+
   async getElementByIndex(index: number): Promise<ElementHandle | null> {
     const selectorMap = this.getSelectorMap();
     const element = selectorMap.get(index);

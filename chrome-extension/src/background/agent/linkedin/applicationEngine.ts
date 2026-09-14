@@ -488,6 +488,32 @@ export class ApplicationEngine {
     let reachedReview = false;
 
     for (let stepCount = 0; stepCount < this.config.maxModalSteps; stepCount++) {
+      // 0. CAPTCHA Shield: Anomaly Check before interacting with modal
+      const captchaStatus = await this.page.detectCaptchaOrSecurityCheck();
+      if (captchaStatus.isCaptcha) {
+        logger.warning(
+          `[ApplicationEngine] 🛡️ Security Challenge / CAPTCHA detected (${captchaStatus.type}). Pausing for user resolution...`,
+        );
+        let solved = false;
+        for (let waitSec = 0; waitSec < 180; waitSec++) {
+          await this.sleep(2000);
+          const recheck = await this.page.detectCaptchaOrSecurityCheck().catch(() => ({ isCaptcha: false }));
+          if (!recheck.isCaptcha) {
+            solved = true;
+            break;
+          }
+        }
+        if (!solved) {
+          logger.error('[ApplicationEngine] Security challenge was not cleared in 3 minutes. Aborting application.');
+          this.state.status = 'NEEDS_MANUAL_REVIEW';
+          this.state.errors.push(`Security verification challenge (${captchaStatus.type}) timed out.`);
+          break;
+        } else {
+          logger.info('[ApplicationEngine] ✅ Security challenge cleared by user. Resuming application flow...');
+          await this.sleep(1500);
+        }
+      }
+
       let stepResult = await this.stepDetectorService.detectCurrentStep(this.page);
 
       if (!stepResult.isModalOpen) {
