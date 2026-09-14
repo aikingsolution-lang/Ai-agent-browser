@@ -177,6 +177,9 @@ export function verifyTaskResult(
       'already processed/applied',
       'daily application quota reached',
       'skipped_external_site',
+      'skipped_job_removed',
+      'job removed or unavailable',
+      'circuit breaker tripped',
     ];
 
     const hasEngineConfirmation = validEngineStatusPhrases.some(phrase => lastMsg.toLowerCase().includes(phrase));

@@ -41,9 +41,9 @@ ${commonSecurityRules}
       * CRITICAL DISTRACTION RULE: Ignore any global warning banners on LinkedIn (such as 'There was a problem processing your payment', 'Update payment method', or 'Claim Premium for 2 months'). These are subscription/upsell banners and have ZERO impact on job search or applying. Completely ignore them and focus solely on the job search and Easy Apply.
       * Navigate to the LinkedIn job listing page first.
       * Once on a job page with an Easy Apply button, instruct the navigator to use the 'linkedin_easy_apply' action.
-      * Do NOT instruct a generic click on the Easy Apply button — always use 'linkedin_easy_apply'.
+      * CRITICAL DEAD END / REMOVED POSTING RULE: If the page displays an error like 'Unable to load the page', 'Job id provided may not be valid', 'Job posting has been removed', or 'No longer accepting applications', DO NOT attempt to find apply buttons or re-navigate to the dead job! IMMEDIATELY recognize this as a dead end. Set "done": true, set "next_steps": "", and state in "final_answer" that the target job posting has been removed or is unavailable on LinkedIn, or instruct navigator to proceed to the next job listing.
       * The Easy Apply engine handles fit scoring, form filling, screening questions, and submission automatically.
-      * Only set done=true when the linkedin_easy_apply action returns a definitive result status (DRY_RUN_SUCCESS, APPLIED, NEEDS_MANUAL_REVIEW, etc.).
+      * Only set done=true when the linkedin_easy_apply action returns a definitive result status (DRY_RUN_SUCCESS, APPLIED, NEEDS_MANUAL_REVIEW, SKIPPED_JOB_REMOVED, etc.) or if the job is confirmed dead/removed.
       * A simple button click alone does NOT constitute a successful application.
     - When you set done to true, you must:
       * Provide the final answer to the user's task in the "final_answer" field

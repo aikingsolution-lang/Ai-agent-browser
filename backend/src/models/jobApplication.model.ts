@@ -1,4 +1,5 @@
-import mongoose, { Schema, Document, Types } from 'mongoose';
+import type { Document, Types } from 'mongoose';
+import mongoose, { Schema } from 'mongoose';
 
 /**
  * Status enum for job application lifecycle.
@@ -17,6 +18,7 @@ export const JOB_APPLICATION_STATUSES = [
   'NEEDS_MANUAL_REVIEW',
   'FAILED_MISSING_DATA',
   'PENDING_RESUME_APPROVAL',
+  'SKIPPED_JOB_REMOVED',
 ] as const;
 
 export type JobApplicationStatus = (typeof JOB_APPLICATION_STATUSES)[number];

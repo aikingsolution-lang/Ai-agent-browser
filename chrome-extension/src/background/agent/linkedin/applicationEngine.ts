@@ -207,6 +207,25 @@ export class ApplicationEngine {
     const puppeteerPage = this.page.puppeteerPage;
     if (!puppeteerPage) throw new Error('Puppeteer page not attached.');
 
+    const deadCheck = await this.page.detectDeadJobOrErrorPage();
+    if (deadCheck.isDeadJob) {
+      logger.warning(`[ApplicationEngine] 🛑 Dead job or removed posting detected: ${deadCheck.reason}`);
+      const url = this.page.url() || '';
+      const jobId = Math.abs(url.split('').reduce((a, b) => ((a << 5) - a + b.charCodeAt(0)) | 0, 0)).toString(16);
+      return {
+        url,
+        jobId,
+        title: 'Removed or Unavailable Job',
+        company: 'LinkedIn',
+        location: '',
+        salaryRange: '',
+        description: `Job removed or unavailable: ${deadCheck.reason}`,
+        jobType: 'Full-time',
+        experienceLevel: 'Mid-Senior level',
+        isEasyApply: false,
+      };
+    }
+
     const rawJob = await puppeteerPage.evaluate(() => {
       const title =
         document
@@ -293,7 +312,18 @@ export class ApplicationEngine {
       completedAt: null,
     };
 
-    // ─── 0. Strict Easy Apply Check (Defense in Depth: Layer 2) ──────────────
+    // ─── 0. Pre-Flight Dead / Removed Job Check ────────────────────────────
+    const deadCheck = await this.page.detectDeadJobOrErrorPage();
+    if (deadCheck.isDeadJob || jobData.title === 'Removed or Unavailable Job') {
+      const msg = `Job "${jobData.title}" is no longer available on LinkedIn (${deadCheck.reason || 'Job posting removed'}). Marked as SKIPPED_JOB_REMOVED.`;
+      logger.warning(`[ApplicationEngine] 🛑 ${msg}`);
+      this.state.status = 'SKIPPED_JOB_REMOVED';
+      this.state.errors.push(msg);
+      this.state.completedAt = Date.now();
+      return this.state;
+    }
+
+    // ─── 0b. Strict Easy Apply Check (Defense in Depth: Layer 2) ──────────────
     if (!jobData.isEasyApply) {
       const msg = `Job "${jobData.title}" at "${jobData.company}" is an External Apply job (not Easy Apply). Skipping to avoid navigating off LinkedIn.`;
       logger.warning(`[ApplicationEngine] 🛑 ${msg}`);

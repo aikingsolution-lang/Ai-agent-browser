@@ -1444,6 +1444,42 @@ export default class Page {
     return false;
   }
 
+  /**
+   * Pre-Flight Error Interceptor:
+   * Detects if the current LinkedIn page is a 404, removed job posting, or invalid page state.
+   */
+  async detectDeadJobOrErrorPage(): Promise<{ isDeadJob: boolean; reason?: string }> {
+    if (!this._puppeteerPage) {
+      return { isDeadJob: false };
+    }
+
+    try {
+      return await this._puppeteerPage.evaluate(() => {
+        const bodyText = (document.body?.innerText || document.body?.textContent || '').toLowerCase();
+        const deadSignatures = [
+          'unable to load the page',
+          'job id provided may not be valid',
+          'job posting has been removed',
+          'no longer accepting applications',
+          'this job is no longer available',
+          'the job you are trying to view is no longer available',
+        ];
+
+        for (const sig of deadSignatures) {
+          if (bodyText.includes(sig)) {
+            return {
+              isDeadJob: true,
+              reason: sig,
+            };
+          }
+        }
+        return { isDeadJob: false };
+      });
+    } catch {
+      return { isDeadJob: false };
+    }
+  }
+
   async getElementByIndex(index: number): Promise<ElementHandle | null> {
     const selectorMap = this.getSelectorMap();
     const element = selectorMap.get(index);

@@ -61,6 +61,7 @@ Common action sequences:
   * You are ALREADY fully authenticated and logged into LinkedIn. The session is managed securely.
   * NEVER attempt to log in or use non-existent actions like 'wait_for_login', 'login_linkedin', or 'check_auth'.
   * Ignore all payment/billing or Premium warning banners on LinkedIn (e.g. 'There was a problem processing your payment'). They are irrelevant distractions.
+  * DEAD END ERROR DETECTION: If the page says 'Unable to load the page', 'Job id provided may not be valid', or 'job posting has been removed', do NOT scroll or attempt to click buttons on this dead page. Immediately return the done action with success: false and explain that the job posting has been removed.
   * When on a LinkedIn job page to apply, ALWAYS use the 'linkedin_easy_apply' action. Do NOT use generic click on the Easy Apply button.
 - If you want to research something, open a new tab instead of using the current tab
 - If captcha pops up, try to solve it if a screenshot image is provided - else try a different approach

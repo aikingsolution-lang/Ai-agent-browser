@@ -291,12 +291,6 @@ export class MaxFailuresReachedError extends Error {
  * Custom error class for when LLM response cannot be parsed into expected format
  */
 export class ResponseParseError extends Error {
-  /**
-   * Creates a new ResponseParseError
-   *
-   * @param message - The error message describing the parsing failure
-   * @param cause - The original error that caused this error
-   */
   constructor(
     message: string,
     public readonly cause?: unknown,
@@ -310,5 +304,16 @@ export class ResponseParseError extends Error {
    */
   toString(): string {
     return `${this.name}: ${this.message}${this.cause ? ` (Caused by: ${this.cause})` : ''}`;
+  }
+}
+
+/**
+ * Custom error class for when the execution circuit breaker trips
+ * due to being stuck on the same page/URL or repeated failures.
+ */
+export class CircuitBreakerTrippedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'CircuitBreakerTrippedError';
   }
 }

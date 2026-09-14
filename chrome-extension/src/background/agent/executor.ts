@@ -19,6 +19,7 @@ import {
   RequestCancelledError,
   MaxStepsReachedError,
   MaxFailuresReachedError,
+  CircuitBreakerTrippedError,
 } from './agents/errors';
 import { URLNotAllowedError } from '../browser/views';
 import { chatHistoryStore } from '@extension/storage/lib/chat';
@@ -166,6 +167,11 @@ export class Executor {
       let latestPlanOutput: AgentOutput<PlannerOutput> | null = null;
       let navigatorDone = false;
 
+      // Circuit Breaker State Tracking
+      let consecutiveStuckSteps = 0;
+      let lastObservedUrl = '';
+      let lastObservedTitle = '';
+
       for (step = 0; step < allowedMaxSteps; step++) {
         context.stepInfo = {
           stepNumber: context.nSteps,
@@ -175,6 +181,53 @@ export class Executor {
         logger.info(`🔄 Step ${step + 1} / ${allowedMaxSteps}`);
         if (await this.shouldStop()) {
           break;
+        }
+
+        // ─── Circuit Breaker Defense: Pre-Flight Dead Page / 404 Check ───
+        try {
+          const currentPage = await this.context.browserContext.getCurrentPage();
+          const currentUrl = currentPage.url() || '';
+          const currentState = await currentPage.getState().catch(() => null);
+          const currentTitle = currentState?.title || '';
+
+          // 1. Check for dead / removed job page signatures
+          const deadPage = await currentPage.detectDeadJobOrErrorPage();
+          if (deadPage.isDeadJob) {
+            const deadMsg = `Circuit Breaker: Dead/removed page detected ("${deadPage.reason}"). Terminating loop cleanly.`;
+            logger.warning(`🛑 ${deadMsg}`);
+            this.context.finalAnswer = `The requested job posting or page is no longer available ("${deadPage.reason}"). Application cannot proceed.`;
+            this.context.emitEvent(Actors.SYSTEM, ExecutionState.ACT_OK, deadMsg);
+            if (latestPlanOutput?.result) {
+              latestPlanOutput.result.done = true;
+              latestPlanOutput.result.final_answer = this.context.finalAnswer;
+            }
+            break;
+          }
+
+          // 2. Check for stagnant page state (stuck on same URL & Title for > 3 consecutive steps)
+          if (currentUrl && currentUrl === lastObservedUrl && currentTitle === lastObservedTitle) {
+            consecutiveStuckSteps++;
+            logger.warning(
+              `⚠️ Circuit Breaker: Agent on same page for ${consecutiveStuckSteps} consecutive steps: "${currentTitle}" (${currentUrl})`,
+            );
+            if (consecutiveStuckSteps >= 3) {
+              const tripMsg = `Circuit Breaker Tripped: Bot is stuck on the same page state for 3 consecutive turns without progress.`;
+              logger.error(`🚨 ${tripMsg}`);
+              this.context.finalAnswer = `${tripMsg} The target element may not exist or the page is unresponsive.`;
+              this.context.emitEvent(Actors.SYSTEM, ExecutionState.ACT_FAIL, tripMsg);
+              if (latestPlanOutput?.result) {
+                latestPlanOutput.result.done = true;
+                latestPlanOutput.result.final_answer = this.context.finalAnswer;
+              }
+              break;
+            }
+          } else {
+            consecutiveStuckSteps = 0;
+            lastObservedUrl = currentUrl;
+            lastObservedTitle = currentTitle;
+          }
+        } catch (circuitErr) {
+          logger.debug(`Circuit breaker pre-flight inspection error: ${circuitErr}`);
         }
 
         // Run planner periodically for guidance
