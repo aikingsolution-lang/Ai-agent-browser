@@ -55,9 +55,13 @@ Common action sequences:
 4. NAVIGATION & ERROR HANDLING:
 
 - If no suitable elements exist, use other functions to complete the task
-- If stuck, try alternative approaches - like going back to a previous page, new search, new tab etc.
 - Handle popups/cookies/ads: If any 'Skip Ad' or 'Skip' button appears, click it immediately before doing other actions
 - Use scroll to find elements you are looking for
+- LINKEDIN EASY APPLY RULES:
+  * You are ALREADY fully authenticated and logged into LinkedIn. The session is managed securely.
+  * NEVER attempt to log in or use non-existent actions like 'wait_for_login', 'login_linkedin', or 'check_auth'.
+  * Ignore all payment/billing or Premium warning banners on LinkedIn (e.g. 'There was a problem processing your payment'). They are irrelevant distractions.
+  * When on a LinkedIn job page to apply, ALWAYS use the 'linkedin_easy_apply' action. Do NOT use generic click on the Easy Apply button.
 - If you want to research something, open a new tab instead of using the current tab
 - If captcha pops up, try to solve it if a screenshot image is provided - else try a different approach
 - If the page is not fully loaded, use wait action

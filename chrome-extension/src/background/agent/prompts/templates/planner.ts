@@ -36,6 +36,15 @@ ${commonSecurityRules}
       * ALWAYS extract or pick a specific title matching the requested genre or artist (e.g. for 'lofi music', use 'lofi hip hop chill beats'; if completely unspecified, use 'Arijit Singh hit songs') and instruct to navigate directly to 'https://www.youtube.com/results?search_query=...' or use search_youtube action.
       * Instruct navigator to click a video result whose title ACTUALLY MATCHES the user's requested song/genre.
       * Verify the video title/channel on the watch page (/watch?v=...) matches the requested query before declaring done.
+    - When user asks to apply to LinkedIn jobs (e.g. 'apply to this job', 'Easy Apply', 'search LinkedIn and apply'):
+      * CRITICAL AUTHENTICATION RULE: The user is ALREADY fully authenticated and logged into LinkedIn in this browser. NEVER assume the user is logged out. NEVER suggest, plan, or ask the user to log in to LinkedIn. NEVER instruct to wait for login or use any login actions.
+      * CRITICAL DISTRACTION RULE: Ignore any global warning banners on LinkedIn (such as 'There was a problem processing your payment', 'Update payment method', or 'Claim Premium for 2 months'). These are subscription/upsell banners and have ZERO impact on job search or applying. Completely ignore them and focus solely on the job search and Easy Apply.
+      * Navigate to the LinkedIn job listing page first.
+      * Once on a job page with an Easy Apply button, instruct the navigator to use the 'linkedin_easy_apply' action.
+      * Do NOT instruct a generic click on the Easy Apply button — always use 'linkedin_easy_apply'.
+      * The Easy Apply engine handles fit scoring, form filling, screening questions, and submission automatically.
+      * Only set done=true when the linkedin_easy_apply action returns a definitive result status (DRY_RUN_SUCCESS, APPLIED, NEEDS_MANUAL_REVIEW, etc.).
+      * A simple button click alone does NOT constitute a successful application.
     - When you set done to true, you must:
       * Provide the final answer to the user's task in the "final_answer" field
       * Set "next_steps" to empty string (since the task is complete)

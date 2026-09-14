@@ -154,6 +154,23 @@ export class LinkedInStepNavigator {
     for (let i = 0; i < maxPolls; i++) {
       await new Promise(res => setTimeout(res, pollIntervalMs));
 
+      // 0. Ensure LinkedIn loading spinners / transition overlays are dismissed
+      const puppeteerPage = page.puppeteerPage;
+      if (puppeteerPage) {
+        const isBusy = await puppeteerPage
+          .evaluate(() => {
+            const spinner = document.querySelector(
+              '.artdeco-spinner, .artdeco-inline-feedback--loading, [data-test-modal-loading], .jobs-easy-apply-modal__loading',
+            );
+            return Boolean(spinner && (spinner as HTMLElement).offsetParent !== null);
+          })
+          .catch(() => false);
+
+        if (isBusy) {
+          continue; // Wait until spinner disappears
+        }
+      }
+
       const detected = await this.detector.detectCurrentStep(page);
 
       // 1. Check if modal closed

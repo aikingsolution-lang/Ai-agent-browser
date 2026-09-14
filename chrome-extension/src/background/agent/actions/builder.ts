@@ -27,12 +27,15 @@ import {
   scrollToElementActionSchema,
   skipAdActionSchema,
   searchYouTubeActionSchema,
+  linkedinEasyApplyActionSchema,
 } from './schemas';
 import { z } from 'zod';
 import { createLogger } from '@src/background/log';
 import { ExecutionState, Actors } from '../event/types';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { wrapUntrustedContent } from '../messages/utils';
+import { ApplicationEngine } from '../linkedin/applicationEngine';
+import { linkedInConfigStore } from '@extension/storage';
 
 const logger = createLogger('Action');
 
@@ -202,11 +205,20 @@ export class ActionBuilder {
     actions.push(searchYouTube);
 
     const goToUrl = new Action(async (input: z.infer<typeof goToUrlActionSchema.schema>) => {
-      const intent = input.intent || t('act_goToUrl_start', [input.url]);
+      let targetUrl = input.url;
+
+      // Layer 1 Filter Injection: Force f_AL=true on LinkedIn job searches to guarantee Easy Apply only
+      if (targetUrl.includes('linkedin.com/jobs') && !targetUrl.includes('f_AL=')) {
+        const separator = targetUrl.includes('?') ? '&' : '?';
+        targetUrl = `${targetUrl}${separator}f_AL=true`;
+        logger.info(`[goToUrl:Layer1] Injected f_AL=true to filter for Easy Apply only: ${targetUrl}`);
+      }
+
+      const intent = input.intent || t('act_goToUrl_start', [targetUrl]);
       this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_START, intent);
 
-      await this.context.browserContext.navigateTo(input.url);
-      const msg2 = t('act_goToUrl_ok', [input.url]);
+      await this.context.browserContext.navigateTo(targetUrl);
+      const msg2 = t('act_goToUrl_ok', [targetUrl]);
       this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_OK, msg2);
       return new ActionResult({
         extractedContent: msg2,
@@ -266,21 +278,109 @@ export class ActionBuilder {
           });
         }
 
+        // Layer 2 & 3: Strict DOM Signature Matching + External Apply Interceptor
+        const pageUrl = page.url() || '';
+        const elementText = (elementNode.getAllTextTillNextClickableElement(2) || '').toLowerCase();
+        const ariaLabel = (elementNode.attributes?.['aria-label'] || '').toLowerCase();
+        const className = (elementNode.attributes?.['class'] || '').toLowerCase();
+
+        // Exact Easy Apply signature (not generic external 'Apply')
+        const isStrictEasyApply =
+          ariaLabel.includes('easy apply') ||
+          elementText.includes('easy apply') ||
+          className.includes('jobs-apply-button--easy-apply') ||
+          (className.includes('jobs-apply-button') &&
+            (ariaLabel.includes('easy apply') || elementText.includes('easy apply')));
+
+        // Check if this is an external apply button on LinkedIn
+        const isExternalApply =
+          pageUrl.includes('linkedin.com') &&
+          !isStrictEasyApply &&
+          (ariaLabel.startsWith('apply to') ||
+            elementText === 'apply' ||
+            elementText.startsWith('apply on') ||
+            className.includes('jobs-apply-button'));
+
+        if (pageUrl.includes('linkedin.com') && isStrictEasyApply) {
+          logger.info(
+            `[clickElement:Layer2] Intercepted verified Easy Apply button for index [${input.index}]. Delegating to ApplicationEngine...`,
+          );
+          try {
+            const userConfig = await linkedInConfigStore.getConfig();
+            const engine = new ApplicationEngine(
+              {
+                dryRun: true, // SAFETY: Always dry-run — hardcode-enforced
+                minFitScore: userConfig.minFitScore ?? 75,
+              },
+              { llm: this.extractorLLM, visionLLM: this.extractorLLM },
+            );
+
+            await engine.initialize(page);
+            const jobData = await engine.scanJobListing();
+            logger.info(`[clickElement:intercept] Starting pipeline for "${jobData.title}" at "${jobData.company}"`);
+
+            const result = await engine.startApplication(jobData);
+            const statusMsg = `LinkedIn Easy Apply Result: ${result.status} | Job: "${jobData.title}" at "${jobData.company}" | Fit Score evaluated`;
+            const isDone = result.status === 'APPLIED' || result.status === 'DRY_RUN_SUCCESS';
+
+            this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_OK, statusMsg);
+            return new ActionResult({
+              isDone,
+              extractedContent: statusMsg,
+              includeInMemory: true,
+            });
+          } catch (error) {
+            const errorMsg = `LinkedIn Easy Apply intercepted execution failed: ${error instanceof Error ? error.message : String(error)}`;
+            logger.error(errorMsg);
+            this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_FAIL, errorMsg);
+            return new ActionResult({ error: errorMsg, includeInMemory: true });
+          }
+        }
+
+        // Reject external apply button clicks on LinkedIn
+        if (isExternalApply) {
+          const skipMsg =
+            'External Apply button detected (not Easy Apply). Skipped to next job to prevent leaving LinkedIn.';
+          logger.warning(`[clickElement:Layer2] 🛑 ${skipMsg}`);
+          this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_OK, skipMsg);
+          return new ActionResult({
+            extractedContent: `LinkedIn Easy Apply Result: SKIPPED_EXTERNAL_SITE | ${skipMsg}`,
+            includeInMemory: true,
+          });
+        }
+
         try {
           const initialTabIds = await this.context.browserContext.getAllTabIds();
           await page.clickElementNode(this.context.options.useVision, elementNode);
           let msg = t('act_click_ok', [input.index.toString(), elementNode.getAllTextTillNextClickableElement(2)]);
           logger.info(msg);
 
-          // TODO: could be optimized by chrome extension tab api
+          // Layer 3: Context-Aware Tab Monitoring & Escape Hatch
           const currentTabIds = await this.context.browserContext.getAllTabIds();
           if (currentTabIds.size > initialTabIds.size) {
-            const newTabMsg = t('act_click_newTabOpened');
-            msg += ` - ${newTabMsg}`;
-            logger.info(newTabMsg);
-            // find the tab id that is not in the initial tab ids
             const newTabId = Array.from(currentTabIds).find(id => !initialTabIds.has(id));
             if (newTabId) {
+              // Inspect newly opened tab URL
+              const newTab = await chrome.tabs.get(newTabId).catch(() => null);
+              const newTabUrl = newTab?.url || newTab?.pendingUrl || '';
+
+              // If an external non-LinkedIn site opened (e.g. Workday, Greenhouse), immediately auto-close it
+              if (pageUrl.includes('linkedin.com') && newTabUrl && !newTabUrl.includes('linkedin.com')) {
+                logger.warning(
+                  `[clickElement:Layer3] External tab detected (${newTabUrl}). Auto-closing tab [${newTabId}] to prevent freeze.`,
+                );
+                await chrome.tabs.remove(newTabId).catch(() => {});
+                const closedMsg = `Auto-closed external site tab (${newTabUrl}). Status: SKIPPED_EXTERNAL_SITE`;
+                this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_OK, closedMsg);
+                return new ActionResult({
+                  extractedContent: `LinkedIn Easy Apply Result: SKIPPED_EXTERNAL_SITE | ${closedMsg}`,
+                  includeInMemory: true,
+                });
+              }
+
+              const newTabMsg = t('act_click_newTabOpened');
+              msg += ` - ${newTabMsg}`;
+              logger.info(newTabMsg);
               await this.context.browserContext.switchTab(newTabId);
             }
           }
@@ -828,6 +928,56 @@ export class ActionBuilder {
       return new ActionResult({ extractedContent: msg, includeInMemory: true });
     }, skipAdActionSchema);
     actions.push(skipAd);
+
+    // LinkedIn Easy Apply — Full ApplicationEngine Pipeline
+    const linkedinEasyApply = new Action(async (input: z.infer<typeof linkedinEasyApplyActionSchema.schema>) => {
+      const intent = input.intent || 'Apply to LinkedIn job via Easy Apply';
+      this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_START, intent);
+
+      try {
+        const page = await this.context.browserContext.getCurrentPage();
+        const url = page.url() || '';
+
+        if (!url.includes('linkedin.com')) {
+          const msg = 'Not on a LinkedIn page. Navigate to a LinkedIn job listing first.';
+          this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_FAIL, msg);
+          return new ActionResult({ error: msg, includeInMemory: true });
+        }
+
+        // Load user config from Career Brain settings, but force dryRun=true for safety
+        const userConfig = await linkedInConfigStore.getConfig();
+        const engine = new ApplicationEngine(
+          {
+            dryRun: true, // SAFETY: Always dry-run — hardcode-enforced
+            minFitScore: userConfig.minFitScore ?? 75,
+          },
+          { llm: this.extractorLLM, visionLLM: this.extractorLLM },
+        );
+
+        await engine.initialize(page);
+        const jobData = await engine.scanJobListing();
+
+        logger.info(`[linkedin_easy_apply] Starting pipeline for "${jobData.title}" at "${jobData.company}"`);
+
+        const result = await engine.startApplication(jobData);
+
+        const statusMsg = `LinkedIn Easy Apply Result: ${result.status} | Job: "${jobData.title}" at "${jobData.company}" | Fit Score evaluated`;
+        const isDone = result.status === 'APPLIED' || result.status === 'DRY_RUN_SUCCESS';
+
+        this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_OK, statusMsg);
+        return new ActionResult({
+          isDone,
+          extractedContent: statusMsg,
+          includeInMemory: true,
+        });
+      } catch (error) {
+        const errorMsg = `LinkedIn Easy Apply failed: ${error instanceof Error ? error.message : String(error)}`;
+        logger.error(errorMsg);
+        this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_FAIL, errorMsg);
+        return new ActionResult({ error: errorMsg, includeInMemory: true });
+      }
+    }, linkedinEasyApplyActionSchema);
+    actions.push(linkedinEasyApply);
 
     return actions;
   }

@@ -262,13 +262,25 @@ export const ApplicationAnalytics: React.FC<ApplicationAnalyticsProps> = ({ isDa
                             ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/60 dark:text-emerald-200'
                             : rec.blockedReason === 'skipped_low_fit'
                               ? 'bg-gray-100 text-gray-700 dark:bg-slate-700 dark:text-gray-300'
-                              : 'bg-amber-100 text-amber-800 dark:bg-amber-900/60 dark:text-amber-200'
+                              : (rec.blockedReason || '').toLowerCase().includes('external') ||
+                                  (rec.notes || '').toLowerCase().includes('external')
+                                ? 'bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400 border border-dashed border-slate-300 dark:border-slate-700'
+                                : (rec.blockedReason || '').toLowerCase().includes('duplicate') ||
+                                    (rec.notes || '').toLowerCase().includes('duplicate')
+                                  ? 'bg-gray-100 text-gray-500 dark:bg-slate-800 dark:text-gray-400'
+                                  : 'bg-amber-100 text-amber-800 dark:bg-amber-900/60 dark:text-amber-200'
                         }`}>
                         {rec.wouldHaveApplied
                           ? '✅ Success (Dry-Run)'
                           : rec.blockedReason === 'skipped_low_fit'
                             ? '⏭️ Skipped (<75 fit)'
-                            : '⚠️ Needs Review'}
+                            : (rec.blockedReason || '').toLowerCase().includes('external') ||
+                                (rec.notes || '').toLowerCase().includes('external')
+                              ? '🛡️ Skipped (External Site)'
+                              : (rec.blockedReason || '').toLowerCase().includes('duplicate') ||
+                                  (rec.notes || '').toLowerCase().includes('duplicate')
+                                ? '⏭️ Skipped (Duplicate)'
+                                : '⚠️ Needs Review'}
                       </span>
                     </td>
                     <td className="py-3 px-4 text-right">

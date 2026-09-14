@@ -312,14 +312,19 @@ export class LinkedInFormFiller {
           );
           if (!modal) return false;
 
-          // Helper to trigger React state setter
+          // Helper to trigger React state setter with full event cycle
           const setReactInputValue = (input: HTMLInputElement | HTMLTextAreaElement, value: string) => {
+            input.focus();
+            input.dispatchEvent(new Event('focus', { bubbles: true }));
+
             const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
               input instanceof HTMLTextAreaElement
                 ? window.HTMLTextAreaElement.prototype
                 : window.HTMLInputElement.prototype,
               'value',
             )?.set;
+
+            input.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'a' }));
 
             if (nativeInputValueSetter) {
               nativeInputValueSetter.call(input, value);
@@ -328,7 +333,9 @@ export class LinkedInFormFiller {
             }
 
             input.dispatchEvent(new Event('input', { bubbles: true }));
+            input.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: 'a' }));
             input.dispatchEvent(new Event('change', { bubbles: true }));
+            input.dispatchEvent(new Event('blur', { bubbles: true }));
           };
 
           // 1. Try finding input by ID

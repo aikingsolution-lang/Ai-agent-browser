@@ -146,6 +146,38 @@ export function verifyTaskResult(
     }
   }
 
+  // 3. LinkedIn Easy Apply Guardrail:
+  // If the user asked to apply to a job on LinkedIn, ensure it actually ran through ApplicationEngine
+  const isLinkedInApplyTask =
+    (taskLower.includes('linkedin') && (taskLower.includes('apply') || taskLower.includes('job'))) ||
+    taskLower.includes('easy apply');
+
+  if (isLinkedInApplyTask) {
+    const validEngineStatusPhrases = [
+      'linkedin easy apply result:',
+      'dry_run_success',
+      'applied',
+      'needs_manual_review',
+      'pending_resume_approval',
+      'skipped low fit',
+      'already processed/applied',
+      'daily application quota reached',
+      'skipped_external_site',
+    ];
+
+    const hasEngineConfirmation = validEngineStatusPhrases.some(phrase => lastMsg.toLowerCase().includes(phrase));
+
+    if (!hasEngineConfirmation) {
+      return {
+        isComplete: false,
+        reason:
+          'LinkedIn application was not processed by the ApplicationEngine. A simple click or navigation is not considered application completion.',
+        retryAction:
+          'Trigger the LinkedIn Easy Apply process using the linkedin_easy_apply action on the job listing page.',
+      };
+    }
+  }
+
   return {
     isComplete: true,
   };

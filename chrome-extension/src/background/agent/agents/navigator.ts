@@ -112,9 +112,13 @@ export class NavigatorActionRegistry {
       wait_page_load: 'wait',
       wait_for_load: 'wait',
       wait_for_page: 'wait',
-      wait_page: 'wait',
       wait_for_element: 'wait',
       sleep: 'wait',
+      easy_apply: 'linkedin_easy_apply',
+      apply_linkedin: 'linkedin_easy_apply',
+      linkedin_apply: 'linkedin_easy_apply',
+      apply_easy_apply: 'linkedin_easy_apply',
+      apply_to_job: 'linkedin_easy_apply',
     };
     const canonical = ALIASES[name];
     if (canonical && this.actions[canonical]) {

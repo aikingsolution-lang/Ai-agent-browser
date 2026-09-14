@@ -14,6 +14,7 @@ export const JOB_APPLICATION_STATUSES = [
   'NEEDS_MANUAL_REVIEW',
   'FAILED_MISSING_DATA',
   'PENDING_RESUME_APPROVAL',
+  'SKIPPED_EXTERNAL_SITE',
 ] as const;
 
 export type JobApplicationStatus = (typeof JOB_APPLICATION_STATUSES)[number];

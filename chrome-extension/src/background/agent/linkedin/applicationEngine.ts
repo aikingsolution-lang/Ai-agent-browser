@@ -220,7 +220,15 @@ export class ApplicationEngine {
         document
           .querySelector('.jobs-description__content, #job-details, .show-more-less-html__markup')
           ?.textContent?.trim() || '';
-      const isEasyApply = Boolean(document.querySelector('button[aria-label*="Easy Apply" i], .jobs-apply-button'));
+      const applyButton = document.querySelector<HTMLButtonElement>(
+        'button[aria-label*="Easy Apply" i], .jobs-apply-button--easy-apply',
+      );
+      const isEasyApply = Boolean(
+        applyButton ||
+          Array.from(document.querySelectorAll<HTMLButtonElement>('button.jobs-apply-button')).some(btn =>
+            (btn.getAttribute('aria-label') || btn.textContent || '').toLowerCase().includes('easy apply'),
+          ),
+      );
 
       return { title, company, location, description, isEasyApply };
     });
@@ -280,6 +288,16 @@ export class ApplicationEngine {
       startedAt: Date.now(),
       completedAt: null,
     };
+
+    // ─── 0. Strict Easy Apply Check (Defense in Depth: Layer 2) ──────────────
+    if (!jobData.isEasyApply) {
+      const msg = `Job "${jobData.title}" at "${jobData.company}" is an External Apply job (not Easy Apply). Skipping to avoid navigating off LinkedIn.`;
+      logger.warning(`[ApplicationEngine] 🛑 ${msg}`);
+      this.state.status = 'SKIPPED_EXTERNAL_SITE';
+      this.state.errors.push(msg);
+      this.state.completedAt = Date.now();
+      return this.state;
+    }
 
     const careerBrain = await careerBrainStore.getCareerBrain();
 

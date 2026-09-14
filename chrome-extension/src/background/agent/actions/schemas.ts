@@ -297,3 +297,12 @@ export const waitActionSchema: ActionSchema = {
       };
     }),
 };
+
+export const linkedinEasyApplyActionSchema: ActionSchema = {
+  name: 'linkedin_easy_apply',
+  description:
+    'Apply to the currently viewed LinkedIn job listing using the Easy Apply engine. Handles fit-scoring, career-brain form filling, screening questions, and dry-run/live submission automatically. Only use when on a LinkedIn job page that has an Easy Apply button.',
+  schema: z.object({
+    intent: z.string().default('Apply to LinkedIn job via Easy Apply').describe('purpose of this action'),
+  }),
+};
