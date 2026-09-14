@@ -1491,20 +1491,29 @@ export default class Page {
 
     try {
       return await this._puppeteerPage.evaluate(() => {
-        // 1. Selector signatures for known CAPTCHA widgets & iframes
+        const url = window.location.href.toLowerCase();
+
+        // 1. Explicit Checkpoint URLs (LinkedIn, Cloudflare, etc.)
+        if (
+          url.includes('/checkpoint/challenge') ||
+          url.includes('/checkpoint/rp/') ||
+          url.includes('/uas/consumer-captcha') ||
+          url.includes('challenges.cloudflare.com')
+        ) {
+          return { isCaptcha: true, type: `Security checkpoint URL (${window.location.pathname})` };
+        }
+
+        // 2. Specific dedicated CAPTCHA iframe and widget selectors
         const captchaSelectors = [
-          'iframe[src*="arkoselabs"]',
+          'iframe[src*="arkoselabs.com"]',
           'iframe[src*="funcaptcha"]',
-          'iframe[src*="recaptcha"]',
-          'iframe[src*="hcaptcha"]',
-          'iframe[src*="challenge"]',
+          'iframe[src*="google.com/recaptcha"]',
+          'iframe[src*="hcaptcha.com"]',
+          'iframe[src*="challenges.cloudflare.com"]',
+          'form#checkpoint-challenge-form',
+          'div#app__container.checkpoint',
           'div#captcha-internal',
           'div.checkpoint-challenge',
-          'div#app__container.checkpoint',
-          'form#checkpoint-challenge-form',
-          'div[data-callback*="captcha"]',
-          '.g-recaptcha',
-          '.h-captcha',
         ];
 
         for (const sel of captchaSelectors) {
@@ -1514,22 +1523,27 @@ export default class Page {
           }
         }
 
-        // 2. Text signatures for LinkedIn Security Verification / Challenge
-        const bodyText = (document.body?.innerText || document.body?.textContent || '').toLowerCase();
-        const securityPhrases = [
-          'quick security check',
-          'let us know you are human',
-          'verify your identity',
-          'security verification',
-          'please solve this puzzle',
-          'unusual traffic from your computer network',
-          'press & hold',
-          'press and hold',
-        ];
+        // 3. Text signatures - ONLY check if we are on a checkpoint page or heading/h1/h2
+        // To avoid false positives matching text on general search result listings or footer links
+        const isCheckpointPage = url.includes('/checkpoint') || url.includes('/challenge');
+        if (isCheckpointPage) {
+          const headingText = Array.from(document.querySelectorAll('h1, h2, h3, [role="heading"]'))
+            .map(h => (h.textContent || '').trim().toLowerCase())
+            .join(' ');
 
-        for (const phrase of securityPhrases) {
-          if (bodyText.includes(phrase)) {
-            return { isCaptcha: true, type: phrase };
+          const checkpointPhrases = [
+            'quick security check',
+            'let us know you are human',
+            'verify your identity',
+            'security verification',
+            'please solve this puzzle',
+            'unusual traffic from your computer network',
+          ];
+
+          for (const phrase of checkpointPhrases) {
+            if (headingText.includes(phrase)) {
+              return { isCaptcha: true, type: phrase };
+            }
           }
         }
 
