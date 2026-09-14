@@ -7,5 +7,13 @@
     "base.json",
     "utils.json",
     "app.json"
-  ]
+  ],
+  "exports": {
+    "./base": "./base.json",
+    "./base.json": "./base.json",
+    "./utils": "./utils.json",
+    "./utils.json": "./utils.json",
+    "./app": "./app.json",
+    "./app.json": "./app.json"
+  }
 }
