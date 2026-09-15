@@ -324,6 +324,11 @@ export class ActionBuilder {
             const isDone =
               result.status === 'APPLIED' ||
               result.status === 'DRY_RUN_SUCCESS' ||
+              result.status === 'NEEDS_MANUAL_REVIEW' ||
+              result.status === 'SKIPPED_EXTERNAL_SITE' ||
+              result.status === 'SKIPPED_LOW_FIT' ||
+              result.status === 'SKIPPED_ALREADY_PROCESSED' ||
+              result.status === 'SKIPPED_DAILY_LIMIT' ||
               result.status === 'SKIPPED_JOB_REMOVED' ||
               result.status === 'SKIPPED_MISSING_RESUME';
 
@@ -969,6 +974,11 @@ export class ActionBuilder {
         const isDone =
           result.status === 'APPLIED' ||
           result.status === 'DRY_RUN_SUCCESS' ||
+          result.status === 'NEEDS_MANUAL_REVIEW' ||
+          result.status === 'SKIPPED_EXTERNAL_SITE' ||
+          result.status === 'SKIPPED_LOW_FIT' ||
+          result.status === 'SKIPPED_ALREADY_PROCESSED' ||
+          result.status === 'SKIPPED_DAILY_LIMIT' ||
           result.status === 'SKIPPED_JOB_REMOVED' ||
           result.status === 'SKIPPED_MISSING_RESUME';
 

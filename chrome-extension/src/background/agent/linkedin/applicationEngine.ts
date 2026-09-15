@@ -227,31 +227,113 @@ export class ApplicationEngine {
     }
 
     const rawJob = await puppeteerPage.evaluate(() => {
-      const title =
-        document
-          .querySelector('.job-details-jobs-unified-top-card__job-title, h1.topcard__title, h1')
-          ?.textContent?.trim() || '';
-      const company =
-        document
-          .querySelector('.job-details-jobs-unified-top-card__company-name, a.topcard__org-name-link')
-          ?.textContent?.trim() || '';
-      const location =
-        document
-          .querySelector('.job-details-jobs-unified-top-card__bullet, .topcard__flavor--bullet')
-          ?.textContent?.trim() || '';
-      const description =
-        document
-          .querySelector('.jobs-description__content, #job-details, .show-more-less-html__markup')
-          ?.textContent?.trim() || '';
-      const applyButton = document.querySelector<HTMLButtonElement>(
-        'button[aria-label*="Easy Apply" i], .jobs-apply-button--easy-apply',
-      );
-      const isEasyApply = Boolean(
-        applyButton ||
-          Array.from(document.querySelectorAll<HTMLButtonElement>('button.jobs-apply-button')).some(btn =>
-            (btn.getAttribute('aria-label') || btn.textContent || '').toLowerCase().includes('easy apply'),
-          ),
-      );
+      // 1. Title Extraction (Modern Unified Top Card, Standalone View, or Heading)
+      const titleSelectors = [
+        '.job-details-jobs-unified-top-card__job-title',
+        'h1.t-24',
+        'h1.job-title',
+        'h1.topcard__title',
+        '.jobs-unified-top-card__job-title',
+        'div.job-view-layout h1',
+        'main h1',
+        'h1',
+      ];
+      let title = '';
+      for (const sel of titleSelectors) {
+        const el = document.querySelector(sel);
+        const text = el?.textContent?.trim();
+        if (text && text.length > 1) {
+          title = text;
+          break;
+        }
+      }
+
+      // 2. Company Extraction (Modern Link, Subtitle, or Topcard Flavor)
+      const companySelectors = [
+        '.job-details-jobs-unified-top-card__company-name',
+        '.job-details-jobs-unified-top-card__primary-description a',
+        '.jobs-unified-top-card__company-name',
+        'a.topcard__org-name-link',
+        '.job-card-container__company-name',
+        'a[data-tracking-control-name="public_jobs_topcard-org-name"]',
+        'div.job-details-jobs-unified-top-card__company-name a',
+      ];
+      let company = '';
+      for (const sel of companySelectors) {
+        const el = document.querySelector(sel);
+        const text = el?.textContent?.trim();
+        if (text && text.length > 0) {
+          company = text;
+          break;
+        }
+      }
+      // Fallback: If company still empty, check primary description container
+      if (!company) {
+        const primaryDesc = document.querySelector('.job-details-jobs-unified-top-card__primary-description');
+        if (primaryDesc) {
+          const firstLink = primaryDesc.querySelector('a');
+          if (firstLink?.textContent?.trim()) {
+            company = firstLink.textContent.trim();
+          }
+        }
+      }
+
+      // 3. Location Extraction
+      const locationSelectors = [
+        '.job-details-jobs-unified-top-card__bullet',
+        '.job-details-jobs-unified-top-card__primary-description span:nth-of-type(1)',
+        '.topcard__flavor--bullet',
+        '.jobs-unified-top-card__bullet',
+      ];
+      let location = '';
+      for (const sel of locationSelectors) {
+        const el = document.querySelector(sel);
+        const text = el?.textContent?.trim();
+        if (text && text.length > 0) {
+          location = text;
+          break;
+        }
+      }
+
+      // 4. Description Extraction
+      const descriptionSelectors = [
+        '.jobs-description__content',
+        '#job-details',
+        '.show-more-less-html__markup',
+        '.jobs-box__html-content',
+        '.jobs-description',
+      ];
+      let description = '';
+      for (const sel of descriptionSelectors) {
+        const el = document.querySelector(sel);
+        const text = el?.textContent?.trim();
+        if (text && text.length > 10) {
+          description = text;
+          break;
+        }
+      }
+
+      // 5. Easy Apply Button Detection (Comprehensive & Resilient)
+      // Look across aria-labels, textContent, button classes, and child spans/SVGs
+      const allButtons = Array.from(document.querySelectorAll<HTMLElement>('button, a[role="button"]'));
+      let isEasyApply = false;
+
+      for (const btn of allButtons) {
+        const ariaLabel = (btn.getAttribute('aria-label') || '').toLowerCase();
+        const text = (btn.innerText || btn.textContent || '').trim().toLowerCase();
+        const className = (btn.className || '').toLowerCase();
+
+        // Check if button explicitly has "Easy Apply" or "in Easy Apply"
+        if (
+          ariaLabel.includes('easy apply') ||
+          text.includes('easy apply') ||
+          className.includes('jobs-apply-button--easy-apply') ||
+          (className.includes('jobs-apply-button') && (ariaLabel.includes('easy apply') || text.includes('easy apply')))
+        ) {
+          isEasyApply = true;
+          break;
+        }
+      }
 
       return { title, company, location, description, isEasyApply };
     });

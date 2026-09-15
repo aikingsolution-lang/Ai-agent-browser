@@ -30,7 +30,7 @@ export const plannerOutputSchema = z.object({
       throw new Error('Invalid boolean string');
     }),
   ]),
-  next_steps: z.string(),
+  next_steps: z.union([z.string(), z.array(z.string()).transform(arr => arr.join('\n'))]),
   final_answer: z.string(),
   reasoning: z.string(),
   web_task: z.union([

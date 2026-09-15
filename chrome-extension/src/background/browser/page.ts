@@ -1455,10 +1455,20 @@ export default class Page {
 
     try {
       return await this._puppeteerPage.evaluate(() => {
-        const bodyText = (document.body?.innerText || document.body?.textContent || '').toLowerCase();
+        // Only evaluate on LinkedIn pages
+        if (!window.location.hostname.includes('linkedin.com')) {
+          return { isDeadJob: false };
+        }
+
+        // Dead job pages have distinct global error headers or empty main containers
+        const errorContainer = document.querySelector(
+          '.artdeco-empty-state, .error-container, #error-page, .jobs-details-error',
+        );
+        const mainHeading = (document.querySelector('h1, h2')?.textContent || '').toLowerCase();
+        const containerText = (errorContainer?.textContent || '').toLowerCase();
+
         const deadSignatures = [
-          'unable to load the page',
-          'job id provided may not be valid',
+          'unable to load the page. job id provided may not be valid',
           'job posting has been removed',
           'no longer accepting applications',
           'this job is no longer available',
@@ -1466,13 +1476,14 @@ export default class Page {
         ];
 
         for (const sig of deadSignatures) {
-          if (bodyText.includes(sig)) {
+          if (mainHeading.includes(sig) || containerText.includes(sig)) {
             return {
               isDeadJob: true,
               reason: sig,
             };
           }
         }
+
         return { isDeadJob: false };
       });
     } catch {
