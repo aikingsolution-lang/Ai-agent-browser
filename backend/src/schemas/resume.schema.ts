@@ -16,6 +16,21 @@ export const generateResumeSchema = z.object({
 
 export type GenerateResumeInput = z.infer<typeof generateResumeSchema>;
 
+export const workExperienceItemSchema = z.object({
+  id: z.string().default(() => Math.random().toString(36).substring(2, 9)),
+  company: z.string().default(''),
+  title: z.string().default(''),
+  startMonth: z.string().default(''),
+  startYear: z.string().default(''),
+  endMonth: z.string().nullable().default(null),
+  endYear: z.string().nullable().default(null),
+  isCurrent: z.boolean().default(false),
+  description: z.string().default(''),
+  source: z.enum(['manual', 'resume']).default('resume'),
+});
+
+export type WorkExperienceItem = z.infer<typeof workExperienceItemSchema>;
+
 export const parsedResumeSchema = z.object({
   fullName: z.string().default('Candidate'),
   email: z.string().default(''),
@@ -23,6 +38,8 @@ export const parsedResumeSchema = z.object({
   currentTitle: z.string().default('Software Professional'),
   skills: z.array(z.string()).default([]),
   yearsOfExperience: z.number().default(0),
+  hasWorkExperience: z.boolean().default(true),
+  workExperience: z.array(workExperienceItemSchema).default([]),
   education: z.string().default(''),
   college: z.string().default(''),
   cgpa: z.string().default(''),

@@ -20,6 +20,195 @@ export const goldenAnswerSchema = z.object({
 export type IGoldenAnswer = z.infer<typeof goldenAnswerSchema>;
 
 /**
+ * Detects generic relative date screening questions for work history, such as:
+ * "Month of From", "Year of From", "Month of To", "Year of To", "From: Month", etc.
+ * These are job/position specific and must NEVER be stored as generic golden answers.
+ */
+export function isGenericWorkExperienceDateField(question: string): boolean {
+  if (!question || typeof question !== 'string') return false;
+  const q = question.trim().toLowerCase();
+  if (
+    /how\s*many|years\s*of\s*(?:total\s*|overall\s*)?experience|notice\s*period|ctc|salary|when\s*can\s*you/i.test(q)
+  ) {
+    return false;
+  }
+  return (
+    /\b(?:from|start)\s*(?:month|year|date)\b|\b(?:to|end|completion|finish)\s*(?:month|year|date)\b|\b(?:month|year)\s+(?:of\s+)?(?:from|start|to|end)\b|\b(?:from|to)\s*:\s*(?:month|year)\b/i.test(
+      q,
+    ) || /^(?:start|from|end|to)\s*(?:month|year)$/i.test(q)
+  );
+}
+
+/**
+ * Cleans a location string to extract a clean city / geographic location.
+ * Strips out "or Remote", "(Remote)", "Remote /", "Hybrid", etc.
+ * E.g., "Bengaluru, India or Remote" -> "Bengaluru, India".
+ */
+export function cleanLocationForCityField(rawLocation: string | undefined | null): string {
+  if (!rawLocation || typeof rawLocation !== 'string') return '';
+  let loc = rawLocation.trim();
+  loc = loc
+    .replace(/(?:(?:\b(?:or|and)\b)|[/\\])\s*remote\b/gi, '')
+    .replace(/\bremote\s*(?:(?:\b(?:or|and)\b)|[/\\])/gi, '')
+    .replace(/\(remote\)/gi, '')
+    .replace(/\[remote\]/gi, '')
+    .replace(/(?:(?:\b(?:or|and)\b)|[/\\])\s*hybrid\b/gi, '')
+    .replace(/\bhybrid\s*(?:(?:\b(?:or|and)\b)|[/\\])/gi, '')
+    .replace(/\(hybrid\)/gi, '')
+    .replace(/\[hybrid\]/gi, '')
+    .replace(/\s*,\s*remote\b/gi, '')
+    .replace(/\bremote\s*,\s*/gi, '')
+    .replace(/\bremote\b/gi, '')
+    .replace(/^[,\-\s/\\|]+|[,\-\s/\\|]+$/g, '')
+    .trim();
+  return loc;
+}
+
+/**
+ * Sanitizes and purges fabricated/hallucinated skillExperience entries from storage.
+ * Detects uniform defaults (e.g. 4+ skills with "5 years" for an intern) or skills
+ * exceeding verifiable tenure without explicit textual grounding.
+ */
+export function sanitizeStoredSkillExperience(
+  rawSkillExp: Record<string, number> | undefined | null,
+  workExp?: Array<{
+    company?: string;
+    title?: string;
+    startYear?: string | number;
+    endYear?: string | null | number;
+    isCurrent?: boolean;
+    description?: string;
+  }> | null,
+  rawResumeText?: string | null,
+  overallYoe?: number | string | null,
+): Record<string, number> {
+  if (!rawSkillExp || typeof rawSkillExp !== 'object') return {};
+
+  const cleanExp: Record<string, number> = {};
+  const currentYear = new Date().getFullYear();
+
+  let maxVerifiableTenure = 0;
+  const validWorkExp = Array.isArray(workExp) ? workExp : [];
+
+  for (const role of validWorkExp) {
+    if (!role) continue;
+    const startYr = parseInt(String(role.startYear || ''), 10);
+    if (!isNaN(startYr) && startYr >= 1970 && startYr <= currentYear + 1) {
+      const endYr = role.isCurrent || !role.endYear ? currentYear : parseInt(String(role.endYear), 10);
+      const tenure = Math.max(0, (!isNaN(endYr) ? endYr : currentYear) - startYr);
+      if (tenure > maxVerifiableTenure) {
+        maxVerifiableTenure = tenure;
+      }
+    }
+  }
+
+  if (overallYoe !== undefined && overallYoe !== null) {
+    const numYoe = parseInt(String(overallYoe), 10);
+    if (!isNaN(numYoe) && numYoe >= 0) {
+      if (validWorkExp.length === 0) {
+        maxVerifiableTenure = numYoe;
+      } else {
+        maxVerifiableTenure = Math.max(maxVerifiableTenure, numYoe);
+      }
+    }
+  }
+
+  const entries = Object.entries(rawSkillExp);
+  const valueCounts = new Map<number, number>();
+  for (const [_, val] of entries) {
+    if (typeof val === 'number' && !isNaN(val) && val > 0) {
+      valueCounts.set(val, (valueCounts.get(val) || 0) + 1);
+    }
+  }
+
+  const suspectedFabricatedValues = new Set<number>();
+  for (const [val, count] of valueCounts.entries()) {
+    if (count >= 4 && val > Math.max(1, maxVerifiableTenure)) {
+      suspectedFabricatedValues.add(val);
+    }
+  }
+
+  for (const [skill, claimedYears] of entries) {
+    if (!skill || typeof claimedYears !== 'number' || isNaN(claimedYears) || claimedYears <= 0) {
+      continue;
+    }
+    const clean = skill
+      .trim()
+      .replace(/^[.,;:!?'"()[\]{}<>/\\|`~*#&^%$@+=]+|[.,;:!?'"()[\]{}<>/\\|`~*#&^%$@+=]+$/g, '')
+      .trim();
+    if (!clean || clean.length > 35) continue;
+
+    // Check if resume text explicitly states duration
+    const escaped = clean.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const explicitRegex = new RegExp(
+      `(?:\\b${escaped}\\b[^\\n\\r,]{0,35}?\\(?(\\d+(?:\\.\\d+)?)\\s*(?:\\+)?\\s*(?:years?|yrs?)\\)?)|(?:(?:for|with)?\\s*(\\d+(?:\\.\\d+)?)\\s*(?:\\+)?\\s*(?:years?|yrs?)[^\\n\\r,]{0,35}?\\b${escaped}\\b)`,
+      'i',
+    );
+    const textMatch = rawResumeText ? rawResumeText.match(explicitRegex) : null;
+
+    if (textMatch) {
+      const explicitNum = parseFloat(textMatch[1] || textMatch[2]);
+      if (!isNaN(explicitNum) && explicitNum > 0) {
+        cleanExp[clean] = Math.round(explicitNum);
+        continue;
+      }
+    }
+
+    const isFabricatedValue = suspectedFabricatedValues.has(claimedYears);
+
+    let skillRoleTenure: number | null = null;
+    const lowerSkill = clean.toLowerCase();
+
+    for (const role of validWorkExp) {
+      const roleText = `${role.title || ''} ${role.company || ''} ${role.description || ''}`.toLowerCase();
+      if (roleText.includes(lowerSkill)) {
+        const sYr = parseInt(String(role.startYear || ''), 10);
+        if (!isNaN(sYr)) {
+          const eYr = role.isCurrent || !role.endYear ? currentYear : parseInt(String(role.endYear), 10);
+          const rTenure = Math.max(0, (!isNaN(eYr) ? eYr : currentYear) - sYr);
+          skillRoleTenure = Math.max(skillRoleTenure ?? 0, rTenure);
+        }
+      }
+    }
+
+    if (skillRoleTenure !== null) {
+      if (maxVerifiableTenure === 0) {
+        continue;
+      }
+      const verifiedYears = Math.min(claimedYears, Math.max(1, skillRoleTenure), Math.max(1, maxVerifiableTenure));
+      cleanExp[clean] = verifiedYears;
+    } else {
+      if (isFabricatedValue || claimedYears > maxVerifiableTenure) {
+        continue;
+      }
+      if (maxVerifiableTenure > 0 && claimedYears <= maxVerifiableTenure) {
+        cleanExp[clean] = claimedYears;
+      }
+    }
+  }
+
+  return cleanExp;
+}
+
+/**
+ * Schema for structured candidate work experience.
+ */
+export const workExperienceItemSchema = z.object({
+  id: z.string(),
+  company: z.string().trim().min(1, 'Company is required'),
+  title: z.string().trim().min(1, 'Job title is required'),
+  startMonth: z.string().default(''),
+  startYear: z.string().default(''),
+  endMonth: z.string().nullable().default(null),
+  endYear: z.string().nullable().default(null),
+  isCurrent: z.boolean().default(false),
+  description: z.string().default(''),
+  source: z.enum(['manual', 'resume']).default('manual'),
+});
+
+export type IWorkExperienceItem = z.infer<typeof workExperienceItemSchema>;
+
+/**
  * Strict Zod Schema for Career Brain.
  * Enforces mandatory resumeText (minimum 50 chars), core contact fields,
  * and valid Golden Q&A list to prevent Bedrock AI form filler crashes.
@@ -41,6 +230,10 @@ export const careerBrainSchema = z.object({
   skills: z.array(z.string()).default([]),
   /** Total years of relevant professional experience */
   yearsOfExperience: z.number().nonnegative().default(0),
+  /** Flag indicating whether the candidate has professional work experience */
+  hasWorkExperience: z.boolean().default(true),
+  /** Structured work experience items */
+  workExperience: z.array(workExperienceItemSchema).default([]),
   /** Education details (Degree, College, CGPA) */
   education: z.string().default(''),
   /** College or University attended */
@@ -390,6 +583,8 @@ Tools: Git, GitHub, Docker, Postman, VS Code`,
     'Docker',
   ],
   yearsOfExperience: 1,
+  hasWorkExperience: true,
+  workExperience: [],
   education:
     'Bachelor of Technology in Computer Science & Engineering, Maulana Abul Kalam Azad University of Technology (2020 – 2024), CGPA: 8.57/10',
   college: 'Maulana Abul Kalam Azad University of Technology',
@@ -517,6 +712,8 @@ export async function getCareerBrainData(): Promise<ICareerBrain> {
           Array.isArray(raw.goldenAnswers) && raw.goldenAnswers.length > 0 ? raw.goldenAnswers : DEFAULT_GOLDEN_ANSWERS,
         customAnswers: raw.customAnswers || {},
         skillExperience: raw.skillExperience || {},
+        hasWorkExperience: raw.hasWorkExperience !== undefined ? Boolean(raw.hasWorkExperience) : true,
+        workExperience: Array.isArray(raw.workExperience) ? raw.workExperience : [],
         resumeText:
           raw.resumeText && raw.resumeText.length >= 20
             ? raw.resumeText
@@ -527,15 +724,64 @@ export async function getCareerBrainData(): Promise<ICareerBrain> {
       data = merged;
     }
 
+    // Seamless auto-migration: Purge any stale generic work-experience date fields from goldenAnswers
+    let purgedStaleGolden = false;
+    if (Array.isArray(data.goldenAnswers) && data.goldenAnswers.length > 0) {
+      const filtered = data.goldenAnswers.filter(ga => !isGenericWorkExperienceDateField(ga.question));
+      if (filtered.length !== data.goldenAnswers.length) {
+        data.goldenAnswers = filtered;
+        purgedStaleGolden = true;
+      }
+    }
+
+    // Seamless auto-migration: Sanitize and purge fabricated skillExperience (e.g. uniform "5 years" across 20+ skills)
+    let sanitizedSkillExp = false;
+    if (data.skillExperience && Object.keys(data.skillExperience).length > 0) {
+      const cleaned = sanitizeStoredSkillExperience(
+        data.skillExperience,
+        data.workExperience,
+        data.resumeText,
+        data.yearsOfExperience,
+      );
+      if (
+        Object.keys(cleaned).length !== Object.keys(data.skillExperience).length ||
+        Object.entries(cleaned).some(([k, v]) => data.skillExperience![k] !== v)
+      ) {
+        data.skillExperience = cleaned;
+        sanitizedSkillExp = true;
+      }
+    }
+
+    // Seamless auto-migration: Clean any stale "or Remote" suffixes from preferredLocation / currentLocation
+    let cleanedLocation = false;
+    if (data.preferredLocation && /remote|hybrid/i.test(data.preferredLocation)) {
+      const cleaned = cleanLocationForCityField(data.preferredLocation);
+      if (cleaned && cleaned !== data.preferredLocation) {
+        data.preferredLocation = cleaned;
+        cleanedLocation = true;
+      }
+    }
+    if (data.currentLocation && /remote|hybrid/i.test(data.currentLocation)) {
+      const cleaned = cleanLocationForCityField(data.currentLocation);
+      if (cleaned && cleaned !== data.currentLocation) {
+        data.currentLocation = cleaned;
+        cleanedLocation = true;
+      }
+    }
+
     // Seamless auto-migration: Ensure all default golden answers exist even for existing users
     const existingIds = new Set((data.goldenAnswers || []).map(ga => ga.id));
     const existingQuestions = new Set((data.goldenAnswers || []).map(ga => ga.question.toLowerCase().trim()));
     const missingDefaults = DEFAULT_GOLDEN_ANSWERS.filter(
       d => !existingIds.has(d.id) && !existingQuestions.has(d.question.toLowerCase().trim()),
     );
-    if (missingDefaults.length > 0) {
-      data.goldenAnswers = [...(data.goldenAnswers || []), ...missingDefaults];
-      storage.set(data).catch(err => console.error('[CareerBrainStorage] Failed to save merged defaults:', err));
+    if (missingDefaults.length > 0 || purgedStaleGolden || sanitizedSkillExp || cleanedLocation) {
+      if (missingDefaults.length > 0) {
+        data.goldenAnswers = [...(data.goldenAnswers || []), ...missingDefaults];
+      }
+      storage
+        .set(data)
+        .catch(err => console.error('[CareerBrainStorage] Failed to save merged defaults/sanitized data:', err));
     }
 
     return data;
@@ -556,6 +802,9 @@ export type CareerBrainStorage = BaseStorage<ICareerBrain> & {
   saveGoldenAnswer: (question: string, answer: string, category?: string) => Promise<void>;
   deleteGoldenAnswer: (id: string) => Promise<void>;
   updateGoldenAnswer: (id: string, newAnswer: string) => Promise<void>;
+  saveWorkExperienceItem: (item: Omit<IWorkExperienceItem, 'id'> & { id?: string }) => Promise<void>;
+  deleteWorkExperienceItem: (id: string) => Promise<void>;
+  setHasWorkExperience: (hasExperience: boolean) => Promise<void>;
 };
 
 export const careerBrainStore: CareerBrainStorage = {
@@ -595,6 +844,11 @@ export const careerBrainStore: CareerBrainStorage = {
   },
 
   async saveGoldenAnswer(question: string, answer: string, category?: string): Promise<void> {
+    // Never persist ambiguous relative work-experience date fields as generic golden answers
+    if (isGenericWorkExperienceDateField(question)) {
+      return;
+    }
+
     const current = await this.getCareerBrain();
     const cleanQ = question.trim();
     const cleanA = answer.trim();
@@ -630,6 +884,43 @@ export const careerBrainStore: CareerBrainStorage = {
     const cleanA = newAnswer.trim();
     const updatedGolden = current.goldenAnswers.map(ga => (ga.id === id ? { ...ga, answer: cleanA } : ga));
     await this.updateCareerBrain({ goldenAnswers: updatedGolden });
+  },
+
+  async setHasWorkExperience(hasExperience: boolean): Promise<void> {
+    await this.updateCareerBrain({ hasWorkExperience: hasExperience });
+  },
+
+  async saveWorkExperienceItem(item: Omit<IWorkExperienceItem, 'id'> & { id?: string }): Promise<void> {
+    const current = await this.getCareerBrain();
+    const currentList = Array.isArray(current.workExperience) ? [...current.workExperience] : [];
+    const itemId = item.id || `we_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+    const fullItem: IWorkExperienceItem = {
+      id: itemId,
+      company: item.company.trim(),
+      title: item.title.trim(),
+      startMonth: item.startMonth || '',
+      startYear: item.startYear || '',
+      endMonth: item.isCurrent ? null : item.endMonth || null,
+      endYear: item.isCurrent ? null : item.endYear || null,
+      isCurrent: Boolean(item.isCurrent),
+      description: item.description || '',
+      source: item.source || 'manual',
+    };
+
+    const existingIndex = currentList.findIndex(e => e.id === itemId);
+    if (existingIndex >= 0) {
+      currentList[existingIndex] = fullItem;
+    } else {
+      currentList.push(fullItem);
+    }
+    await this.updateCareerBrain({ workExperience: currentList, hasWorkExperience: true });
+  },
+
+  async deleteWorkExperienceItem(id: string): Promise<void> {
+    const current = await this.getCareerBrain();
+    const currentList = Array.isArray(current.workExperience) ? [...current.workExperience] : [];
+    const updatedList = currentList.filter(e => e.id !== id);
+    await this.updateCareerBrain({ workExperience: updatedList });
   },
 
   async saveData(data: unknown): Promise<SaveCareerBrainResult> {

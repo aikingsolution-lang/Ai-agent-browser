@@ -14,7 +14,13 @@
 
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { HumanMessage, SystemMessage } from '@langchain/core/messages';
-import { careerBrainStore, type ICareerBrain } from '@extension/storage';
+import {
+  careerBrainStore,
+  type ICareerBrain,
+  type IWorkExperienceItem,
+  isGenericWorkExperienceDateField,
+  cleanLocationForCityField,
+} from '@extension/storage';
 import { isValidSkillName } from '@extension/shared';
 import { createLogger } from '../../log';
 import { userQuestionManager } from './userQuestionManager';
@@ -494,17 +500,73 @@ export interface ParsedWorkDates {
 }
 
 /**
- * Extracts work history dates from resumeText or estimates from years of experience.
+ * Retrieves the candidate's primary work experience entry from structured careerBrain.workExperience.
+ * Prioritizes current role (isCurrent === true), then most recent by start year/month.
+ */
+export function getPrimaryWorkExperience(careerBrain: ICareerBrain): IWorkExperienceItem | null {
+  const list = Array.isArray(careerBrain.workExperience) ? careerBrain.workExperience : [];
+  if (list.length === 0) return null;
+
+  // 1. Prioritize current active position
+  const current = list.find(item => item.isCurrent);
+  if (current) return current;
+
+  // 2. Sort descending by startYear and startMonth
+  const sorted = [...list].sort((a, b) => {
+    const yearA = parseInt(a.startYear || '0', 10);
+    const yearB = parseInt(b.startYear || '0', 10);
+    if (yearA !== yearB) return yearB - yearA;
+
+    const monthA = MONTH_NAMES.findIndex(m =>
+      m.toLowerCase().startsWith((a.startMonth || '').slice(0, 3).toLowerCase()),
+    );
+    const monthB = MONTH_NAMES.findIndex(m =>
+      m.toLowerCase().startsWith((b.startMonth || '').slice(0, 3).toLowerCase()),
+    );
+    return monthB - monthA;
+  });
+
+  return sorted[0] || null;
+}
+
+/**
+ * Extracts work history dates prioritizing structured careerBrain.workExperience first,
+ * then falling back to resumeText regex or years of experience.
  */
 export function extractWorkHistoryDates(careerBrain: ICareerBrain): ParsedWorkDates {
-  const resume = careerBrain.resumeText || '';
   const now = new Date();
   const currentYear = now.getFullYear();
   const currentMonthIndex = now.getMonth();
   const currentMonthName = MONTH_NAMES[currentMonthIndex];
 
-  // Regex for date ranges in resume:
-  // e.g. "July 2022 - Present", "Aug 2021 to Current", "06/2022 - Present", "2022 - Present"
+  // 1. Structured Work Experience in Career Brain (highest priority, user-confirmed)
+  const primary = getPrimaryWorkExperience(careerBrain);
+  if (primary) {
+    const rawStartMonth = (primary.startMonth || '').trim().toLowerCase();
+    const startMonth =
+      rawStartMonth && MONTH_MAP[rawStartMonth] ? MONTH_MAP[rawStartMonth] : primary.startMonth || 'January';
+    const startYear = primary.startYear || String(currentYear - 1);
+
+    const isPresent = Boolean(primary.isCurrent);
+    const rawEndMonth = (primary.endMonth || '').trim().toLowerCase();
+    const endMonth = isPresent
+      ? currentMonthName
+      : rawEndMonth && MONTH_MAP[rawEndMonth]
+        ? MONTH_MAP[rawEndMonth]
+        : primary.endMonth || currentMonthName;
+    const endYear = isPresent ? String(currentYear) : primary.endYear || String(currentYear);
+
+    return {
+      startMonth,
+      startYear,
+      endMonth,
+      endYear,
+      isCurrentRole: isPresent,
+    };
+  }
+
+  // 2. Fallback: Parse date ranges from resume text
+  const resume = careerBrain.resumeText || '';
   const rangeRegex =
     /(?:(?:(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?|\d{1,2}[\/-])\s*)?(\d{4})\s*(?:-|–|—|to)\s*(Present|Current|Now|(?:(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?|\d{1,2}[\/-])\s*)?(\d{4})))/i;
 
@@ -534,7 +596,7 @@ export function extractWorkHistoryDates(careerBrain: ICareerBrain): ParsedWorkDa
     };
   }
 
-  // Fallback: estimate start date from candidate's yearsOfExperience
+  // 3. Fallback: estimate start date from candidate's yearsOfExperience
   const yoe = Math.max(1, Math.round(careerBrain.yearsOfExperience || 2));
   const estimatedStartYear = String(currentYear - yoe);
   return {
@@ -548,51 +610,85 @@ export function extractWorkHistoryDates(careerBrain: ICareerBrain): ParsedWorkDa
 
 /**
  * Maps a target month or year to available dropdown options (name, 2-digit, 1-digit, or string).
+ * Returns null if the targetValue is fundamentally incompatible (e.g. "No" for a month, or a year for a month).
  */
-export function matchDateOption(field: FormFieldDescriptor, targetValue: string, type: 'month' | 'year'): string {
+export function matchDateOption(
+  field: FormFieldDescriptor,
+  targetValue: string,
+  type: 'month' | 'year',
+): string | null {
+  if (!targetValue || typeof targetValue !== 'string') {
+    return null;
+  }
+  const val = targetValue.trim();
+
+  // Strict type checks:
+  if (type === 'month') {
+    // A month cannot be a 4-digit number (e.g. "2026") or boolean ("No", "Yes")
+    if (/^\d{4}$/.test(val) || /^(?:yes|no|true|false)$/i.test(val)) {
+      return null;
+    }
+  } else if (type === 'year') {
+    // A year must be numeric (usually 4 digits), never boolean or month name
+    if (
+      /^(?:yes|no|true|false)$/i.test(val) ||
+      MONTH_NAMES.some(m => m.toLowerCase().startsWith(val.slice(0, 3).toLowerCase()))
+    ) {
+      return null;
+    }
+  }
+
   if (!field.options || field.options.length === 0) {
-    return targetValue;
+    return val;
   }
   const cleanOptions = field.options.map(o => o.trim()).filter(Boolean);
 
   if (type === 'month') {
-    const monthName = targetValue;
-    const monthIdx = MONTH_NAMES.findIndex(m => m.toLowerCase() === monthName.toLowerCase());
-    const validIdx = monthIdx >= 0 ? monthIdx : 0;
-    const monthNum1 = String(validIdx + 1);
-    const monthNum2 = String(validIdx + 1).padStart(2, '0');
+    const monthName = val;
+    const monthIdx = MONTH_NAMES.findIndex(m => m.toLowerCase().startsWith(monthName.slice(0, 3).toLowerCase()));
+    const validIdx = monthIdx >= 0 ? monthIdx : -1;
+    if (validIdx === -1 && !/^\d{1,2}$/.test(val)) {
+      return null;
+    }
+
+    const monthNum1 = validIdx >= 0 ? String(validIdx + 1) : String(parseInt(val, 10));
+    const monthNum2 =
+      validIdx >= 0 ? String(validIdx + 1).padStart(2, '0') : String(parseInt(val, 10)).padStart(2, '0');
+    const fullMonth = validIdx >= 0 ? MONTH_NAMES[validIdx] : '';
 
     // 1. Direct name match (e.g. "January" or "Jan")
-    const nameMatch = cleanOptions.find(
-      o =>
-        o.toLowerCase() === monthName.toLowerCase() || o.toLowerCase().startsWith(monthName.slice(0, 3).toLowerCase()),
-    );
-    if (nameMatch) return nameMatch;
+    if (fullMonth) {
+      const nameMatch = cleanOptions.find(
+        o =>
+          o.toLowerCase() === fullMonth.toLowerCase() ||
+          o.toLowerCase().startsWith(fullMonth.slice(0, 3).toLowerCase()) ||
+          fullMonth.toLowerCase().startsWith(o.toLowerCase()),
+      );
+      if (nameMatch) return nameMatch;
+    }
 
     // 2. Numeric match (e.g. "01" or "1")
     const numMatch = cleanOptions.find(o => o === monthNum2 || o === monthNum1);
     if (numMatch) return numMatch;
 
-    // 3. Substring match
-    const subMatch = cleanOptions.find(o => o.toLowerCase().includes(monthName.slice(0, 3).toLowerCase()));
-    if (subMatch) return subMatch;
-
-    return cleanOptions[0];
+    return null;
   } else {
     // type === 'year'
-    const yearMatch = cleanOptions.find(o => o === targetValue || o.includes(targetValue));
+    const yearMatch = cleanOptions.find(o => o === val || o.trim() === val);
     if (yearMatch) return yearMatch;
 
-    // Fallback: closest year
-    const targetNum = parseInt(targetValue, 10);
-    if (!isNaN(targetNum)) {
+    // Fallback: closest year if valid 4-digit number
+    const targetNum = parseInt(val, 10);
+    if (!isNaN(targetNum) && targetNum >= 1970 && targetNum <= 2100) {
       const sortedYears = cleanOptions
         .map(o => ({ opt: o, num: parseInt(o, 10) }))
-        .filter(x => !isNaN(x.num))
+        .filter(x => !isNaN(x.num) && x.num >= 1970 && x.num <= 2100)
         .sort((a, b) => Math.abs(a.num - targetNum) - Math.abs(b.num - targetNum));
-      if (sortedYears.length > 0) return sortedYears[0].opt;
+      if (sortedYears.length > 0 && Math.abs(sortedYears[0].num - targetNum) <= 5) {
+        return sortedYears[0].opt;
+      }
     }
-    return cleanOptions[0];
+    return null;
   }
 }
 
@@ -626,14 +722,73 @@ export function adaptAnswerToFieldFormat(
     return { valid: false, value: '', wasConverted: false };
   }
 
-  // Radio, Dropdown, and Checkbox fields handle option matching / boolean states separately; don't force numeric strings on them
-  if (field.fieldType === 'radio' || field.fieldType === 'dropdown' || field.fieldType === 'checkbox') {
-    return { valid: true, value: answer, wasConverted: false };
-  }
-
   const labelLower = (field.label || '').toLowerCase();
   const hintLower = `${field.hintText || ''} ${field.placeholder || ''}`.toLowerCase();
   const combinedContext = `${labelLower} ${hintLower}`;
+
+  // 0a. Check date fields first (Month / Year)
+  const isMonthField =
+    (/\b(?:from|start|to|end)?\s*month\b|\bmonth\s+(?:of\s+)?(?:from|start|to|end)\b/i.test(labelLower) ||
+      /^(?:start|from|end|to)\s*month$/i.test(labelLower)) &&
+    !/how\s*many|notice\s*period|ctc|salary/i.test(labelLower);
+
+  const isYearField =
+    (/\b(?:from|start|to|end)?\s*year\b|\byear\s+(?:of\s+)?(?:from|start|to|end)\b/i.test(labelLower) ||
+      /^(?:start|from|end|to)\s*year$/i.test(labelLower)) &&
+    !/how\s*many|years\s*of|notice\s*period|ctc|salary/i.test(labelLower);
+
+  if (isMonthField) {
+    const matched = matchDateOption(field, answer, 'month');
+    if (matched) {
+      return { valid: true, value: matched, wasConverted: matched !== answer };
+    }
+    return { valid: false, value: answer, wasConverted: false };
+  }
+
+  if (isYearField) {
+    const matched = matchDateOption(field, answer, 'year');
+    if (matched) {
+      return { valid: true, value: matched, wasConverted: matched !== answer };
+    }
+    return { valid: false, value: answer, wasConverted: false };
+  }
+
+  // 0b. General Dropdown: Must match one of the available options
+  if (field.fieldType === 'dropdown') {
+    if (field.options && field.options.length > 0) {
+      const cleanOptions = field.options.map(o => o.trim()).filter(Boolean);
+      const strAnswer = answer.toLowerCase();
+      const exactMatch = cleanOptions.find(o => o.toLowerCase() === strAnswer);
+      if (exactMatch) {
+        return { valid: true, value: exactMatch, wasConverted: false };
+      }
+      const partialMatch = cleanOptions.find(
+        o => o.toLowerCase().startsWith(strAnswer) || strAnswer.startsWith(o.toLowerCase()),
+      );
+      if (partialMatch) {
+        return { valid: true, value: partialMatch, wasConverted: true };
+      }
+      return { valid: false, value: answer, wasConverted: false };
+    }
+    return { valid: true, value: answer, wasConverted: false };
+  }
+
+  // 0c. Radio / Checkbox: For Yes/No options, must be valid boolean/Yes/No
+  if (field.fieldType === 'radio' || field.fieldType === 'checkbox') {
+    if (field.options && field.options.length > 0 && field.options.every(o => /^(?:yes|no)$/i.test(o.trim()))) {
+      const strAns = answer.toLowerCase();
+      if (/^(?:yes|true|1|y)$/i.test(strAns)) {
+        const yesOpt = field.options.find(o => /^yes$/i.test(o.trim())) || 'Yes';
+        return { valid: true, value: yesOpt, wasConverted: yesOpt !== answer };
+      }
+      if (/^(?:no|false|0|n)$/i.test(strAns)) {
+        const noOpt = field.options.find(o => /^no$/i.test(o.trim())) || 'No';
+        return { valid: true, value: noOpt, wasConverted: noOpt !== answer };
+      }
+      return { valid: false, value: answer, wasConverted: false };
+    }
+    return { valid: true, value: answer, wasConverted: false };
+  }
 
   const isNumericField =
     field.fieldType === 'number' ||
@@ -1017,32 +1172,167 @@ export function matchRuleBased(
     }
   }
 
-  // 2. Golden Answers (loose match check with format adaptation)
-  const goldenAnswers = Array.isArray(careerBrain.goldenAnswers) ? careerBrain.goldenAnswers : [];
-  for (const ga of goldenAnswers) {
-    if (!ga.question || !ga.answer) continue;
-    if (matchesQuestionLoosely(label, ga.question)) {
-      const adapted = adaptAnswerToFieldFormat(ga.answer, field);
-      if (adapted.valid) {
+  // 1d. Structured Work Experience & Work History (Dates, Title, Company, Currently Working)
+  // CRITICAL: Strictly guard against general duration/years of experience questions
+  const isExperienceOrDurationQuestion =
+    /how\s*many\s*years|years\s*of|experience|duration|\(in\s*years?\)|notice\s*period|ctc|salary|when\s*can\s*you/i.test(
+      labelLower,
+    );
+
+  if (!isExperienceOrDurationQuestion) {
+    const primaryWork = getPrimaryWorkExperience(careerBrain);
+
+    // Job Title / Position
+    if (primaryWork?.title && /^(?:job\s*)?title$|^(?:current\s*)?(?:job\s*)?title$|^position$/i.test(labelLower)) {
+      return {
+        matched: true,
+        answer: primaryWork.title,
+        sourceDetail: `workExperience: title ("${primaryWork.title}")`,
+      };
+    }
+
+    // Company / Employer
+    if (
+      primaryWork?.company &&
+      /^(?:company|company\s*name|employer)$|^(?:current\s*)?(?:company|employer)$/i.test(labelLower)
+    ) {
+      return {
+        matched: true,
+        answer: primaryWork.company,
+        sourceDetail: `workExperience: company ("${primaryWork.company}")`,
+      };
+    }
+
+    // Role description / summary
+    if (
+      primaryWork?.description &&
+      /^(?:role\s*)?description$|^summary$|^(?:work|job)\s*description$/i.test(labelLower)
+    ) {
+      return {
+        matched: true,
+        answer: primaryWork.description,
+        sourceDetail: `workExperience: description`,
+      };
+    }
+
+    // Start Month: "Month of From", "From: Month", "Start Month", etc.
+    if (
+      (/\b(?:from|start)\s*(?:month|date)\b|\bmonth\s+(?:of\s+)?(?:from|start)\b/i.test(labelLower) ||
+        /^(?:start|from)\s*month$/i.test(labelLower)) &&
+      !/start\s*(?:salary|ctc|compensation)/i.test(labelLower)
+    ) {
+      const dates = extractWorkHistoryDates(careerBrain);
+      const ans = matchDateOption(field, dates.startMonth, 'month');
+      if (ans) {
         return {
           matched: true,
-          answer: adapted.value,
-          sourceDetail: adapted.sourceNote || `goldenAnswers: "${ga.question}"`,
+          answer: ans,
+          sourceDetail: `work history: start month (${dates.startMonth})`,
+        };
+      }
+    }
+
+    // Start Year: "Year of From", "From: Year", "Start Year", etc.
+    if (
+      (/\b(?:from|start)\s*year\b|\byear\s+(?:of\s+)?(?:from|start)\b/i.test(labelLower) ||
+        /^(?:start|from)\s*year$/i.test(labelLower)) &&
+      !/start\s*(?:salary|ctc|compensation)/i.test(labelLower)
+    ) {
+      const dates = extractWorkHistoryDates(careerBrain);
+      const ans = matchDateOption(field, dates.startYear, 'year');
+      if (ans) {
+        return {
+          matched: true,
+          answer: ans,
+          sourceDetail: `work history: start year (${dates.startYear})`,
+        };
+      }
+    }
+
+    // End Month: "Month of To", "To: Month", "End Month", etc.
+    if (
+      !/front[-\s]*end|back[-\s]*end|end[-\s]*to[-\s]*end/i.test(labelLower) &&
+      (/\b(?:to|end|completion|finish)\s*(?:month|date)\b|\bmonth\s+(?:of\s+)?(?:to|end)\b/i.test(labelLower) ||
+        /^(?:end|to)\s*month$/i.test(labelLower))
+    ) {
+      const dates = extractWorkHistoryDates(careerBrain);
+      const ans = matchDateOption(field, dates.endMonth, 'month');
+      if (ans) {
+        return {
+          matched: true,
+          answer: ans,
+          sourceDetail: `work history: end month (${dates.endMonth})`,
+        };
+      }
+    }
+
+    // End Year: "Year of To", "To: Year", "End Year", etc.
+    if (
+      !/front[-\s]*end|back[-\s]*end|end[-\s]*to[-\s]*end/i.test(labelLower) &&
+      (/\b(?:to|end|completion|finish)\s*year\b|\byear\s+(?:of\s+)?(?:to|end)\b/i.test(labelLower) ||
+        /^(?:end|to)\s*year$/i.test(labelLower))
+    ) {
+      const dates = extractWorkHistoryDates(careerBrain);
+      const ans = matchDateOption(field, dates.endYear, 'year');
+      if (ans) {
+        return {
+          matched: true,
+          answer: ans,
+          sourceDetail: `work history: end year (${dates.endYear})`,
         };
       }
     }
   }
 
+  // Currently working here / I currently work here
+  if (
+    /currently\s*work|current\s*(?:role|job|company|employer|position|work)|currently\s*employed|i\s*work\s*here|present\s*(?:company|employer|role|job)/i.test(
+      labelLower,
+    )
+  ) {
+    const dates = extractWorkHistoryDates(careerBrain);
+    const isCurrent = dates.isCurrentRole ?? true;
+    const ans = isCurrent ? 'Yes' : 'No';
+    const adapted = adaptAnswerToFieldFormat(ans, field);
+    return {
+      matched: true,
+      answer: adapted.valid ? adapted.value : ans,
+      sourceDetail: `work history: ${isCurrent ? 'currently working here' : 'past role'}`,
+    };
+  }
+
+  // 2. Golden Answers (loose match check with format adaptation)
+  if (!isGenericWorkExperienceDateField(label)) {
+    const goldenAnswers = Array.isArray(careerBrain.goldenAnswers) ? careerBrain.goldenAnswers : [];
+    for (const ga of goldenAnswers) {
+      if (!ga.question || !ga.answer) continue;
+      if (isGenericWorkExperienceDateField(ga.question)) continue;
+      if (matchesQuestionLoosely(label, ga.question)) {
+        const adapted = adaptAnswerToFieldFormat(ga.answer, field);
+        if (adapted.valid) {
+          return {
+            matched: true,
+            answer: adapted.value,
+            sourceDetail: adapted.sourceNote || `goldenAnswers: "${ga.question}"`,
+          };
+        }
+      }
+    }
+  }
+
   // 3. Custom Answers (loose match check with format adaptation)
-  for (const [key, ans] of Object.entries(careerBrain.customAnswers || {})) {
-    if (matchesQuestionLoosely(label, key)) {
-      const adapted = adaptAnswerToFieldFormat(String(ans), field);
-      if (adapted.valid) {
-        return {
-          matched: true,
-          answer: adapted.value,
-          sourceDetail: adapted.sourceNote || `customAnswers: "${key}"`,
-        };
+  if (!isGenericWorkExperienceDateField(label)) {
+    for (const [key, ans] of Object.entries(careerBrain.customAnswers || {})) {
+      if (isGenericWorkExperienceDateField(key)) continue;
+      if (matchesQuestionLoosely(label, key)) {
+        const adapted = adaptAnswerToFieldFormat(String(ans), field);
+        if (adapted.valid) {
+          return {
+            matched: true,
+            answer: adapted.value,
+            sourceDetail: adapted.sourceNote || `customAnswers: "${key}"`,
+          };
+        }
       }
     }
   }
@@ -1132,9 +1422,12 @@ export function matchRuleBased(
   if (
     /city|location|preferred\s*location/i.test(labelLower) &&
     !/comfortable|willing|open\s+to|commute|relocate|able\s+to|hybrid|onsite|are\s+you/i.test(labelLower) &&
-    careerBrain.preferredLocation
+    (careerBrain.preferredLocation || careerBrain.currentLocation)
   ) {
-    return { matched: true, answer: careerBrain.preferredLocation, sourceDetail: 'profile: preferredLocation' };
+    const rawLoc = careerBrain.preferredLocation || careerBrain.currentLocation || '';
+    const cleanCity = cleanLocationForCityField(rawLoc);
+    const finalAnswer = cleanCity || rawLoc;
+    return { matched: true, answer: finalAnswer, sourceDetail: `profile: preferredLocation ("${finalAnswer}")` };
   }
   if (/authorized|legally\s*authorized|eligible\s*to\s*work/i.test(labelLower)) {
     const isAuth = !careerBrain.workAuthorization?.toLowerCase().includes('not authorized');
@@ -1314,117 +1607,21 @@ export function matchRuleBased(
     }
   }
 
-  // 6. Work History & Employment Date Fields
-  // CRITICAL: Strictly guard against experience, years of experience, and skills questions
-  // (e.g. "How many years of experience do you have in front end & back end development?")
-  const isExperienceOrDurationQuestion =
-    /how\s*many\s*years|years\s*of|experience|duration|\(in\s*years?\)|notice\s*period|ctc|salary|when\s*can\s*you/i.test(
-      labelLower,
-    );
-
-  if (!isExperienceOrDurationQuestion) {
-    // a) Start Month: "Month of From", "From: Month", "Start Month", etc.
-    if (
-      (/\b(?:from|start)\s*(?:month|date)\b|\bmonth\s+(?:of\s+)?(?:from|start)\b/i.test(labelLower) ||
-        /^(?:start|from)\s*month$/i.test(labelLower)) &&
-      !/start\s*(?:salary|ctc|compensation)/i.test(labelLower)
-    ) {
-      const dates = extractWorkHistoryDates(careerBrain);
-      const ans = matchDateOption(field, dates.startMonth, 'month');
-      return {
-        matched: true,
-        answer: ans,
-        sourceDetail: `work history: start month (${dates.startMonth})`,
-      };
-    }
-
-    // b) Start Year: "Year of From", "From: Year", "Start Year", etc.
-    if (
-      (/\b(?:from|start)\s*year\b|\byear\s+(?:of\s+)?(?:from|start)\b/i.test(labelLower) ||
-        /^(?:start|from)\s*year$/i.test(labelLower)) &&
-      !/start\s*(?:salary|ctc|compensation)/i.test(labelLower)
-    ) {
-      const dates = extractWorkHistoryDates(careerBrain);
-      const ans = matchDateOption(field, dates.startYear, 'year');
-      return {
-        matched: true,
-        answer: ans,
-        sourceDetail: `work history: start year (${dates.startYear})`,
-      };
-    }
-
-    // c) End Month: "Month of To", "To: Month", "End Month", "Month of end", etc.
-    if (
-      !/front[-\s]*end|back[-\s]*end|end[-\s]*to[-\s]*end/i.test(labelLower) &&
-      (/\b(?:to|end|completion|finish)\s*(?:month|date)\b|\bmonth\s+(?:of\s+)?(?:to|end)\b/i.test(labelLower) ||
-        /^(?:end|to)\s*month$/i.test(labelLower))
-    ) {
-      const dates = extractWorkHistoryDates(careerBrain);
-      const ans = matchDateOption(field, dates.endMonth, 'month');
-      return {
-        matched: true,
-        answer: ans,
-        sourceDetail: `work history: end month (${dates.endMonth})`,
-      };
-    }
-
-    // d) End Year: "Year of To", "To: Year", "End Year", "Year of end", etc.
-    if (
-      !/front[-\s]*end|back[-\s]*end|end[-\s]*to[-\s]*end/i.test(labelLower) &&
-      (/\b(?:to|end|completion|finish)\s*year\b|\byear\s+(?:of\s+)?(?:to|end)\b/i.test(labelLower) ||
-        /^(?:end|to)\s*year$/i.test(labelLower))
-    ) {
-      const dates = extractWorkHistoryDates(careerBrain);
-      const ans = matchDateOption(field, dates.endYear, 'year');
-      return {
-        matched: true,
-        answer: ans,
-        sourceDetail: `work history: end year (${dates.endYear})`,
-      };
-    }
-  }
-
-  // e) "Currently working here" / "I currently work here" / "Current company" / "Present employer"
-  if (
-    /currently\s*work|current\s*(?:role|job|company|employer|position|work)|currently\s*employed|i\s*work\s*here|present\s*(?:company|employer|role|job)/i.test(
-      labelLower,
-    )
-  ) {
-    // 1. Check customAnswers or goldenAnswers first if user previously answered
-    const saved =
-      careerBrain.customAnswers?.[field.label] ||
-      careerBrain.customAnswers?.['I currently work here'] ||
-      careerBrain.goldenAnswers?.find(ga => /currently\s*work|current\s*role|currently\s*employed/i.test(ga.question))
-        ?.answer;
-    if (saved) {
-      return {
-        matched: true,
-        answer: saved,
-        sourceDetail: 'saved preference: currently working here',
-      };
-    }
-
-    // 2. Check resume work history dates
-    const dates = extractWorkHistoryDates(careerBrain);
-    const isCurrent = dates.isCurrentRole ?? true;
-    return {
-      matched: true,
-      answer: isCurrent ? 'Yes' : 'No',
-      sourceDetail: `work history: ${isCurrent ? 'currently working here (from resume/history)' : 'past role'}`,
-    };
-  }
-
   // f) Graduation Month & Year
   if (/graduation|graduate/i.test(labelLower)) {
     if (/month/i.test(labelLower)) {
       const ans = matchDateOption(field, 'May', 'month');
-      return { matched: true, answer: ans, sourceDetail: 'education: graduation month' };
+      if (ans) {
+        return { matched: true, answer: ans, sourceDetail: 'education: graduation month' };
+      }
     }
     if (/year/i.test(labelLower)) {
       const dates = extractWorkHistoryDates(careerBrain);
       const gradYear = String(parseInt(dates.startYear, 10));
       const ans = matchDateOption(field, gradYear, 'year');
-      return { matched: true, answer: ans, sourceDetail: `education: graduation year (${gradYear})` };
+      if (ans) {
+        return { matched: true, answer: ans, sourceDetail: `education: graduation year (${gradYear})` };
+      }
     }
   }
 
@@ -2001,14 +2198,16 @@ OUTPUT STRICTLY VALID JSON ONLY:
         }
 
         // Auto-save to goldenAnswers for future encounters
-        await careerBrainStore.saveGoldenAnswer(cleanLabel, ans, 'Screening').catch(() => {});
-        if (!careerBrain.goldenAnswers) careerBrain.goldenAnswers = [];
-        careerBrain.goldenAnswers.push({
-          id: `ga_${Date.now()}`,
-          question: cleanLabel,
-          answer: ans,
-          category: 'Screening',
-        });
+        if (!isGenericWorkExperienceDateField(cleanLabel)) {
+          await careerBrainStore.saveGoldenAnswer(cleanLabel, ans, 'Screening').catch(() => {});
+          if (!careerBrain.goldenAnswers) careerBrain.goldenAnswers = [];
+          careerBrain.goldenAnswers.push({
+            id: `ga_${Date.now()}`,
+            question: cleanLabel,
+            answer: ans,
+            category: 'Screening',
+          });
+        }
 
         logger.info(
           `[FormQuestionResolver] [AUTONOMOUS SOLVED] "${cleanLabel}": "${ans}" (${parsed.reason || 'Autonomous LLM determination'})`,
@@ -2304,7 +2503,9 @@ export async function resolveModalFieldWithAudit(
         }
 
         // Auto-save to goldenAnswers so future encounters of this question resolve immediately in Step 1
-        await careerBrainStore.saveGoldenAnswer(label, subjectiveMatch.answer, 'Screening').catch(() => {});
+        if (!isGenericWorkExperienceDateField(label)) {
+          await careerBrainStore.saveGoldenAnswer(label, subjectiveMatch.answer, 'Screening').catch(() => {});
+        }
 
         return {
           success: true,
@@ -2414,7 +2615,9 @@ export async function resolveModalFieldWithAudit(
       );
 
       // Auto-save to goldenAnswers
-      await careerBrainStore.saveGoldenAnswer(label, userAnswer, 'Screening');
+      if (!isGenericWorkExperienceDateField(label)) {
+        await careerBrainStore.saveGoldenAnswer(label, userAnswer, 'Screening');
+      }
 
       // Auto-save to skillExperience if this is a skill numeric question
       const skillName = userQuestionManager.extractSkillName(label);
@@ -2451,15 +2654,17 @@ export async function resolveModalFieldWithAudit(
       }
 
       // Update in-memory careerBrain goldenAnswers array so subsequent checks in the current run see it
-      careerBrain.goldenAnswers = [
-        ...(careerBrain.goldenAnswers || []),
-        {
-          id: `ga_${Date.now()}`,
-          question: label,
-          answer: userAnswer,
-          category: 'Screening',
-        },
-      ];
+      if (!isGenericWorkExperienceDateField(label)) {
+        careerBrain.goldenAnswers = [
+          ...(careerBrain.goldenAnswers || []),
+          {
+            id: `ga_${Date.now()}`,
+            question: label,
+            answer: userAnswer,
+            category: 'Screening',
+          },
+        ];
+      }
 
       const adaptedUser = adaptAnswerToFieldFormat(userAnswer, field);
       const valToFill = adaptedUser.valid ? adaptedUser.value : userAnswer;

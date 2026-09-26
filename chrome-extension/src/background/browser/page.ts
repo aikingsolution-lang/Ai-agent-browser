@@ -3344,16 +3344,54 @@ export default class Page {
           targetEl.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
 
           // Autocomplete / typeahead suggestion selection (e.g. Location (city), School/University, Company, Title)
+          const isLocationField =
+            /location|city/i.test(ident.label || '') ||
+            /location|city/i.test(ident.id || '') ||
+            /location|city/i.test(targetEl.id || '') ||
+            /location|city/i.test(targetEl.name || '');
+
           const isTypeahead =
             targetEl.getAttribute('role') === 'combobox' ||
             targetEl.getAttribute('aria-autocomplete') === 'list' ||
             targetEl.hasAttribute('aria-controls') ||
             Boolean(targetEl.closest('.basic-typeahead, .artdeco-typeahead, [data-test-typeahead]')) ||
-            /location|city|school|college|university|company|title/i.test(ident.label || '');
+            isLocationField ||
+            /school|college|university|company|title/i.test(ident.label || '');
+
+          // If location field, sanitize remote/hybrid clauses e.g. "Bengaluru, India or Remote" -> "Bengaluru, India"
+          let cleanVal = val.trim();
+          if (isLocationField) {
+            cleanVal = cleanVal
+              .replace(/\b(?:or|and|\/)\s*remote\b/gi, '')
+              .replace(/\bremote\s*(?:or|and|\/)\b/gi, '')
+              .replace(/\(remote\)/gi, '')
+              .replace(/\[remote\]/gi, '')
+              .replace(/\b(?:or|and|\/)\s*hybrid\b/gi, '')
+              .replace(/\(hybrid\)/gi, '')
+              .replace(/\[hybrid\]/gi, '')
+              .replace(/\s*,\s*remote\b/gi, '')
+              .replace(/\bremote\s*,\s*/gi, '')
+              .replace(/^[,\-\s/]+|[,\-\s/]+$/g, '')
+              .trim();
+            if (/^remote$/i.test(cleanVal)) cleanVal = '';
+            if (!cleanVal) cleanVal = val.trim();
+
+            // Re-apply cleaned value to input if modified
+            if (cleanVal !== val) {
+              if (setter) {
+                setter.call(targetEl, cleanVal);
+              } else {
+                targetEl.value = cleanVal;
+              }
+              targetEl.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+              targetEl.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+            }
+          }
 
           if (isTypeahead) {
-            // Wait briefly for suggestions to appear
-            await new Promise(r => setTimeout(r, 450));
+            // Dispatch key events to activate LinkedIn's typeahead listener
+            targetEl.dispatchEvent(new KeyboardEvent('keydown', { key: cleanVal.slice(-1) || 'a', bubbles: true }));
+            targetEl.dispatchEvent(new KeyboardEvent('keyup', { key: cleanVal.slice(-1) || 'a', bubbles: true }));
 
             const listboxSelectors = [
               'div[role="listbox"]',
@@ -3362,42 +3400,124 @@ export default class Page {
               '.artdeco-typeahead__results-list',
               '.basic-typeahead__selectable-list',
               '.typeahead-results',
+              'div[data-artdeco-typeahead-results]',
             ];
 
+            let optionEls: HTMLElement[] = [];
             let listbox: HTMLElement | null = null;
-            const container = targetEl.closest(
-              '.basic-typeahead, .artdeco-typeahead, .fb-dash-form-element, div[data-test-form-element]',
-            );
-            if (container) {
-              listbox = container.querySelector(listboxSelectors.join(', '));
-            }
-            if (!listbox) {
-              listbox =
-                modal.querySelector(listboxSelectors.join(', ')) || document.querySelector(listboxSelectors.join(', '));
-            }
 
-            if (listbox) {
-              const optionEls = Array.from(
-                listbox.querySelectorAll(
-                  'div[role="option"], li[role="option"], .basic-typeahead__selectable-item, .artdeco-typeahead__result, [role="option"]',
-                ),
-              ) as HTMLElement[];
+            // Poll for up to 2 seconds (10 attempts * 200ms) for suggestions to render
+            for (let attempt = 0; attempt < 10; attempt++) {
+              await new Promise(r => setTimeout(r, 200));
 
-              if (optionEls.length > 0) {
-                const normVal = val.toLowerCase().trim();
-                // Find matching option or select the first option
-                let bestOpt =
-                  optionEls.find(opt => {
-                    const txt = (opt.textContent || '').toLowerCase().trim();
-                    return txt.includes(normVal) || normVal.includes(txt);
-                  }) || optionEls[0];
+              const container = targetEl.closest(
+                '.basic-typeahead, .artdeco-typeahead, .fb-dash-form-element, div[data-test-form-element]',
+              );
+              if (container) {
+                listbox = container.querySelector(listboxSelectors.join(', '));
+              }
+              if (!listbox) {
+                listbox =
+                  modal.querySelector(listboxSelectors.join(', ')) ||
+                  document.querySelector(listboxSelectors.join(', '));
+              }
 
-                if (bestOpt) {
-                  ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(evt => {
-                    bestOpt.dispatchEvent(new MouseEvent(evt, { bubbles: true, cancelable: true, view: window }));
-                  });
-                  await new Promise(r => setTimeout(r, 200));
+              if (listbox) {
+                optionEls = Array.from(
+                  listbox.querySelectorAll(
+                    'div[role="option"], li[role="option"], .basic-typeahead__selectable-item, .artdeco-typeahead__result, [role="option"]',
+                  ),
+                ) as HTMLElement[];
+                if (optionEls.length > 0) {
+                  break;
                 }
+              }
+
+              // After 4 attempts (800ms) with no options, if this is a location field with a comma, try typing just the city name!
+              if (attempt === 3 && optionEls.length === 0 && isLocationField && cleanVal.includes(',')) {
+                const primaryCity = cleanVal.split(',')[0].trim();
+                if (primaryCity && primaryCity !== cleanVal) {
+                  if (setter) {
+                    setter.call(targetEl, primaryCity);
+                  } else {
+                    targetEl.value = primaryCity;
+                  }
+                  targetEl.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+                  targetEl.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+                  targetEl.dispatchEvent(
+                    new KeyboardEvent('keydown', { key: primaryCity.slice(-1) || 'a', bubbles: true }),
+                  );
+                  targetEl.dispatchEvent(
+                    new KeyboardEvent('keyup', { key: primaryCity.slice(-1) || 'a', bubbles: true }),
+                  );
+                }
+              }
+            }
+
+            if (optionEls.length > 0) {
+              const normVal = cleanVal.toLowerCase().trim();
+              const tokens = normVal
+                .replace(/[^\w\s]/g, ' ')
+                .split(/\s+/)
+                .filter(t => t.length > 2);
+              const primaryToken = tokens[0] || normVal;
+
+              let bestOpt: HTMLElement | null = null;
+              let highestScore = -1;
+
+              for (const opt of optionEls) {
+                const txt = (opt.textContent || '').toLowerCase().trim();
+                let score = 0;
+
+                if (txt === normVal) {
+                  score = 100;
+                } else if (txt.startsWith(normVal)) {
+                  score = 90;
+                } else if (txt.includes(normVal) || normVal.includes(txt)) {
+                  score = 80;
+                } else if (primaryToken && txt.includes(primaryToken)) {
+                  // e.g. "bengaluru" in "Bengaluru, Karnataka, India" or "Greater Bengaluru Area"
+                  score = 70;
+                  for (const tok of tokens.slice(1)) {
+                    if (txt.includes(tok)) score += 10;
+                  }
+                } else {
+                  for (const tok of tokens) {
+                    if (txt.includes(tok)) score += 10;
+                  }
+                }
+
+                if (score > highestScore) {
+                  highestScore = score;
+                  bestOpt = opt;
+                }
+              }
+
+              if (!bestOpt) {
+                bestOpt = optionEls[0];
+              }
+
+              if (bestOpt) {
+                const clickable = (bestOpt.querySelector('span, div, p, a') as HTMLElement) || bestOpt;
+                ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(evt => {
+                  clickable.dispatchEvent(new MouseEvent(evt, { bubbles: true, cancelable: true, view: window }));
+                  bestOpt!.dispatchEvent(new MouseEvent(evt, { bubbles: true, cancelable: true, view: window }));
+                });
+                try {
+                  clickable.click();
+                } catch {}
+                try {
+                  bestOpt.click();
+                } catch {}
+
+                // Accessible combobox keyboard selection fallback: ArrowDown + Enter
+                targetEl.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', keyCode: 40, bubbles: true }));
+                targetEl.dispatchEvent(new KeyboardEvent('keyup', { key: 'ArrowDown', keyCode: 40, bubbles: true }));
+                await new Promise(r => setTimeout(r, 80));
+                targetEl.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));
+                targetEl.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', keyCode: 13, bubbles: true }));
+
+                await new Promise(r => setTimeout(r, 300));
               }
             }
           }

@@ -1,13 +1,21 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import {
   type ICareerBrain,
+  type IWorkExperienceItem,
   getCareerBrainData,
   saveCareerBrainData,
   DEFAULT_CAREER_BRAIN,
   careerBrainStore,
   authStorage,
+  isGenericWorkExperienceDateField,
+  cleanLocationForCityField,
 } from '@extension/storage';
-import { backendApiClient, isValidSkillName, cleanSkillName } from '@extension/shared';
+import {
+  backendApiClient,
+  isValidSkillName,
+  cleanSkillName,
+  validateAndSanitizeSkillExperience,
+} from '@extension/shared';
 import {
   FiUploadCloud,
   FiCheckCircle,
@@ -28,9 +36,12 @@ import {
   FiPlus,
   FiCheck,
   FiX,
+  FiCalendar,
 } from 'react-icons/fi';
 import { AiOutlineLoading3Quarters } from 'react-icons/ai';
 import { SkillAutocompleteInput } from './SkillAutocompleteInput';
+
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
 interface ResumeProfileViewProps {
   isDarkMode?: boolean;
@@ -59,23 +70,102 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
   const [newAnswerText, setNewAnswerText] = useState('');
   const [showAddGolden, setShowAddGolden] = useState(false);
 
+  // Work experience state
+  const [showWorkExpForm, setShowWorkExpForm] = useState(false);
+  const [editingWorkExpId, setEditingWorkExpId] = useState<string | null>(null);
+  const [workExpCompany, setWorkExpCompany] = useState('');
+  const [workExpTitle, setWorkExpTitle] = useState('');
+  const [workExpStartMonth, setWorkExpStartMonth] = useState('');
+  const [workExpStartYear, setWorkExpStartYear] = useState('');
+  const [workExpEndMonth, setWorkExpEndMonth] = useState('');
+  const [workExpEndYear, setWorkExpEndYear] = useState('');
+  const [workExpIsCurrent, setWorkExpIsCurrent] = useState(false);
+  const [workExpDescription, setWorkExpDescription] = useState('');
+
+  const resetWorkExpForm = () => {
+    setShowWorkExpForm(false);
+    setEditingWorkExpId(null);
+    setWorkExpCompany('');
+    setWorkExpTitle('');
+    setWorkExpStartMonth('');
+    setWorkExpStartYear('');
+    setWorkExpEndMonth('');
+    setWorkExpEndYear('');
+    setWorkExpIsCurrent(false);
+    setWorkExpDescription('');
+  };
+
+  const startEditWorkExp = (item: IWorkExperienceItem) => {
+    setEditingWorkExpId(item.id);
+    setWorkExpCompany(item.company);
+    setWorkExpTitle(item.title);
+    setWorkExpStartMonth(item.startMonth || '');
+    setWorkExpStartYear(item.startYear || '');
+    setWorkExpEndMonth(item.endMonth || '');
+    setWorkExpEndYear(item.endYear || '');
+    setWorkExpIsCurrent(Boolean(item.isCurrent));
+    setWorkExpDescription(item.description || '');
+    setShowWorkExpForm(true);
+  };
+
+  const handleSaveWorkExp = async () => {
+    if (!workExpCompany.trim() || !workExpTitle.trim()) return;
+
+    await careerBrainStore.saveWorkExperienceItem({
+      id: editingWorkExpId || undefined,
+      company: workExpCompany.trim(),
+      title: workExpTitle.trim(),
+      startMonth: workExpStartMonth.trim(),
+      startYear: workExpStartYear.trim(),
+      endMonth: workExpIsCurrent ? null : workExpEndMonth.trim() || null,
+      endYear: workExpIsCurrent ? null : workExpEndYear.trim() || null,
+      isCurrent: workExpIsCurrent,
+      description: workExpDescription.trim(),
+      source: editingWorkExpId
+        ? profile.workExperience?.find(w => w.id === editingWorkExpId)?.source || 'manual'
+        : 'manual',
+    });
+
+    const updated = await careerBrainStore.getCareerBrain();
+    setProfile(updated);
+    resetWorkExpForm();
+  };
+
+  const handleDeleteWorkExp = async (id: string) => {
+    await careerBrainStore.deleteWorkExperienceItem(id);
+    const updated = await careerBrainStore.getCareerBrain();
+    setProfile(updated);
+  };
+
+  const formatDateRange = (item: IWorkExperienceItem) => {
+    const start = [item.startMonth, item.startYear].filter(Boolean).join(' ');
+    if (item.isCurrent) {
+      return start ? `${start} – Present` : 'Present';
+    }
+    const end = [item.endMonth, item.endYear].filter(Boolean).join(' ');
+    if (!start && !end) return '';
+    if (start && end) return `${start} – ${end}`;
+    return start || end;
+  };
+
   // Load existing Career Brain data on mount and sanitize garbage skills
   useEffect(() => {
     getCareerBrainData().then(data => {
       if (data) {
         let modified = false;
         if (data.skillExperience) {
-          const cleanedExp: Record<string, number> = {};
-          for (const [k, v] of Object.entries(data.skillExperience)) {
-            const clean = cleanSkillName(k);
-            if (isValidSkillName(clean)) {
-              cleanedExp[clean] = v;
-            } else {
-              modified = true;
-            }
-          }
-          if (modified) {
-            data.skillExperience = cleanedExp;
+          const sanitized = validateAndSanitizeSkillExperience(
+            data.skillExperience,
+            data.workExperience,
+            data.resumeText,
+            data.yearsOfExperience,
+          );
+          if (
+            Object.keys(sanitized).length !== Object.keys(data.skillExperience).length ||
+            Object.entries(sanitized).some(([k, v]) => data.skillExperience![k] !== v)
+          ) {
+            data.skillExperience = sanitized;
+            modified = true;
           }
         }
         if (data.autoExtractedSkills && data.autoExtractedSkills.length > 0) {
@@ -89,6 +179,27 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
           const cleanedSkills = data.skills.map(cleanSkillName).filter(isValidSkillName);
           if (cleanedSkills.length !== data.skills.length) {
             data.skills = cleanedSkills;
+            modified = true;
+          }
+        }
+        if (data.goldenAnswers && data.goldenAnswers.length > 0) {
+          const cleanedGolden = data.goldenAnswers.filter(ga => !isGenericWorkExperienceDateField(ga.question));
+          if (cleanedGolden.length !== data.goldenAnswers.length) {
+            data.goldenAnswers = cleanedGolden;
+            modified = true;
+          }
+        }
+        if (data.preferredLocation && /remote|hybrid/i.test(data.preferredLocation)) {
+          const cleaned = cleanLocationForCityField(data.preferredLocation);
+          if (cleaned && cleaned !== data.preferredLocation) {
+            data.preferredLocation = cleaned;
+            modified = true;
+          }
+        }
+        if (data.currentLocation && /remote|hybrid/i.test(data.currentLocation)) {
+          const cleaned = cleanLocationForCityField(data.currentLocation);
+          if (cleaned && cleaned !== data.currentLocation) {
+            data.currentLocation = cleaned;
             modified = true;
           }
         }
@@ -147,15 +258,16 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
           const rawResumeText =
             res.data.rawText || (res.data as any).careerBrain?.resumeText || parsed.backgroundNarrative || '';
 
-          // If backend did not extract skillExperience or screening fields, attempt extension-side LLM enrichment pass
+          // If backend did not extract skillExperience, screening fields, or workExperience, attempt extension-side LLM enrichment pass
           let extractedSkillExp: Record<string, number> = parsed.skillExperience || {};
           let extractedWorkAuth: string | undefined = parsed.workAuthorization;
           let extractedNotice: string | undefined = parsed.noticePeriod;
           let extractedCollege: string | undefined = parsed.college;
           let extractedEducation: string | undefined = parsed.education;
           let extractedYoe: number | undefined = parsed.yearsOfExperience;
+          let extractedWorkExp: any[] = Array.isArray(parsed.workExperience) ? parsed.workExperience : [];
 
-          if (Object.keys(extractedSkillExp).length === 0 && rawResumeText) {
+          if ((Object.keys(extractedSkillExp).length === 0 || extractedWorkExp.length === 0) && rawResumeText) {
             try {
               const enrichRes = await new Promise<any>(resolve => {
                 chrome.runtime.sendMessage(
@@ -164,7 +276,7 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
                 );
               });
               if (enrichRes?.success && enrichRes.data) {
-                if (enrichRes.data.skillExperience) {
+                if (enrichRes.data.skillExperience && Object.keys(extractedSkillExp).length === 0) {
                   extractedSkillExp = enrichRes.data.skillExperience;
                 }
                 if (!extractedWorkAuth && enrichRes.data.workAuthorization) {
@@ -182,13 +294,24 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
                 if ((!extractedYoe || extractedYoe === 0) && enrichRes.data.yearsOfExperience) {
                   extractedYoe = enrichRes.data.yearsOfExperience;
                 }
+                if (extractedWorkExp.length === 0 && Array.isArray(enrichRes.data.workExperience)) {
+                  extractedWorkExp = enrichRes.data.workExperience;
+                }
               }
             } catch (e) {
               console.warn('[ResumeProfileView] Background LLM enrichment pass error:', e);
             }
           }
 
-          // 1. Merge skills with years: CRITICAL - NEVER overwrite existing manually-entered entries.
+          // 1. Sanitize extracted skills against verifiable tenure and explicit mentions
+          extractedSkillExp = validateAndSanitizeSkillExperience(
+            extractedSkillExp,
+            extractedWorkExp,
+            rawResumeText,
+            extractedYoe,
+          );
+
+          // Merge skills with years: CRITICAL - NEVER overwrite existing manually-entered entries.
           // Also strictly filter out stopwords, generic buzzwords, and non-skills (like "ai", "and", etc.)
           const existingSkillExp: Record<string, number> = profile.skillExperience || {};
           const mergedSkillExp: Record<string, number> = { ...existingSkillExp };
@@ -213,12 +336,53 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
           );
           const updatedAutoExtracted = Array.from(new Set([...prevAuto, ...newlyExtractedSkillNames]));
 
+          // 2. Merge work experience: loosely by company + title.
+          // NEVER overwrite manually-entered positions!
+          const existingWorkExp: IWorkExperienceItem[] = Array.isArray(profile.workExperience)
+            ? [...profile.workExperience]
+            : [];
+          const mergedWorkExp: IWorkExperienceItem[] = [...existingWorkExp];
+          let newlyExtractedWorkCount = 0;
+
+          for (const item of extractedWorkExp) {
+            if (!item || (!item.company && !item.title)) continue;
+            const cName = (item.company || '').trim().toLowerCase();
+            const tName = (item.title || '').trim().toLowerCase();
+
+            const existingIdx = mergedWorkExp.findIndex(
+              w => (w.company || '').trim().toLowerCase() === cName && (w.title || '').trim().toLowerCase() === tName,
+            );
+
+            if (existingIdx === -1) {
+              mergedWorkExp.push({
+                id: item.id || `we_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+                company: (item.company || '').trim(),
+                title: (item.title || '').trim(),
+                startMonth: (item.startMonth || '').trim(),
+                startYear: (item.startYear || '').trim(),
+                endMonth: item.isCurrent ? null : item.endMonth ? String(item.endMonth).trim() : null,
+                endYear: item.isCurrent ? null : item.endYear ? String(item.endYear).trim() : null,
+                isCurrent: Boolean(item.isCurrent),
+                description: (item.description || '').trim(),
+                source: 'resume',
+              });
+              newlyExtractedWorkCount++;
+            }
+          }
+
+          const hasWorkExperience =
+            mergedWorkExp.length > 0
+              ? true
+              : profile.hasWorkExperience !== undefined
+                ? profile.hasWorkExperience
+                : true;
+
           // Sanitize primary skills list as well
           const validParsedSkills = Array.isArray(parsed.skills)
             ? parsed.skills.map(cleanSkillName).filter(isValidSkillName)
             : [];
 
-          // 2. Screening fields: Only populate if careerBrain does not already have values
+          // 3. Screening fields: Only populate if careerBrain does not already have values
           const updated: ICareerBrain = {
             ...profile,
             fullName: parsed.fullName || profile.fullName,
@@ -233,15 +397,21 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
               profile.yearsOfExperience !== undefined && profile.yearsOfExperience > 0
                 ? profile.yearsOfExperience
                 : (extractedYoe ?? profile.yearsOfExperience),
+            hasWorkExperience,
+            workExperience: mergedWorkExp,
             education: extractedEducation || parsed.education || profile.education || '',
             college: extractedCollege || parsed.college || profile.college || '',
             cgpa: parsed.cgpa || profile.cgpa || '',
             currentCTC: parsed.currentCTC || profile.currentCTC,
             expectedCTC: parsed.expectedCTC || profile.expectedCTC,
-            currentLocation: parsed.currentLocation || profile.currentLocation,
+            currentLocation:
+              cleanLocationForCityField(parsed.currentLocation) || parsed.currentLocation || profile.currentLocation,
             noticePeriod: extractedNotice || parsed.noticePeriod || profile.noticePeriod || 'Immediate',
             backgroundNarrative: parsed.backgroundNarrative || profile.backgroundNarrative,
-            preferredLocation: parsed.preferredLocation || profile.preferredLocation,
+            preferredLocation:
+              cleanLocationForCityField(parsed.preferredLocation) ||
+              parsed.preferredLocation ||
+              profile.preferredLocation,
             workAuthorization:
               profile.workAuthorization && profile.workAuthorization !== DEFAULT_CAREER_BRAIN.workAuthorization
                 ? profile.workAuthorization
@@ -257,20 +427,28 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
           setProfile(updated);
           setEditForm(updated);
 
+          const addedDetails: string[] = [];
           if (newlyExtractedSkillNames.length > 0) {
+            addedDetails.push(`${newlyExtractedSkillNames.length} skill(s)`);
+          }
+          if (newlyExtractedWorkCount > 0) {
+            addedDetails.push(`${newlyExtractedWorkCount} work position(s)`);
+          }
+
+          if (addedDetails.length > 0) {
             setUploadStatus({
               type: 'success',
-              message: `✅ "${file.name}" parsed & profile enriched! ${newlyExtractedSkillNames.length} skills auto-added from resume.`,
+              message: `✅ "${file.name}" parsed & profile enriched! Auto-added ${addedDetails.join(' and ')} from resume.`,
             });
-          } else if (Object.keys(extractedSkillExp).length === 0) {
+          } else if (Object.keys(extractedSkillExp).length === 0 && mergedWorkExp.length === 0) {
             setUploadStatus({
               type: 'warning',
-              message: `⚠️ "${file.name}" saved, but no technical skills could be detected from the document. Please add skills manually below.`,
+              message: `⚠️ "${file.name}" saved, but no technical skills or work positions could be detected. Please add details manually below.`,
             });
           } else {
             setUploadStatus({
               type: 'success',
-              message: `✅ "${file.name}" parsed! All detected skills are already present in your profile.`,
+              message: `✅ "${file.name}" parsed! All detected details are already present in your profile.`,
             });
           }
         } else {
@@ -781,6 +959,348 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
             )}
           </div>
         )}
+
+        {/* Work Experience Section */}
+        <div className="pt-3 border-t border-gray-200/20 space-y-2.5">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center space-x-1.5">
+              <FiBriefcase className="size-3.5 text-sky-400" />
+              <span className="text-[11px] font-bold uppercase tracking-wider text-sky-400">Work Experience</span>
+            </div>
+            {profile.hasWorkExperience !== false && (
+              <button
+                type="button"
+                onClick={() => {
+                  if (showWorkExpForm) {
+                    resetWorkExpForm();
+                  } else {
+                    resetWorkExpForm();
+                    setShowWorkExpForm(true);
+                  }
+                }}
+                className="flex items-center space-x-1 text-[11px] font-semibold text-sky-400 hover:text-sky-300 cursor-pointer">
+                <FiPlus className="size-3" />
+                <span>Add Position</span>
+              </button>
+            )}
+          </div>
+
+          {/* Do you have work experience? Yes / No Toggle */}
+          <div
+            className={`flex items-center justify-between p-2 rounded-lg border text-xs ${
+              isDarkMode ? 'border-sky-900 bg-slate-900/60' : 'border-sky-100 bg-white/70'
+            }`}>
+            <span className="font-medium">Do you have work experience?</span>
+            <div
+              className={`flex rounded-md p-0.5 border ${
+                isDarkMode ? 'border-slate-700 bg-slate-800' : 'border-sky-200 bg-sky-50'
+              }`}>
+              <button
+                type="button"
+                onClick={async () => {
+                  await careerBrainStore.setHasWorkExperience(true);
+                  const updated = await careerBrainStore.getCareerBrain();
+                  setProfile(updated);
+                }}
+                className={`px-3 py-0.5 rounded text-xs font-bold transition-all cursor-pointer ${
+                  profile.hasWorkExperience !== false
+                    ? 'bg-sky-500 text-white shadow-xs'
+                    : 'text-gray-400 hover:text-gray-200'
+                }`}>
+                Yes
+              </button>
+              <button
+                type="button"
+                onClick={async () => {
+                  await careerBrainStore.setHasWorkExperience(false);
+                  const updated = await careerBrainStore.getCareerBrain();
+                  setProfile(updated);
+                  resetWorkExpForm();
+                }}
+                className={`px-3 py-0.5 rounded text-xs font-bold transition-all cursor-pointer ${
+                  profile.hasWorkExperience === false
+                    ? 'bg-sky-500 text-white shadow-xs'
+                    : 'text-gray-400 hover:text-gray-200'
+                }`}>
+                No
+              </button>
+            </div>
+          </div>
+
+          {/* If No: Candidate is a fresher */}
+          {profile.hasWorkExperience === false && (
+            <div
+              className={`p-2.5 rounded-lg border text-xs text-center ${
+                isDarkMode
+                  ? 'border-slate-800 bg-slate-900/40 text-gray-400'
+                  : 'border-gray-200 bg-gray-50 text-gray-500'
+              }`}>
+              <p className="font-medium">Candidate is a fresher / entry level with no formal work experience.</p>
+              <p className="text-[10px] opacity-75 mt-0.5">
+                Work experience questions will be answered according to fresher status.
+              </p>
+            </div>
+          )}
+
+          {/* If Yes: Show List and Form */}
+          {profile.hasWorkExperience !== false && (
+            <>
+              {/* Add / Edit Position Form */}
+              {showWorkExpForm && (
+                <div
+                  className={`p-3 rounded-lg border space-y-2.5 text-xs ${
+                    isDarkMode ? 'border-sky-900 bg-slate-900/80' : 'border-sky-100 bg-sky-50/50'
+                  }`}>
+                  <div className="flex items-center justify-between font-bold text-sky-400 text-[11px] uppercase tracking-wider">
+                    <span>{editingWorkExpId ? 'Edit Position' : 'Add Position'}</span>
+                    <button
+                      type="button"
+                      onClick={resetWorkExpForm}
+                      className="text-gray-400 hover:text-gray-200 cursor-pointer">
+                      <FiX className="size-3.5" />
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="block text-[10px] font-semibold text-gray-400 mb-0.5">Company *</label>
+                      <input
+                        type="text"
+                        placeholder="e.g. Google, Infosys"
+                        value={workExpCompany}
+                        onChange={e => setWorkExpCompany(e.target.value)}
+                        className={`w-full rounded-lg border px-2.5 py-1 text-xs outline-none ${
+                          isDarkMode
+                            ? 'border-sky-900 bg-slate-800 text-white focus:border-sky-500'
+                            : 'border-sky-200 bg-white text-gray-900 focus:border-sky-400'
+                        }`}
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-semibold text-gray-400 mb-0.5">Job Title *</label>
+                      <input
+                        type="text"
+                        placeholder="e.g. Software Engineer"
+                        value={workExpTitle}
+                        onChange={e => setWorkExpTitle(e.target.value)}
+                        className={`w-full rounded-lg border px-2.5 py-1 text-xs outline-none ${
+                          isDarkMode
+                            ? 'border-sky-900 bg-slate-800 text-white focus:border-sky-500'
+                            : 'border-sky-200 bg-white text-gray-900 focus:border-sky-400'
+                        }`}
+                      />
+                    </div>
+                  </div>
+
+                  {/* Start Date */}
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="block text-[10px] font-semibold text-gray-400 mb-0.5">Start Date</label>
+                      <div className="flex space-x-1.5">
+                        <select
+                          value={workExpStartMonth}
+                          onChange={e => setWorkExpStartMonth(e.target.value)}
+                          className={`w-1/2 rounded-lg border px-1.5 py-1 text-xs outline-none ${
+                            isDarkMode
+                              ? 'border-sky-900 bg-slate-800 text-white'
+                              : 'border-sky-200 bg-white text-gray-900'
+                          }`}>
+                          <option value="">Month</option>
+                          {MONTHS.map(m => (
+                            <option key={m} value={m}>
+                              {m}
+                            </option>
+                          ))}
+                        </select>
+                        <input
+                          type="text"
+                          placeholder="Year (2022)"
+                          value={workExpStartYear}
+                          onChange={e => setWorkExpStartYear(e.target.value)}
+                          className={`w-1/2 rounded-lg border px-2 py-1 text-xs outline-none ${
+                            isDarkMode
+                              ? 'border-sky-900 bg-slate-800 text-white'
+                              : 'border-sky-200 bg-white text-gray-900'
+                          }`}
+                        />
+                      </div>
+                    </div>
+
+                    {/* End Date / Present */}
+                    <div>
+                      <div className="flex items-center justify-between mb-0.5">
+                        <label className="text-[10px] font-semibold text-gray-400">End Date</label>
+                        <label className="flex items-center space-x-1 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={workExpIsCurrent}
+                            onChange={e => setWorkExpIsCurrent(e.target.checked)}
+                            className="rounded border-slate-700 text-sky-500 focus:ring-0 size-3"
+                          />
+                          <span className="text-[10px] text-sky-400 font-medium">Currently work here</span>
+                        </label>
+                      </div>
+                      {!workExpIsCurrent ? (
+                        <div className="flex space-x-1.5">
+                          <select
+                            value={workExpEndMonth}
+                            onChange={e => setWorkExpEndMonth(e.target.value)}
+                            className={`w-1/2 rounded-lg border px-1.5 py-1 text-xs outline-none ${
+                              isDarkMode
+                                ? 'border-sky-900 bg-slate-800 text-white'
+                                : 'border-sky-200 bg-white text-gray-900'
+                            }`}>
+                            <option value="">Month</option>
+                            {MONTHS.map(m => (
+                              <option key={m} value={m}>
+                                {m}
+                              </option>
+                            ))}
+                          </select>
+                          <input
+                            type="text"
+                            placeholder="Year (2024)"
+                            value={workExpEndYear}
+                            onChange={e => setWorkExpEndYear(e.target.value)}
+                            className={`w-1/2 rounded-lg border px-2 py-1 text-xs outline-none ${
+                              isDarkMode
+                                ? 'border-sky-900 bg-slate-800 text-white'
+                                : 'border-sky-200 bg-white text-gray-900'
+                            }`}
+                          />
+                        </div>
+                      ) : (
+                        <div
+                          className={`rounded-lg border px-2 py-1 text-xs text-center font-semibold text-emerald-400 ${
+                            isDarkMode ? 'border-emerald-900/50 bg-emerald-950/20' : 'border-emerald-200 bg-emerald-50'
+                          }`}>
+                          Present
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-[10px] font-semibold text-gray-400 mb-0.5">
+                      Description / Achievements
+                    </label>
+                    <textarea
+                      rows={2}
+                      placeholder="Key responsibilities, technologies used, and accomplishments..."
+                      value={workExpDescription}
+                      onChange={e => setWorkExpDescription(e.target.value)}
+                      className={`w-full rounded-lg border px-2.5 py-1.5 text-xs outline-none resize-none ${
+                        isDarkMode
+                          ? 'border-sky-900 bg-slate-800 text-white focus:border-sky-500'
+                          : 'border-sky-200 bg-white text-gray-900 focus:border-sky-400'
+                      }`}
+                    />
+                  </div>
+
+                  <div className="flex justify-end space-x-2 pt-1">
+                    <button
+                      type="button"
+                      onClick={resetWorkExpForm}
+                      className="px-2.5 py-1 text-xs font-medium text-gray-400 hover:text-gray-200 cursor-pointer">
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleSaveWorkExp}
+                      disabled={!workExpCompany.trim() || !workExpTitle.trim()}
+                      className="flex items-center space-x-1 rounded-lg bg-sky-500 px-3 py-1 text-xs font-bold text-white hover:bg-sky-400 disabled:opacity-50 cursor-pointer">
+                      <FiCheck className="size-3" />
+                      <span>{editingWorkExpId ? 'Update Position' : 'Save Position'}</span>
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Positions List */}
+              {profile.workExperience && profile.workExperience.length > 0 ? (
+                <div className="space-y-2">
+                  {profile.workExperience.map(item => {
+                    const dateRange = formatDateRange(item);
+                    return (
+                      <div
+                        key={item.id}
+                        className={`p-2.5 rounded-lg border text-xs transition-colors ${
+                          isDarkMode ? 'border-sky-900/70 bg-slate-900/60' : 'border-sky-100 bg-white/70'
+                        }`}>
+                        <div className="flex items-start justify-between">
+                          <div className="min-w-0 pr-2">
+                            <div className="flex items-center flex-wrap gap-1.5 mb-0.5">
+                              <span className="font-bold text-sky-300">{item.title}</span>
+                              <span className="text-gray-400 text-[11px]">at</span>
+                              <span className="font-semibold">{item.company}</span>
+                              {item.source === 'resume' && (
+                                <span
+                                  title="Extracted from resume"
+                                  className="px-1.5 py-0.2 rounded text-[8px] font-semibold bg-sky-500/15 text-sky-400 border border-sky-500/30 whitespace-nowrap">
+                                  from resume
+                                </span>
+                              )}
+                              {item.isCurrent && (
+                                <span className="px-1.5 py-0.2 rounded text-[8px] font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 whitespace-nowrap">
+                                  Current
+                                </span>
+                              )}
+                            </div>
+                            {dateRange && (
+                              <div className="flex items-center space-x-1 text-[10px] text-gray-400">
+                                <FiCalendar className="size-2.5 shrink-0" />
+                                <span>{dateRange}</span>
+                              </div>
+                            )}
+                          </div>
+                          <div className="flex items-center space-x-1 shrink-0">
+                            <button
+                              type="button"
+                              onClick={() => startEditWorkExp(item)}
+                              title="Edit position"
+                              className="p-1 text-gray-400 hover:text-sky-400 transition-colors cursor-pointer">
+                              <FiEdit2 className="size-3" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteWorkExp(item.id)}
+                              title="Delete position"
+                              className="p-1 text-gray-400 hover:text-red-400 transition-colors cursor-pointer">
+                              <FiTrash2 className="size-3" />
+                            </button>
+                          </div>
+                        </div>
+                        {item.description && (
+                          <p className="mt-1.5 text-[11px] text-gray-300 opacity-90 leading-relaxed whitespace-pre-line border-t border-gray-200/10 pt-1.5">
+                            {item.description}
+                          </p>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                !showWorkExpForm && (
+                  <div
+                    className={`p-3 rounded-lg border text-xs text-center ${
+                      isDarkMode
+                        ? 'border-slate-800 bg-slate-900/30 text-gray-400'
+                        : 'border-gray-100 bg-gray-50/50 text-gray-500'
+                    }`}>
+                    No work experience positions added yet. Click{' '}
+                    <button
+                      type="button"
+                      onClick={() => setShowWorkExpForm(true)}
+                      className="text-sky-400 hover:underline font-semibold cursor-pointer">
+                      "Add Position"
+                    </button>{' '}
+                    or upload a resume.
+                  </div>
+                )
+              )}
+            </>
+          )}
+        </div>
 
         {/* Skills & Experience per Skill */}
         <div className="pt-3 border-t border-gray-200/20 space-y-2">

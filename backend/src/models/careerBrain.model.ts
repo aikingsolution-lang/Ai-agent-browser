@@ -16,6 +16,19 @@ export interface IWorkExperience {
   highlights?: string[];
 }
 
+export interface IWorkExperienceItem {
+  id: string;
+  company: string;
+  title: string;
+  startMonth?: string;
+  startYear?: string;
+  endMonth?: string | null;
+  endYear?: string | null;
+  isCurrent?: boolean;
+  description?: string;
+  source?: 'manual' | 'resume';
+}
+
 export interface ICareerBrainDocument extends Document {
   _id: Types.ObjectId;
   userId: Types.ObjectId;
@@ -28,6 +41,8 @@ export interface ICareerBrainDocument extends Document {
   backgroundNarrative?: string;
   skills: string[];
   yearsOfExperience: number;
+  hasWorkExperience?: boolean;
+  workExperience?: IWorkExperienceItem[];
   education?: string;
   college?: string;
   cgpa?: string;
@@ -73,6 +88,22 @@ const workExperienceSubSchema = new Schema<IWorkExperience>(
   { _id: false },
 );
 
+const workExperienceItemSubSchema = new Schema<IWorkExperienceItem>(
+  {
+    id: { type: String, required: true },
+    company: { type: String, required: true, trim: true },
+    title: { type: String, required: true, trim: true },
+    startMonth: { type: String, default: '', trim: true },
+    startYear: { type: String, default: '', trim: true },
+    endMonth: { type: String, default: null },
+    endYear: { type: String, default: null },
+    isCurrent: { type: Boolean, default: false },
+    description: { type: String, default: '', trim: true },
+    source: { type: String, enum: ['manual', 'resume'], default: 'manual' },
+  },
+  { _id: false },
+);
+
 const careerBrainSchema = new Schema<ICareerBrainDocument>(
   {
     userId: {
@@ -91,6 +122,8 @@ const careerBrainSchema = new Schema<ICareerBrainDocument>(
     backgroundNarrative: { type: String, default: '', trim: true },
     skills: { type: [String], default: [] },
     yearsOfExperience: { type: Number, default: 0, min: 0 },
+    hasWorkExperience: { type: Boolean, default: true },
+    workExperience: { type: [workExperienceItemSubSchema], default: [] },
     education: { type: String, default: '', trim: true },
     college: { type: String, default: '', trim: true },
     cgpa: { type: String, default: '', trim: true },

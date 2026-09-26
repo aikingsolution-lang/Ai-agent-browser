@@ -1701,6 +1701,25 @@ export class DedicatedJobRunner {
     const maxSteps = 10;
     let submitted = false;
 
+    // Loop-prevention guards: limit repeat attempts on individual fields and modal steps
+    const fieldAttemptCounts = new Map<string, number>();
+    const MAX_FIELD_ATTEMPTS = 3;
+    const stepRetryCounts = new Map<number, number>();
+    const MAX_STEP_RETRIES = 2;
+
+    const checkFieldRepeat = (fieldDesc: FormFieldDescriptor): boolean => {
+      const key = `${(fieldDesc.label || '').trim().toLowerCase()}:::${fieldDesc.fieldType || 'text'}`;
+      const current = (fieldAttemptCounts.get(key) || 0) + 1;
+      fieldAttemptCounts.set(key, current);
+      if (current >= MAX_FIELD_ATTEMPTS) {
+        logger.error(
+          `[DedicatedJobRunner] Field "${fieldDesc.label}" has reached ${current} resolution attempts. Aborting modal workflow to prevent infinite loop.`,
+        );
+        return false;
+      }
+      return true;
+    };
+
     while (step < maxSteps && this.isRunning) {
       step++;
       this.notifyStatus(portToSend, `📄 Reviewing Step ${step} of the application...`, 'info');
@@ -1725,6 +1744,12 @@ export class DedicatedJobRunner {
         // Phase A: Auto-resolve with skipAskUser to fill all known/inferred fields first
         for (const field of fields) {
           if (!this.isRunning) break;
+          if (!checkFieldRepeat(field)) {
+            return {
+              success: false,
+              reason: `Field "${field.label}" repeated ${MAX_FIELD_ATTEMPTS} times (validation loop detected)`,
+            };
+          }
           try {
             const res = await resolveModalFieldWithAudit(page, field, careerBrain, scopedLLM, onAuditLog, {
               skipAskUser: true,
@@ -1864,6 +1889,12 @@ export class DedicatedJobRunner {
           const unresolvedReqFields: FormFieldDescriptor[] = [];
           for (const reqField of validation.emptyRequiredFields) {
             if (!this.isRunning) break;
+            if (!checkFieldRepeat(reqField)) {
+              return {
+                success: false,
+                reason: `Required field "${reqField.label}" repeated ${MAX_FIELD_ATTEMPTS} times (validation loop detected)`,
+              };
+            }
             try {
               const res = await resolveModalFieldWithAudit(page, reqField, careerBrain, scopedLLM, onAuditLog, {
                 skipAskUser: true,
@@ -1966,27 +1997,47 @@ export class DedicatedJobRunner {
               `[DedicatedJobRunner] Attempting emergency resolution for ${recheck.emptyRequiredFields.length} invalid/unfilled fields...`,
             );
             for (const reqF of recheck.emptyRequiredFields) {
+              if (!checkFieldRepeat(reqF)) {
+                return {
+                  success: false,
+                  reason: `Validation auto-heal field "${reqF.label}" repeated ${MAX_FIELD_ATTEMPTS} times (validation loop detected)`,
+                };
+              }
               try {
                 // Try rule-based adaptation first (with newly detected error/numeric context in hintText)
                 const ruleMatch = matchRuleBased(reqF, careerBrain);
                 if (ruleMatch.matched && ruleMatch.answer) {
-                  const fillSuccess = await page.fillModalFieldDirect(reqF, ruleMatch.answer);
-                  onAuditLog(
-                    'MATCHED',
-                    reqF.label,
-                    ruleMatch.answer,
-                    `Validation auto-heal | DOM fill: ${fillSuccess ? 'SUCCESS' : 'FAILED'}`,
-                  );
+                  const adapted = adaptAnswerToFieldFormat(ruleMatch.answer, reqF);
+                  if (adapted.valid) {
+                    const fillSuccess = await page.fillModalFieldDirect(reqF, adapted.value);
+                    onAuditLog(
+                      'MATCHED',
+                      reqF.label,
+                      adapted.value,
+                      `Validation auto-heal | DOM fill: ${fillSuccess ? 'SUCCESS' : 'FAILED'}`,
+                    );
+                  } else {
+                    logger.warning(
+                      `[DedicatedJobRunner] Validation auto-heal skipped incompatible ruleMatch value "${ruleMatch.answer}" for field "${reqF.label}"`,
+                    );
+                  }
                 } else if (scopedLLM) {
                   const autoSol = await solveQuestionAutonomousWithLLM(reqF, careerBrain, scopedLLM);
                   if (autoSol.success && autoSol.answer) {
-                    const fillSuccess = await page.fillModalFieldDirect(reqF, autoSol.answer);
-                    onAuditLog(
-                      'GENERATED',
-                      reqF.label,
-                      autoSol.answer,
-                      `Validation recovery LLM | DOM fill: ${fillSuccess ? 'SUCCESS' : 'FAILED'}`,
-                    );
+                    const adapted = adaptAnswerToFieldFormat(autoSol.answer, reqF);
+                    if (adapted.valid) {
+                      const fillSuccess = await page.fillModalFieldDirect(reqF, adapted.value);
+                      onAuditLog(
+                        'GENERATED',
+                        reqF.label,
+                        adapted.value,
+                        `Validation recovery LLM | DOM fill: ${fillSuccess ? 'SUCCESS' : 'FAILED'}`,
+                      );
+                    } else {
+                      logger.warning(
+                        `[DedicatedJobRunner] Validation recovery LLM skipped incompatible value "${autoSol.answer}" for field "${reqF.label}"`,
+                      );
+                    }
                   }
                 }
               } catch {}
@@ -2007,8 +2058,19 @@ export class DedicatedJobRunner {
                 continue; // Modal advanced successfully!
               }
               // If errors still block the exact same fields, don't increment step; re-try on this step
+              const retries = (stepRetryCounts.get(step) || 0) + 1;
+              stepRetryCounts.set(step, retries);
+              if (retries > MAX_STEP_RETRIES) {
+                logger.error(
+                  `[DedicatedJobRunner] Modal step ${step} failed validation ${retries} times. Aborting modal workflow to prevent infinite loop.`,
+                );
+                return {
+                  success: false,
+                  reason: `Modal step ${step} failed validation after ${retries} attempts`,
+                };
+              }
               logger.warning(
-                `[DedicatedJobRunner] Modal forward click was blocked by validation errors. Re-correcting on step ${step}...`,
+                `[DedicatedJobRunner] Modal forward click was blocked by validation errors. Re-correcting on step ${step} (attempt ${retries}/${MAX_STEP_RETRIES})...`,
               );
               step = Math.max(0, step - 1);
             }

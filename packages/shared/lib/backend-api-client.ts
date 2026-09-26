@@ -420,6 +420,19 @@ export interface IWorkExperience {
   highlights?: string[];
 }
 
+export interface IWorkExperienceItem {
+  id: string;
+  company: string;
+  title: string;
+  startMonth?: string;
+  startYear?: string;
+  endMonth?: string | null;
+  endYear?: string | null;
+  isCurrent?: boolean;
+  description?: string;
+  source?: 'manual' | 'resume';
+}
+
 export interface ParsedResumeData {
   fullName: string;
   email: string;
@@ -427,6 +440,8 @@ export interface ParsedResumeData {
   currentTitle: string;
   skills: string[];
   yearsOfExperience: number;
+  hasWorkExperience?: boolean;
+  workExperience?: IWorkExperienceItem[];
   education: string;
   college?: string;
   cgpa?: string;

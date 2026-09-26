@@ -5,7 +5,12 @@ import { env } from '../config/env.js';
 import { logger } from '../utils/logger.js';
 import { AppError } from '../middleware/errorHandler.js';
 import { parsedResumeSchema, type ParsedResumeData } from '../schemas/resume.schema.js';
-import { isValidSkillName, cleanSkillName } from '../utils/skillValidator.js';
+import {
+  isValidSkillName,
+  cleanSkillName,
+  validateAndSanitizeSkillExperience,
+  cleanLocationForCityField,
+} from '../utils/skillValidator.js';
 
 export interface ParseResumeResult {
   rawText: string;
@@ -87,20 +92,44 @@ export class ResumeParserService {
 Your mission is to accurately parse the provided raw resume text into structured JSON format.
 
 RULES:
-1. ZERO HALLUCINATION: Extract only factual information present in the resume. If a field is not found, leave it as an empty string, empty array, or 0.
-2. EXPERIENCE CALCULATION: Calculate total integer years of professional software/work experience (e.g. 3, 5, 0) strictly based on employment history dates.
-3. SKILLS WITH YEARS: Extract technical skills mentioned in the resume along with their stated or inferred years of experience based strictly on dates/tenure in the work experience section (e.g. {"React": 3, "Node.js": 2}).
+1. ZERO HALLUCINATION & ZERO FABRICATION: Extract only factual information present in the resume. If a field is not found, leave it as an empty string, empty array, or 0. NEVER invent or default to arbitrary numbers.
+2. EXPERIENCE CALCULATION:
+   - Calculate total integer years of professional software/work experience (e.g. 0, 1, 3, 5) strictly based on verifiable employment history dates.
+   - DO NOT count college or university degree duration (e.g. a 2020–2024 B.Tech is education, NOT 4 years of work experience).
+   - If the candidate is a fresher or intern with under 1 year of work history, yearsOfExperience MUST be 0 (or 1 if at least 1 full year).
+3. SKILLS WITH YEARS (skillExperience):
+   - Years of experience for a skill may ONLY be set if:
+     a) The resume explicitly states a duration for that skill (e.g. "React (3 years)", "4+ yrs Python experience"), OR
+     b) It can be factually computed from actual date ranges in the work history where that skill was actively used (e.g. Job from 2022 to 2024 using React = 2 years).
+   - ABSOLUTE PROHIBITIONS:
+     * NEVER apply a generic constant or default (e.g. NEVER assign "5" or "3" across skills).
+     * NEVER calculate skill years based on degree dates or college timeline.
+     * NEVER count skill mention frequency or project count as years.
+   - OMISSION RULE: If a skill is listed (e.g. under "Technical Skills" or "Projects") but NO duration is explicitly stated and it was NOT part of a dated professional employment role, OMIT it from skillExperience completely! Do NOT guess or invent a number.
    - CONCRETE TECHNICAL TOOLS ONLY: Extract specific technologies, frameworks, libraries, databases, and languages (e.g. TypeScript, React, Python, PostgreSQL, Docker, AWS).
    - REJECT GENERIC TERMS & STOPWORDS: Never extract generic buzzwords or grammatical words (e.g. "ai", "ml", "ui", "ux", "and", "the", "developer", "engineering", "programming", "software", "tech", "skills").
    - LENGTH RULE: Reject any skill name under 3 characters unless it is a standard short programming language ("Go", "R", "C#", "C").
-   - NO ZERO-YEAR ARTIFACTS: Do not guess years or output 0 years for skills where duration cannot be inferred; only include skills where tenure/years can be factually determined from employment dates.
 4. SCREENING FIELDS:
    - workAuthorization: If mentioned (e.g. US Citizen, Green Card, Authorized to work, H1B, Indian Citizen), extract it. Otherwise empty string.
    - noticePeriod: If mentioned in summary, header, or availability (e.g. "Immediate", "30 days", "2 weeks"), extract it. Otherwise empty string.
    - college: Extract university or college name if mentioned.
    - education: Degree name and details (e.g. "B.Tech in Computer Science").
-5. WORK HISTORY: Extract all distinct past/present roles with company, title, duration, and key highlights.
-6. CLEAN OUTPUT: Output ONLY a valid JSON object matching the requested schema. Do NOT include markdown code blocks, backticks, XML tags, or conversational preamble.`;
+5. WORK EXPERIENCE (STRUCTURED):
+   - Extract factual work history positions present in the resume.
+   - For each role:
+     {
+       "company": "Company Name",
+       "title": "Job Title",
+       "startMonth": "Month or empty string",
+       "startYear": "Year (e.g. 2023) or empty string",
+       "endMonth": "Month or null if current",
+       "endYear": "Year or null if current",
+       "isCurrent": true/false (true if currently working here / present),
+       "description": "Brief summary of responsibilities & accomplishments"
+     }
+   - hasWorkExperience: true if one or more legitimate work/internship positions are found, false if candidate is a fresher with no work experience.
+6. WORK HISTORY: Extract all distinct past/present roles with company, title, duration, and key highlights.
+7. CLEAN OUTPUT: Output ONLY a valid JSON object matching the requested schema. Do NOT include markdown code blocks, backticks, XML tags, or conversational preamble.`;
 
     const userPrompt = `Parse the following raw resume into a valid JSON object matching this schema:
 {
@@ -110,6 +139,19 @@ RULES:
   "currentTitle": "Software Engineer",
   "skills": ["TypeScript", "React", "Node.js", "MongoDB", "AWS"],
   "yearsOfExperience": 3,
+  "hasWorkExperience": true,
+  "workExperience": [
+    {
+      "company": "ABC Corp",
+      "title": "Frontend Developer",
+      "startMonth": "Jan",
+      "startYear": "2023",
+      "endMonth": null,
+      "endYear": null,
+      "isCurrent": true,
+      "description": "Built responsive dashboards with React and Redux."
+    }
+  ],
   "education": "B.Tech in Computer Science, XYZ University, 2023",
   "college": "XYZ University",
   "noticePeriod": "Immediate",
@@ -127,7 +169,7 @@ RULES:
     }
   ],
   "backgroundNarrative": "A concise 2-3 sentence executive summary of the candidate's career and strengths.",
-  "preferredLocation": "City, Country or Remote",
+  "preferredLocation": "City, Country (e.g. Bengaluru, India. Do NOT append 'or Remote')",
   "salaryExpectation": "",
   "portfolioUrl": "",
   "githubUrl": "",
@@ -167,19 +209,45 @@ ${truncatedText}`;
 
       const parsed = JSON.parse(cleaned);
 
-      // Sanitize extracted skills and skillExperience
-      if (parsed.skillExperience && typeof parsed.skillExperience === 'object') {
-        const validExp: Record<string, number> = {};
-        for (const [k, v] of Object.entries(parsed.skillExperience)) {
-          const clean = cleanSkillName(k);
-          if (isValidSkillName(clean) && typeof v === 'number' && !isNaN(v) && v > 0) {
-            validExp[clean] = v;
-          }
+      // 1. Sanitize extracted workExperience first
+      if (Array.isArray(parsed.workExperience)) {
+        parsed.workExperience = parsed.workExperience
+          .filter((item: any) => item && (item.company || item.title))
+          .map((item: any) => ({
+            id: item.id || `we_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+            company: String(item.company || '').trim(),
+            title: String(item.title || '').trim(),
+            startMonth: String(item.startMonth || '').trim(),
+            startYear: String(item.startYear || '').trim(),
+            endMonth: item.isCurrent ? null : item.endMonth ? String(item.endMonth).trim() : null,
+            endYear: item.isCurrent ? null : item.endYear ? String(item.endYear).trim() : null,
+            isCurrent: Boolean(item.isCurrent),
+            description: String(item.description || '').trim(),
+            source: 'resume',
+          }));
+        if (parsed.workExperience.length > 0) {
+          parsed.hasWorkExperience = true;
         }
-        parsed.skillExperience = validExp;
       }
+
+      // 2. Sanitize extracted skills
       if (Array.isArray(parsed.skills)) {
         parsed.skills = parsed.skills.map(cleanSkillName).filter(isValidSkillName);
+      }
+
+      // 3. Sanitize extracted skillExperience against verifiable work dates & resume text
+      if (parsed.skillExperience && typeof parsed.skillExperience === 'object') {
+        parsed.skillExperience = validateAndSanitizeSkillExperience(
+          parsed.skillExperience,
+          parsed.workExperience,
+          rawText,
+          parsed.yearsOfExperience,
+        );
+      }
+
+      // 4. Sanitize preferredLocation (strip any 'or Remote' / 'Remote /' suffixes)
+      if (parsed.preferredLocation) {
+        parsed.preferredLocation = cleanLocationForCityField(parsed.preferredLocation) || parsed.preferredLocation;
       }
 
       const validated = parsedResumeSchema.safeParse(parsed);
@@ -321,6 +389,8 @@ ${truncatedText}`;
       currentTitle: 'Software Developer',
       skills: detectedSkills,
       yearsOfExperience: 2,
+      hasWorkExperience: false,
+      workExperience: [],
       education: '',
       college,
       cgpa: '',

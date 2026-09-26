@@ -15,7 +15,13 @@ import {
   processedJobsStore,
 } from '@extension/storage';
 import { t } from '@extension/i18n';
-import { backendApiClient, isValidSkillName, cleanSkillName } from '@extension/shared';
+import {
+  backendApiClient,
+  isValidSkillName,
+  cleanSkillName,
+  validateAndSanitizeSkillExperience,
+  cleanLocationForCityField,
+} from '@extension/shared';
 import BrowserContext from './browser/context';
 import { Executor } from './agent/executor';
 import { createLogger } from './log';
@@ -684,18 +690,43 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
 Your job is to extract factual attributes from the candidate's resume text.
 
 CRITICAL RULES:
-1. STRICT ZERO INVENTION: Never invent, guess, or assume facts not explicitly stated.
-2. SKILLS WITH YEARS: Extract technical skills mentioned in the resume along with their stated or inferred years of experience based strictly on dates/tenure in the work experience section (e.g. {"React": 3, "Node.js": 2}).
+1. STRICT ZERO INVENTION & ZERO FABRICATION: Never invent, guess, or assume facts not explicitly stated. NEVER default to arbitrary numbers.
+2. EXPERIENCE CALCULATION:
+   - Calculate total integer years of professional software/work experience (e.g. 0, 1, 3, 5) strictly based on verifiable employment history dates.
+   - DO NOT count college or university degree duration (e.g. a 2020–2024 B.Tech is education, NOT 4 years of work experience).
+   - If the candidate is a fresher or intern with under 1 year of work history, yearsOfExperience MUST be 0 (or 1 if at least 1 full year).
+3. SKILLS WITH YEARS (skillExperience):
+   - Years of experience for a skill may ONLY be set if:
+     a) The resume explicitly states a duration for that skill (e.g. "React (3 years)", "4+ yrs Python experience"), OR
+     b) It can be factually computed from actual date ranges in the work history where that skill was actively used (e.g. Job from 2022 to 2024 using React = 2 years).
+   - ABSOLUTE PROHIBITIONS:
+     * NEVER apply a generic constant or default (e.g. NEVER assign "5" or "3" across skills).
+     * NEVER calculate skill years based on degree dates or college timeline.
+     * NEVER count skill mention frequency or project count as years.
+   - OMISSION RULE: If a skill is listed (e.g. under "Technical Skills" or "Projects") but NO duration is explicitly stated and it was NOT part of a dated professional employment role, OMIT it from skillExperience completely! Do NOT guess or invent a number.
    - CONCRETE TECHNICAL TOOLS ONLY: Extract specific technologies, frameworks, libraries, databases, and languages (e.g. TypeScript, React, Python, PostgreSQL, Docker, AWS).
    - REJECT GENERIC TERMS & STOPWORDS: Never extract generic buzzwords or grammatical words (e.g. "ai", "ml", "ui", "ux", "and", "the", "developer", "engineering", "programming", "software", "tech", "skills").
    - LENGTH RULE: Reject any skill name under 3 characters unless it is a standard short programming language ("Go", "R", "C#", "C").
-   - NO ZERO-YEAR ARTIFACTS: If a skill has NO explicit duration and cannot be determined from employment tenure, DO NOT guess a number or output 0; omit it completely.
-3. SCREENING FIELDS:
+4. SCREENING FIELDS:
    - workAuthorization: If mentioned (e.g. "Authorized to work in India", "US Citizen", "No visa sponsorship required"), extract it. Otherwise null.
    - noticePeriod: If mentioned (e.g. "Immediate", "30 days", "2 weeks"), extract it. Otherwise null.
    - college: University or college name if mentioned, otherwise null.
    - education: Degree name (e.g. "B.Tech in Computer Science"), otherwise null.
    - yearsOfExperience: Total integer years of professional experience calculated from employment history dates, or null if cannot be determined.
+5. WORK EXPERIENCE (STRUCTURED):
+   - Extract factual work history positions present in the resume.
+   - For each role:
+     {
+       "company": "Company Name",
+       "title": "Job Title",
+       "startMonth": "Month or empty string",
+       "startYear": "Year (e.g. 2023) or empty string",
+       "endMonth": "Month or null if current",
+       "endYear": "Year or null if current",
+       "isCurrent": true/false (true if currently working here / present),
+       "description": "Brief summary of responsibilities & accomplishments"
+     }
+   - hasWorkExperience: true if one or more legitimate work/internship positions are found, false if candidate is a fresher with no work experience.
 
 Return valid JSON ONLY matching this format:
 {
@@ -704,7 +735,20 @@ Return valid JSON ONLY matching this format:
   "noticePeriod": string or null,
   "college": string or null,
   "education": string or null,
-  "yearsOfExperience": number or null
+  "yearsOfExperience": number or null,
+  "hasWorkExperience": boolean,
+  "workExperience": [
+    {
+      "company": "Company Name",
+      "title": "Job Title",
+      "startMonth": "Jan",
+      "startYear": "2023",
+      "endMonth": null,
+      "endYear": null,
+      "isCurrent": true,
+      "description": "Responsibilities and accomplishments"
+    }
+  ]
 }
 
 === CANDIDATE RESUME TEXT ===
@@ -731,16 +775,43 @@ ${resumeText.slice(0, 12000)}
 
         const parsed = JSON.parse(raw);
 
-        // Sanitize extracted skillExperience
-        if (parsed.skillExperience && typeof parsed.skillExperience === 'object') {
-          const validExp: Record<string, number> = {};
-          for (const [k, v] of Object.entries(parsed.skillExperience)) {
-            const clean = cleanSkillName(k);
-            if (isValidSkillName(clean) && typeof v === 'number' && !isNaN(v) && v > 0) {
-              validExp[clean] = v;
-            }
+        // 1. Sanitize extracted workExperience first
+        if (Array.isArray(parsed.workExperience)) {
+          parsed.workExperience = parsed.workExperience
+            .filter((item: any) => item && (item.company || item.title))
+            .map((item: any) => ({
+              id: item.id || `we_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+              company: String(item.company || '').trim(),
+              title: String(item.title || '').trim(),
+              startMonth: String(item.startMonth || '').trim(),
+              startYear: String(item.startYear || '').trim(),
+              endMonth: item.isCurrent ? null : item.endMonth ? String(item.endMonth).trim() : null,
+              endYear: item.isCurrent ? null : item.endYear ? String(item.endYear).trim() : null,
+              isCurrent: Boolean(item.isCurrent),
+              description: String(item.description || '').trim(),
+              source: 'resume',
+            }));
+          if (parsed.workExperience.length > 0) {
+            parsed.hasWorkExperience = true;
           }
-          parsed.skillExperience = validExp;
+        }
+
+        // 2. Sanitize extracted skillExperience against verifiable work dates & resume text
+        if (parsed.skillExperience && typeof parsed.skillExperience === 'object') {
+          parsed.skillExperience = validateAndSanitizeSkillExperience(
+            parsed.skillExperience,
+            parsed.workExperience,
+            resumeText,
+            parsed.yearsOfExperience,
+          );
+        }
+
+        // 3. Sanitize location fields
+        if (parsed.preferredLocation) {
+          parsed.preferredLocation = cleanLocationForCityField(parsed.preferredLocation) || parsed.preferredLocation;
+        }
+        if (parsed.currentLocation) {
+          parsed.currentLocation = cleanLocationForCityField(parsed.currentLocation) || parsed.currentLocation;
         }
 
         logger.info('[background] Successfully extracted enrichment data from resume:', parsed);
