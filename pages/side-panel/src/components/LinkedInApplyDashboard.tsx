@@ -190,10 +190,14 @@ export function LinkedInApplyDashboard({
         </button>
         <button
           type="button"
-          disabled={true}
-          title="Coming soon in Phase 3"
-          className="flex-1 py-1.5 px-2 rounded-lg text-center opacity-40 cursor-not-allowed text-gray-500">
-          Indeed <span className="text-[9px]">(Soon)</span>
+          onClick={() => setSelectedPlatform('indeed')}
+          disabled={isApplying}
+          className={`flex-1 py-1.5 px-2 rounded-lg text-center transition-all cursor-pointer ${
+            selectedPlatform === 'indeed'
+              ? 'bg-indigo-600 text-white shadow-sm font-bold'
+              : 'text-gray-400 hover:text-gray-200'
+          }`}>
+          Indeed
         </button>
       </div>
 
@@ -237,10 +241,15 @@ export function LinkedInApplyDashboard({
               : 'bg-gradient-to-r from-sky-500 to-blue-600 text-white hover:from-sky-600 hover:to-blue-700 hover:shadow-sky-500/20 active:scale-[0.99] cursor-pointer'
           }`}>
           <FiPlay className="size-4 text-emerald-300" />
-          <span>Start Auto Apply ({selectedPlatform === 'naukri' ? 'Naukri' : 'LinkedIn'})</span>
+          <span>
+            Start Auto Apply (
+            {selectedPlatform === 'naukri' ? 'Naukri' : selectedPlatform === 'indeed' ? 'Indeed' : 'LinkedIn'})
+          </span>
         </button>
         <p className="text-[11px] text-center opacity-60">
-          Autonomous end-to-end {selectedPlatform === 'naukri' ? 'Naukri.com' : 'LinkedIn'} application flow
+          Autonomous end-to-end{' '}
+          {selectedPlatform === 'naukri' ? 'Naukri.com' : selectedPlatform === 'indeed' ? 'Indeed' : 'LinkedIn'}{' '}
+          application flow
         </p>
 
         {/* Visible Stop Application Button */}
