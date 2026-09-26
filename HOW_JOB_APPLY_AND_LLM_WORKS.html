@@ -1,0 +1,468 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Nanobrowser: Architecture, Job Application Lifecycle & LLM Decision Logic</title>
+  <style>
+    @page {
+      size: A4;
+      margin: 16mm 14mm 16mm 14mm;
+    }
+    *, *::before, *::after {
+      box-sizing: border-box;
+    }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      font-size: 13px;
+      line-height: 1.6;
+      color: #1e293b;
+      background: #ffffff;
+      margin: 0;
+      padding: 0;
+    }
+    h1 {
+      font-size: 24px;
+      font-weight: 800;
+      color: #0f172a;
+      border-bottom: 3px solid #0284c7;
+      padding-bottom: 8px;
+      margin-top: 0;
+      margin-bottom: 14px;
+    }
+    h2 {
+      font-size: 17px;
+      font-weight: 700;
+      color: #0369a1;
+      border-bottom: 1.5px solid #e2e8f0;
+      padding-bottom: 5px;
+      margin-top: 24px;
+      margin-bottom: 10px;
+      page-break-after: avoid;
+    }
+    h3 {
+      font-size: 14px;
+      font-weight: 700;
+      color: #1e293b;
+      margin-top: 16px;
+      margin-bottom: 6px;
+      page-break-after: avoid;
+    }
+    p {
+      margin: 0 0 10px 0;
+    }
+    strong {
+      color: #0f172a;
+    }
+    .lead {
+      font-size: 13.5px;
+      color: #334155;
+      background: #f0f9ff;
+      border-left: 4px solid #0284c7;
+      padding: 10px 14px;
+      border-radius: 4px;
+      margin-bottom: 18px;
+    }
+    .toc {
+      background: #f8fafc;
+      border: 1px solid #e2e8f0;
+      border-radius: 6px;
+      padding: 12px 18px;
+      margin-bottom: 22px;
+      page-break-inside: avoid;
+    }
+    .toc-title {
+      font-weight: 700;
+      font-size: 14px;
+      margin-bottom: 6px;
+      color: #0f172a;
+    }
+    .toc ol {
+      margin: 0;
+      padding-left: 20px;
+    }
+    .toc li {
+      margin-bottom: 4px;
+      color: #0369a1;
+      font-weight: 500;
+    }
+    pre {
+      background: #0f172a;
+      color: #f1f5f9;
+      font-family: "Cascadia Code", "Consolas", "Courier New", monospace;
+      font-size: 10.5px;
+      line-height: 1.45;
+      padding: 10px 12px;
+      border-radius: 6px;
+      white-space: pre-wrap;
+      word-break: break-word;
+      margin: 8px 0 12px 0;
+      page-break-inside: avoid;
+    }
+    code {
+      font-family: "Cascadia Code", "Consolas", "Courier New", monospace;
+      font-size: 11.5px;
+      background: #f1f5f9;
+      color: #0f172a;
+      padding: 2px 5px;
+      border-radius: 3px;
+      border: 1px solid #e2e8f0;
+    }
+    pre code {
+      background: transparent;
+      color: inherit;
+      padding: 0;
+      border: none;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 12px 0 16px 0;
+      font-size: 12px;
+      page-break-inside: avoid;
+    }
+    th, td {
+      border: 1px solid #cbd5e1;
+      padding: 8px 10px;
+      text-align: left;
+    }
+    th {
+      background: #f1f5f9;
+      color: #0f172a;
+      font-weight: 700;
+    }
+    tr:nth-child(even) td {
+      background: #f8fafc;
+    }
+    .badge {
+      display: inline-block;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 10.5px;
+      font-weight: 700;
+      letter-spacing: 0.3px;
+    }
+    .badge-no { background: #fee2e2; color: #991b1b; border: 1px solid #fca5a5; }
+    .badge-yes { background: #dcfce7; color: #166534; border: 1px solid #86efac; }
+    .badge-hybrid { background: #fef3c7; color: #92400e; border: 1px solid #fcd34d; }
+
+    .callout {
+      border-left: 4px solid;
+      padding: 10px 14px;
+      border-radius: 4px;
+      margin: 12px 0;
+      page-break-inside: avoid;
+    }
+    .callout-info { border-color: #0284c7; background: #f0f9ff; }
+    .callout-warn { border-color: #f59e0b; background: #fffbeb; }
+
+    .step-card {
+      background: #ffffff;
+      border: 1px solid #e2e8f0;
+      border-radius: 6px;
+      padding: 10px 14px;
+      margin-bottom: 10px;
+      page-break-inside: avoid;
+    }
+    .step-title {
+      font-weight: 700;
+      color: #0369a1;
+      margin-bottom: 4px;
+    }
+    hr {
+      border: none;
+      border-top: 1px solid #e2e8f0;
+      margin: 20px 0;
+    }
+    ul, ol {
+      margin: 6px 0 10px 0;
+      padding-left: 22px;
+    }
+    li {
+      margin-bottom: 4px;
+    }
+  </style>
+</head>
+<body>
+
+  <h1>Nanobrowser: Architecture, Job Application Lifecycle &amp; LLM Decision Logic</h1>
+
+  <div class="lead">
+    This document provides an in-depth technical explanation of how the <strong>Nanobrowser extension operates</strong>, 
+    how it <strong>autonomously applies to LinkedIn Easy Apply jobs</strong>, and exactly 
+    <strong>when, where, how, and why it uses Large Language Models (LLMs)</strong>—as well as when LLM invocations are 
+    deliberately avoided to eliminate hallucinations and preserve API credits.
+  </div>
+
+  <div class="toc">
+    <div class="toc-title">📑 Table of Contents</div>
+    <ol>
+      <li>High-Level System Architecture</li>
+      <li>End-to-End Job Application Lifecycle</li>
+      <li>Form Question Resolution Pipeline</li>
+      <li>LLM Deep-Dive: When, Where, How, and Why the Model is Invoked</li>
+      <li>When the LLM is Deliberately Skipped (Cost Optimization &amp; Zero Hallucination)</li>
+      <li>Human-In-The-Loop: 5-Minute Unified Batch Questioning</li>
+      <li>Credit Deductions &amp; 100% Automatic Refund Guarantee</li>
+      <li>Executive Summary</li>
+    </ol>
+  </div>
+
+  <h2>1. High-Level System Architecture</h2>
+  <p>Nanobrowser is engineered as a robust, decoupled multi-layer system comprising a <strong>Chrome Extension + Node.js Backend API + AI Bedrock Gateway</strong>:</p>
+
+  <pre>┌─────────────────────────────────────────────────────────────┐
+│  Side Panel UI (React + Tailwind + TypeScript)              │
+│  - "Start Auto Apply" / "Stop" Application Controls         │
+│  - Live Activity Stream (Real-time telemetry per field/job) │
+│  - Interactive Human-In-The-Loop Question Cards (Batched)   │
+└───────────────────────────▲─────────────────────────────────┘
+                            │ Chrome Port Messaging (Bi-directional)
+┌───────────────────────────▼─────────────────────────────────┐
+│  Extension Background Service Worker (Node / Chrome API)    │
+│  - index.ts (Event router &amp; connection port manager)         │
+│  - DailyQuotaManager (Account safety &amp; application limits)  │
+│  - DedicatedWindowManager (Independent window/tab manager)  │
+└───────────────────────────▲─────────────────────────────────┘
+                            │
+┌───────────────────────────▼─────────────────────────────────┐
+│  Dedicated Job Runner &amp; Form Solver Engine                  │
+│  - dedicatedJobRunner.ts (Autonomous execution loop)        │
+│  - formQuestionResolver.ts (Deterministic &amp; LLM Resolver)   │
+│  - userQuestionManager.ts (3-min &amp; 5-min batch timers)      │
+│  - page.ts (DOM discovery, selector fallback &amp; typing)      │
+└───────────────────────────▲─────────────────────────────────┘
+                            │ HTTP API Calls (Only when necessary)
+┌───────────────────────────▼─────────────────────────────────┐
+│  Backend Gateway &amp; LLM Provider                             │
+│  - AWS Bedrock Gateway (Amazon Nova-Lite v1:0)              │
+│  - Local Providers fallback (OpenAI, Gemini, Anthropic)     │
+│  - MongoDB / Storage (CareerBrain Profile &amp; Golden Answers) │
+└─────────────────────────────────────────────────────────────┘</pre>
+
+  <h2>2. End-to-End Job Application Lifecycle</h2>
+  <p>When you click <strong>"Start Auto Apply"</strong> or <strong>"Apply Current Job"</strong> in the Side Panel, the engine executes the following deterministic lifecycle:</p>
+
+  <div class="step-card">
+    <div class="step-title">Step 1: Pre-Flight Safety Checks (Before Touching Any Job)</div>
+    <ul>
+      <li><strong>Daily Quota Verification:</strong> <code>DailyQuotaManager.canApplyToday()</code> ensures daily limits (e.g. 15-20 jobs/day) are respected to protect the user's LinkedIn account from automation bans.</li>
+      <li><strong>Profile Completeness Check:</strong> <code>validateProfileCompleteness(careerBrain)</code> verifies that the candidate's resume, full name, email, phone number, and core skills are populated.</li>
+      <li><strong>Credit Balance Verification:</strong> The engine checks backend credit balance (minimum 5 credits required to ensure uninterrupted execution).</li>
+    </ul>
+  </div>
+
+  <div class="step-card">
+    <div class="step-title">Step 2: Dedicated Window &amp; Tab Isolation</div>
+    <p>To avoid disrupting the candidate's active browsing session, <code>dedicatedWindowManager</code> creates an isolated Chrome window. A DevTools detachment listener monitors debugger health; if detached or toggled, execution pauses cleanly and credits are refunded.</p>
+  </div>
+
+  <div class="step-card">
+    <div class="step-title">Step 3: Job Page Inspection &amp; Login Wall Detection</div>
+    <p>Upon navigating to the target job URL, <code>currentPage.extractJobTopCardContext()</code> evaluates the page:</p>
+    <ul>
+      <li><strong>Login Wall Check:</strong> If the candidate is logged out, the run pauses cleanly without spending any credits and prompts the user to log in.</li>
+      <li><strong>Easy Apply Detection:</strong> Verifies the presence of LinkedIn's native <strong>"Easy Apply"</strong> button. External redirect jobs ("Apply on company website") are skipped immediately.</li>
+    </ul>
+  </div>
+
+  <div class="step-card">
+    <div class="step-title">Step 4: Pre-Apply Relevance Fit Check (0 LLM Credits)</div>
+    <p>The candidate's core skills and background keywords are compared against the job title and requirements using a <strong>purely deterministic algorithmic scoring system</strong> (0 LLM tokens consumed).</p>
+  </div>
+
+  <div class="step-card">
+    <div class="step-title">Step 5: Modal Opening &amp; Step-by-Step Traversal</div>
+    <p><code>currentPage.clickEasyApplyButton()</code> launches the application modal. The modal typically contains <strong>1 to 10 progressive steps</strong> (Contact Info &rarr; Address &rarr; Resume &rarr; Screening Questions &rarr; Review &rarr; Submit). The runner traverses steps using a controlled loop, validating form states before advancing.</p>
+  </div>
+
+  <h2>3. Form Question Resolution Pipeline</h2>
+  <p>On each modal step, interactive elements are discovered via <code>page.discoverModalFormFields()</code>. Fields are then processed through a multi-phase resolution pipeline:</p>
+
+  <pre>Field Input (e.g. "Notice Period in Days", "AWS Lambda?", "Experience with Python?")
+                             │
+                             ▼
+┌────────────────────────────────────────────────────────┐
+│ Phase A: FAST &amp; ZERO-COST RESOLUTION (No LLM Calls)    │
+└────────────────────────────┬───────────────────────────┘
+                             │
+  ├─► [Step 1: Exact Rule-Based &amp; Golden Answers Cache]
+  │   - Previously answered questions (e.g. "Notice Period" -> "30")
+  │   - Standard profile fields (Phone, Email, LinkedIn Profile URL, City)
+  │   - IF MATCHED: Direct DOM Fill &amp; [MATCHED] Audit Log
+  │
+  ├─► [Step 2: Factual Profile Data Mapping]
+  │   - Current CTC, Expected CTC, Total Years of Experience, Degrees
+  │   - IF MATCHED: Direct DOM Fill &amp; [MATCHED] Audit Log
+  │
+  ├─► [Step 3b: Resume Facts Extraction]
+  │   - Direct factual entity extraction from resume text
+  │
+  ├─► [Step 3c: Numeric Skill-Experience 0-Defaulting]
+  │   - Question: "How many years of work experience with SharePoint / Azure?"
+  │   - Check: Is this skill present in skills list, skillExperience, or resume?
+  │   - IF ABSENT: Auto-defaults to "0" (0 years is the honest minimum)
+  │
+  └─► [Step 3d: Subjective Experience Yes/No (LLM Inference)]
+      - Question: "Have you developed SaaS, CRM, or business applications?"
+      - LLM inspects resume excerpt: if clear evidence exists -> Answers "Yes"
+      - If no evidence exists in resume: Falls through to Phase B (ask_user)
+      - NOTE: Unknown tech Yes/No questions are NEVER auto-answered "No"
+        (to prevent false negative claims). The user is prompted instead!
+                             │
+                             ▼
+┌────────────────────────────────────────────────────────┐
+│ Phase B: BATCHING &amp; OVER-QUALIFICATION SKIP HEURISTIC  │
+└────────────────────────────┬───────────────────────────┘
+                             │
+  ├─► If the step has &ge; 8 Unmatched Screening Fields:
+  │   ==> AUTO-SKIP JOB! ("Over-qualified screening, low candidate fit")
+  │   ==> 0 Credits charged, 100% instant refund, Advances to next job!
+  │
+  └─► If 1 to 7 Unmatched Fields remain:
+      ==> UNIFIED BATCH PROMPT IN SIDE PANEL (Single 5-minute timer)
+      ==> Candidate reviews and answers all questions in one scrollable form!
+      ==> Submitted answers are saved permanently to Golden Answers.</pre>
+
+  <h2>4. LLM Deep-Dive: When, Where, How, and Why the Model is Invoked</h2>
+
+  <div class="callout callout-info">
+    <strong>Model &amp; Provider:</strong> Amazon Nova-Lite (<code>amazon.nova-lite-v1:0</code>) through the backend AWS Bedrock gateway, or the user's custom configured provider (OpenAI GPT-4o-mini, Claude, Gemini Flash).<br>
+    <strong>Core Implementation Files:</strong> <code>dedicatedJobRunner.ts</code> and <code>formQuestionResolver.ts</code>.
+  </div>
+
+  <h3>Situation 1: Subjective Experience Yes/No Inference (Step 3d)</h3>
+  <ul>
+    <li><strong>File &amp; Method:</strong> <code>formQuestionResolver.ts</code> &rarr; <code>inferSubjectiveExperienceFromResume()</code></li>
+    <li><strong>WHEN Invoked:</strong> When an experience-based Yes/No question cannot be answered from structured profile keys, but can be answered from descriptions of past projects in the candidate's resume.
+      <br><em>Examples:</em> "Have you developed enterprise SaaS applications?", "Do you have experience designing microservices architectures?"</li>
+    <li><strong>HOW Invoked:</strong> The LLM receives the candidate's <strong>resume excerpt (up to 4,000 characters)</strong>, <strong>skills list</strong>, and the <strong>target question</strong> with a strict evidence-first JSON prompt:
+      <pre style="margin-top:4px;">{
+  "hasEvidence": true,
+  "answer": "Yes",
+  "evidence": "Built multi-tenant SaaS dashboard at previous company"
+}</pre>
+    </li>
+    <li><strong>WHY Invoked:</strong> To avoid pausing the automation for standard project questions that the resume clearly confirms. If the resume does not substantiate the claim, the model returns <code>hasEvidence: false</code> and cleanly defers to the user.</li>
+  </ul>
+
+  <h3>Situation 2: Ambiguous Semantic Field Mapping (Step 3)</h3>
+  <ul>
+    <li><strong>File &amp; Method:</strong> <code>formQuestionResolver.ts</code> &rarr; <code>matchWithLLM()</code></li>
+    <li><strong>WHEN Invoked:</strong> When a recruiter phrases a standard factual question using idiosyncratic, non-standard wording that evades rule-based regex patterns.
+      <br><em>Examples:</em> "What remuneration are you currently drawing per annum?" (Current CTC), "How soon can you come on board?" (Notice Period).</li>
+    <li><strong>HOW Invoked:</strong> A summarized dictionary of available profile keys is provided to the LLM to identify the underlying intent.</li>
+    <li><strong>WHY Invoked:</strong> To prevent brittle keyword mismatches from failing form submissions while ensuring the correct profile data is inserted.</li>
+  </ul>
+
+  <h3>Situation 3: Free-Text Narrative Generation</h3>
+  <ul>
+    <li><strong>File &amp; Method:</strong> <code>formQuestionResolver.ts</code> &rarr; <code>generateFreeTextWithLLM()</code></li>
+    <li><strong>WHEN Invoked:</strong> When a form presents an open-ended textarea without selectable options.
+      <br><em>Examples:</em> "Why are you interested in joining our company?", "Describe your most challenging engineering problem."</li>
+    <li><strong>HOW Invoked:</strong> The candidate's <code>backgroundNarrative</code>, target job title, and company name are passed to produce a concise (2-3 sentences), professional response.</li>
+    <li><strong>WHY Invoked:</strong> Open-ended narrative questions cannot be statically hardcoded; responses must be tailored to the specific position.</li>
+  </ul>
+
+  <h2>5. When the LLM is Deliberately Skipped (Cost Optimization &amp; Zero Hallucination)</h2>
+
+  <p>Invoking LLMs indiscriminately causes three critical drawbacks: high API token costs, network latency (1-2s delay per field), and the risk of hallucinating sensitive compliance facts. Nanobrowser enforces a strict <strong>Zero-Invention &amp; Deterministic-First Policy</strong>:</p>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Question Type</th>
+        <th>Resolution Mechanism</th>
+        <th style="text-align:center;">LLM Used?</th>
+        <th style="text-align:center;">Credit Cost</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>Contact Details (Phone, Email, LinkedIn URL, City)</strong></td>
+        <td>Direct CareerBrain profile lookup</td>
+        <td style="text-align:center;"><span class="badge badge-no">&#10006; NO</span></td>
+        <td style="text-align:center;"><strong>0</strong></td>
+      </tr>
+      <tr>
+        <td><strong>Previously Answered Questions</strong></td>
+        <td><code>goldenAnswers</code> memory cache (Instant recall)</td>
+        <td style="text-align:center;"><span class="badge badge-no">&#10006; NO</span></td>
+        <td style="text-align:center;"><strong>0</strong></td>
+      </tr>
+      <tr>
+        <td><strong>Unknown Numeric Skill (e.g. "Years with SharePoint?")</strong></td>
+        <td>Auto-defaults to <code>0</code> (Step 3c - honest minimum)</td>
+        <td style="text-align:center;"><span class="badge badge-no">&#10006; NO</span></td>
+        <td style="text-align:center;"><strong>0</strong></td>
+      </tr>
+      <tr>
+        <td><strong>Unknown Tech Yes/No (Not in resume)</strong></td>
+        <td>Batched <code>ask_user</code> / &ge;8 Skip Heuristic</td>
+        <td style="text-align:center;"><span class="badge badge-no">&#10006; NO</span></td>
+        <td style="text-align:center;"><strong>0</strong></td>
+      </tr>
+      <tr>
+        <td><strong>Legal Compliance (Visa Sponsorship, Background Checks)</strong></td>
+        <td>Strict profile lookup / Batched <code>ask_user</code></td>
+        <td style="text-align:center;"><span class="badge badge-no">&#10006; NO</span></td>
+        <td style="text-align:center;"><strong>0</strong></td>
+      </tr>
+      <tr>
+        <td><strong>Notice Period / CTC Format Adaptation</strong></td>
+        <td>Deterministic regex conversion (<code>adaptAnswerToFieldFormat</code>)</td>
+        <td style="text-align:center;"><span class="badge badge-no">&#10006; NO</span></td>
+        <td style="text-align:center;"><strong>0</strong></td>
+      </tr>
+      <tr>
+        <td><strong>Excessive Screening Forms (&ge; 8 Unmatched Fields)</strong></td>
+        <td>Over-qualification skip heuristic (Low candidate fit)</td>
+        <td style="text-align:center;"><span class="badge badge-no">&#10006; NO</span></td>
+        <td style="text-align:center;"><strong>0</strong></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>6. Human-In-The-Loop: 5-Minute Unified Batch Questioning</h2>
+  <p>When a question cannot be resolved from existing profile keys, golden answers, or resume evidence (such as unlisted technical skills, confidential compliance questions, or custom client requirements):</p>
+  <ul>
+    <li><strong>Legacy Behavior (Deprecated):</strong> Each unresolved question triggered an isolated popup with an individual 3-minute timer (10 questions = 10 sequential interruptions).</li>
+    <li><strong>Modern Batched Flow:</strong>
+      <ul>
+        <li>All fields on the modal step are first evaluated in Phase A (populating known profile data, numeric 0-defaults, and resume matches).</li>
+        <li>Unresolved fields (including unlisted tech Yes/No questions) are aggregated into a <strong>Unified Batch Form in the Side Panel</strong>.</li>
+        <li>A <strong>single combined 5-minute countdown timer</strong> is initiated.</li>
+        <li>The candidate reviews all questions simultaneously in a scrollable card and clicks <strong>"Submit All Answers &amp; Continue Application"</strong>.</li>
+        <li>Submitted answers are injected directly into the DOM and permanently saved to <code>goldenAnswers</code> so the candidate is never asked again.</li>
+      </ul>
+    </li>
+  </ul>
+
+  <h2>7. Credit Deductions &amp; 100% Automatic Refund Guarantee</h2>
+  <div class="step-card">
+    <div class="step-title">When Are Credits Deducted?</div>
+    <p>Credits are deducted strictly for billable LLM tokens consumed during necessary AI inferences. Nanobrowser charges <strong>zero flat fees</strong> for running the automation loop or filling deterministic fields.</p>
+  </div>
+  <div class="step-card">
+    <div class="step-title">When is a 100% Instant Refund Issued?</div>
+    <p>If an application cannot be successfully submitted and verified, the engine immediately calls <code>backendApiClient.refundCredits(jobRunId)</code> to restore all deducted credits to the user's account:</p>
+    <ul>
+      <li>Job Skipped (e.g. <code>&ge; 8 unmatched fields</code> low candidate fit).</li>
+      <li>Candidate clicks the Stop Application button.</li>
+      <li>Dedicated browser window closed by user.</li>
+      <li>LinkedIn prompts for phone verification or CAPTCHA.</li>
+      <li>DevTools debugger detached or network connection dropped.</li>
+      <li>Form validation errors that cannot be cleared.</li>
+    </ul>
+  </div>
+
+  <h2>8. Executive Summary</h2>
+  <ul>
+    <li><strong>Deterministic First:</strong> Over 90% of form fields resolve in 0 milliseconds without consuming LLM tokens.</li>
+    <li><strong>Targeted LLM Invocations:</strong> The model is reserved strictly for subjective resume verification and narrative generation.</li>
+    <li><strong>Safe Defaults:</strong> Unknown numeric skill experience defaults to <code>0</code> (the honest minimum). Technology Yes/No questions are never guessed to prevent under-representing genuine experience.</li>
+    <li><strong>Streamlined Batch UX:</strong> Unresolved questions appear together in a single 5-minute batch form.</li>
+    <li><strong>Zero Financial Risk:</strong> Incomplete, paused, or skipped applications incur 0 credit costs with automatic 100% refunds.</li>
+  </ul>
+
+</body>
+</html>

@@ -23,8 +23,9 @@ export class LlmController {
       const maxTokens = body.max_tokens;
       const stream = Boolean(body.stream);
 
-      // Support header or body idempotency key
+      // Support header or body idempotency key and runId
       const idempotencyKey = (req.headers['x-idempotency-key'] as string) || body.idempotencyKey;
+      const runId = (req.headers['x-run-id'] as string) || body.runId;
 
       if (stream) {
         // SSE Header setup
@@ -47,6 +48,7 @@ export class LlmController {
             temperature,
             maxTokens,
             idempotencyKey,
+            runId,
             onChunk: (chunk: string) => {
               if (!res.writableEnded) {
                 res.write(`data: ${JSON.stringify({ chunk })}\n\n`);
@@ -81,6 +83,7 @@ export class LlmController {
         temperature,
         maxTokens,
         idempotencyKey,
+        runId,
       });
 
       if (req.path.endsWith('/completions')) {

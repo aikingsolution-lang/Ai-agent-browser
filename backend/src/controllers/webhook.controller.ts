@@ -1,4 +1,4 @@
-import { Request, Response, NextFunction } from 'express';
+import type { Request, Response, NextFunction } from 'express';
 import { SubscriptionLifecycleService } from '../services/subscriptionLifecycle.service.js';
 import { sendSuccess } from '../utils/apiResponse.js';
 import { AppError } from '../middleware/errorHandler.js';

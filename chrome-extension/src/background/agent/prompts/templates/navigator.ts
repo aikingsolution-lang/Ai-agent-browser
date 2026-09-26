@@ -63,8 +63,12 @@ Common action sequences:
   * Ignore all payment/billing or Premium warning banners on LinkedIn (e.g. 'There was a problem processing your payment'). They are irrelevant distractions.
   * DEAD END ERROR DETECTION: If the page says 'Unable to load the page', 'Job id provided may not be valid', or 'job posting has been removed', do NOT scroll or attempt to click buttons on this dead page. Immediately return the done action with success: false and explain that the job posting has been removed.
   * When on a LinkedIn job page to apply, ALWAYS use the 'linkedin_easy_apply' action. Do NOT use generic click on the Easy Apply button.
-  * ON A LINKEDIN SEARCH RESULTS PAGE: If the user asked to apply to a job from the search results, click on the desired job card in the search results list (or the 'Easy Apply' button in the job details pane) to open the job details, and then call 'linkedin_easy_apply'. NEVER remain idle on the search results page!
-- If you want to research something, open a new tab instead of using the current tab
+  * ON A LINKEDIN SEARCH RESULTS PAGE:
+    - NEVER select or click a job card that already says 'Applied' or 'Applied · X ago'! Those jobs are already completed.
+    - DO NOT blindly scroll down or scroll to the bottom if job listings are already visible. Inspect the visible job cards in the left list, find one that has the 'Easy Apply' badge and is NOT already applied, and click it immediately.
+    - Once clicked, look at the details pane on the right: if the blue 'Easy Apply' button is visible, execute 'linkedin_easy_apply' (or click the Easy Apply button).
+    - If the selected job turns out to have no Easy Apply button (or was already applied), DO NOT STOP and DO NOT call done! Immediately click the NEXT unapplied job card with 'Easy Apply' in the search results list!
+- Use the current tab to navigate to the target site or search engine (e.g. using go_to_url or search_google). Only open a new tab if explicitly requested by the user.
 - If captcha or security challenge pops up, the engine will automatically pause for human verification. Do not click random puzzle items or hallucinate actions.
 - If the page is not fully loaded, use wait action
 

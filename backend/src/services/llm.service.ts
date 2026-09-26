@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import mongoose from 'mongoose';
+import type mongoose from 'mongoose';
 import { LlmUsageLog, type ILlmUsageLog, type LlmRequestStatus } from '../models/llmUsageLog.model.js';
 import { CreditService } from './credit.service.js';
 import { LlmProviderFactory } from './llm/llmProviderFactory.js';
@@ -14,6 +14,7 @@ export interface ProcessLlmChatParams {
   temperature?: number;
   maxTokens?: number;
   idempotencyKey?: string;
+  runId?: string;
 }
 
 export interface ProcessLlmStreamParams extends ProcessLlmChatParams {
@@ -51,7 +52,7 @@ export class LlmService {
    * Process a non-streaming LLM chat completion request.
    */
   public static async processChatCompletion(params: ProcessLlmChatParams): Promise<LlmChatResult> {
-    const { userId, model, messages, temperature, maxTokens, idempotencyKey } = params;
+    const { userId, model, messages, temperature, maxTokens, idempotencyKey, runId } = params;
 
     // 1. Idempotency Check
     if (idempotencyKey) {
@@ -117,6 +118,7 @@ export class LlmService {
           promptTokens: completion.promptTokens,
           completionTokens: completion.completionTokens,
           totalTokens: completion.totalTokens,
+          runId,
         },
       });
 
@@ -135,6 +137,7 @@ export class LlmService {
         idempotencyKey,
         metadata: {
           content: completion.content,
+          runId,
         },
       });
 
@@ -181,7 +184,7 @@ export class LlmService {
    * Process a streaming LLM chat completion request.
    */
   public static async processStreamCompletion(params: ProcessLlmStreamParams): Promise<LlmChatResult> {
-    const { userId, model, messages, temperature, maxTokens, idempotencyKey, onChunk, signal } = params;
+    const { userId, model, messages, temperature, maxTokens, idempotencyKey, onChunk, signal, runId } = params;
 
     // 1. Pre-check Credit Balance
     const minRequiredCredits = this.calculateRequiredCredits(model, 100);
@@ -229,6 +232,7 @@ export class LlmService {
             model,
             provider: provider.providerName,
             status,
+            runId,
           },
         });
       }
@@ -247,6 +251,7 @@ export class LlmService {
         idempotencyKey,
         metadata: {
           content: completion.content,
+          runId,
         },
       });
 

@@ -11,6 +11,7 @@ export const JOB_APPLICATION_STATUSES = [
   'QUEUED',
   'APPLIED',
   'DRY_RUN_SUCCESS',
+  'AWAITING_USER_CONFIRMATION',
   'NEEDS_MANUAL_REVIEW',
   'FAILED_MISSING_DATA',
   'PENDING_RESUME_APPROVAL',
@@ -148,6 +149,8 @@ export interface IApplicationState {
   screeningQuestions: IScreeningQuestion[];
   /** Accumulated errors during the application process */
   errors: string[];
+  /** Formatted human-readable review summary before submission */
+  reviewSummary?: string;
   /** Timestamp when the application process started */
   startedAt: number;
   /** Timestamp when the application process completed (or failed) */

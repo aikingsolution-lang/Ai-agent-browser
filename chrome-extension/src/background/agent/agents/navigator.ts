@@ -96,9 +96,15 @@ export class NavigatorActionRegistry {
       scroll_down: 'next_page',
       scrolldown: 'next_page',
       scroll_page_down: 'next_page',
+      scroll_page: 'next_page',
+      scroll: 'next_page',
+      page_down: 'next_page',
+      pagedown: 'next_page',
       scroll_up: 'previous_page',
       scrollup: 'previous_page',
       scroll_page_up: 'previous_page',
+      page_up: 'previous_page',
+      pageup: 'previous_page',
       skip_ad: 'skip_ad',
       skip_ads: 'skip_ad',
       skip_youtube_ad: 'skip_ad',
@@ -119,6 +125,8 @@ export class NavigatorActionRegistry {
       linkedin_apply: 'linkedin_easy_apply',
       apply_easy_apply: 'linkedin_easy_apply',
       apply_to_job: 'linkedin_easy_apply',
+      apply_job: 'linkedin_easy_apply',
+      apply: 'linkedin_easy_apply',
     };
     const canonical = ALIASES[name];
     if (canonical && this.actions[canonical]) {

@@ -1,4 +1,4 @@
-import { Request, Response, NextFunction } from 'express';
+import type { Request, Response, NextFunction } from 'express';
 import { CreditService } from '../services/credit.service.js';
 import { creditHistoryQuerySchema } from '../schemas/credit.schema.js';
 import { sendSuccess } from '../utils/apiResponse.js';
@@ -79,6 +79,44 @@ export class CreditController {
           },
         },
         'Credit history retrieved',
+      );
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  /**
+   * POST /api/v1/credits/refund
+   * Refunds credits back to user for a specific agent run.
+   * Server calculates the refund amount from the CreditLedger for the given runId.
+   */
+  public static async refundCredits(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const userId = req.user?._id?.toString();
+      if (!userId) {
+        throw new AppError('Authentication required', 401, 'UNAUTHORIZED');
+      }
+
+      const { runId } = req.body;
+      if (!runId || typeof runId !== 'string') {
+        throw new AppError('runId is required for refund', 400, 'INVALID_RUN_ID');
+      }
+
+      const result = await CreditService.refundRunCredits({
+        userId,
+        runId,
+      });
+
+      sendSuccess(
+        res,
+        {
+          remainingCredits: result.balance.remainingCredits,
+          usedCredits: result.balance.usedCredits,
+          allocatedCredits: result.balance.allocatedCredits,
+          refundedAmount: result.refundedAmount,
+          runId: result.runId,
+        },
+        'Credits refunded successfully',
       );
     } catch (error) {
       next(error);

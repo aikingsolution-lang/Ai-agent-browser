@@ -65,10 +65,10 @@ export const ResumeApprovals: React.FC = () => {
       </div>
 
       {items.length === 0 ? (
-        <div className="p-8 text-center bg-gray-50 dark:bg-gray-800/50 rounded-xl border border-gray-200 dark:border-gray-700">
-          <FiFileText className="w-12 h-12 mx-auto text-gray-400 mb-3" />
+        <div className="rounded-xl border border-gray-200 bg-gray-50 p-8 text-center dark:border-gray-700 dark:bg-gray-800/50">
+          <FiFileText className="mx-auto mb-3 size-12 text-gray-400" />
           <h3 className="text-base font-semibold text-gray-700 dark:text-gray-200">No Resumes Pending Approval</h3>
-          <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
+          <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
             When the LinkedIn automation generates a tailored resume for a job opening, it will appear here for your
             review.
           </p>
@@ -78,18 +78,18 @@ export const ResumeApprovals: React.FC = () => {
           {items.map(item => (
             <div
               key={item.id}
-              className={`p-5 rounded-xl border transition-all ${
+              className={`rounded-xl border p-5 transition-all ${
                 item.status === 'PENDING'
-                  ? 'border-amber-300 dark:border-amber-600 bg-amber-50/40 dark:bg-amber-950/20'
+                  ? 'border-amber-300 bg-amber-50/40 dark:border-amber-600 dark:bg-amber-950/20'
                   : item.status === 'APPROVED'
-                    ? 'border-green-300 dark:border-green-700 bg-green-50/30 dark:bg-green-950/10'
-                    : 'border-gray-200 dark:border-gray-700 bg-gray-50/50 dark:bg-gray-800/40 opacity-70'
+                    ? 'border-green-300 bg-green-50/30 dark:border-green-700 dark:bg-green-950/10'
+                    : 'border-gray-200 bg-gray-50/50 opacity-70 dark:border-gray-700 dark:bg-gray-800/40'
               }`}>
-              <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+              <div className="flex flex-col justify-between gap-4 md:flex-row md:items-center">
                 <div className="space-y-1.5">
                   <div className="flex items-center gap-2.5">
                     <span
-                      className={`text-xs px-2.5 py-0.5 rounded-full font-semibold uppercase ${
+                      className={`rounded-full px-2.5 py-0.5 text-xs font-semibold uppercase ${
                         item.status === 'PENDING'
                           ? 'bg-amber-100 text-amber-800 dark:bg-amber-900/60 dark:text-amber-200'
                           : item.status === 'APPROVED'
@@ -109,11 +109,11 @@ export const ResumeApprovals: React.FC = () => {
                   </p>
                   {item.highlightedKeywords.length > 0 && (
                     <div className="flex flex-wrap gap-1.5 pt-1">
-                      <span className="text-xs text-gray-500 self-center">Keywords tailored:</span>
+                      <span className="self-center text-xs text-gray-500">Keywords tailored:</span>
                       {item.highlightedKeywords.map((kw: string) => (
                         <span
                           key={kw}
-                          className="text-xs bg-indigo-50 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 px-2 py-0.5 rounded border border-indigo-200 dark:border-indigo-800">
+                          className="rounded border border-indigo-200 bg-indigo-50 px-2 py-0.5 text-xs text-indigo-700 dark:border-indigo-800 dark:bg-indigo-950/60 dark:text-indigo-300">
                           {kw}
                         </span>
                       ))}
@@ -121,12 +121,12 @@ export const ResumeApprovals: React.FC = () => {
                   )}
                 </div>
 
-                <div className="flex items-center gap-2 shrink-0">
+                <div className="flex shrink-0 items-center gap-2">
                   <Button
                     variant="secondary"
                     onClick={() => downloadPdf(item)}
-                    className="flex items-center gap-1.5 text-xs px-2.5 py-1.5">
-                    <FiDownload className="w-4 h-4" />
+                    className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs">
+                    <FiDownload className="size-4" />
                     Download PDF
                   </Button>
 
@@ -135,15 +135,15 @@ export const ResumeApprovals: React.FC = () => {
                       <Button
                         variant="primary"
                         onClick={() => handleApprove(item.id)}
-                        className="bg-green-600 hover:bg-green-700 text-white flex items-center gap-1.5 text-xs px-2.5 py-1.5">
-                        <FiCheck className="w-4 h-4" />
+                        className="flex items-center gap-1.5 bg-green-600 px-2.5 py-1.5 text-xs text-white hover:bg-green-700">
+                        <FiCheck className="size-4" />
                         Approve
                       </Button>
                       <Button
                         variant="danger"
                         onClick={() => handleReject(item.id)}
-                        className="flex items-center gap-1.5 text-xs px-2.5 py-1.5">
-                        <FiX className="w-4 h-4" />
+                        className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs">
+                        <FiX className="size-4" />
                         Reject
                       </Button>
                     </>

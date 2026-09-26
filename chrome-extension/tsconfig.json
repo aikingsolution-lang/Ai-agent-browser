@@ -3,7 +3,11 @@
   "compilerOptions": {
     "baseUrl": ".",
     "paths": {
-      "@src/*": ["src/*"]
+      "@src/*": ["src/*"],
+      "@extension/storage": ["../packages/storage/index.ts"],
+      "@extension/storage/*": ["../packages/storage/*"],
+      "@extension/i18n": ["../packages/i18n/index.ts"],
+      "@extension/shared": ["../packages/shared/index.ts"]
     }
   },
   "include": ["src", "utils", "vite.config.mts", "../node_modules/@types"]

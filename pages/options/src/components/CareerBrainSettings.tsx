@@ -3,9 +3,13 @@ import { Button } from '@extension/ui';
 import {
   careerBrainStore,
   linkedInConfigStore,
+  saveCareerBrainData,
+  getCareerBrainData,
   type ICareerBrain,
+  type IGoldenAnswer,
   type ILinkedInAutomationConfig,
   DEFAULT_CAREER_BRAIN,
+  DEFAULT_GOLDEN_ANSWERS,
   DEFAULT_LINKEDIN_CONFIG,
 } from '@extension/storage';
 import {
@@ -20,6 +24,9 @@ import {
   FiLock,
   FiCheckCircle,
   FiFileText,
+  FiTrash2,
+  FiAlertCircle,
+  FiHelpCircle,
 } from 'react-icons/fi';
 import { PREDEFINED_TECH_SKILLS } from '../constants/skillsList';
 
@@ -32,6 +39,8 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
   const [config, setConfig] = useState<ILinkedInAutomationConfig>({ ...DEFAULT_LINKEDIN_CONFIG, dryRun: true });
   const [newSkill, setNewSkill] = useState<string>('');
   const [saveSuccess, setSaveSuccess] = useState<boolean>(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [validationErrors, setValidationErrors] = useState<Record<string, string>>({});
   const [showSafetyModal, setShowSafetyModal] = useState<boolean>(false);
 
   // Autocomplete dropdown state
@@ -41,13 +50,18 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
   const skillInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    Promise.all([careerBrainStore.getCareerBrain(), linkedInConfigStore.getConfig()]).then(
-      ([brainData, configData]) => {
-        setCareerBrain(brainData);
-        // Live-Mode is temporarily hardcode-disabled / locked for safety verification
-        setConfig({ ...configData, dryRun: true });
-      },
-    );
+    Promise.all([getCareerBrainData(), linkedInConfigStore.getConfig()]).then(([brainData, configData]) => {
+      // Ensure goldenAnswers exists even if user previously had old storage format
+      if (!brainData.goldenAnswers || brainData.goldenAnswers.length === 0) {
+        brainData.goldenAnswers = DEFAULT_GOLDEN_ANSWERS;
+      }
+      if (!brainData.resumeText) {
+        brainData.resumeText = DEFAULT_CAREER_BRAIN.resumeText;
+      }
+      setCareerBrain(brainData);
+      // Live-Mode is temporarily hardcode-disabled / locked for safety verification
+      setConfig({ ...configData, dryRun: true });
+    });
   }, []);
 
   // Close suggestions on outside click
@@ -62,11 +76,62 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
   }, []);
 
   const handleSave = async () => {
-    // Keep dryRun strictly locked to true for safety
+    setSaveError(null);
+    setValidationErrors({});
+
+    // 1. Strict Zod Validation & Safe Storage
+    const result = await saveCareerBrainData(careerBrain);
+
+    if (!result.success) {
+      setSaveError(result.error || 'Validation failed. Please correct the highlighted fields.');
+      setValidationErrors(result.validationErrors || {});
+      return;
+    }
+
+    // 2. Keep dryRun strictly locked to true for safety
     const safeConfig: ILinkedInAutomationConfig = { ...config, dryRun: true };
-    await Promise.all([careerBrainStore.updateCareerBrain(careerBrain), linkedInConfigStore.updateConfig(safeConfig)]);
+    await linkedInConfigStore.updateConfig(safeConfig);
+
     setSaveSuccess(true);
-    setTimeout(() => setSaveSuccess(false), 3000);
+    setTimeout(() => setSaveSuccess(false), 3500);
+  };
+
+  const handleUpdateGoldenAnswer = (id: string, field: 'question' | 'answer', value: string) => {
+    setCareerBrain(prev => ({
+      ...prev,
+      goldenAnswers: prev.goldenAnswers.map(ga => (ga.id === id ? { ...ga, [field]: value } : ga)),
+    }));
+    // Clear validation error on type
+    const errorKey = `goldenAnswers.${careerBrain.goldenAnswers.findIndex(ga => ga.id === id)}.${field}`;
+    if (validationErrors[errorKey]) {
+      setValidationErrors(prev => {
+        const next = { ...prev };
+        delete next[errorKey];
+        return next;
+      });
+    }
+  };
+
+  const handleAddGoldenAnswer = () => {
+    const newId = `custom_${Date.now()}`;
+    const newItem: IGoldenAnswer = {
+      id: newId,
+      question: '',
+      answer: '',
+      category: 'Custom Rule',
+      isDefault: false,
+    };
+    setCareerBrain(prev => ({
+      ...prev,
+      goldenAnswers: [...prev.goldenAnswers, newItem],
+    }));
+  };
+
+  const handleRemoveGoldenAnswer = (id: string) => {
+    setCareerBrain(prev => ({
+      ...prev,
+      goldenAnswers: prev.goldenAnswers.filter(ga => ga.id !== id),
+    }));
   };
 
   // Compute filtered suggestions based on typed input
@@ -152,6 +217,40 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
         </Button>
       </div>
 
+      {/* Floating Animated Success Toast Notification */}
+      {saveSuccess && (
+        <div className="fixed bottom-6 right-6 z-50 flex items-center gap-3 rounded-xl border border-emerald-300 bg-emerald-50 px-5 py-3.5 shadow-2xl transition-all duration-300 dark:border-emerald-700 dark:bg-emerald-950">
+          <div className="rounded-full bg-emerald-500 p-1 text-white">
+            <FiCheck className="size-4" />
+          </div>
+          <div>
+            <h5 className="text-sm font-bold text-emerald-900 dark:text-emerald-100">Settings Saved Successfully</h5>
+            <p className="text-xs text-emerald-700 dark:text-emerald-300">
+              Career Brain validated & stored securely in chrome.storage.local
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* Validation Error Banner */}
+      {saveError && (
+        <div className="rounded-xl border border-red-200 bg-red-50 p-4 dark:border-red-800/80 dark:bg-red-950/40">
+          <div className="flex items-start gap-3">
+            <FiAlertCircle className="mt-0.5 size-5 shrink-0 text-red-600 dark:text-red-400" />
+            <div className="flex-1">
+              <h5 className="text-sm font-bold text-red-900 dark:text-red-200">Validation Error (Save Blocked)</h5>
+              <p className="mt-1 text-xs text-red-700 dark:text-red-300 leading-relaxed">{saveError}</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setSaveError(null)}
+              className="text-red-500 hover:text-red-700 dark:hover:text-red-300">
+              <FiX className="size-4" />
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Safety Mode Banner — Hardcoded Safe Dry-Run */}
       <div className="flex items-center justify-between rounded-xl border border-emerald-200 bg-emerald-50/80 p-4 dark:border-emerald-800 dark:bg-emerald-950/30">
         <div className="flex items-center gap-3">
@@ -206,6 +305,71 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
         </div>
       </div>
 
+      {/* Section 0: Candidate Resume (Raw Text for Bedrock AI / Form Filling) */}
+      <div
+        className={`rounded-xl border ${
+          validationErrors.resumeText
+            ? 'border-red-300 ring-2 ring-red-400/30 dark:border-red-700'
+            : isDarkMode
+              ? 'border-slate-700 bg-slate-800'
+              : 'border-gray-200 bg-white'
+        } space-y-4 p-6 shadow-sm`}>
+        <div className="flex items-center justify-between border-b border-gray-100 pb-3 dark:border-gray-700">
+          <div className="flex items-center gap-2.5">
+            <div className="rounded-lg bg-indigo-100 p-2 text-indigo-600 dark:bg-indigo-900/60 dark:text-indigo-300">
+              <FiFileText className="size-5" />
+            </div>
+            <div>
+              <h3 className="text-base font-bold text-gray-900 dark:text-white">Candidate Resume (Raw Text)</h3>
+              <p className="text-xs text-gray-500 dark:text-gray-400">
+                Paste your full resume text here. The Bedrock AI screening engine reads this content to truthfully
+                answer job screening questions.
+              </p>
+            </div>
+          </div>
+          <span
+            className={`rounded-md px-2.5 py-1 text-xs font-semibold ${
+              (careerBrain.resumeText || '').length >= 50
+                ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/70 dark:text-emerald-300'
+                : 'bg-amber-100 text-amber-800 dark:bg-amber-950/70 dark:text-amber-300'
+            }`}>
+            {(careerBrain.resumeText || '').length} chars{' '}
+            {(careerBrain.resumeText || '').length < 50 ? '(Min 50 required)' : '✓ Ready'}
+          </span>
+        </div>
+
+        <div className="space-y-1.5">
+          <textarea
+            rows={10}
+            value={careerBrain.resumeText || ''}
+            onChange={e => {
+              setCareerBrain(prev => ({ ...prev, resumeText: e.target.value }));
+              if (validationErrors.resumeText) {
+                setValidationErrors(prev => {
+                  const next = { ...prev };
+                  delete next.resumeText;
+                  return next;
+                });
+              }
+            }}
+            placeholder="Paste plain-text resume here (Summary, Work History, Education, Skills, Projects)..."
+            className={`w-full font-mono text-xs leading-relaxed rounded-lg border ${
+              validationErrors.resumeText
+                ? 'border-red-400 focus:ring-red-500'
+                : isDarkMode
+                  ? 'border-slate-600 bg-slate-700/80 text-gray-100'
+                  : 'border-gray-300 bg-white text-gray-800'
+            } p-3.5 focus:outline-none focus:ring-2 focus:ring-indigo-500`}
+          />
+          {validationErrors.resumeText && (
+            <p className="text-xs font-medium text-red-600 dark:text-red-400 flex items-center gap-1 mt-1">
+              <FiAlertCircle className="size-3.5" />
+              {validationErrors.resumeText}
+            </p>
+          )}
+        </div>
+      </div>
+
       {/* Section 1: Background Narrative */}
       <div
         className={`rounded-xl border ${
@@ -241,6 +405,36 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
 
         {/* Structured Profile Fields Grid */}
         <div className="grid grid-cols-1 gap-4 pt-2 md:grid-cols-2">
+          <div>
+            <label className="mb-1 block text-xs font-semibold text-gray-700 dark:text-gray-300">
+              Candidate Full Name
+            </label>
+            <input
+              type="text"
+              value={careerBrain.fullName || ''}
+              onChange={e => setCareerBrain(prev => ({ ...prev, fullName: e.target.value }))}
+              placeholder="e.g. Mubasshir Ali"
+              className={`w-full rounded-md border ${
+                isDarkMode ? 'border-slate-600 bg-slate-700 text-gray-100' : 'border-gray-300 bg-white text-gray-800'
+              } px-3 py-2 text-sm`}
+            />
+          </div>
+
+          <div>
+            <label className="mb-1 block text-xs font-semibold text-gray-700 dark:text-gray-300">
+              Education & Degree
+            </label>
+            <input
+              type="text"
+              value={careerBrain.education || ''}
+              onChange={e => setCareerBrain(prev => ({ ...prev, education: e.target.value }))}
+              placeholder="e.g. B.Tech Computer Science, MAKAUT (2020-2024), CGPA 8.57"
+              className={`w-full rounded-md border ${
+                isDarkMode ? 'border-slate-600 bg-slate-700 text-gray-100' : 'border-gray-300 bg-white text-gray-800'
+              } px-3 py-2 text-sm`}
+            />
+          </div>
+
           <div>
             <label className="mb-1 block text-xs font-semibold text-gray-700 dark:text-gray-300">
               Current / Target Job Title
@@ -357,6 +551,51 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
               } px-3 py-2 text-sm`}
             />
           </div>
+
+          <div>
+            <label className="mb-1 block text-xs font-semibold text-gray-700 dark:text-gray-300">
+              GitHub Profile URL
+            </label>
+            <input
+              type="url"
+              value={careerBrain.githubUrl || ''}
+              onChange={e => setCareerBrain(prev => ({ ...prev, githubUrl: e.target.value }))}
+              placeholder="e.g. https://github.com/username"
+              className={`w-full rounded-md border ${
+                isDarkMode ? 'border-slate-600 bg-slate-700 text-gray-100' : 'border-gray-300 bg-white text-gray-800'
+              } px-3 py-2 text-sm`}
+            />
+          </div>
+
+          <div>
+            <label className="mb-1 block text-xs font-semibold text-gray-700 dark:text-gray-300">
+              Portfolio / Website URL
+            </label>
+            <input
+              type="url"
+              value={careerBrain.portfolioUrl || ''}
+              onChange={e => setCareerBrain(prev => ({ ...prev, portfolioUrl: e.target.value }))}
+              placeholder="e.g. https://myportfolio.dev"
+              className={`w-full rounded-md border ${
+                isDarkMode ? 'border-slate-600 bg-slate-700 text-gray-100' : 'border-gray-300 bg-white text-gray-800'
+              } px-3 py-2 text-sm`}
+            />
+          </div>
+
+          <div>
+            <label className="mb-1 block text-xs font-semibold text-gray-700 dark:text-gray-300">
+              LinkedIn Profile URL
+            </label>
+            <input
+              type="url"
+              value={careerBrain.linkedinUrl || ''}
+              onChange={e => setCareerBrain(prev => ({ ...prev, linkedinUrl: e.target.value }))}
+              placeholder="e.g. https://linkedin.com/in/username"
+              className={`w-full rounded-md border ${
+                isDarkMode ? 'border-slate-600 bg-slate-700 text-gray-100' : 'border-gray-300 bg-white text-gray-800'
+              } px-3 py-2 text-sm`}
+            />
+          </div>
         </div>
       </div>
 
@@ -464,6 +703,112 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
           {careerBrain.skills.length === 0 && (
             <span className="text-xs italic text-gray-400">No skills added yet. Type a skill above to add.</span>
           )}
+        </div>
+      </div>
+
+      {/* Section 2.5: Golden Q&A Screening Answers */}
+      <div
+        className={`rounded-xl border ${
+          isDarkMode ? 'border-slate-700 bg-slate-800' : 'border-gray-200 bg-white'
+        } space-y-4 p-6 shadow-sm`}>
+        <div className="flex items-center justify-between border-b border-gray-100 pb-3 dark:border-gray-700">
+          <div className="flex items-center gap-2.5">
+            <div className="rounded-lg bg-amber-100 p-2 text-amber-600 dark:bg-amber-900/60 dark:text-amber-300">
+              <FiHelpCircle className="size-5" />
+            </div>
+            <div>
+              <h3 className="text-base font-bold text-gray-900 dark:text-white">Golden Q&A — Screening Answer Bank</h3>
+              <p className="text-xs text-gray-500 dark:text-gray-400">
+                Ground-truth answers for common questions (visa sponsorship, notice period, CTC, relocation). Add custom
+                rules to ensure the Bedrock AI form-filler never hallucinates.
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={handleAddGoldenAnswer}
+            className="flex items-center gap-1.5 rounded-lg bg-amber-600 px-3 py-1.5 text-xs font-semibold text-white shadow-xs transition-colors hover:bg-amber-700">
+            <FiPlus className="size-3.5" />
+            Add Custom Rule
+          </button>
+        </div>
+
+        <div className="space-y-3">
+          {careerBrain.goldenAnswers.map((item, index) => {
+            const hasQError = validationErrors[`goldenAnswers.${index}.question`];
+            const hasAError = validationErrors[`goldenAnswers.${index}.answer`];
+
+            return (
+              <div
+                key={item.id}
+                className={`rounded-lg border ${
+                  hasQError || hasAError
+                    ? 'border-red-300 bg-red-50/40 dark:border-red-800 dark:bg-red-950/20'
+                    : isDarkMode
+                      ? 'border-slate-700/80 bg-slate-750'
+                      : 'border-gray-200 bg-gray-50/50'
+                } p-3.5 transition-all`}>
+                <div className="flex items-start gap-3">
+                  <div className="flex-1 space-y-2">
+                    <div>
+                      <div className="mb-1 flex items-center justify-between">
+                        <label className="text-xs font-semibold text-gray-700 dark:text-gray-300">
+                          Question / Screening Prompt
+                        </label>
+                        {item.category && (
+                          <span className="rounded bg-sky-100 px-1.5 py-0.5 text-[10px] font-medium text-sky-800 dark:bg-sky-900/70 dark:text-sky-300">
+                            {item.category}
+                          </span>
+                        )}
+                      </div>
+                      <input
+                        type="text"
+                        value={item.question}
+                        onChange={e => handleUpdateGoldenAnswer(item.id, 'question', e.target.value)}
+                        placeholder="e.g. Do you require visa sponsorship?"
+                        className={`w-full rounded-md border ${
+                          hasQError
+                            ? 'border-red-400'
+                            : isDarkMode
+                              ? 'border-slate-600 bg-slate-700 text-gray-100'
+                              : 'border-gray-300 bg-white text-gray-800'
+                        } px-3 py-1.5 text-xs`}
+                      />
+                      {hasQError && <p className="mt-0.5 text-[11px] text-red-500">{hasQError}</p>}
+                    </div>
+
+                    <div>
+                      <label className="mb-1 block text-xs font-semibold text-gray-700 dark:text-gray-300">
+                        Exact Ground-Truth Answer
+                      </label>
+                      <input
+                        type="text"
+                        value={item.answer}
+                        onChange={e => handleUpdateGoldenAnswer(item.id, 'answer', e.target.value)}
+                        placeholder="e.g. No / Immediate / ₹10,00,000"
+                        className={`w-full rounded-md border ${
+                          hasAError
+                            ? 'border-red-400'
+                            : isDarkMode
+                              ? 'border-slate-600 bg-slate-700 text-gray-100'
+                              : 'border-gray-300 bg-white text-gray-800'
+                        } px-3 py-1.5 text-xs font-medium text-indigo-700 dark:text-indigo-300`}
+                      />
+                      {hasAError && <p className="mt-0.5 text-[11px] text-red-500">{hasAError}</p>}
+                    </div>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => handleRemoveGoldenAnswer(item.id)}
+                    title="Remove rule"
+                    className="mt-6 text-gray-400 transition-colors hover:text-red-500 focus:outline-none">
+                    <FiTrash2 className="size-4" />
+                  </button>
+                </div>
+              </div>
+            );
+          })}
         </div>
       </div>
 

@@ -67,26 +67,26 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
-      <div className="bg-gray-900 border border-gray-800 rounded-xl w-full max-w-md p-6 text-white shadow-2xl relative">
-        <button onClick={onClose} className="absolute top-4 right-4 text-gray-400 hover:text-white transition-colors">
-          <FiX className="w-5 h-5" />
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
+      <div className="relative w-full max-w-md rounded-xl border border-gray-800 bg-gray-900 p-6 text-white shadow-2xl">
+        <button onClick={onClose} className="absolute right-4 top-4 text-gray-400 transition-colors hover:text-white">
+          <FiX className="size-5" />
         </button>
 
-        <h2 className="text-xl font-bold mb-1 flex items-center gap-2">
+        <h2 className="mb-1 flex items-center gap-2 text-xl font-bold">
           <FiLock className="text-blue-500" />
           {mode === 'login' ? 'Sign In to NanoBrowser' : 'Create NanoBrowser Account'}
         </h2>
-        <p className="text-sm text-gray-400 mb-6">
+        <p className="mb-6 text-sm text-gray-400">
           Access cloud LLM proxy, credits engine, and commercial browser automation.
         </p>
 
         {/* Tab Selector */}
-        <div className="flex border-b border-gray-800 mb-6">
+        <div className="mb-6 flex border-b border-gray-800">
           <button
-            className={`pb-2 px-4 text-sm font-medium transition-colors border-b-2 ${
+            className={`border-b-2 px-4 pb-2 text-sm font-medium transition-colors ${
               mode === 'login'
-                ? 'border-blue-500 text-blue-400 font-semibold'
+                ? 'border-blue-500 font-semibold text-blue-400'
                 : 'border-transparent text-gray-400 hover:text-gray-200'
             }`}
             onClick={() => {
@@ -96,9 +96,9 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess
             Sign In
           </button>
           <button
-            className={`pb-2 px-4 text-sm font-medium transition-colors border-b-2 ${
+            className={`border-b-2 px-4 pb-2 text-sm font-medium transition-colors ${
               mode === 'register'
-                ? 'border-blue-500 text-blue-400 font-semibold'
+                ? 'border-blue-500 font-semibold text-blue-400'
                 : 'border-transparent text-gray-400 hover:text-gray-200'
             }`}
             onClick={() => {
@@ -110,11 +110,11 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess
         </div>
 
         {error && (
-          <div className="mb-4 p-3 rounded bg-red-900/40 border border-red-800 text-red-200 text-sm">{error}</div>
+          <div className="mb-4 rounded border border-red-800 bg-red-900/40 p-3 text-sm text-red-200">{error}</div>
         )}
 
         {successMessage && (
-          <div className="mb-4 p-3 rounded bg-green-900/40 border border-green-800 text-green-200 text-sm flex items-center gap-2">
+          <div className="mb-4 flex items-center gap-2 rounded border border-green-800 bg-green-900/40 p-3 text-sm text-green-200">
             <FiCheckCircle className="text-green-400" />
             {successMessage}
           </div>
@@ -123,7 +123,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess
         <form onSubmit={handleSubmit} className="space-y-4">
           {mode === 'register' && (
             <div>
-              <label className="block text-xs font-semibold text-gray-400 uppercase mb-1">Full Name</label>
+              <label className="mb-1 block text-xs font-semibold uppercase text-gray-400">Full Name</label>
               <div className="relative">
                 <FiUser className="absolute left-3 top-3 text-gray-500" />
                 <input
@@ -132,14 +132,14 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess
                   onChange={e => setName(e.target.value)}
                   placeholder="Alex Morgan"
                   required
-                  className="w-full bg-gray-800 border border-gray-700 rounded-lg py-2 pl-10 pr-4 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-blue-500"
+                  className="w-full rounded-lg border border-gray-700 bg-gray-800 py-2 pl-10 pr-4 text-sm text-white placeholder:text-gray-500 focus:border-blue-500 focus:outline-none"
                 />
               </div>
             </div>
           )}
 
           <div>
-            <label className="block text-xs font-semibold text-gray-400 uppercase mb-1">Email Address</label>
+            <label className="mb-1 block text-xs font-semibold uppercase text-gray-400">Email Address</label>
             <div className="relative">
               <FiMail className="absolute left-3 top-3 text-gray-500" />
               <input
@@ -148,13 +148,13 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess
                 onChange={e => setEmail(e.target.value)}
                 placeholder="alex@company.com"
                 required
-                className="w-full bg-gray-800 border border-gray-700 rounded-lg py-2 pl-10 pr-4 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-blue-500"
+                className="w-full rounded-lg border border-gray-700 bg-gray-800 py-2 pl-10 pr-4 text-sm text-white placeholder:text-gray-500 focus:border-blue-500 focus:outline-none"
               />
             </div>
           </div>
 
           <div>
-            <label className="block text-xs font-semibold text-gray-400 uppercase mb-1">Password</label>
+            <label className="mb-1 block text-xs font-semibold uppercase text-gray-400">Password</label>
             <div className="relative">
               <FiLock className="absolute left-3 top-3 text-gray-500" />
               <input
@@ -163,7 +163,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess
                 onChange={e => setPassword(e.target.value)}
                 placeholder="••••••••"
                 required
-                className="w-full bg-gray-800 border border-gray-700 rounded-lg py-2 pl-10 pr-4 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-blue-500"
+                className="w-full rounded-lg border border-gray-700 bg-gray-800 py-2 pl-10 pr-4 text-sm text-white placeholder:text-gray-500 focus:border-blue-500 focus:outline-none"
               />
             </div>
           </div>
@@ -171,7 +171,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess
           <button
             type="submit"
             disabled={loading}
-            className="w-full mt-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white font-medium py-2.5 rounded-lg text-sm transition-colors shadow-lg shadow-blue-600/20">
+            className="mt-2 w-full rounded-lg bg-blue-600 py-2.5 text-sm font-medium text-white shadow-lg shadow-blue-600/20 transition-colors hover:bg-blue-500 disabled:opacity-50">
             {loading ? 'Processing...' : mode === 'login' ? 'Sign In' : 'Register Account'}
           </button>
         </form>

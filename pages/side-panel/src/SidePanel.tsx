@@ -14,6 +14,10 @@ import {
   type CloudApiSettingsConfig,
   authStorage,
   type UserSessionData,
+  careerBrainStore,
+  validateProfileCompleteness,
+  queueSafetyStore,
+  normalizeLinkedInJobUrl,
 } from '@extension/storage';
 import { backendApiClient } from '@extension/shared';
 import favoritesStorage, { type FavoritePrompt } from '@extension/storage/lib/prompt/favorites';
@@ -24,6 +28,9 @@ import ChatHistoryList from './components/ChatHistoryList';
 import BookmarkList from './components/BookmarkList';
 import { AuthModal } from './components/AuthModal';
 import { EventType, type AgentEvent, ExecutionState } from './types/event';
+import { FiBriefcase, FiFileText, FiMessageSquare } from 'react-icons/fi';
+import { ResumeProfileView } from './components/ResumeProfileView';
+import { LinkedInApplyDashboard, type StructuredActivityItem } from './components/LinkedInApplyDashboard';
 import './SidePanel.css';
 
 // Declare chrome API types
@@ -54,6 +61,15 @@ const SidePanel = () => {
   const [authSession, setAuthSession] = useState<UserSessionData | null>(null);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
   const [userCredits, setUserCredits] = useState<{ remainingCredits: number; allocatedCredits: number } | null>(null);
+  const [mainTab, setMainTab] = useState<'apply' | 'resume' | 'chat'>('apply');
+  const [isApplying, setIsApplying] = useState(false);
+  const [activeStatusText, setActiveStatusText] = useState('');
+  const [appliedLogs, setAppliedLogs] = useState<
+    Array<{ id: string; text: string; status: 'ok' | 'fail' | 'info'; timestamp: number }>
+  >([]);
+  const [activityItems, setActivityItems] = useState<StructuredActivityItem[]>([]);
+  const [pendingQuestion, setPendingQuestion] = useState<any | null>(null);
+  const [pendingBatch, setPendingBatch] = useState<any | null>(null);
 
   // Check if models are configured OR user is authenticated with Cloud API
   const checkModelConfiguration = useCallback(async () => {
@@ -228,14 +244,21 @@ const SidePanel = () => {
         case Actors.SYSTEM:
           switch (state) {
             case ExecutionState.TASK_START:
-              // Reset historical session flag when a new task starts
               setIsHistoricalSession(false);
+              skip = false;
+              break;
+            case ExecutionState.STEP_OK:
+              skip = false;
+              break;
+            case ExecutionState.STEP_FAIL:
+              skip = false;
               break;
             case ExecutionState.TASK_OK:
               setIsFollowUpMode(true);
               setInputEnabled(true);
               setShowStopButton(false);
               setIsReplaying(false);
+              skip = false;
               fetchCreditsBalance();
               break;
             case ExecutionState.TASK_FAIL:
@@ -259,8 +282,8 @@ const SidePanel = () => {
             case ExecutionState.TASK_RESUME:
               break;
             default:
-              console.error('Invalid task state', state);
-              return;
+              skip = false;
+              break;
           }
           break;
         case Actors.USER:
@@ -337,6 +360,40 @@ const SidePanel = () => {
           return;
       }
 
+      if (content && data?.taskId !== 'runner_status') {
+        setActiveStatusText(content);
+        setAppliedLogs(prev => {
+          if (prev.length > 0 && prev[0].text === content) return prev;
+          return [
+            {
+              id: String(Date.now()) + Math.random(),
+              text: content,
+              status:
+                state === ExecutionState.STEP_FAIL || state === ExecutionState.TASK_FAIL
+                  ? 'fail'
+                  : state === ExecutionState.TASK_OK || content.includes('Successfully')
+                    ? 'ok'
+                    : 'info',
+              timestamp: Date.now(),
+            },
+            ...prev.slice(0, 49),
+          ];
+        });
+        if (
+          state === ExecutionState.TASK_OK ||
+          state === ExecutionState.TASK_FAIL ||
+          content.includes('Successfully applied') ||
+          content.includes('🏁 All') ||
+          content.includes('Halting queue') ||
+          content.includes('Stopping queue') ||
+          content.includes('Queue stopped') ||
+          content.includes('Queue halted') ||
+          content.includes('Queue locked')
+        ) {
+          setIsApplying(false);
+        }
+      }
+
       if (!skip) {
         appendMessage({
           actor,
@@ -381,7 +438,7 @@ const SidePanel = () => {
       // biome-ignore lint/suspicious/noExplicitAny: <explanation>
       portRef.current.onMessage.addListener((message: any) => {
         // Add type checking for message
-        if (message && message.type === EventType.EXECUTION) {
+        if (message && (message.type === EventType.EXECUTION || message.actor || message.data)) {
           handleTaskState(message);
         } else if (message && message.type === 'error') {
           // Handle error messages from service worker
@@ -392,6 +449,7 @@ const SidePanel = () => {
           });
           setInputEnabled(true);
           setShowStopButton(false);
+          setIsFollowUpMode(false);
         } else if (message && message.type === 'speech_to_text_result') {
           // Handle speech-to-text result
           if (message.text && setInputTextRef.current) {
@@ -406,6 +464,69 @@ const SidePanel = () => {
             timestamp: Date.now(),
           });
           setIsProcessingSpeech(false);
+        } else if (message && message.type === 'ASK_USER_QUESTION') {
+          setPendingQuestion(message.data);
+          setPendingBatch(null);
+          setMainTab('apply');
+        } else if (message && message.type === 'ASK_USER_QUESTION_BATCH') {
+          setPendingBatch(message.data);
+          setPendingQuestion(null);
+          setMainTab('apply');
+        } else if (message && message.type === 'LIVE_ACTIVITY_UPDATE' && message.data) {
+          const act = message.data;
+          setActivityItems(prev => {
+            const idx = prev.findIndex(item => item.jobId === act.jobId);
+            const newItem: StructuredActivityItem = {
+              id: act.jobId || String(Date.now()),
+              jobId: act.jobId,
+              url: act.url,
+              title: act.title,
+              company: act.company,
+              status: act.status,
+              reason: act.reason,
+              creditsUsed: act.creditsUsed,
+              timestamp: Date.now(),
+            };
+            if (idx >= 0) {
+              const copy = [...prev];
+              copy[idx] = newItem;
+              return copy;
+            }
+            return [newItem, ...prev.slice(0, 49)];
+          });
+        } else if (message && message.type === 'LINKEDIN_STATUS_UPDATE') {
+          if (message.text) {
+            setActiveStatusText(message.text);
+            setAppliedLogs(prev => {
+              if (prev.length > 0 && prev[0].text === message.text) return prev;
+              return [
+                {
+                  id: String(Date.now()) + Math.random().toString(36).slice(2, 6),
+                  text: message.text,
+                  status: message.status || 'info',
+                  timestamp: Date.now(),
+                },
+                ...prev.slice(0, 99),
+              ];
+            });
+          }
+        } else if (message && message.type === 'LINKEDIN_RUN_FINISHED') {
+          setIsApplying(false);
+          if (message.summary) {
+            setActiveStatusText(message.summary);
+            setAppliedLogs(prev => {
+              if (prev.length > 0 && prev[0].text === message.summary) return prev;
+              return [
+                {
+                  id: String(Date.now()) + Math.random().toString(36).slice(2, 6),
+                  text: message.summary,
+                  status: 'ok',
+                  timestamp: Date.now(),
+                },
+                ...prev.slice(0, 99),
+              ];
+            });
+          }
         } else if (message && message.type === 'heartbeat_ack') {
           console.log('Heartbeat acknowledged');
         }
@@ -451,6 +572,11 @@ const SidePanel = () => {
       portRef.current = null;
     }
   }, [handleTaskState, appendMessage, stopConnection]);
+
+  // Automatically connect side panel port on mount
+  useEffect(() => {
+    setupConnection();
+  }, [setupConnection]);
 
   // Add safety check for message sending
   const sendMessage = useCallback(
@@ -740,6 +866,7 @@ const SidePanel = () => {
       });
       setInputEnabled(true);
       setShowStopButton(false);
+      setIsFollowUpMode(false);
       stopConnection();
     }
   };
@@ -761,6 +888,100 @@ const SidePanel = () => {
     setInputEnabled(true);
     setShowStopButton(false);
   };
+
+  const handleStartAutoApply = useCallback(async () => {
+    try {
+      const brain = await careerBrainStore.getCareerBrain();
+      const check = validateProfileCompleteness(brain);
+      if (!check.isValid) {
+        const msg = `⚠️ Incomplete profile. Missing required fields: ${check.missingFields.join(', ')}. Please complete your profile in the "Resume & Profile" tab before applying.`;
+        setActiveStatusText(msg);
+        setAppliedLogs(prev => [
+          {
+            id: String(Date.now()),
+            text: msg,
+            status: 'fail',
+            timestamp: Date.now(),
+          },
+          ...prev,
+        ]);
+        setMainTab('resume');
+        return;
+      }
+    } catch {}
+
+    if (!portRef.current) {
+      setupConnection();
+    }
+
+    setIsApplying(true);
+    setActiveStatusText('Initializing autonomous search and apply loop...');
+    setAppliedLogs(prev => [
+      {
+        id: String(Date.now()),
+        text: '🚀 Starting Auto Apply loop (searching jobs with Easy Apply filter)...',
+        status: 'info',
+        timestamp: Date.now(),
+      },
+      ...prev,
+    ]);
+
+    try {
+      portRef.current?.postMessage({ type: 'START_AUTO_APPLY' });
+    } catch (err) {
+      console.error('Failed to post START_AUTO_APPLY:', err);
+      setIsApplying(false);
+      setActiveStatusText('Failed to start application run.');
+    }
+  }, [setupConnection]);
+
+  const handleStopLinkedInApply = useCallback(() => {
+    setIsApplying(false);
+    setActiveStatusText('Application stopped by user.');
+    setPendingQuestion(null);
+    setPendingBatch(null);
+    setAppliedLogs(prev => [
+      {
+        id: String(Date.now()),
+        text: '⏹️ Application stopped by user.',
+        status: 'info',
+        timestamp: Date.now(),
+      },
+      ...prev,
+    ]);
+    try {
+      portRef.current?.postMessage({ type: 'STOP_AUTO_APPLY' });
+    } catch {}
+    chrome.runtime.sendMessage({ type: 'STOP_JOB_APPLY' });
+  }, []);
+
+  const handleAnswerQuestion = useCallback(
+    (questionId: string, answer: string) => {
+      if (!portRef.current) {
+        setupConnection();
+      }
+      portRef.current?.postMessage({
+        type: 'USER_QUESTION_ANSWER',
+        data: { questionId, answer },
+      });
+      setPendingQuestion(null);
+    },
+    [setupConnection],
+  );
+
+  const handleAnswerQuestionBatch = useCallback(
+    (batchId: string, answers: Record<string, string>) => {
+      if (!portRef.current) {
+        setupConnection();
+      }
+      portRef.current?.postMessage({
+        type: 'USER_QUESTION_BATCH_ANSWER',
+        data: { batchId, answers },
+      });
+      setPendingBatch(null);
+    },
+    [setupConnection],
+  );
 
   const handleNewChat = () => {
     // Clear messages and start a new chat
@@ -1119,13 +1340,13 @@ const SidePanel = () => {
                 <img src="/icon-128.png" alt="Extension Logo" className="size-6" />
                 {authSession?.token && authSession.user ? (
                   <div className="flex items-center space-x-2 text-xs">
-                    <span className="font-semibold text-sky-400 flex items-center gap-1">
-                      <FiUser className="w-3.5 h-3.5 text-sky-400" />
+                    <span className="flex items-center gap-1 font-semibold text-sky-400">
+                      <FiUser className="size-3.5 text-sky-400" />
                       {authSession.user.name.split(' ')[0]}
                     </span>
                     {userCredits && (
                       <span
-                        className="rounded-full bg-amber-500/20 text-amber-300 text-[10px] px-2 py-0.5 font-bold border border-amber-500/30"
+                        className="rounded-full border border-amber-500/30 bg-amber-500/20 px-2 py-0.5 text-[10px] font-bold text-amber-300"
                         title={`${userCredits.remainingCredits} credits available out of ${userCredits.allocatedCredits}`}>
                         ⚡ {userCredits.remainingCredits} credits
                       </span>
@@ -1139,16 +1360,16 @@ const SidePanel = () => {
                         setUserCredits(null);
                       }}
                       title="Sign Out"
-                      className="text-gray-400 hover:text-red-400 transition-colors p-1 cursor-pointer">
-                      <FiLogOut className="w-3.5 h-3.5" />
+                      className="cursor-pointer p-1 text-gray-400 transition-colors hover:text-red-400">
+                      <FiLogOut className="size-3.5" />
                     </button>
                   </div>
                 ) : (
                   <button
                     type="button"
                     onClick={() => setIsAuthModalOpen(true)}
-                    className="inline-flex items-center space-x-1 rounded-full bg-gradient-to-r from-sky-500 to-indigo-600 px-2.5 py-0.5 text-[10px] font-bold text-white shadow transition-transform hover:scale-105 cursor-pointer">
-                    <FiUser className="w-3 h-3" />
+                    className="inline-flex cursor-pointer items-center space-x-1 rounded-full bg-gradient-to-r from-sky-500 to-indigo-600 px-2.5 py-0.5 text-[10px] font-bold text-white shadow transition-transform hover:scale-105">
+                    <FiUser className="size-3" />
                     <span>Sign In</span>
                   </button>
                 )}
@@ -1178,13 +1399,6 @@ const SidePanel = () => {
                 </button>
               </>
             )}
-            <a
-              href="https://discord.gg/NN3ABHggMK"
-              target="_blank"
-              rel="noopener noreferrer"
-              className={`header-icon ${isDarkMode ? 'text-sky-400 hover:text-sky-300' : 'text-sky-400 hover:text-sky-500'}`}>
-              <RxDiscordLogo size={20} />
-            </a>
             <button
               type="button"
               onClick={() => chrome.runtime.openOptionsPage()}
@@ -1196,6 +1410,44 @@ const SidePanel = () => {
             </button>
           </div>
         </header>
+
+        {/* Navigation Tabs */}
+        {!showHistory && (
+          <div
+            className={`flex border-b text-xs font-semibold shrink-0 ${isDarkMode ? 'border-sky-900 bg-slate-800/90' : 'border-sky-100 bg-white/90 shadow-sm'}`}>
+            <button
+              onClick={() => setMainTab('apply')}
+              className={`flex-1 flex items-center justify-center space-x-1.5 py-2.5 transition-colors cursor-pointer border-b-2 ${
+                mainTab === 'apply'
+                  ? 'border-sky-500 text-sky-400 font-bold bg-sky-500/10'
+                  : 'border-transparent opacity-70 hover:opacity-100'
+              }`}>
+              <FiBriefcase className="size-3.5" />
+              <span>Job Apply</span>
+            </button>
+            <button
+              onClick={() => setMainTab('resume')}
+              className={`flex-1 flex items-center justify-center space-x-1.5 py-2.5 transition-colors cursor-pointer border-b-2 ${
+                mainTab === 'resume'
+                  ? 'border-sky-500 text-sky-400 font-bold bg-sky-500/10'
+                  : 'border-transparent opacity-70 hover:opacity-100'
+              }`}>
+              <FiFileText className="size-3.5" />
+              <span>Resume & Profile</span>
+            </button>
+            <button
+              onClick={() => setMainTab('chat')}
+              className={`flex-1 flex items-center justify-center space-x-1.5 py-2.5 transition-colors cursor-pointer border-b-2 ${
+                mainTab === 'chat'
+                  ? 'border-sky-500 text-sky-400 font-bold bg-sky-500/10'
+                  : 'border-transparent opacity-70 hover:opacity-100'
+              }`}>
+              <FiMessageSquare className="size-3.5" />
+              <span>AI Chat</span>
+            </button>
+          </div>
+        )}
+
         {showHistory ? (
           <div className="flex-1 overflow-hidden">
             <ChatHistoryList
@@ -1207,6 +1459,22 @@ const SidePanel = () => {
               isDarkMode={isDarkMode}
             />
           </div>
+        ) : mainTab === 'apply' ? (
+          <LinkedInApplyDashboard
+            isDarkMode={isDarkMode}
+            onStartAutoApply={handleStartAutoApply}
+            onStop={handleStopLinkedInApply}
+            isApplying={isApplying}
+            activeStatusText={activeStatusText}
+            appliedLogs={appliedLogs}
+            activityItems={activityItems}
+            pendingQuestion={pendingQuestion}
+            onAnswerQuestion={handleAnswerQuestion}
+            pendingBatch={pendingBatch}
+            onAnswerQuestionBatch={handleAnswerQuestionBatch}
+          />
+        ) : mainTab === 'resume' ? (
+          <ResumeProfileView isDarkMode={isDarkMode} />
         ) : (
           <>
             {/* Show loading state while checking model configuration */}
@@ -1237,18 +1505,18 @@ const SidePanel = () => {
                   {!authSession?.token ? (
                     <button
                       onClick={() => setIsAuthModalOpen(true)}
-                      className="my-2 w-full rounded-lg bg-gradient-to-r from-sky-500 to-indigo-600 px-4 py-2.5 font-bold text-white shadow-lg hover:from-sky-600 hover:to-indigo-700 transition-all text-xs cursor-pointer">
+                      className="my-2 w-full cursor-pointer rounded-lg bg-gradient-to-r from-sky-500 to-indigo-600 px-4 py-2.5 text-xs font-bold text-white shadow-lg transition-all hover:from-sky-600 hover:to-indigo-700">
                       Sign In / Create Account
                     </button>
                   ) : (
-                    <div className="my-2 p-3 rounded-lg bg-sky-500/10 border border-sky-500/30 text-xs font-semibold text-sky-400">
+                    <div className="my-2 rounded-lg border border-sky-500/30 bg-sky-500/10 p-3 text-xs font-semibold text-sky-400">
                       Logged in as {authSession.user?.email} ({userCredits?.remainingCredits || 0} credits available)
                     </div>
                   )}
 
                   <button
                     onClick={() => chrome.runtime.openOptionsPage()}
-                    className={`my-2 w-full rounded-lg px-4 py-2 text-xs font-medium transition-colors cursor-pointer ${
+                    className={`my-2 w-full cursor-pointer rounded-lg px-4 py-2 text-xs font-medium transition-colors ${
                       isDarkMode
                         ? 'bg-slate-700 text-white hover:bg-slate-600'
                         : 'bg-slate-200 text-slate-800 hover:bg-slate-300'

@@ -93,18 +93,23 @@ export default class BrowserContext {
   public async getCurrentPage(): Promise<Page> {
     // 1. If _currentTabId not set, query the active tab and attach it
     if (!this._currentTabId) {
-      let activeTab: chrome.tabs.Tab;
-      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-      if (!tab?.id) {
+      let activeTab: chrome.tabs.Tab | undefined;
+      const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+      if (tabs.length > 0 && tabs[0]?.id) {
+        activeTab = tabs[0];
+      } else {
+        const [anyActiveTab] = await chrome.tabs.query({ active: true });
+        activeTab = anyActiveTab;
+      }
+
+      if (!activeTab?.id) {
         // open a new tab with blank page
-        const newTab = await chrome.tabs.create({ url: this._config.homePageUrl });
+        const newTab = await chrome.tabs.create({ url: this._config.homePageUrl || 'about:blank' });
         if (!newTab.id) {
           // this should rarely happen
           throw new Error('No tab ID available');
         }
         activeTab = newTab;
-      } else {
-        activeTab = tab;
       }
       logger.info('active tab', activeTab.id, activeTab.url, activeTab.title);
       const page = await this._getOrCreatePage(activeTab);
@@ -132,7 +137,10 @@ export default class BrowserContext {
    * @returns A set of tab IDs.
    */
   public async getAllTabIds(): Promise<Set<number>> {
-    const tabs = await chrome.tabs.query({ currentWindow: true });
+    let tabs = await chrome.tabs.query({ lastFocusedWindow: true });
+    if (tabs.length === 0) {
+      tabs = await chrome.tabs.query({});
+    }
     return new Set(tabs.map(tab => tab.id).filter(id => id !== undefined));
   }
 
@@ -150,69 +158,85 @@ export default class BrowserContext {
       timeoutMs?: number;
     } = {},
   ): Promise<void> {
-    const { waitForUpdate = true, waitForActivation = true, timeoutMs = 5000 } = options;
+    const { waitForUpdate = true, waitForActivation = true, timeoutMs = 8000 } = options;
 
     const promises: Promise<void>[] = [];
 
     if (waitForUpdate) {
       const updatePromise = new Promise<void>(resolve => {
-        let hasUrl = false;
-        let hasTitle = false;
-        let isComplete = false;
-
-        const onUpdatedHandler = (updatedTabId: number, changeInfo: chrome.tabs.TabChangeInfo) => {
-          if (updatedTabId !== tabId) return;
-
-          if (changeInfo.url) hasUrl = true;
-          if (changeInfo.title) hasTitle = true;
-          if (changeInfo.status === 'complete') isComplete = true;
-
-          // Resolve when we have all the information we need
-          if (hasUrl && hasTitle && isComplete) {
+        let isResolved = false;
+        const cleanup = () => {
+          if (!isResolved) {
+            isResolved = true;
             chrome.tabs.onUpdated.removeListener(onUpdatedHandler);
             resolve();
           }
         };
+
+        const onUpdatedHandler = (
+          updatedTabId: number,
+          changeInfo: chrome.tabs.TabChangeInfo,
+          tab: chrome.tabs.Tab,
+        ) => {
+          if (updatedTabId !== tabId) return;
+
+          // If tab status is complete, or url is loaded
+          if (changeInfo.status === 'complete' || tab.status === 'complete') {
+            cleanup();
+          }
+        };
         chrome.tabs.onUpdated.addListener(onUpdatedHandler);
 
-        // Check current state
-        chrome.tabs.get(tabId).then(tab => {
-          if (tab.url) hasUrl = true;
-          if (tab.title) hasTitle = true;
-          if (tab.status === 'complete') isComplete = true;
-
-          if (hasUrl && hasTitle && isComplete) {
-            chrome.tabs.onUpdated.removeListener(onUpdatedHandler);
-            resolve();
-          }
-        });
+        // Check current state immediately
+        chrome.tabs
+          .get(tabId)
+          .then(tab => {
+            if (tab.status === 'complete') {
+              cleanup();
+            }
+          })
+          .catch(() => {});
       });
       promises.push(updatePromise);
     }
 
     if (waitForActivation) {
       const activatedPromise = new Promise<void>(resolve => {
-        const onActivatedHandler = (activeInfo: chrome.tabs.TabActiveInfo) => {
-          if (activeInfo.tabId === tabId) {
+        let isResolved = false;
+        const cleanup = () => {
+          if (!isResolved) {
+            isResolved = true;
             chrome.tabs.onActivated.removeListener(onActivatedHandler);
             resolve();
           }
         };
+
+        const onActivatedHandler = (activeInfo: chrome.tabs.TabActiveInfo) => {
+          if (activeInfo.tabId === tabId) {
+            cleanup();
+          }
+        };
         chrome.tabs.onActivated.addListener(onActivatedHandler);
 
-        // Check current state
-        chrome.tabs.get(tabId).then(tab => {
-          if (tab.active) {
-            chrome.tabs.onActivated.removeListener(onActivatedHandler);
-            resolve();
-          }
-        });
+        // Check current state immediately
+        chrome.tabs
+          .get(tabId)
+          .then(tab => {
+            if (tab.active) {
+              cleanup();
+            }
+          })
+          .catch(() => {});
       });
       promises.push(activatedPromise);
     }
 
-    const timeoutPromise = new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error(`Tab operation timed out after ${timeoutMs} ms`)), timeoutMs),
+    // Graceful timeout: do not reject with an unhandled error so attachment can proceed
+    const timeoutPromise = new Promise<void>(resolve =>
+      setTimeout(() => {
+        logger.warning(`Tab operation wait reached ${timeoutMs}ms for tab ${tabId}; continuing`);
+        resolve();
+      }, timeoutMs),
     );
 
     await Promise.race([Promise.all(promises), timeoutPromise]);
@@ -265,6 +289,23 @@ export default class BrowserContext {
       throw new URLNotAllowedError(`Open tab failed. URL: ${url} is not allowed`);
     }
 
+    // Check if the current tab is an empty tab (chrome://newtab/ or about:blank)
+    // If so, reuse the existing tab instead of opening a redundant new tab
+    const currentPage = await this.getCurrentPage().catch(() => null);
+    if (currentPage) {
+      try {
+        const currentTab = await chrome.tabs.get(currentPage.tabId);
+        const curUrl = (currentTab.url || '').trim().toLowerCase();
+        if (curUrl === 'chrome://newtab/' || curUrl === 'about:blank' || curUrl === '') {
+          logger.info(`Reusing existing empty tab ${currentPage.tabId} for target ${url}`);
+          await this.navigateTo(url);
+          return (await this.getCurrentPage())!;
+        }
+      } catch {
+        // Fallback to creating a new tab
+      }
+    }
+
     // Create the new tab
     const tab = await chrome.tabs.create({ url, active: true });
     if (!tab.id) {
@@ -276,7 +317,7 @@ export default class BrowserContext {
     // Get updated tab information
     const updatedTab = await chrome.tabs.get(tab.id);
     // Create and attach the page after tab is fully loaded and activated
-    const page = await this._getOrCreatePage(updatedTab);
+    const page = await this._getOrCreatePage(updatedTab, true);
     await this.attachPage(page);
     this._currentTabId = tab.id;
 

@@ -1,10 +1,11 @@
-import mongoose from 'mongoose';
+import type mongoose from 'mongoose';
 import { User } from '../models/user.model.js';
 import { Plan } from '../models/plan.model.js';
 import { Subscription, type ISubscription } from '../models/subscription.model.js';
 import { WebhookLedger } from '../models/webhookLedger.model.js';
 import { RazorpayService } from './razorpay.service.js';
 import { CreditService } from './credit.service.js';
+import { ProfileService } from './profile.service.js';
 import { AppError } from '../middleware/errorHandler.js';
 import { logger } from '../utils/logger.js';
 import { env } from '../config/env.js';
@@ -157,7 +158,7 @@ export class SubscriptionLifecycleService {
     }
 
     // 3. Fetch Subscription for current User
-    let subscription =
+    const subscription =
       (await Subscription.findOne({ providerSubscriptionId: subscriptionId })) ||
       (await Subscription.findOne({ userId }).sort({ createdAt: -1 }));
     if (!subscription) {
@@ -211,6 +212,13 @@ export class SubscriptionLifecycleService {
       description: `Paid subscription activation credits (${subscription.planCodeSnapshot})`,
       type: 'SUBSCRIPTION_RENEWAL',
     });
+
+    // Upgrade Career Brain tier to Premium (100 jobs/day)
+    try {
+      await ProfileService.upgradeToPremium(userId.toString());
+    } catch (e: any) {
+      logger.warn(`Failed to upgrade Career Brain tier for user ${userId}: ${e.message}`);
+    }
 
     logger.info(`Verified payment ${paymentId} for subscription ${subscription._id}, status set to ACTIVE`);
 
@@ -336,6 +344,12 @@ export class SubscriptionLifecycleService {
               periodEnd: subscription.currentPeriodEnd,
               type: 'SUBSCRIPTION_RENEWAL',
             });
+
+            try {
+              await ProfileService.upgradeToPremium(subscription.userId.toString());
+            } catch (e: any) {
+              logger.warn(`Failed to upgrade Career Brain tier for user ${subscription.userId}: ${e.message}`);
+            }
           } else if (eventType === 'subscription.charged') {
             const durationDays = subscription.billingIntervalSnapshot === 'yearly' ? 365 : 30;
             const oldStart = subscription.currentPeriodStart;
@@ -362,6 +376,12 @@ export class SubscriptionLifecycleService {
                 description: `Renewal credit top-up (${paymentId})`,
                 type: 'SUBSCRIPTION_RENEWAL',
               });
+
+              try {
+                await ProfileService.upgradeToPremium(subscription.userId.toString());
+              } catch (e: any) {
+                logger.warn(`Failed to upgrade Career Brain tier for user ${subscription.userId}: ${e.message}`);
+              }
             } catch (creditError) {
               // Standalone MongoDB Fallback: Revert period update if credit initialization fails
               subscription.currentPeriodStart = oldStart;
@@ -383,6 +403,29 @@ export class SubscriptionLifecycleService {
               subscription.canceledAt = now;
             }
             await subscription.save();
+          }
+        }
+      }
+
+      // Handle standalone or subscription payment.captured
+      if (eventType === 'payment.captured') {
+        const paymentEntity = payload.payment?.entity || payload.entity;
+        const capturedSubId = paymentEntity?.subscription_id || rzpSubId;
+        let targetUserId = paymentEntity?.notes?.userId || payload.order?.entity?.notes?.userId;
+
+        if (!targetUserId && capturedSubId) {
+          const sub = await Subscription.findOne({ providerSubscriptionId: capturedSubId });
+          if (sub) {
+            targetUserId = sub.userId.toString();
+          }
+        }
+
+        if (targetUserId) {
+          try {
+            await ProfileService.upgradeToPremium(targetUserId.toString());
+            logger.info(`Upgraded Career Brain to Premium for user ${targetUserId} via payment.captured`);
+          } catch (e: any) {
+            logger.warn(`Failed to upgrade Career Brain for user ${targetUserId}: ${e.message}`);
           }
         }
       }

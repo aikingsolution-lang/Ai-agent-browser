@@ -163,7 +163,7 @@ export const APIModeSelector: React.FC<APIModeSelectorProps> = ({ isDarkMode, on
                 ? 'bg-gradient-to-r from-sky-500 to-indigo-500 text-white shadow-md'
                 : 'bg-emerald-500/20 text-emerald-600 dark:text-emerald-400'
             }`}>
-            <FiZap className="h-3 w-3" />
+            <FiZap className="size-3" />
             <span>{settings.apiMode === 'premium' ? 'Premium Mode' : 'Free Mode'}</span>
           </span>
         </div>
@@ -188,7 +188,7 @@ export const APIModeSelector: React.FC<APIModeSelectorProps> = ({ isDarkMode, on
                       ? 'bg-sky-500 text-white'
                       : 'bg-gray-200 text-gray-700 dark:bg-slate-600 dark:text-gray-200'
                   }`}>
-                  <FiKey className="h-6 w-6" />
+                  <FiKey className="size-6" />
                 </div>
                 <div>
                   <h3 className={`font-semibold ${isDarkMode ? 'text-gray-200' : 'text-gray-800'}`}>
@@ -199,7 +199,7 @@ export const APIModeSelector: React.FC<APIModeSelectorProps> = ({ isDarkMode, on
                   </p>
                 </div>
               </div>
-              {settings.apiMode === 'free' && <FiCheckCircle className="h-5 w-5 text-sky-500" />}
+              {settings.apiMode === 'free' && <FiCheckCircle className="size-5 text-sky-500" />}
             </div>
             <ul className={`mt-4 space-y-2 text-xs ${isDarkMode ? 'text-gray-300' : 'text-gray-600'}`}>
               <li className="flex items-center space-x-2">
@@ -235,21 +235,21 @@ export const APIModeSelector: React.FC<APIModeSelectorProps> = ({ isDarkMode, on
                       ? 'bg-gradient-to-r from-sky-500 to-indigo-500 text-white'
                       : 'bg-gray-200 text-gray-700 dark:bg-slate-600 dark:text-gray-200'
                   }`}>
-                  <FiCpu className="h-6 w-6" />
+                  <FiCpu className="size-6" />
                 </div>
                 <div>
                   <div className="flex items-center space-x-2">
                     <h3 className={`font-semibold ${isDarkMode ? 'text-gray-200' : 'text-gray-800'}`}>
                       Premium Mode (Built-in API)
                     </h3>
-                    {!isPaidUser && <FiLock className="h-4 w-4 text-amber-500" title="Subscription required" />}
+                    {!isPaidUser && <FiLock className="size-4 text-amber-500" title="Subscription required" />}
                   </div>
                   <p className={`text-xs ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>
                     Zero setup required — subscribe for built-in high speed API access
                   </p>
                 </div>
               </div>
-              {settings.apiMode === 'premium' && <FiCheckCircle className="h-5 w-5 text-indigo-500" />}
+              {settings.apiMode === 'premium' && <FiCheckCircle className="size-5 text-indigo-500" />}
             </div>
             <ul className={`mt-4 space-y-2 text-xs ${isDarkMode ? 'text-gray-300' : 'text-gray-600'}`}>
               <li className="flex items-center space-x-2">
@@ -270,9 +270,9 @@ export const APIModeSelector: React.FC<APIModeSelectorProps> = ({ isDarkMode, on
 
         {/* Subscription Gating Banner for Free Users */}
         {!isPaidUser && (
-          <div className="mt-4 rounded-xl border border-amber-500/30 bg-amber-500/10 p-4 flex items-center justify-between">
+          <div className="mt-4 flex items-center justify-between rounded-xl border border-amber-500/30 bg-amber-500/10 p-4">
             <div className="flex items-center space-x-3">
-              <FiAlertCircle className="h-5 w-5 text-amber-500 flex-shrink-0" />
+              <FiAlertCircle className="size-5 shrink-0 text-amber-500" />
               <div>
                 <h4 className={`text-xs font-bold ${isDarkMode ? 'text-amber-300' : 'text-amber-800'}`}>
                   Subscription Required for Premium Mode
@@ -285,8 +285,8 @@ export const APIModeSelector: React.FC<APIModeSelectorProps> = ({ isDarkMode, on
             {onNavigateToPremium && (
               <button
                 onClick={onNavigateToPremium}
-                className="inline-flex items-center space-x-1.5 rounded-lg bg-gradient-to-r from-sky-500 to-indigo-600 px-3 py-1.5 text-xs font-semibold text-white shadow hover:from-sky-600 hover:to-indigo-700 transition-all">
-                <FiStar className="h-3.5 w-3.5" />
+                className="inline-flex items-center space-x-1.5 rounded-lg bg-gradient-to-r from-sky-500 to-indigo-600 px-3 py-1.5 text-xs font-semibold text-white shadow transition-all hover:from-sky-600 hover:to-indigo-700">
+                <FiStar className="size-3.5" />
                 <span>View Plans & Subscribe</span>
               </button>
             )}
@@ -299,7 +299,7 @@ export const APIModeSelector: React.FC<APIModeSelectorProps> = ({ isDarkMode, on
             className={`mt-6 rounded-lg border p-4 ${
               isDarkMode ? 'border-slate-700 bg-slate-700/50' : 'border-indigo-100 bg-indigo-50/50'
             }`}>
-            <div className="flex items-center justify-between mb-2">
+            <div className="mb-2 flex items-center justify-between">
               <span className={`text-sm font-medium ${isDarkMode ? 'text-gray-200' : 'text-gray-700'}`}>
                 Monthly Premium Quota Usage
               </span>
@@ -307,7 +307,7 @@ export const APIModeSelector: React.FC<APIModeSelectorProps> = ({ isDarkMode, on
                 {settings.usage.taskCount} / {settings.usage.taskLimit || 1000} tasks used ({usagePercent}%)
               </span>
             </div>
-            <div className={`h-2.5 w-full rounded-full overflow-hidden ${isDarkMode ? 'bg-slate-600' : 'bg-gray-200'}`}>
+            <div className={`h-2.5 w-full overflow-hidden rounded-full ${isDarkMode ? 'bg-slate-600' : 'bg-gray-200'}`}>
               <div
                 className="h-full bg-gradient-to-r from-sky-500 to-indigo-500 transition-all duration-300"
                 style={{ width: `${usagePercent}%` }}></div>
@@ -321,8 +321,8 @@ export const APIModeSelector: React.FC<APIModeSelectorProps> = ({ isDarkMode, on
         {/* Cloud Secret Manager & Key Integration Form */}
         <div
           className={`mt-8 rounded-lg border p-6 ${isDarkMode ? 'border-slate-700 bg-slate-700/30' : 'border-gray-200 bg-gray-50'}`}>
-          <div className="flex items-center space-x-2 mb-4">
-            <FiServer className={`h-5 w-5 ${isDarkMode ? 'text-sky-400' : 'text-sky-600'}`} />
+          <div className="mb-4 flex items-center space-x-2">
+            <FiServer className={`size-5 ${isDarkMode ? 'text-sky-400' : 'text-sky-600'}`} />
             <h3 className={`text-base font-semibold ${isDarkMode ? 'text-gray-200' : 'text-gray-800'}`}>
               AWS Secrets Manager & GCP Secret Manager Integration
             </h3>
@@ -428,8 +428,8 @@ export const APIModeSelector: React.FC<APIModeSelectorProps> = ({ isDarkMode, on
                 }`}>
                 {testResult.success && testResult.payload ? (
                   <div className="space-y-1">
-                    <div className="flex items-center space-x-2 font-bold text-sm">
-                      <FiCheckCircle className="h-4 w-4" />
+                    <div className="flex items-center space-x-2 text-sm font-bold">
+                      <FiCheckCircle className="size-4" />
                       <span>Secret Manager Connected ({testResult.payload.provider.toUpperCase()})</span>
                     </div>
                     <p className="font-mono text-[11px] opacity-80">{testResult.payload.secretIdentifier}</p>
@@ -448,11 +448,11 @@ export const APIModeSelector: React.FC<APIModeSelectorProps> = ({ isDarkMode, on
                 type="button"
                 onClick={handleTestSecretManager}
                 disabled={isTestingConnection}
-                className="inline-flex items-center space-x-2 rounded-lg border border-slate-600 px-3 py-2 text-xs font-medium text-gray-300 hover:bg-slate-700 transition-colors">
+                className="inline-flex items-center space-x-2 rounded-lg border border-slate-600 px-3 py-2 text-xs font-medium text-gray-300 transition-colors hover:bg-slate-700">
                 {isTestingConnection ? (
-                  <FiRefreshCw className="h-3.5 w-3.5 animate-spin" />
+                  <FiRefreshCw className="size-3.5 animate-spin" />
                 ) : (
-                  <FiActivity className="h-3.5 w-3.5 text-sky-400" />
+                  <FiActivity className="size-3.5 text-sky-400" />
                 )}
                 <span>Test Secret Manager Vault</span>
               </button>
@@ -460,8 +460,8 @@ export const APIModeSelector: React.FC<APIModeSelectorProps> = ({ isDarkMode, on
               <button
                 type="submit"
                 disabled={isSavingCloud}
-                className="inline-flex items-center space-x-2 rounded-lg bg-sky-600 px-4 py-2 text-xs font-medium text-white shadow hover:bg-sky-700 transition-colors">
-                {isSavingCloud ? <FiRefreshCw className="h-4 w-4 animate-spin" /> : <FiCloud className="h-4 w-4" />}
+                className="inline-flex items-center space-x-2 rounded-lg bg-sky-600 px-4 py-2 text-xs font-medium text-white shadow transition-colors hover:bg-sky-700">
+                {isSavingCloud ? <FiRefreshCw className="size-4 animate-spin" /> : <FiCloud className="size-4" />}
                 <span>{saveSuccess ? 'Saved & Synced!' : 'Sync Secret Credentials'}</span>
               </button>
             </div>
@@ -471,13 +471,13 @@ export const APIModeSelector: React.FC<APIModeSelectorProps> = ({ isDarkMode, on
 
       {/* Subscription Required Modal */}
       {showSubscriptionPrompt && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
           <div
             className={`w-full max-w-sm rounded-2xl border p-6 text-center shadow-2xl ${
               isDarkMode ? 'border-slate-700 bg-slate-800 text-gray-100' : 'border-gray-200 bg-white text-gray-900'
             }`}>
-            <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-amber-500/20 text-amber-500 mb-3">
-              <FiLock className="h-6 w-6" />
+            <div className="mx-auto mb-3 flex size-12 items-center justify-center rounded-full bg-amber-500/20 text-amber-500">
+              <FiLock className="size-6" />
             </div>
             <h3 className="text-lg font-bold">Pro Subscription Required</h3>
             <p className="mt-2 text-xs text-gray-400">

@@ -28,6 +28,8 @@ import {
   skipAdActionSchema,
   searchYouTubeActionSchema,
   linkedinEasyApplyActionSchema,
+  fillVisibleFormFieldsActionSchema,
+  askUserActionSchema,
 } from './schemas';
 import { z } from 'zod';
 import { createLogger } from '@src/background/log';
@@ -35,7 +37,9 @@ import { ExecutionState, Actors } from '../event/types';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { wrapUntrustedContent } from '../messages/utils';
 import { ApplicationEngine } from '../linkedin/applicationEngine';
-import { linkedInConfigStore } from '@extension/storage';
+import { linkedInConfigStore, careerBrainStore } from '@extension/storage';
+import { userQuestionManager } from '../linkedin/userQuestionManager';
+import { resolveModalFieldWithAudit, type FormFieldDescriptor } from '../linkedin/formQuestionResolver';
 
 const logger = createLogger('Action');
 
@@ -254,6 +258,56 @@ export class ActionBuilder {
     }, waitActionSchema);
     actions.push(wait);
 
+    const onAuditLog = (
+      category: 'MATCHED' | 'GENERATED' | 'ASKED',
+      label: string,
+      answer: string,
+      detail?: string,
+    ) => {
+      const auditText = `[${category}] ${label}: "${answer}"${detail ? ` (${detail})` : ''}`;
+      this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.STEP_OK, auditText).catch(() => {});
+    };
+
+    const resolveOrAskModalField = async (
+      page: any,
+      field: FormFieldDescriptor,
+      careerBrain: any,
+    ): Promise<boolean> => {
+      const res = await resolveModalFieldWithAudit(page, field, careerBrain, this.extractorLLM, onAuditLog);
+      return res.success;
+    };
+
+    const askUser = new Action(async (input: z.infer<typeof askUserActionSchema.schema>) => {
+      const questionText = input.question;
+      const fieldType = input.fieldType || 'text';
+      this.context.emitEvent(
+        Actors.NAVIGATOR,
+        ExecutionState.ACT_START,
+        `[ASKED] Prompting candidate for: "${questionText}"`,
+      );
+
+      const answer = await userQuestionManager.askQuestion({
+        questionText,
+        fieldType,
+        options: input.options,
+        skillName: input.skillName,
+      });
+
+      // Persist to golden answers
+      await careerBrainStore.saveGoldenAnswer(questionText, answer, 'Screening');
+
+      // Persist to skillExperience if skill
+      const skillName = input.skillName || userQuestionManager.extractSkillName(questionText);
+      if (skillName && !isNaN(Number(answer))) {
+        await careerBrainStore.saveSkillExperience(skillName, Number(answer));
+      }
+
+      const logMsg = `[ASKED] ${questionText}: "${answer}" (Saved to goldenAnswers / skillExperience)`;
+      this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_OK, logMsg);
+      return new ActionResult({ extractedContent: answer, includeInMemory: true });
+    }, askUserActionSchema);
+    actions.push(askUser);
+
     // Element Interaction Actions
     const clickElement = new Action(
       async (input: z.infer<typeof clickElementActionSchema.schema>) => {
@@ -261,11 +315,16 @@ export class ActionBuilder {
         this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_START, intent);
 
         const page = await this.context.browserContext.getCurrentPage();
-        const state = await page.getState();
+        let state = await page.getState();
 
-        const elementNode = state?.selectorMap.get(input.index);
+        let elementNode = state?.selectorMap.get(input.index);
         if (!elementNode) {
-          throw new Error(t('act_errors_elementNotExist', [input.index.toString()]));
+          // Element-not-found recovery: re-fetch state once
+          state = await page.getState(true);
+          elementNode = state?.selectorMap.get(input.index);
+          if (!elementNode) {
+            throw new Error(t('act_errors_elementNotExist', [input.index.toString()]));
+          }
         }
 
         // Check if element is a file uploader
@@ -278,91 +337,164 @@ export class ActionBuilder {
           });
         }
 
-        // Layer 2 & 3: Strict DOM Signature Matching + External Apply Interceptor
-        const pageUrl = page.url() || '';
-        const elementText = (elementNode.getAllTextTillNextClickableElement(2) || '').toLowerCase();
-        const ariaLabel = (elementNode.attributes?.['aria-label'] || '').toLowerCase();
-        const className = (elementNode.attributes?.['class'] || '').toLowerCase();
-
-        // Exact Easy Apply signature (not generic external 'Apply')
-        const isStrictEasyApply =
-          ariaLabel.includes('easy apply') ||
-          elementText.includes('easy apply') ||
-          className.includes('jobs-apply-button--easy-apply') ||
-          (className.includes('jobs-apply-button') &&
-            (ariaLabel.includes('easy apply') || elementText.includes('easy apply')));
-
-        // Check if this is an external apply button on LinkedIn
-        const isExternalApply =
-          pageUrl.includes('linkedin.com') &&
-          !isStrictEasyApply &&
-          (ariaLabel.startsWith('apply to') ||
-            elementText === 'apply' ||
-            elementText.startsWith('apply on') ||
-            className.includes('jobs-apply-button'));
-
-        if (pageUrl.includes('linkedin.com') && isStrictEasyApply) {
-          logger.info(
-            `[clickElement:Layer2] Intercepted verified Easy Apply button for index [${input.index}]. Delegating to ApplicationEngine...`,
-          );
-          try {
-            const userConfig = await linkedInConfigStore.getConfig();
-            const engine = new ApplicationEngine(
-              {
-                dryRun: true, // SAFETY: Always dry-run — hardcode-enforced
-                minFitScore: userConfig.minFitScore ?? 75,
-              },
-              { llm: this.extractorLLM, visionLLM: this.extractorLLM },
+        try {
+          // Guard: Job cards in search results list contain "Easy Apply" tags/badges.
+          // Never confuse a search result job card click with the actual Easy Apply button click!
+          const isInsideSearchList =
+            Boolean(
+              elementNode.xpath &&
+                /jobs-search-results|scaffold-layout__list|job-card-container/i.test(elementNode.xpath),
+            ) ||
+            Boolean(
+              elementNode.attributes?.['data-job-id'] &&
+                !elementNode.attributes?.['class']?.includes('jobs-apply-button'),
+            ) ||
+            Boolean(elementNode.attributes?.['data-occludable-job-id']) ||
+            Boolean(
+              elementNode.attributes?.['class'] &&
+                /job-card|jobs-search-results__list-item/i.test(elementNode.attributes['class']),
             );
 
-            await engine.initialize(page);
-            const jobData = await engine.scanJobListing();
-            logger.info(`[clickElement:intercept] Starting pipeline for "${jobData.title}" at "${jobData.company}"`);
+          const isButtonTag =
+            elementNode.tagName?.toLowerCase() === 'button' || elementNode.attributes?.['role'] === 'button';
 
-            const result = await engine.startApplication(jobData);
-            const statusMsg = `LinkedIn Easy Apply Result: ${result.status} | Job: "${jobData.title}" at "${jobData.company}" | Fit Score evaluated`;
-            const isDone =
-              result.status === 'APPLIED' ||
-              result.status === 'DRY_RUN_SUCCESS' ||
-              result.status === 'NEEDS_MANUAL_REVIEW' ||
-              result.status === 'SKIPPED_EXTERNAL_SITE' ||
-              result.status === 'SKIPPED_LOW_FIT' ||
-              result.status === 'SKIPPED_ALREADY_PROCESSED' ||
-              result.status === 'SKIPPED_DAILY_LIMIT' ||
-              result.status === 'SKIPPED_JOB_REMOVED' ||
-              result.status === 'SKIPPED_MISSING_RESUME';
+          const buttonText = (elementNode.getAllTextTillNextClickableElement(2) || '').toLowerCase().trim();
+          const buttonAria = (elementNode.attributes?.['aria-label'] || '').toLowerCase().trim();
 
-            this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_OK, statusMsg);
-            return new ActionResult({
-              isDone,
-              extractedContent: statusMsg,
-              includeInMemory: true,
-            });
-          } catch (error) {
-            const errorMsg = `LinkedIn Easy Apply intercepted execution failed: ${error instanceof Error ? error.message : String(error)}`;
-            logger.error(errorMsg);
-            this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_FAIL, errorMsg);
-            return new ActionResult({ error: errorMsg, includeInMemory: true });
+          const isExplicitEasyApplyButton =
+            isButtonTag &&
+            (/jobs-apply-button/i.test(elementNode.attributes?.['class'] || '') ||
+              /^\s*easy\s*apply/i.test(buttonText) ||
+              /^\s*easy\s*apply/i.test(buttonAria));
+
+          const isEasyApplyClick =
+            !isInsideSearchList &&
+            (isExplicitEasyApplyButton ||
+              (isButtonTag && /easy\s*apply/i.test(input.intent || '') && /apply/i.test(buttonText || buttonAria)));
+
+          const isDismissOrDone =
+            /dismiss|done|close|not now|skip/i.test(buttonText) || /dismiss|done|close|not now|skip/i.test(buttonAria);
+          const isSubmitApplication =
+            /submit application|submit/i.test(buttonText) || /submit application|submit/i.test(buttonAria);
+
+          // Check if modal already open before clicking Easy Apply
+          if (isEasyApplyClick) {
+            const alreadyOpen = await page.isEasyApplyModalOpen();
+            if (alreadyOpen) {
+              logger.info('Easy Apply modal is already open. Skipping duplicate click and extracting fresh state.');
+              await page.getState(true);
+              const okMsg = 'Easy Apply modal is already open and active.';
+              this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_OK, okMsg);
+              return new ActionResult({ extractedContent: okMsg, includeInMemory: true });
+            }
           }
-        }
 
-        // Reject external apply button clicks on LinkedIn
-        if (isExternalApply) {
-          const skipMsg =
-            'External Apply button detected (not Easy Apply). Skipped to next job to prevent leaving LinkedIn.';
-          logger.warning(`[clickElement:Layer2] 🛑 ${skipMsg}`);
-          this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_OK, skipMsg);
-          return new ActionResult({
-            extractedContent: `LinkedIn Easy Apply Result: SKIPPED_EXTERNAL_SITE | ${skipMsg}`,
-            includeInMemory: true,
-          });
-        }
+          // Pre-dismiss verification: If confirmation dialog is visible before dismissing, record it now!
+          if (isDismissOrDone && !this.context.applicationSubmissionConfirmed) {
+            const preDismissCheck = await page
+              .verifyApplicationConfirmation()
+              .catch(() => ({ confirmed: false, message: '' }));
+            if (preDismissCheck.confirmed) {
+              this.context.applicationSubmissionConfirmed = true;
+              this.context.submissionConfirmationMessage = preDismissCheck.message || null;
+              logger.info(`[ActionBuilder] Pre-dismiss confirmation captured: "${preDismissCheck.message}"`);
+            }
+          }
 
-        try {
+          // Pre-Next Validation Guard: Prevent proceeding past invalid or empty required fields in modal
+          const isNextOrReview =
+            /\b(next|review|submit)\b/i.test(buttonText) ||
+            /\b(next|review|submit)\b/i.test(buttonAria) ||
+            /continue to next step/i.test(buttonAria);
+
+          if (isNextOrReview) {
+            const modalOpen = await page.isEasyApplyModalOpen();
+            if (modalOpen) {
+              let validation = await page.validateModalFormState();
+              if (validation.hasErrors) {
+                logger.info(
+                  '[PreNextGuard] Validation errors or empty required fields detected before Next/Review click. Resolving fields...',
+                  validation,
+                );
+                const careerBrain = await careerBrainStore.getCareerBrain();
+                for (const field of validation.emptyRequiredFields) {
+                  await resolveOrAskModalField(page, field, careerBrain);
+                }
+                validation = await page.validateModalFormState();
+                if (validation.hasErrors) {
+                  for (const err of validation.errors) {
+                    await resolveOrAskModalField(page, { label: err.fieldLabel, fieldType: 'text' }, careerBrain);
+                  }
+                }
+                // Refresh state so updated DOM is reflected
+                state = await page.getState(true);
+                const recheckedNode = state?.selectorMap.get(input.index);
+                if (recheckedNode) {
+                  elementNode = recheckedNode;
+                }
+              }
+            }
+          }
+
           const initialTabIds = await this.context.browserContext.getAllTabIds();
-          await page.clickElementNode(this.context.options.useVision, elementNode);
+          if (isEasyApplyClick) {
+            const customClick = await page.clickEasyApplyButton().catch(() => ({ success: false }));
+            if (!customClick.success) {
+              await page.clickElementNode(this.context.options.useVision, elementNode);
+            }
+          } else {
+            await page.clickElementNode(this.context.options.useVision, elementNode);
+          }
           let msg = t('act_click_ok', [input.index.toString(), elementNode.getAllTextTillNextClickableElement(2)]);
           logger.info(msg);
+
+          // Post-submit verification: If submit application was clicked, wait briefly and check confirmation
+          if (isSubmitApplication && !this.context.applicationSubmissionConfirmed) {
+            logger.info('Submit clicked. Waiting for application confirmation on page...');
+            await new Promise(resolve => setTimeout(resolve, 1500));
+            const postSubmitCheck = await page
+              .verifyApplicationConfirmation()
+              .catch(() => ({ confirmed: false, message: '' }));
+            if (postSubmitCheck.confirmed) {
+              this.context.applicationSubmissionConfirmed = true;
+              this.context.submissionConfirmationMessage = postSubmitCheck.message || null;
+              logger.info(`[ActionBuilder] Post-submit confirmation captured: "${postSubmitCheck.message}"`);
+            }
+          }
+
+          // Post-click modal handling for Easy Apply
+          if (isEasyApplyClick) {
+            logger.info('Waiting for Easy Apply modal to render...');
+            let modalResult = await page.waitForEasyApplyModal(5000, 250);
+
+            // If modal failed to open and it was not an unknown dialog halt, retry click once
+            if (!modalResult.opened && !modalResult.error?.includes('Unknown dialog')) {
+              const stillOpen = await page.isEasyApplyModalOpen();
+              if (!stillOpen) {
+                logger.warning('Easy Apply modal did not appear after initial click. Retrying click once...');
+                const retryClick = await page.clickEasyApplyButton().catch(() => ({ success: false }));
+                if (!retryClick.success) {
+                  const freshState = await page.getState(true);
+                  const freshNode = freshState?.selectorMap.get(input.index);
+                  if (freshNode) {
+                    await page.clickElementNode(this.context.options.useVision, freshNode);
+                  }
+                }
+                modalResult = await page.waitForEasyApplyModal(5000, 250);
+              }
+            }
+
+            if (!modalResult.opened) {
+              const failureMsg = modalResult.error || 'Easy Apply modal failed to open';
+              logger.error(`🛑 ${failureMsg}`);
+              this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_FAIL, failureMsg);
+              return new ActionResult({ error: failureMsg });
+            }
+
+            // Force fresh DOM extraction after modal opens
+            await page.getState(true);
+            msg += ` - Easy Apply modal rendered successfully (${modalResult.interactiveCount || 0} interactive elements discovered).`;
+          }
 
           // Layer 3: Context-Aware Tab Monitoring & Escape Hatch
           const currentTabIds = await this.context.browserContext.getAllTabIds();
@@ -374,6 +506,7 @@ export class ActionBuilder {
               const newTabUrl = newTab?.url || newTab?.pendingUrl || '';
 
               // If an external non-LinkedIn site opened (e.g. Workday, Greenhouse), immediately auto-close it
+              const pageUrl = page.url() || '';
               if (pageUrl.includes('linkedin.com') && newTabUrl && !newTabUrl.includes('linkedin.com')) {
                 logger.warning(
                   `[clickElement:Layer3] External tab detected (${newTabUrl}). Auto-closing tab [${newTabId}] to prevent freeze.`,
@@ -408,17 +541,51 @@ export class ActionBuilder {
     );
     actions.push(clickElement);
 
+    const fillVisibleFormFields = new Action(
+      async (input: z.infer<typeof fillVisibleFormFieldsActionSchema.schema>) => {
+        const intent = input.intent || 'Batch fill visible form fields in modal';
+        this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_START, intent);
+
+        const page = await this.context.browserContext.getCurrentPage();
+        const validation = await page.validateModalFormState();
+        const careerBrain = await careerBrainStore.getCareerBrain();
+
+        let filledCount = 0;
+        for (const field of validation.emptyRequiredFields) {
+          const ok = await resolveOrAskModalField(page, field, careerBrain);
+          if (ok) filledCount++;
+        }
+
+        for (const err of validation.errors) {
+          const ok = await resolveOrAskModalField(page, { label: err.fieldLabel, fieldType: 'text' }, careerBrain);
+          if (ok) filledCount++;
+        }
+
+        await page.getState(true);
+        const msg = `Batch filled ${filledCount} form fields in modal.`;
+        this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_OK, msg);
+        return new ActionResult({ extractedContent: msg, includeInMemory: true });
+      },
+      fillVisibleFormFieldsActionSchema,
+    );
+    actions.push(fillVisibleFormFields);
+
     const inputText = new Action(
       async (input: z.infer<typeof inputTextActionSchema.schema>) => {
         const intent = input.intent || t('act_inputText_start', [input.index.toString()]);
         this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_START, intent);
 
         const page = await this.context.browserContext.getCurrentPage();
-        const state = await page.getState();
+        let state = await page.getState();
 
-        const elementNode = state?.selectorMap.get(input.index);
+        let elementNode = state?.selectorMap.get(input.index);
         if (!elementNode) {
-          throw new Error(t('act_errors_elementNotExist', [input.index.toString()]));
+          // Element-not-found recovery: Re-fetch DOM state once and retry
+          state = await page.getState(true);
+          elementNode = state?.selectorMap.get(input.index);
+          if (!elementNode) {
+            throw new Error(t('act_errors_elementNotExist', [input.index.toString()]));
+          }
         }
 
         const urlBefore = page.url();
@@ -476,6 +643,19 @@ export class ActionBuilder {
         } else {
           await page.sendKeys('Enter');
         }
+
+        if (!this.context.applicationSubmissionConfirmed) {
+          await new Promise(resolve => setTimeout(resolve, 1500));
+          const postSubmitCheck = await page
+            .verifyApplicationConfirmation()
+            .catch(() => ({ confirmed: false, message: '' }));
+          if (postSubmitCheck.confirmed) {
+            this.context.applicationSubmissionConfirmed = true;
+            this.context.submissionConfirmationMessage = postSubmitCheck.message || null;
+            logger.info(`[ActionBuilder] Post-submitForm confirmation captured: "${postSubmitCheck.message}"`);
+          }
+        }
+
         const msg = 'Submitted form successfully';
         this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_OK, msg);
         return new ActionResult({ extractedContent: msg, includeInMemory: true });
@@ -957,8 +1137,8 @@ export class ActionBuilder {
         const userConfig = await linkedInConfigStore.getConfig();
         const engine = new ApplicationEngine(
           {
-            dryRun: true, // SAFETY: Always dry-run — hardcode-enforced
-            minFitScore: userConfig.minFitScore ?? 75,
+            dryRun: userConfig.dryRun ?? false,
+            minFitScore: 0,
           },
           { llm: this.extractorLLM, visionLLM: this.extractorLLM },
         );
@@ -969,23 +1149,23 @@ export class ActionBuilder {
         logger.info(`[linkedin_easy_apply] Starting pipeline for "${jobData.title}" at "${jobData.company}"`);
 
         const result = await engine.startApplication(jobData);
+        const isDone = result.status === 'APPLIED' || result.status === 'DRY_RUN_SUCCESS';
+        let finalStatusMsg = `LinkedIn Easy Apply Result: ${result.status} | Job: "${jobData.title}" at "${jobData.company}"`;
+        if (result.reviewSummary) {
+          finalStatusMsg = `${result.reviewSummary}\n\n${finalStatusMsg}`;
+        }
+        if (!isDone) {
+          finalStatusMsg +=
+            '. Job application did not submit (skipped or needs review). Please select and apply to the next unapplied Easy Apply job listing in search results.';
+        } else if (result.status === 'DRY_RUN_SUCCESS') {
+          finalStatusMsg +=
+            '. Application review completed safely. Please review the summary above before confirming submission.';
+        }
 
-        const statusMsg = `LinkedIn Easy Apply Result: ${result.status} | Job: "${jobData.title}" at "${jobData.company}" | Fit Score evaluated`;
-        const isDone =
-          result.status === 'APPLIED' ||
-          result.status === 'DRY_RUN_SUCCESS' ||
-          result.status === 'NEEDS_MANUAL_REVIEW' ||
-          result.status === 'SKIPPED_EXTERNAL_SITE' ||
-          result.status === 'SKIPPED_LOW_FIT' ||
-          result.status === 'SKIPPED_ALREADY_PROCESSED' ||
-          result.status === 'SKIPPED_DAILY_LIMIT' ||
-          result.status === 'SKIPPED_JOB_REMOVED' ||
-          result.status === 'SKIPPED_MISSING_RESUME';
-
-        this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_OK, statusMsg);
+        this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_OK, finalStatusMsg);
         return new ActionResult({
           isDone,
-          extractedContent: statusMsg,
+          extractedContent: finalStatusMsg,
           includeInMemory: true,
         });
       } catch (error) {

@@ -1,4 +1,5 @@
-import mongoose, { Schema, Document, Types } from 'mongoose';
+import type { Document, Types } from 'mongoose';
+import mongoose, { Schema } from 'mongoose';
 
 export type CreditTransactionType =
   | 'TRIAL_ALLOCATION'
@@ -106,5 +107,8 @@ creditLedgerSchema.index(
 
 // Compound Index: Fast paginated history lookup
 creditLedgerSchema.index({ userId: 1, createdAt: -1 });
+
+// Fast run-level deductions & idempotency lookup
+creditLedgerSchema.index({ userId: 1, 'metadata.runId': 1 });
 
 export const CreditLedger = mongoose.model<ICreditLedger>('CreditLedger', creditLedgerSchema);

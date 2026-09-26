@@ -131,9 +131,9 @@ const Options = () => {
                     ${
                       activeTab !== item.id
                         ? `${isDarkMode ? 'bg-slate-700/70 text-gray-300 hover:text-white' : 'bg-[#0EA5E9]/15 font-medium text-gray-700 hover:text-white'} backdrop-blur-sm`
-                        : `${isDarkMode ? 'bg-sky-800/50' : ''} text-white backdrop-blur-sm font-semibold`
+                        : `${isDarkMode ? 'bg-sky-800/50' : ''} font-semibold text-white backdrop-blur-sm`
                     }`}>
-                  <item.icon className="h-4 w-4 shrink-0" />
+                  <item.icon className="size-4 shrink-0" />
                   <span className="truncate">{item.label}</span>
                 </Button>
               </li>
@@ -143,7 +143,7 @@ const Options = () => {
       </nav>
 
       {/* Main Content Area */}
-      <main className={`flex-1 ${isDarkMode ? 'bg-slate-800/50' : 'bg-white/10'} p-8 backdrop-blur-sm overflow-y-auto`}>
+      <main className={`flex-1 ${isDarkMode ? 'bg-slate-800/50' : 'bg-white/10'} overflow-y-auto p-8 backdrop-blur-sm`}>
         <div className="mx-auto min-w-[512px] max-w-screen-lg">{renderTabContent()}</div>
       </main>
     </div>

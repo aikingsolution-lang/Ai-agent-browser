@@ -9,27 +9,507 @@ import {
   cloudApiSettingsStore,
   ProviderTypeEnum,
   authStorage,
+  careerBrainStore,
+  validateProfileCompleteness,
+  queueSafetyStore,
+  processedJobsStore,
 } from '@extension/storage';
 import { t } from '@extension/i18n';
+import { backendApiClient, isValidSkillName, cleanSkillName } from '@extension/shared';
 import BrowserContext from './browser/context';
 import { Executor } from './agent/executor';
 import { createLogger } from './log';
-import { ExecutionState } from './agent/event/types';
+import { Actors, ExecutionState } from './agent/event/types';
 import { createChatModel } from './agent/helper';
 import { cloudApiClient } from './services/cloud-api-client';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
+import { HumanMessage, SystemMessage } from '@langchain/core/messages';
 import { ChatOpenAI } from '@langchain/openai';
-import { DEFAULT_AGENT_OPTIONS } from './agent/types';
+import { DEFAULT_AGENT_OPTIONS, type AgentOptions } from './agent/types';
 import { SpeechToTextService } from './services/speechToText';
 import { injectBuildDomTreeScripts } from './browser/dom/service';
 import { analytics } from './services/analytics';
+import { queueManager } from './agent/linkedin/queueManager';
+import { ApplicationEngine } from './agent/linkedin/applicationEngine';
+import { DailyQuotaManager } from './agent/linkedin/rateLimiter';
+import { solveQuestions } from './agent/linkedin/questionSolver';
+import { buildLinkedInApplyTask, buildLinkedInApplyTaskDetails } from './agent/linkedin/taskBuilder';
+import { buildExternalApplyTaskDetails } from './agent/taskBuilderExternal';
+import { userQuestionManager } from './agent/linkedin/userQuestionManager';
+import { dedicatedJobRunner } from './agent/linkedin/dedicatedJobRunner';
+import { normalizeLinkedInJobUrl } from './agent/linkedin/urlUtils';
+import type { IJobData } from './agent/linkedin/types';
 
 const logger = createLogger('background');
 
 const browserContext = new BrowserContext({});
+queueManager.setBrowserContext(browserContext);
+queueManager.setAgentApplyRunner(async () => {
+  return applyToCurrentActiveJob(currentPort);
+});
+
+dedicatedJobRunner.setBrowserContext(browserContext);
+dedicatedJobRunner.setExecutorFactory(setupExecutor);
+dedicatedJobRunner.setExecutorSubscriber(subscribeToExecutorEvents);
+
+// Recover any interrupted job run from previous worker lifecycle
+dedicatedJobRunner.recoverInterruptedRunOnStartup().catch(err => {
+  logger.error('Failed to run startup recovery for interrupted jobs:', err);
+});
+
+// Alarm listener for service worker keep-alive during job runs
+if (typeof chrome !== 'undefined' && chrome.alarms) {
+  chrome.alarms.onAlarm.addListener(alarm => {
+    if (alarm.name === 'job_runner_keep_alive') {
+      logger.debug('job_runner_keep_alive alarm tick');
+    }
+  });
+}
+
 let currentExecutor: Executor | null = null;
 let currentPort: chrome.runtime.Port | null = null;
+let isJobApplyInProgress = false;
+let activeJobTaskId: string | null = null;
 const SIDE_PANEL_URL = chrome.runtime.getURL('side-panel/index.html');
+
+/**
+ * Resolves active LLM (Backend Bedrock Gateway or Local Provider)
+ */
+async function getActiveChatModel(): Promise<BaseChatModel | undefined> {
+  try {
+    const session = await authStorage.getSession();
+    if (session?.token) {
+      return new ChatOpenAI({
+        modelName: 'amazon.nova-lite-v1:0',
+        apiKey: session.token,
+        configuration: {
+          baseURL: 'http://localhost:5000/api/v1/llm',
+          defaultHeaders: {
+            Authorization: `Bearer ${session.token}`,
+          },
+        },
+        temperature: 0.1,
+        maxTokens: 4096,
+      });
+    }
+
+    const providers = await llmProviderStore.getAllProviders();
+    const agentModels = await agentModelStore.getAllAgentModels();
+    const plannerAgentModel = agentModels[AgentNameEnum.Planner];
+    if (plannerAgentModel && providers[plannerAgentModel.provider]) {
+      return createChatModel(providers[plannerAgentModel.provider], plannerAgentModel);
+    }
+    const firstProviderKey = Object.keys(providers)[0];
+    if (firstProviderKey && providers[firstProviderKey]) {
+      const p = providers[firstProviderKey];
+      return createChatModel(p, {
+        provider: firstProviderKey,
+        modelName: p.modelNames?.[0] || 'gpt-4o-mini',
+      });
+    }
+  } catch (err) {
+    logger.warning('Could not resolve active chat model for QueueManager:', err);
+  }
+  return undefined;
+}
+
+// Wire active LLM model to QueueManager on background startup
+getActiveChatModel().then(llm => {
+  if (llm) {
+    queueManager.setModels({ llm });
+    logger.info('QueueManager initialized with active LLM model');
+  }
+});
+
+// Retry any pending credit refunds from previous sessions
+backendApiClient.retryPendingRefunds().catch(e => {
+  logger.warning('Pending refunds retry failed:', e);
+});
+
+// Stream live LinkedIn Queue progress events to Side Panel UI
+queueManager.setProgressCallback((details, isError) => {
+  if (currentPort) {
+    try {
+      currentPort.postMessage({
+        actor: Actors.SYSTEM,
+        state: isError ? ExecutionState.STEP_FAIL : ExecutionState.STEP_OK,
+        data: {
+          taskId: 'linkedin_queue',
+          step: 1,
+          maxSteps: 1,
+          details,
+        },
+      });
+    } catch {}
+  }
+});
+
+/**
+ * Applies to the active LinkedIn job using LLM Planner & Navigator (Option 2)
+ */
+async function applyToCurrentActiveJob(
+  portToSend?: chrome.runtime.Port | null,
+): Promise<{ status: string; message: string }> {
+  if (isJobApplyInProgress) {
+    const busyMsg = '⚠️ An application is already in progress. Please wait for it to complete.';
+    logger.warning(`[applyToCurrentActiveJob] Rejected concurrent apply request: ${busyMsg}`);
+    const port = portToSend || currentPort;
+    if (port) {
+      try {
+        port.postMessage({
+          actor: Actors.SYSTEM,
+          state: ExecutionState.TASK_FAIL,
+          data: {
+            taskId: `busy_${Date.now()}`,
+            step: 1,
+            maxSteps: 1,
+            details: busyMsg,
+          },
+        });
+      } catch {}
+    }
+    return { status: 'error', message: busyMsg };
+  }
+
+  isJobApplyInProgress = true;
+
+  const notify = (msg: string, isErr = false) => {
+    logger.info(`[applyToCurrentActiveJob] ${msg}`);
+    const port = portToSend || currentPort;
+    if (port) {
+      try {
+        port.postMessage({
+          actor: Actors.SYSTEM,
+          state: isErr ? ExecutionState.TASK_FAIL : ExecutionState.STEP_OK,
+          data: {
+            taskId: activeJobTaskId || `current_job_${Date.now()}`,
+            step: 1,
+            maxSteps: 1,
+            details: msg,
+          },
+        });
+      } catch {}
+    }
+  };
+
+  let initialCredits: number | null = null;
+  let taskId = '';
+  try {
+    const balanceRes = await backendApiClient.getCreditsBalance().catch(() => null);
+    if (balanceRes?.data?.remainingCredits !== undefined) {
+      initialCredits = balanceRes.data.remainingCredits;
+    }
+
+    // 1. Quota check
+    const quota = await DailyQuotaManager.canApplyToday();
+    if (!quota.allowed) {
+      notify(`🛑 Daily application quota reached (${quota.currentCount} applications today).`, true);
+      return { status: 'error', message: 'Daily application quota reached' };
+    }
+
+    // 2. Profile completeness check
+    const careerBrain = await careerBrainStore.getCareerBrain();
+    const completeness = validateProfileCompleteness(careerBrain);
+    if (!completeness.isValid) {
+      const missingList = completeness.missingFields.join(', ');
+      notify(
+        `⚠️ Cannot apply: Incomplete profile. Missing required fields: ${missingList}. Please update your profile in the "Resume & Profile" tab.`,
+        true,
+      );
+      return {
+        status: 'error',
+        message: `Incomplete profile: Missing ${missingList}. Please update the Resume & Profile tab.`,
+      };
+    }
+
+    // 3. Find target LinkedIn tab
+    let targetTab: chrome.tabs.Tab | undefined;
+    const activeTabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    if (activeTabs.length > 0 && activeTabs[0].url && activeTabs[0].url.includes('linkedin.com')) {
+      targetTab = activeTabs[0];
+    } else {
+      const anyJobTabs = await chrome.tabs.query({ url: '*://*.linkedin.com/*' });
+      targetTab = anyJobTabs.find(t => t.active) || anyJobTabs[0];
+    }
+
+    if (!targetTab?.id || !targetTab.url) {
+      const noTabMsg = '⚠️ Please open a LinkedIn job page in your browser first.';
+      notify(noTabMsg, true);
+      return { status: 'error', message: noTabMsg };
+    }
+
+    const hasJobId = /(?:\/jobs\/view\/|currentJobId=)(\d+)/.test(targetTab.url);
+    if (!hasJobId && !targetTab.url.includes('/jobs/')) {
+      const notJobMsg = 'Open a specific job listing first';
+      notify(`⚠️ ${notJobMsg}`, true);
+      return { status: 'error', message: notJobMsg };
+    }
+
+    await chrome.tabs.update(targetTab.id, { active: true }).catch(() => {});
+    browserContext.updateCurrentTabId(targetTab.id);
+
+    notify('🔍 Connecting to LinkedIn tab & inspecting job listing...');
+    const currentPage = await browserContext.getCurrentPage();
+
+    // Quickly inspect top-card for title/company (non-blocking fallback)
+    const topCard = await currentPage.extractJobTopCardContext(2000).catch(() => null);
+
+    if (topCard?.isLoginWall) {
+      notify('⚠️ LinkedIn login required. Please log in to LinkedIn first.', true);
+      return { status: 'error', message: 'Please log in to LinkedIn first' };
+    }
+
+    // Extract title, company, location or fallback cleanly to tab title
+    const rawTabTitle = targetTab.title?.replace(/\s*\|\s*LinkedIn$/i, '').trim() || '';
+    const jobTitle = topCard?.title || (hasJobId ? rawTabTitle : '') || '';
+    const company = topCard?.company || '';
+    const location = topCard?.location || '';
+
+    if (!jobTitle || /^(?:feed|linkedin|notifications|messaging|home)$/i.test(jobTitle.trim())) {
+      const notJobMsg = 'Open a specific job listing first';
+      notify(`⚠️ ${notJobMsg}`, true);
+      return { status: 'error', message: notJobMsg };
+    }
+
+    const jobTitleDisplay = company ? `${jobTitle} at ${company}` : jobTitle;
+    const jobIdMatch = targetTab.url.match(/(?:\/jobs\/view\/|currentJobId=)(\d+)/);
+    const jobId = jobIdMatch?.[1] || `${Date.now()}`;
+    const canonicalUrl = `https://www.linkedin.com/jobs/view/${jobId}/`;
+
+    // Duplicate check in processed jobs store
+    const processedCheck = await processedJobsStore.isJobProcessed(jobId);
+    if (processedCheck.isProcessed && processedCheck.status === 'applied') {
+      const msg = `Job "${jobTitleDisplay}" was already applied previously`;
+      notify(`ℹ️ Skipping (0 credits): ${msg}`);
+      return { status: 'skipped', message: msg };
+    }
+
+    // Already applied on page check
+    if (topCard?.isAlreadyApplied) {
+      const appliedMsg = `Job "${jobTitleDisplay}" already shows as Applied on LinkedIn.`;
+      notify(`ℹ️ Skipping (0 credits): ${appliedMsg}`);
+      await processedJobsStore.recordJob({
+        jobId,
+        url: canonicalUrl,
+        title: jobTitle,
+        company,
+        status: 'applied',
+        reason: 'Already applied on LinkedIn',
+        creditsUsed: 0,
+      });
+      return { status: 'skipped', message: appliedMsg };
+    }
+
+    notify(`🎯 Target Job: "${jobTitleDisplay}". Launching Autonomous Planner & Navigator...`);
+
+    const details = buildLinkedInApplyTaskDetails(careerBrain, jobTitle, company, location);
+    const taskPrompt = details.taskPrompt;
+    const notProvidedFields = details.notProvidedFields;
+
+    console.debug('[JobApplyAgent] LinkedIn prompt builder | NOT PROVIDED fields:', notProvidedFields);
+    logger.debug(`[JobApplyAgent] LinkedIn prompt builder | NOT PROVIDED fields: ${JSON.stringify(notProvidedFields)}`);
+
+    taskId = `easy_apply_${jobId}_${Date.now()}`;
+    activeJobTaskId = taskId;
+
+    // Clean up previous executor if any
+    if (currentExecutor) {
+      await currentExecutor.cleanup().catch(() => {});
+      currentExecutor = null;
+    }
+
+    notify('🚀 Launching LLM Planner & Navigator (1 action per step)...');
+
+    const executor = await setupExecutor(
+      taskId,
+      taskPrompt,
+      browserContext,
+      {
+        maxActionsPerStep: 1, // Single deliberate action per step - eliminates stale CDP indices
+        planningInterval: 1, // Re-plan after every single action to check modal state
+        maxSteps: 25, // Ample steps for complete modal progression
+      },
+      true, // isJobApplyRun = true (set ONLY by applyToCurrentActiveJob and queue-apply flow)
+    );
+
+    currentExecutor = executor;
+    await subscribeToExecutorEvents(executor);
+
+    const execResult = await executor.execute();
+
+    if (!execResult || !execResult.success) {
+      const failReason = execResult?.reason || 'Application failed or submission could not be verified.';
+      logger.error(`❌ Application failed for "${jobTitleDisplay}": ${failReason}`);
+      notify(`❌ Application failed: ${failReason}`, true);
+
+      await processedJobsStore.recordJob({
+        jobId,
+        url: canonicalUrl,
+        title: jobTitle,
+        company,
+        status: 'failed',
+        reason: failReason,
+        creditsUsed: 0,
+      });
+
+      // Refund credits via server computing amount from ledger for this taskId
+      logger.info(`[Credits] Requesting server-computed refund for runId: ${taskId}`);
+      await backendApiClient.refundCredits(taskId).catch(e => {
+        logger.error('Failed to refund credits:', e);
+      });
+      return { status: 'error', message: failReason };
+    }
+
+    // Success! Record to processed jobs store
+    await processedJobsStore.recordJob({
+      jobId,
+      url: canonicalUrl,
+      title: jobTitle,
+      company,
+      status: 'applied',
+      creditsUsed: 0,
+    });
+
+    // Only increment daily quota when run was a verified success!
+    await DailyQuotaManager.incrementAppliedCount();
+    // Unlock Gate: Record verified single application success!
+    await queueSafetyStore.setSingleApplyVerified(true);
+    logger.info('[QueueSafety] Recorded verified single application success! Queue mode unlocked.');
+    notify(`🎉 Successfully completed application for "${jobTitleDisplay}"!`);
+    return { status: 'success', message: `Applied to ${jobTitleDisplay}` };
+  } catch (err: any) {
+    const errorMsg = String(err?.message || err);
+    notify(`⚠️ Application stopped: ${errorMsg}`, true);
+    // Refund credits on unexpected exception
+    if (taskId) {
+      await backendApiClient.refundCredits(taskId).catch(e => {
+        logger.error('Failed to refund credits on error:', e);
+      });
+    }
+    return { status: 'error', message: errorMsg };
+  } finally {
+    isJobApplyInProgress = false;
+    activeJobTaskId = null;
+  }
+}
+
+/**
+ * Validates active LinkedIn tab and dispatches START_HARVESTING to content script
+ * Uses URL pattern matching across all windows to avoid side panel / devtools focus interception
+ */
+async function triggerLinkedInHarvesting(_targetTabId?: number, portToSend?: chrome.runtime.Port | null) {
+  // Check unlock gate: Single verified application required before queue harvesting
+  const isVerified = await queueSafetyStore.isSingleApplyVerified();
+  if (!isVerified) {
+    const lockMsg = '🛑 Queue locked: Complete one successful single application first to unlock the queue.';
+    logger.warning(lockMsg);
+    if (portToSend) {
+      portToSend.postMessage({
+        actor: Actors.SYSTEM,
+        state: ExecutionState.TASK_FAIL,
+        data: {
+          taskId: `task_gate_${Date.now()}`,
+          step: 1,
+          maxSteps: 1,
+          details: lockMsg,
+        },
+      });
+    }
+    return;
+  }
+
+  // 1. Active tab check karne ki jagah hum URL pattern match karenge (Window focus ka issue khatam)
+  chrome.tabs.query({ url: '*://*.linkedin.com/jobs/*' }, tabs => {
+    let linkedInTab = tabs && tabs.length > 0 ? tabs[0] : null;
+
+    const proceedWithTab = (activeTab: chrome.tabs.Tab) => {
+      if (!activeTab.id) return;
+
+      console.log('🚀 Found LinkedIn tab:', activeTab.id, activeTab.url);
+      logger.info(`Found LinkedIn jobs tab: ${activeTab.id} -> ${activeTab.url}`);
+
+      // Bring tab to focus
+      chrome.tabs.update(activeTab.id, { active: true }).catch(() => {});
+
+      if (portToSend) {
+        portToSend.postMessage({
+          actor: Actors.SYSTEM,
+          state: ExecutionState.TASK_START,
+          data: {
+            taskId: `task_${Date.now()}`,
+            step: 1,
+            maxSteps: 15,
+            details: '🔍 Scanning LinkedIn page & scrolling to harvest Easy Apply jobs (approx 10-15s)...',
+          },
+        });
+      }
+
+      const targetTabId = activeTab.id;
+      if (!targetTabId) return;
+
+      const sendHarvestCmd = () => {
+        chrome.tabs.sendMessage(targetTabId, { type: 'START_HARVESTING', targetCount: 15 }, res => {
+          if (chrome.runtime.lastError) {
+            logger.warning('Failed to contact jobHarvester script:', chrome.runtime.lastError.message);
+            // Auto inject content script and retry once
+            chrome.scripting.executeScript(
+              {
+                target: { tabId: targetTabId },
+                files: ['content/index.iife.js'],
+              },
+              () => {
+                if (chrome.runtime.lastError) {
+                  if (portToSend) {
+                    portToSend.postMessage({
+                      actor: Actors.SYSTEM,
+                      state: ExecutionState.TASK_FAIL,
+                      data: {
+                        taskId: `task_${Date.now()}`,
+                        step: 1,
+                        maxSteps: 1,
+                        details: '⚠️ Please refresh the LinkedIn jobs page and click Auto-Apply again.',
+                      },
+                    });
+                  }
+                } else {
+                  setTimeout(() => {
+                    chrome.tabs.sendMessage(targetTabId, { type: 'START_HARVESTING', targetCount: 15 });
+                  }, 500);
+                }
+              },
+            );
+          } else {
+            console.log('🚀 Sent START_HARVESTING to LinkedIn tab:', targetTabId, res);
+            logger.info('Sent START_HARVESTING to tab', targetTabId, res);
+          }
+        });
+      };
+
+      sendHarvestCmd();
+    };
+
+    if (linkedInTab) {
+      proceedWithTab(linkedInTab);
+    } else {
+      const errorMsg =
+        '[background] ⚠️ Please open a LinkedIn Job Search page (e.g. linkedin.com/jobs) before starting Auto-Apply.';
+      console.error(errorMsg);
+      logger.warning(errorMsg);
+      if (portToSend) {
+        portToSend.postMessage({
+          actor: Actors.SYSTEM,
+          state: ExecutionState.TASK_FAIL,
+          data: {
+            taskId: `task_${Date.now()}`,
+            step: 1,
+            maxSteps: 1,
+            details: '⚠️ Please open a LinkedIn Job Search page before starting Auto-Apply.',
+          },
+        });
+      }
+    }
+  });
+}
 
 // Setup side panel behavior
 chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(error => console.error(error));
@@ -40,16 +520,58 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   }
 });
 
-// Listen for debugger detached event
-// if canceled_by_user, remove the tab from the browser context
+// Listen for debugger detached event (e.g. when DevTools is opened or tab is closed)
 chrome.debugger.onDetach.addListener(async (source, reason) => {
-  console.log('Debugger detached:', source, reason);
+  logger.warning('Debugger detached:', source, reason);
+  const tabId = source.tabId;
+
+  // Ignore detachment if no job application or executor run is active, or if target closed normally
+  if (!isJobApplyInProgress && !dedicatedJobRunner.isJobRunning() && !activeJobTaskId) {
+    logger.info('Debugger detached outside active run. Ignoring.');
+    await browserContext.cleanup().catch(() => {});
+    return;
+  }
+
+  // Only broadcast DevTools conflict when detachment is canceled by user (DevTools conflict)
   if (reason === 'canceled_by_user') {
-    if (source.tabId) {
-      currentExecutor?.cancel();
-      await browserContext.cleanup();
+    const detachMsg =
+      '🛑 Lost control of the tab (DevTools opened on it?). Please close DevTools on the job tab and retry.';
+
+    // Notify side panel UI immediately to halt and show clear message
+    if (currentPort) {
+      try {
+        currentPort.postMessage({
+          actor: Actors.SYSTEM,
+          state: ExecutionState.TASK_FAIL,
+          data: {
+            taskId: activeJobTaskId || `detached_${Date.now()}`,
+            step: 1,
+            maxSteps: 1,
+            details: detachMsg,
+          },
+        });
+      } catch {}
     }
   }
+
+  // Automatic credit refund if detachment occurred during an active job run
+  if (activeJobTaskId) {
+    const refundId = activeJobTaskId;
+    activeJobTaskId = null;
+    logger.info(`[Credits] Refunding credits due to debugger detachment for task: ${refundId}`);
+    await backendApiClient.refundCredits(refundId).catch(err => {
+      logger.error('Failed to refund credits on debugger detach:', err);
+    });
+  }
+
+  // Handle dedicated runner if active
+  await dedicatedJobRunner.handleDebuggerDetach(tabId).catch(() => {});
+
+  if (currentExecutor) {
+    currentExecutor.cancel();
+    currentExecutor = null;
+  }
+  await browserContext.cleanup().catch(() => {});
 });
 
 // Cleanup when tab is closed
@@ -71,12 +593,371 @@ analyticsSettingsStore.subscribe(() => {
   });
 });
 
-// Listen for simple messages (e.g., from options page)
-chrome.runtime.onMessage.addListener(() => {
-  // Handle other message types if needed in the future
-  // Return false if response is not sent asynchronously
-  // return false;
+// Listen for messages (e.g., from options page, content scripts, or chat triggers)
+chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
+  // -1. Forward live progress steps from content script to Side Panel
+  if (request.type === 'APPLY_STEP_UPDATE') {
+    if (currentPort) {
+      try {
+        currentPort.postMessage({
+          actor: Actors.SYSTEM,
+          state: request.isError ? ExecutionState.STEP_FAIL : ExecutionState.STEP_OK,
+          data: {
+            taskId: `current_job_${Date.now()}`,
+            step: 1,
+            maxSteps: 1,
+            details: request.details,
+          },
+        });
+      } catch {}
+    }
+    return false;
+  }
+
+  // 0a. APPLY BY URL: Dedicated Window Job Runner (Milestone M0)
+  if (request.type === 'START_JOB_BY_URL') {
+    dedicatedJobRunner
+      .runJobByUrl({
+        inputUrl: request.url,
+        portToSend: currentPort,
+        onLiveActivity: activity => {
+          if (currentPort) {
+            try {
+              currentPort.postMessage({
+                type: 'LIVE_ACTIVITY_UPDATE',
+                data: activity,
+              });
+            } catch {}
+          }
+        },
+      })
+      .then(res => sendResponse(res))
+      .catch(err => sendResponse({ status: 'error', message: String(err) }));
+    return true;
+  }
+
+  // 0. DIRECT APPLY: Instant application on currently active LinkedIn tab
+  if (request.type === 'APPLY_CURRENT_JOB') {
+    applyToCurrentActiveJob(currentPort)
+      .then(res => sendResponse(res))
+      .catch(err => sendResponse({ status: 'error', message: String(err) }));
+    return true;
+  }
+
+  // 0b. SOLVE SCREENING QUESTIONS: AI question solver using Resume & CareerBrain context
+  if (request.type === 'SOLVE_SCREENING_QUESTIONS') {
+    (async () => {
+      try {
+        const careerBrain = await careerBrainStore.getCareerBrain();
+        const llm = await getActiveChatModel();
+        const questions = request.questions || [];
+        logger.info(`[background] Solving ${questions.length} screening questions with CareerBrain & LLM...`);
+        const solutions = await solveQuestions(questions, careerBrain, llm);
+        logger.info(`[background] Successfully solved ${solutions.length} questions.`);
+        sendResponse({ success: true, solutions });
+      } catch (err) {
+        logger.error('Failed to solve screening questions:', err);
+        sendResponse({ success: false, error: String(err), solutions: [] });
+      }
+    })();
+    return true;
+  }
+
+  // 0c. ENRICH PROFILE FROM RESUME: One-time factual extraction of skills with years and screening fields
+  if (request.type === 'ENRICH_PROFILE_FROM_RESUME') {
+    (async () => {
+      try {
+        const resumeText = request.resumeText || '';
+        if (!resumeText || resumeText.length < 30) {
+          sendResponse({ success: false, error: 'Resume text is too short' });
+          return;
+        }
+
+        const llm = await getActiveChatModel();
+        if (!llm) {
+          sendResponse({ success: false, error: 'No active LLM model available for enrichment' });
+          return;
+        }
+
+        logger.info('[background] Enriching profile from resume text using active LLM...');
+        const prompt = `You are a strict zero-hallucination resume intelligence auditor.
+Your job is to extract factual attributes from the candidate's resume text.
+
+CRITICAL RULES:
+1. STRICT ZERO INVENTION: Never invent, guess, or assume facts not explicitly stated.
+2. SKILLS WITH YEARS: Extract technical skills mentioned in the resume along with their stated or inferred years of experience based strictly on dates/tenure in the work experience section (e.g. {"React": 3, "Node.js": 2}).
+   - CONCRETE TECHNICAL TOOLS ONLY: Extract specific technologies, frameworks, libraries, databases, and languages (e.g. TypeScript, React, Python, PostgreSQL, Docker, AWS).
+   - REJECT GENERIC TERMS & STOPWORDS: Never extract generic buzzwords or grammatical words (e.g. "ai", "ml", "ui", "ux", "and", "the", "developer", "engineering", "programming", "software", "tech", "skills").
+   - LENGTH RULE: Reject any skill name under 3 characters unless it is a standard short programming language ("Go", "R", "C#", "C").
+   - NO ZERO-YEAR ARTIFACTS: If a skill has NO explicit duration and cannot be determined from employment tenure, DO NOT guess a number or output 0; omit it completely.
+3. SCREENING FIELDS:
+   - workAuthorization: If mentioned (e.g. "Authorized to work in India", "US Citizen", "No visa sponsorship required"), extract it. Otherwise null.
+   - noticePeriod: If mentioned (e.g. "Immediate", "30 days", "2 weeks"), extract it. Otherwise null.
+   - college: University or college name if mentioned, otherwise null.
+   - education: Degree name (e.g. "B.Tech in Computer Science"), otherwise null.
+   - yearsOfExperience: Total integer years of professional experience calculated from employment history dates, or null if cannot be determined.
+
+Return valid JSON ONLY matching this format:
+{
+  "skillExperience": { "SkillName": 3 },
+  "workAuthorization": string or null,
+  "noticePeriod": string or null,
+  "college": string or null,
+  "education": string or null,
+  "yearsOfExperience": number or null
+}
+
+=== CANDIDATE RESUME TEXT ===
+${resumeText.slice(0, 12000)}
+`;
+
+        const res = await llm.invoke([
+          new SystemMessage('You are a strict factual resume intelligence extractor. Output valid JSON only.'),
+          new HumanMessage(prompt),
+        ]);
+
+        let raw = typeof res.content === 'string' ? res.content : String(res.content);
+        raw = raw.replace(/<(?:think|thought)>[\s\S]*?<\/(?:think|thought)>/gi, '').trim();
+        raw = raw
+          .replace(/```(?:json)?/gi, '')
+          .replace(/```/g, '')
+          .trim();
+
+        const firstBrace = raw.indexOf('{');
+        const lastBrace = raw.lastIndexOf('}');
+        if (firstBrace !== -1 && lastBrace !== -1) {
+          raw = raw.substring(firstBrace, lastBrace + 1);
+        }
+
+        const parsed = JSON.parse(raw);
+
+        // Sanitize extracted skillExperience
+        if (parsed.skillExperience && typeof parsed.skillExperience === 'object') {
+          const validExp: Record<string, number> = {};
+          for (const [k, v] of Object.entries(parsed.skillExperience)) {
+            const clean = cleanSkillName(k);
+            if (isValidSkillName(clean) && typeof v === 'number' && !isNaN(v) && v > 0) {
+              validExp[clean] = v;
+            }
+          }
+          parsed.skillExperience = validExp;
+        }
+
+        logger.info('[background] Successfully extracted enrichment data from resume:', parsed);
+        sendResponse({ success: true, data: parsed });
+      } catch (err) {
+        logger.warning('[background] Resume enrichment failed:', err);
+        sendResponse({ success: false, error: String(err) });
+      }
+    })();
+    return true;
+  }
+
+  // 1. NAYA ROUTE: Agar command "Start Auto-Apply" ya Queue start karne ka hai
+  if (request.type === 'START_LINKEDIN_QUEUE') {
+    console.log('🚀 Bypassing generic AI! Starting Deterministic Queue Manager...');
+
+    (async () => {
+      try {
+        const isVerified = await queueSafetyStore.isSingleApplyVerified();
+        if (!isVerified) {
+          sendResponse({
+            status: 'error',
+            error: 'Complete one successful single application first to unlock the queue.',
+          });
+          return;
+        }
+
+        const queue = await queueManager.getQueueStatus();
+        if (queue.pendingJobs && queue.pendingJobs.length > 0) {
+          const llm = await getActiveChatModel();
+          if (llm) queueManager.setModels({ llm });
+          await queueManager.startQueueProcessing();
+          sendResponse({ status: 'Queue Started' });
+        } else {
+          await triggerLinkedInHarvesting(undefined, currentPort);
+          sendResponse({ status: 'Harvesting Initiated' });
+        }
+      } catch (err: any) {
+        logger.error('Failed to start LinkedIn queue:', err);
+        sendResponse({ status: 'error', error: String(err?.message || err) });
+      }
+    })();
+    return true;
+  }
+
+  // 2. PURANA ROUTE: General web browsing/chat commands ke liye
+  if (request.type === 'START_AGENT_TASK') {
+    const taskStr = request.task || '';
+    const taskLower = taskStr.toLowerCase();
+
+    // JOB APPLY INTERCEPTOR
+    if (
+      (taskLower.includes('apply') && taskLower.includes('job')) ||
+      taskLower.includes('easy apply') ||
+      taskLower.includes('auto apply') ||
+      taskLower.includes('auto-apply')
+    ) {
+      console.log('🚀 Intercepted Job Task! Triggering Harvester first...');
+      triggerLinkedInHarvesting(request.tabId, currentPort);
+      sendResponse({ status: 'Harvesting Initiated' });
+      return true; // Keep channel open
+    }
+
+    // Normal execution for other tasks
+    if (request.tabId) {
+      browserContext
+        .switchTab(request.tabId)
+        .then(() => setupExecutor(request.taskId || `task_${Date.now()}`, request.task, browserContext))
+        .then(async executor => {
+          currentExecutor = executor;
+          subscribeToExecutorEvents(currentExecutor);
+          const result = await executor.execute();
+          sendResponse({ status: 'executed', result });
+        })
+        .catch(err => {
+          logger.error('Failed to execute task:', err);
+          sendResponse({ status: 'error', error: String(err) });
+        });
+      return true;
+    }
+  }
+
+  // JAB HARVESTER APNA KAAM KHATAM KAR LEGA:
+  if (request.type === 'HARVESTED_JOBS') {
+    (async () => {
+      const isVerified = await queueSafetyStore.isSingleApplyVerified();
+      if (!isVerified) {
+        logger.warning('[HARVESTED_JOBS] Cannot start queue: single apply is not verified.');
+        sendResponse({
+          status: 'error',
+          error: 'Complete one successful single application first to unlock the queue.',
+        });
+        return;
+      }
+
+      const jobsCount = request.jobs?.length || 0;
+      console.log(`✅ Harvester collected ${jobsCount} jobs! Injecting to Queue...`);
+
+      const result = await queueManager.enqueueHarvestedJobs(request.jobs || []);
+      if (currentPort) {
+        currentPort.postMessage({
+          actor: Actors.SYSTEM,
+          state: ExecutionState.STEP_OK,
+          data: {
+            taskId: `task_harvest_${Date.now()}`,
+            step: 1,
+            maxSteps: Math.max(1, jobsCount),
+            details: `✅ Harvester collected ${jobsCount} jobs! Added ${result.addedCount} new jobs to queue (Total pending: ${result.totalPending}). Starting application process...`,
+          },
+        });
+      }
+
+      if (jobsCount > 0 || result.totalPending > 0) {
+        // 4. Ab asli apply process start karo!
+        getActiveChatModel()
+          .then(llm => {
+            if (llm) queueManager.setModels({ llm });
+            return queueManager.startQueueProcessing();
+          })
+          .catch(err => logger.error('Failed to start queue:', err));
+        sendResponse({ status: 'Jobs queued and Processing Started', ...result });
+      } else {
+        if (currentPort) {
+          currentPort.postMessage({
+            actor: Actors.SYSTEM,
+            state: ExecutionState.TASK_FAIL,
+            data: {
+              taskId: `task_harvest_${Date.now()}`,
+              step: 1,
+              maxSteps: 1,
+              details:
+                '⚠️ No new Easy Apply jobs found on this page. Try scrolling or checking if Easy Apply filter is active.',
+            },
+          });
+        }
+        sendResponse({ status: 'No jobs found' });
+      }
+    })();
+    return true;
+  }
+
+  if (
+    request.type === 'STOP_LINKEDIN_QUEUE' ||
+    request.type === 'STOP_JOB_APPLY' ||
+    request.type === 'STOP_AUTO_APPLY'
+  ) {
+    if (currentExecutor) {
+      currentExecutor.cancel();
+    }
+    dedicatedJobRunner.stop().catch(() => {});
+    queueManager.stopQueue().then(() => {
+      sendResponse({ status: 'stopped' });
+    });
+    return true;
+  }
+
+  if (request.type === 'GET_LINKEDIN_QUEUE_STATUS') {
+    queueManager.getQueueStatus().then(queue => {
+      sendResponse({ status: 'success', queue });
+    });
+    return true;
+  }
+
+  if (request.type === 'CLEAR_LINKEDIN_QUEUE') {
+    queueManager.clearQueue().then(() => {
+      sendResponse({ status: 'cleared' });
+    });
+    return true;
+  }
+
+  return false;
 });
+
+/**
+ * Intercepts job-apply intents in AI Chat so they never run free-hand agents.
+ * AI Chat replies directing the user to the unified "Start Auto Apply" button.
+ */
+async function handleJobApplyChatIntent(
+  task: string,
+  tabId: number | undefined,
+  taskId: string | undefined,
+  port: chrome.runtime.Port,
+): Promise<boolean> {
+  const urlMatch = task.match(/(https?:\/\/[^\s]*linkedin\.com\/jobs\/[^\s]+|linkedin\.com\/jobs\/[^\s]+)/i);
+  const taskLower = task.toLowerCase().trim();
+
+  const isJobApplyIntent = Boolean(
+    urlMatch ||
+      /^\s*(?:easy\s*)?apply(?:\s*(?:now|here|karo|please|kar do|krdo))?\s*$/i.test(taskLower) ||
+      /\b(easy\s*apply|apply\s*karo|apply\s*job|job\s*apply|apply\s*to\s*this\s*job|apply\s*to\s*current\s*job|apply\s*for\s*this\s*job|apply\s*this\s*job|apply\s*here|apply\s*now|start\s*apply|please\s*apply)\b/i.test(
+        taskLower,
+      ) ||
+      (/\bapply\b/i.test(taskLower) &&
+        /\b(job|jobs|linkedin|position|opening|role|resume|profile|career)\b/i.test(taskLower)) ||
+      (/\b(apply|applying|application)\b/i.test(taskLower) &&
+        !/\b(css|style|styles|patch|filter|rule|formula|discount|promo|code)\b/i.test(taskLower)),
+  );
+
+  if (!isJobApplyIntent) {
+    return false;
+  }
+
+  logger.info('[ChatIntent] Job-related intent detected in AI Chat. Directing user to Start Auto Apply button.');
+  const replyText = "Please use the 'Start Auto Apply' button — this is being rebuilt.";
+  port.postMessage({
+    type: 'CHAT_DIRECT_REPLY',
+    actor: Actors.SYSTEM,
+    content: replyText,
+    data: {
+      taskId: taskId || `chat_apply_${Date.now()}`,
+      step: 1,
+      maxSteps: 1,
+      details: replyText,
+    },
+  });
+  return true;
+}
 
 // Setup connection listener for long-lived connections (e.g., side panel)
 chrome.runtime.onConnect.addListener(port => {
@@ -91,10 +972,76 @@ chrome.runtime.onConnect.addListener(port => {
     }
 
     currentPort = port;
+    userQuestionManager.setPort(port);
 
     port.onMessage.addListener(async message => {
       try {
         switch (message.type) {
+          case 'USER_QUESTION_ANSWER': {
+            if (message.data?.questionId && message.data?.answer !== undefined) {
+              await userQuestionManager.handleAnswer(message.data.questionId, String(message.data.answer));
+            }
+            break;
+          }
+
+          case 'USER_QUESTION_BATCH_ANSWER': {
+            if (message.data?.batchId && message.data?.answers) {
+              await userQuestionManager.handleBatchAnswer(message.data.batchId, message.data.answers);
+            }
+            break;
+          }
+
+          case 'apply_current_job': {
+            applyToCurrentActiveJob(port).catch(err => {
+              logger.error('Failed to apply to current job:', err);
+            });
+            break;
+          }
+
+          case 'start_linkedin_queue': {
+            triggerLinkedInHarvesting(undefined, port);
+            break;
+          }
+
+          case 'START_AUTO_APPLY': {
+            if (isJobApplyInProgress || dedicatedJobRunner.isJobRunning()) {
+              port.postMessage({
+                type: 'LINKEDIN_STATUS_UPDATE',
+                text: '⚠️ An Auto Apply run is already in progress.',
+                status: 'fail',
+              });
+              break;
+            }
+            isJobApplyInProgress = true;
+            dedicatedJobRunner
+              .startAutonomousJobLoop({
+                portToSend: port,
+                maxJobs: 10,
+              })
+              .finally(() => {
+                isJobApplyInProgress = false;
+              })
+              .catch(err => {
+                logger.error('Failed in startAutonomousJobLoop:', err);
+              });
+            break;
+          }
+
+          case 'STOP_AUTO_APPLY':
+          case 'STOP_JOB_APPLY':
+          case 'stop_linkedin_queue': {
+            if (currentExecutor) {
+              currentExecutor.cancel();
+            }
+            dedicatedJobRunner.stop().catch(err => {
+              logger.error('Failed to stop dedicated runner:', err);
+            });
+            queueManager.stopQueue().catch(err => {
+              logger.error('Failed to stop queue:', err);
+            });
+            break;
+          }
+
           case 'heartbeat':
             // Acknowledge heartbeat
             port.postMessage({ type: 'heartbeat_ack' });
@@ -104,7 +1051,15 @@ chrome.runtime.onConnect.addListener(port => {
             if (!message.task) return port.postMessage({ type: 'error', error: t('bg_cmd_newTask_noTask') });
             if (!message.tabId) return port.postMessage({ type: 'error', error: t('bg_errors_noTabId') });
 
-            logger.info('new_task', message.tabId, message.task);
+            // Intercept job-apply intent so AI Chat NEVER uses the generic Planner/Navigator for job applications
+            const handled = await handleJobApplyChatIntent(message.task, message.tabId, message.taskId, port);
+            if (handled) {
+              break;
+            }
+
+            await browserContext.switchTab(message.tabId).catch(err => {
+              logger.warning('Failed to switch tab on new_task:', err);
+            });
             currentExecutor = await setupExecutor(message.taskId, message.task, browserContext);
             subscribeToExecutorEvents(currentExecutor);
 
@@ -117,19 +1072,36 @@ chrome.runtime.onConnect.addListener(port => {
             if (!message.task) return port.postMessage({ type: 'error', error: t('bg_cmd_followUpTask_noTask') });
             if (!message.tabId) return port.postMessage({ type: 'error', error: t('bg_errors_noTabId') });
 
+            // Intercept job-apply intent in follow-up mode as well
+            const handled = await handleJobApplyChatIntent(message.task, message.tabId, message.taskId, port);
+            if (handled) {
+              break;
+            }
+
             logger.info('follow_up_task', message.tabId, message.task);
 
-            // If executor exists, add follow-up task
+            // If executor exists, add follow-up task. Otherwise spawn fresh executor seamlessly.
             if (currentExecutor) {
+              await browserContext.switchTab(message.tabId).catch(err => {
+                logger.warning('Failed to switch tab on follow_up_task:', err);
+              });
               currentExecutor.addFollowUpTask(message.task);
               // Re-subscribe to events in case the previous subscription was cleaned up
               subscribeToExecutorEvents(currentExecutor);
               const result = await currentExecutor.execute();
               logger.info('follow_up_task execution result', message.tabId, result);
             } else {
-              // executor was cleaned up, can not add follow-up task
-              logger.info('follow_up_task: executor was cleaned up, can not add follow-up task');
-              return port.postMessage({ type: 'error', error: t('bg_cmd_followUpTask_cleaned') });
+              logger.info(
+                'follow_up_task: no active executor found, launching fresh executor for message',
+                message.taskId,
+              );
+              await browserContext.switchTab(message.tabId).catch(err => {
+                logger.warning('Failed to switch tab on follow_up_task:', err);
+              });
+              currentExecutor = await setupExecutor(message.taskId, message.task, browserContext);
+              subscribeToExecutorEvents(currentExecutor);
+              const result = await currentExecutor.execute();
+              logger.info('follow_up_task execution result (fresh executor)', message.tabId, result);
             }
             break;
           }
@@ -264,13 +1236,21 @@ chrome.runtime.onConnect.addListener(port => {
     port.onDisconnect.addListener(() => {
       // this event is also triggered when the side panel is closed, so we need to cancel the task
       console.log('Side panel disconnected');
+      userQuestionManager.cancelAll('Side panel closed');
+      userQuestionManager.setPort(null);
       currentPort = null;
       currentExecutor?.cancel();
     });
   }
 });
 
-async function setupExecutor(taskId: string, task: string, browserContext: BrowserContext) {
+async function setupExecutor(
+  taskId: string,
+  task: string,
+  browserContext: BrowserContext,
+  customAgentOptions?: Partial<AgentOptions>,
+  isJobApplyRun = false,
+) {
   const providers = await llmProviderStore.getAllProviders();
   const session = await authStorage.getSession();
 
@@ -296,6 +1276,7 @@ async function setupExecutor(taskId: string, task: string, browserContext: Brows
         baseURL: backendBaseUrl,
         defaultHeaders: {
           Authorization: `Bearer ${backendToken}`,
+          'x-run-id': taskId,
         },
       },
       temperature: 0.1,
@@ -353,14 +1334,15 @@ async function setupExecutor(taskId: string, task: string, browserContext: Brows
   const executor = new Executor(task, taskId, browserContext, navigatorLLM, {
     plannerLLM: plannerLLM ?? navigatorLLM,
     agentOptions: {
-      maxSteps: generalSettings.maxSteps,
-      maxFailures: generalSettings.maxFailures,
-      maxActionsPerStep: generalSettings.maxActionsPerStep,
-      useVision: generalSettings.useVision,
+      maxSteps: customAgentOptions?.maxSteps ?? generalSettings.maxSteps,
+      maxFailures: customAgentOptions?.maxFailures ?? generalSettings.maxFailures,
+      maxActionsPerStep: customAgentOptions?.maxActionsPerStep ?? generalSettings.maxActionsPerStep,
+      useVision: customAgentOptions?.useVision ?? generalSettings.useVision,
       useVisionForPlanner: true,
-      planningInterval: generalSettings.planningInterval,
+      planningInterval: customAgentOptions?.planningInterval ?? generalSettings.planningInterval,
     },
     generalSettings: generalSettings,
+    isJobApplyRun,
   });
 
   return executor;

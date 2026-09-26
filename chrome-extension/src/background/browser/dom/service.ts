@@ -518,11 +518,26 @@ export async function removeHighlights(tabId: number): Promise<void> {
           container.remove();
         }
 
-        // Remove highlight attributes from elements
-        const highlightedElements = document.querySelectorAll('[browser-user-highlight-id^="playwright-highlight-"]');
-        for (const el of Array.from(highlightedElements)) {
-          el.removeAttribute('browser-user-highlight-id');
+        // Remove highlight attributes from elements (piercing open shadow roots)
+        function cleanNode(root: Document | Element | ShadowRoot) {
+          try {
+            const elements = root.querySelectorAll(
+              '[browser-user-highlight-id], [data-nanobrowser-id], [highlightindex]',
+            );
+            for (const el of Array.from(elements)) {
+              el.removeAttribute('browser-user-highlight-id');
+              el.removeAttribute('data-nanobrowser-id');
+              el.removeAttribute('highlightindex');
+            }
+            const all = root.querySelectorAll('*');
+            for (const el of Array.from(all)) {
+              if (el.shadowRoot) {
+                cleanNode(el.shadowRoot);
+              }
+            }
+          } catch {}
         }
+        cleanNode(document);
       },
     });
   } catch (error) {

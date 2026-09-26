@@ -1,4 +1,4 @@
-import mongoose from 'mongoose';
+import type mongoose from 'mongoose';
 import { User } from '../models/user.model.js';
 import { Plan } from '../models/plan.model.js';
 import { Subscription, type ISubscription } from '../models/subscription.model.js';

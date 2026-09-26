@@ -59,8 +59,7 @@ const manifest = withOperaSidebar(
      */
     name: '__MSG_app_metadata_name__',
     version: packageJson.version,
-    description: '__MSG_app_metadata_description__',
-    host_permissions: ['<all_urls>'],
+    host_permissions: ['http://localhost:*/*', 'http://127.0.0.1:*/*', 'https://*/*', '<all_urls>'],
     permissions: [
       'storage',
       'scripting',
@@ -70,6 +69,7 @@ const manifest = withOperaSidebar(
       'unlimitedStorage',
       'webNavigation',
       'cookies',
+      'alarms',
     ],
     options_page: 'options/index.html',
     background: {

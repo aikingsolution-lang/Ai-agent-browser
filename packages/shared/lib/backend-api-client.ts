@@ -25,6 +25,20 @@ export class BackendApiClient {
     return this.token;
   }
 
+  public async ensureToken(): Promise<void> {
+    try {
+      if (typeof chrome !== 'undefined' && chrome?.storage?.local) {
+        const res = await chrome.storage.local.get(['nanobrowser_auth_session']);
+        const session = res?.nanobrowser_auth_session;
+        if (session?.token) {
+          this.token = session.token;
+        }
+      }
+    } catch {
+      // Storage not accessible or not available in this context
+    }
+  }
+
   private getHeaders(extraHeaders: Record<string, string> = {}): Record<string, string> {
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
@@ -36,7 +50,8 @@ export class BackendApiClient {
     return headers;
   }
 
-  private async request<T>(endpoint: string, options: RequestInit = {}): Promise<ApiResponse<T>> {
+  private async request<T>(endpoint: string, options: RequestInit = {}, isRetry = false): Promise<ApiResponse<T>> {
+    await this.ensureToken();
     const url = `${this.baseUrl}${endpoint}`;
     const headers = this.getHeaders((options.headers as Record<string, string>) || {});
 
@@ -45,6 +60,14 @@ export class BackendApiClient {
         ...options,
         headers,
       });
+
+      if (response.status === 401 && !isRetry) {
+        // Token might have expired or updated; refresh from storage and retry once
+        await this.ensureToken();
+        if (this.token) {
+          return this.request<T>(endpoint, options, true);
+        }
+      }
 
       const data: ApiResponse<T> = await response.json();
 
@@ -121,6 +144,89 @@ export class BackendApiClient {
       `/credits/history?page=${page}&limit=${limit}`,
       { method: 'GET' },
     );
+  }
+
+  public async addPendingRefund(runId: string): Promise<void> {
+    try {
+      if (typeof chrome !== 'undefined' && chrome?.storage?.local) {
+        const data = await chrome.storage.local.get(['nanobrowser_pending_refunds']);
+        const list: string[] = data?.nanobrowser_pending_refunds || [];
+        if (!list.includes(runId)) {
+          list.push(runId);
+          await chrome.storage.local.set({ nanobrowser_pending_refunds: list });
+        }
+      }
+    } catch {
+      // Ignore
+    }
+  }
+
+  public async removePendingRefund(runId: string): Promise<void> {
+    try {
+      if (typeof chrome !== 'undefined' && chrome?.storage?.local) {
+        const data = await chrome.storage.local.get(['nanobrowser_pending_refunds']);
+        const list: string[] = data?.nanobrowser_pending_refunds || [];
+        const filtered = list.filter(id => id !== runId);
+        await chrome.storage.local.set({ nanobrowser_pending_refunds: filtered });
+      }
+    } catch {
+      // Ignore
+    }
+  }
+
+  public async retryPendingRefunds(): Promise<void> {
+    try {
+      if (typeof chrome !== 'undefined' && chrome?.storage?.local) {
+        const data = await chrome.storage.local.get(['nanobrowser_pending_refunds']);
+        const list: string[] = data?.nanobrowser_pending_refunds || [];
+        for (const runId of list) {
+          try {
+            await this.refundCredits(runId);
+          } catch {
+            // Remains in queue if failed
+          }
+        }
+      }
+    } catch {
+      // Ignore
+    }
+  }
+
+  public async refundCredits(runId: string) {
+    await this.addPendingRefund(runId);
+    try {
+      const res = await this.request<{
+        remainingCredits: number;
+        usedCredits: number;
+        allocatedCredits: number;
+        refundedAmount: number;
+        runId: string;
+      }>('/credits/refund', {
+        method: 'POST',
+        body: JSON.stringify({ runId }),
+      });
+      await this.removePendingRefund(runId);
+      return res;
+    } catch (error: any) {
+      const errMsg = String(error?.message || '').toLowerCase();
+      if (
+        error?.status === 400 ||
+        error?.status === 404 ||
+        error?.code === 'ALREADY_REFUNDED' ||
+        error?.code === 'RUN_NOT_FOUND' ||
+        errMsg.includes('no billable usage')
+      ) {
+        await this.removePendingRefund(runId);
+        return {
+          remainingCredits: 0,
+          usedCredits: 0,
+          allocatedCredits: 0,
+          refundedAmount: 0,
+          runId,
+        };
+      }
+      throw error;
+    }
   }
 
   // --- Subscription APIs ---
@@ -273,6 +379,79 @@ export class BackendApiClient {
       { method: 'GET' },
     );
   }
+
+  /**
+   * Uploads raw resume file (PDF/DOCX) to backend, extracts structured data via Bedrock AI,
+   * and saves/syncs the updated CareerBrain.
+   */
+  public async uploadAndParseResume(
+    file: File | Blob,
+    fileName = 'resume.pdf',
+  ): Promise<ApiResponse<ResumeParseApiResponse>> {
+    const formData = new FormData();
+    formData.append('resume', file, fileName);
+
+    const headers: Record<string, string> = {};
+    if (this.token) {
+      headers['Authorization'] = `Bearer ${this.token}`;
+    }
+
+    const response = await fetch(`${this.baseUrl}/resume/upload-and-parse`, {
+      method: 'POST',
+      headers,
+      body: formData,
+    });
+
+    const data: ApiResponse<ResumeParseApiResponse> = await response.json();
+    if (!response.ok || !data.success) {
+      const err = new Error(data.message || `Upload failed with status ${response.status}`) as any;
+      err.status = response.status;
+      err.code = data.error?.code || `HTTP_${response.status}`;
+      throw err;
+    }
+    return data;
+  }
+}
+
+export interface IWorkExperience {
+  role: string;
+  company: string;
+  duration?: string;
+  highlights?: string[];
+}
+
+export interface ParsedResumeData {
+  fullName: string;
+  email: string;
+  phoneNumber: string;
+  currentTitle: string;
+  skills: string[];
+  yearsOfExperience: number;
+  education: string;
+  college?: string;
+  cgpa?: string;
+  currentCTC?: string;
+  expectedCTC?: string;
+  currentLocation?: string;
+  noticePeriod?: string;
+  workHistory: IWorkExperience[];
+  backgroundNarrative: string;
+  preferredLocation: string;
+  workAuthorization: string;
+  salaryExpectation: string;
+  portfolioUrl: string;
+  githubUrl: string;
+  linkedinUrl: string;
+  skillExperience?: Record<string, number>;
+  autoExtractedSkills?: string[];
+}
+
+export interface ResumeParseApiResponse {
+  fileName: string;
+  fileSize: number;
+  parsedData: ParsedResumeData;
+  careerBrain: any;
+  rawText?: string;
 }
 
 export const backendApiClient = new BackendApiClient();

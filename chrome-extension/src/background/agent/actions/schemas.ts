@@ -306,3 +306,24 @@ export const linkedinEasyApplyActionSchema: ActionSchema = {
     intent: z.string().default('Apply to LinkedIn job via Easy Apply').describe('purpose of this action'),
   }),
 };
+
+export const fillVisibleFormFieldsActionSchema: ActionSchema = {
+  name: 'fill_visible_form_fields',
+  description:
+    'Batch fills all visible form fields (text, numeric, radios, dropdowns) in the current active modal using user profile, golden answers, and skill experience. If any required field cannot be resolved automatically, it prompts the user to answer directly.',
+  schema: z.object({
+    intent: z.string().optional().default('Fill visible form fields in modal').describe('purpose of this action'),
+  }),
+};
+
+export const askUserActionSchema: ActionSchema = {
+  name: 'ask_user',
+  description:
+    'Prompt the candidate in the side panel to answer an unknown factual form question (e.g. years of experience in an unlisted skill, expected salary, notice period). The answer is automatically saved to golden answers and reused in future jobs.',
+  schema: z.object({
+    question: z.string().describe('The question text to show the user'),
+    fieldType: z.enum(['text', 'number', 'radio', 'dropdown', 'checkbox']).optional().default('text'),
+    options: z.array(z.string()).optional().describe('Available selectable options if radio or dropdown'),
+    skillName: z.string().optional().describe('The specific skill name if this is a skill experience question'),
+  }),
+};

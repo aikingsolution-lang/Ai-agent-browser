@@ -1,4 +1,4 @@
-import mongoose from 'mongoose';
+import type mongoose from 'mongoose';
 import { UserCreditBalance, type IUserCreditBalance } from '../models/userCreditBalance.model.js';
 import { CreditLedger, type ICreditLedger, type CreditTransactionType } from '../models/creditLedger.model.js';
 import { AppError } from '../middleware/errorHandler.js';
@@ -218,6 +218,130 @@ export class CreditService {
       }
       throw error;
     }
+  }
+
+  /**
+   * Atomically refunds credits back to a user's balance.
+   */
+  public static async refundCredits(params: {
+    userId: string | mongoose.Types.ObjectId;
+    amount: number;
+    description: string;
+    idempotencyKey?: string;
+    metadata?: Record<string, any>;
+  }): Promise<{ balance: IUserCreditBalance; ledgerEntry: ICreditLedger }> {
+    const { userId, amount, description, idempotencyKey, metadata } = params;
+
+    if (amount <= 0 || !Number.isInteger(amount)) {
+      throw new AppError('Refund amount must be a positive integer', 400, 'INVALID_AMOUNT');
+    }
+
+    const currentBalance = await UserCreditBalance.findOne({ userId });
+    if (!currentBalance) {
+      throw new AppError('Credit balance not found', 404, 'BALANCE_NOT_FOUND');
+    }
+
+    const balanceBefore = currentBalance.remainingCredits;
+    const updatedBalance = await UserCreditBalance.findOneAndUpdate(
+      { userId },
+      {
+        $inc: {
+          usedCredits: -amount,
+          remainingCredits: amount,
+        },
+      },
+      { new: true },
+    );
+
+    const ledgerDocs = await CreditLedger.create([
+      {
+        userId,
+        subscriptionId: updatedBalance!.subscriptionId,
+        amount,
+        balanceBefore,
+        balanceAfter: updatedBalance!.remainingCredits,
+        type: 'REFUND',
+        description,
+        idempotencyKey,
+        metadata: metadata || {},
+      },
+    ]);
+
+    return {
+      balance: updatedBalance!,
+      ledgerEntry: ledgerDocs[0],
+    };
+  }
+
+  /**
+   * Securely and idempotently refunds credits incurred during a specific agent run.
+   * Computes the exact amount deducted from the CreditLedger for the given runId and userId.
+   * Rejects duplicate refunds for the same runId.
+   */
+  public static async refundRunCredits(params: {
+    userId: string | mongoose.Types.ObjectId;
+    runId: string;
+  }): Promise<{ refundedAmount: number; runId: string; balance: IUserCreditBalance }> {
+    const { userId, runId } = params;
+
+    if (!runId || typeof runId !== 'string' || runId.trim() === '') {
+      throw new AppError('A valid runId is required for refund', 400, 'INVALID_RUN_ID');
+    }
+
+    const cleanRunId = runId.trim();
+
+    // 1. Check if this runId has already been refunded
+    const existingRefund = await CreditLedger.findOne({
+      userId,
+      type: 'REFUND',
+      'metadata.runId': cleanRunId,
+    });
+
+    if (existingRefund) {
+      logger.info(`Run ${cleanRunId} has already been refunded. Idempotent return.`);
+      const currentBalance = await UserCreditBalance.findOne({ userId });
+      return {
+        refundedAmount: existingRefund.amount,
+        runId: cleanRunId,
+        balance: currentBalance!,
+      };
+    }
+
+    // 2. Sum all USAGE_DEDUCTION ledger entries tagged with this runId
+    const usageEntries = await CreditLedger.find({
+      userId,
+      type: 'USAGE_DEDUCTION',
+      'metadata.runId': cleanRunId,
+    });
+
+    if (!usageEntries || usageEntries.length === 0) {
+      throw new AppError(`No billable usage found for runId: ${cleanRunId}`, 404, 'RUN_NOT_FOUND');
+    }
+
+    const totalToRefund = usageEntries.reduce((sum, entry) => sum + Math.abs(entry.amount), 0);
+
+    if (totalToRefund <= 0) {
+      throw new AppError(`No credits were deducted for runId: ${cleanRunId}`, 400, 'NOTHING_TO_REFUND');
+    }
+
+    // 3. Perform refund
+    const idempotencyKey = `refund_run_${cleanRunId}`;
+    const refundResult = await this.refundCredits({
+      userId,
+      amount: totalToRefund,
+      description: `Automatic refund for failed agent run (${cleanRunId})`,
+      idempotencyKey,
+      metadata: {
+        runId: cleanRunId,
+        deductionEntriesCount: usageEntries.length,
+      },
+    });
+
+    return {
+      refundedAmount: totalToRefund,
+      runId: cleanRunId,
+      balance: refundResult.balance,
+    };
   }
 
   /**

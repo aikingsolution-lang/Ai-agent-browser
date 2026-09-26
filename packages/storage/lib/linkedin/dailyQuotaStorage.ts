@@ -27,6 +27,7 @@ export type DailyQuotaStorageType = BaseStorage<DailyQuotaData> & {
   getQuotaData: () => Promise<DailyQuotaData>;
   canApplyToday: () => Promise<{ allowed: boolean; remaining: number; currentCount: number }>;
   incrementAppliedCount: () => Promise<DailyQuotaData>;
+  resetTodayAppliedCount: () => Promise<DailyQuotaData>;
   setMaxDailyLimit: (limit: number) => Promise<void>;
 };
 
@@ -84,6 +85,18 @@ export const dailyQuotaStore: DailyQuotaStorageType = {
       nextResumeTimestamp: nextResume,
     };
 
+    await storage.set(updatedData);
+    return updatedData;
+  },
+
+  async resetTodayAppliedCount(): Promise<DailyQuotaData> {
+    const data = await this.getQuotaData();
+    const updatedData: DailyQuotaData = {
+      ...data,
+      appliedCount: 0,
+      isPausedDueToQuota: false,
+      nextResumeTimestamp: null,
+    };
     await storage.set(updatedData);
     return updatedData;
   },

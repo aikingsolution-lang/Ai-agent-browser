@@ -82,3 +82,19 @@ export const llmRateLimiter = rateLimit({
     timestamp: new Date().toISOString(),
   },
 });
+
+export const refundRateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 30, // Limit each IP to 30 refund requests per 15 minutes
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: isTest,
+  message: {
+    success: false,
+    message: 'Too many refund requests from this IP, please try again later.',
+    error: {
+      code: 'TOO_MANY_REQUESTS',
+    },
+    timestamp: new Date().toISOString(),
+  },
+});

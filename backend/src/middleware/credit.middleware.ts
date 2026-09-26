@@ -1,4 +1,4 @@
-import { Request, Response, NextFunction } from 'express';
+import type { Request, Response, NextFunction } from 'express';
 import { CreditService } from '../services/credit.service.js';
 import { type IUserCreditBalance } from '../models/userCreditBalance.model.js';
 import { AppError } from './errorHandler.js';

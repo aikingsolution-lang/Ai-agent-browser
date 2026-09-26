@@ -7,7 +7,7 @@
  */
 
 import { createLogger } from '@src/background/log';
-import { userStore } from '@extension/storage';
+import { userStore, authStorage } from '@extension/storage';
 import type { IJobData, JobApplicationStatus } from './types';
 
 const logger = createLogger('LinkedInBackendClient');
@@ -109,6 +109,104 @@ export class LinkedInBackendClient {
     } catch (err) {
       logger.warning('Backend resume generator endpoint unavailable:', err);
       return null;
+    }
+  }
+
+  /**
+   * Syncs the user's local Career Brain data to MongoDB.
+   */
+  static async syncCareerBrainProfile(profileData: any): Promise<boolean> {
+    try {
+      const session = await authStorage.getSession();
+      if (!session?.token) {
+        logger.info('[BackendClient] No auth token available. Skipping cloud profile sync.');
+        return false;
+      }
+
+      const res = await fetch(`${BACKEND_BASE_URL}/profile`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${session.token}`,
+        },
+        body: JSON.stringify(profileData),
+      });
+
+      if (res.ok) {
+        logger.info('[BackendClient] Career Brain successfully synced to MongoDB.');
+        return true;
+      }
+      logger.warning(`[BackendClient] Profile sync returned status ${res.status}`);
+      return false;
+    } catch (err) {
+      logger.warning('[BackendClient] Cloud profile sync failed:', err);
+      return false;
+    }
+  }
+
+  /**
+   * Fetches user's Career Brain from MongoDB.
+   */
+  static async fetchCareerBrainProfile(): Promise<any | null> {
+    try {
+      const session = await authStorage.getSession();
+      if (!session?.token) return null;
+
+      const res = await fetch(`${BACKEND_BASE_URL}/profile`, {
+        headers: {
+          Authorization: `Bearer ${session.token}`,
+        },
+      });
+
+      if (!res.ok) return null;
+      const json = await res.json();
+      return json.data;
+    } catch (err) {
+      logger.warning('[BackendClient] Failed to fetch cloud profile:', err);
+      return null;
+    }
+  }
+
+  /**
+   * Server-side quota check and atomic increment.
+   */
+  static async checkAndIncrementDailyQuota(): Promise<{ allowed: boolean; appliedToday: number; dailyLimit: number }> {
+    try {
+      const session = await authStorage.getSession();
+      if (!session?.token) {
+        // Unauthenticated local fallback: allow local processing
+        return { allowed: true, appliedToday: 0, dailyLimit: 15 };
+      }
+
+      const res = await fetch(`${BACKEND_BASE_URL}/profile/quota/check-and-increment`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${session.token}`,
+        },
+      });
+
+      if (res.status === 429) {
+        const errJson = await res.json();
+        return {
+          allowed: false,
+          appliedToday: errJson.error?.details?.appliedToday ?? 15,
+          dailyLimit: errJson.error?.details?.dailyLimit ?? 15,
+        };
+      }
+
+      if (res.ok) {
+        const json = await res.json();
+        return {
+          allowed: true,
+          appliedToday: json.data?.appliedToday ?? 1,
+          dailyLimit: json.data?.dailyLimit ?? 15,
+        };
+      }
+
+      return { allowed: true, appliedToday: 0, dailyLimit: 15 };
+    } catch (err) {
+      logger.warning('[BackendClient] Server quota check failed, falling back to local quota:', err);
+      return { allowed: true, appliedToday: 0, dailyLimit: 15 };
     }
   }
 }

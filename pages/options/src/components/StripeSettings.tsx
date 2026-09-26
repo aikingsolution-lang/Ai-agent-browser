@@ -83,7 +83,7 @@ export const StripeSettings: React.FC<StripeSettingsProps> = ({ isDarkMode }) =>
       <div
         className={`rounded-lg border ${isDarkMode ? 'border-slate-700 bg-slate-800' : 'border-blue-100 bg-gray-50'} p-6 text-left shadow-sm`}>
         {/* Header */}
-        <div className="flex items-center justify-between mb-6">
+        <div className="mb-6 flex items-center justify-between">
           <div>
             <h2 className={`text-xl font-bold ${isDarkMode ? 'text-gray-100' : 'text-gray-900'}`}>
               Razorpay Billing & Webhook Configuration
@@ -96,10 +96,10 @@ export const StripeSettings: React.FC<StripeSettingsProps> = ({ isDarkMode }) =>
           <span
             className={`inline-flex items-center space-x-1 rounded-full px-3.5 py-1 text-xs font-bold ${
               isLiveMode
-                ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
-                : 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
+                ? 'border border-emerald-500/30 bg-emerald-500/20 text-emerald-400'
+                : 'border border-amber-500/30 bg-amber-500/20 text-amber-400'
             }`}>
-            <FiSliders className="h-3.5 w-3.5" />
+            <FiSliders className="size-3.5" />
             <span>{isLiveMode ? 'LIVE PRODUCTION MODE' : 'RAZORPAY TEST MODE'}</span>
           </span>
         </div>
@@ -109,7 +109,7 @@ export const StripeSettings: React.FC<StripeSettingsProps> = ({ isDarkMode }) =>
           <div
             className={`rounded-xl border p-5 ${isDarkMode ? 'border-slate-700 bg-slate-700/30' : 'border-gray-200 bg-white'}`}>
             <label
-              className={`block text-xs font-bold uppercase tracking-wider mb-2 ${isDarkMode ? 'text-gray-300' : 'text-gray-700'}`}>
+              className={`mb-2 block text-xs font-bold uppercase tracking-wider ${isDarkMode ? 'text-gray-300' : 'text-gray-700'}`}>
               Razorpay Environment
             </label>
             <div className="grid grid-cols-2 gap-4">
@@ -124,8 +124,8 @@ export const StripeSettings: React.FC<StripeSettingsProps> = ({ isDarkMode }) =>
                       : 'border-gray-200 bg-gray-50 hover:border-gray-300'
                 }`}>
                 <div className="flex items-center justify-between">
-                  <span className="font-bold text-xs text-amber-500">Razorpay Test Mode</span>
-                  {environment === 'sandbox' && <FiCheckCircle className="h-4 w-4 text-amber-500" />}
+                  <span className="text-xs font-bold text-amber-500">Razorpay Test Mode</span>
+                  {environment === 'sandbox' && <FiCheckCircle className="size-4 text-amber-500" />}
                 </div>
                 <p className={`mt-1 text-[11px] ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>
                   Use Razorpay test API keys (`rzp_test_...`) for safe local testing and development.
@@ -143,8 +143,8 @@ export const StripeSettings: React.FC<StripeSettingsProps> = ({ isDarkMode }) =>
                       : 'border-gray-200 bg-gray-50 hover:border-gray-300'
                 }`}>
                 <div className="flex items-center justify-between">
-                  <span className="font-bold text-xs text-emerald-500">Live Production Mode</span>
-                  {environment === 'live' && <FiCheckCircle className="h-4 w-4 text-emerald-500" />}
+                  <span className="text-xs font-bold text-emerald-500">Live Production Mode</span>
+                  {environment === 'live' && <FiCheckCircle className="size-4 text-emerald-500" />}
                 </div>
                 <p className={`mt-1 text-[11px] ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>
                   Connect real Razorpay live keys (`rzp_live_...`) to accept real credit card/UPI payments.
@@ -156,7 +156,7 @@ export const StripeSettings: React.FC<StripeSettingsProps> = ({ isDarkMode }) =>
           {/* Key Inputs */}
           <div className="space-y-4">
             <div>
-              <label className={`block text-xs font-medium mb-1 ${isDarkMode ? 'text-gray-300' : 'text-gray-700'}`}>
+              <label className={`mb-1 block text-xs font-medium ${isDarkMode ? 'text-gray-300' : 'text-gray-700'}`}>
                 Razorpay Key ID ({environment === 'live' ? 'rzp_live_...' : 'rzp_test_...'})
               </label>
               <div className="relative">
@@ -166,18 +166,18 @@ export const StripeSettings: React.FC<StripeSettingsProps> = ({ isDarkMode }) =>
                   value={razorpayKeyId}
                   onChange={e => setRazorpayKeyId(e.target.value)}
                   placeholder={environment === 'live' ? 'rzp_live_...' : 'rzp_test_...'}
-                  className={`w-full rounded-lg border p-2.5 pl-9 text-xs font-mono ${
+                  className={`w-full rounded-lg border p-2.5 pl-9 font-mono text-xs ${
                     isDarkMode
                       ? 'border-slate-600 bg-slate-900 text-gray-200'
                       : 'border-gray-300 bg-white text-gray-800'
                   }`}
                 />
-                <FiKey className="absolute left-3 top-3 h-4 w-4 text-gray-400" />
+                <FiKey className="absolute left-3 top-3 size-4 text-gray-400" />
               </div>
             </div>
 
             <div>
-              <label className={`block text-xs font-medium mb-1 ${isDarkMode ? 'text-gray-300' : 'text-gray-700'}`}>
+              <label className={`mb-1 block text-xs font-medium ${isDarkMode ? 'text-gray-300' : 'text-gray-700'}`}>
                 Razorpay Webhook Secret Key
               </label>
               <div className="relative">
@@ -186,13 +186,13 @@ export const StripeSettings: React.FC<StripeSettingsProps> = ({ isDarkMode }) =>
                   value={razorpayWebhookSecret}
                   onChange={e => setRazorpayWebhookSecret(e.target.value)}
                   placeholder="Webhook secret key..."
-                  className={`w-full rounded-lg border p-2.5 pl-9 text-xs font-mono ${
+                  className={`w-full rounded-lg border p-2.5 pl-9 font-mono text-xs ${
                     isDarkMode
                       ? 'border-slate-600 bg-slate-900 text-gray-200'
                       : 'border-gray-300 bg-white text-gray-800'
                   }`}
                 />
-                <FiLock className="absolute left-3 top-3 h-4 w-4 text-gray-400" />
+                <FiLock className="absolute left-3 top-3 size-4 text-gray-400" />
               </div>
               <p className={`mt-1 text-[11px] ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>
                 Used to verify HMAC signature headers on incoming Razorpay subscription events (`subscription.charged`).
@@ -204,8 +204,8 @@ export const StripeSettings: React.FC<StripeSettingsProps> = ({ isDarkMode }) =>
           {webhookTestStatus && (
             <div
               className={`rounded-xl border p-4 text-xs ${isDarkMode ? 'border-indigo-500/30 bg-indigo-500/10 text-indigo-300' : 'border-indigo-200 bg-indigo-50 text-indigo-800'}`}>
-              <div className="flex items-center space-x-2 font-bold mb-1">
-                <FiCheckCircle className="h-4 w-4 text-indigo-400" />
+              <div className="mb-1 flex items-center space-x-2 font-bold">
+                <FiCheckCircle className="size-4 text-indigo-400" />
                 <span>Webhook Health Check</span>
               </div>
               <p className="opacity-90">{webhookTestStatus}</p>
@@ -218,11 +218,11 @@ export const StripeSettings: React.FC<StripeSettingsProps> = ({ isDarkMode }) =>
               type="button"
               onClick={handleTestWebhookSignature}
               disabled={isTestingWebhook}
-              className="inline-flex items-center space-x-2 rounded-lg border border-slate-600 px-3 py-2 text-xs font-medium text-gray-300 hover:bg-slate-700 transition-colors">
+              className="inline-flex items-center space-x-2 rounded-lg border border-slate-600 px-3 py-2 text-xs font-medium text-gray-300 transition-colors hover:bg-slate-700">
               {isTestingWebhook ? (
-                <FiRefreshCw className="h-3.5 w-3.5 animate-spin" />
+                <FiRefreshCw className="size-3.5 animate-spin" />
               ) : (
-                <FiShield className="h-3.5 w-3.5 text-sky-400" />
+                <FiShield className="size-3.5 text-sky-400" />
               )}
               <span>Verify Webhook Signature</span>
             </button>
@@ -230,8 +230,8 @@ export const StripeSettings: React.FC<StripeSettingsProps> = ({ isDarkMode }) =>
             <button
               type="submit"
               disabled={isSaving}
-              className="inline-flex items-center space-x-2 rounded-lg bg-sky-600 px-5 py-2.5 text-xs font-bold text-white shadow hover:bg-sky-700 transition-colors">
-              {isSaving ? <FiRefreshCw className="h-4 w-4 animate-spin" /> : <FiCreditCard className="h-4 w-4" />}
+              className="inline-flex items-center space-x-2 rounded-lg bg-sky-600 px-5 py-2.5 text-xs font-bold text-white shadow transition-colors hover:bg-sky-700">
+              {isSaving ? <FiRefreshCw className="size-4 animate-spin" /> : <FiCreditCard className="size-4" />}
               <span>{saveSuccess ? 'Configuration Saved!' : 'Save Razorpay Credentials'}</span>
             </button>
           </div>

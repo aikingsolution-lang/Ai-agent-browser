@@ -46,8 +46,22 @@ export function createApp(): express.Application {
         }
       },
       credentials: true,
+      methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+      allowedHeaders: [
+        'Content-Type',
+        'Authorization',
+        'x-run-id',
+        'x-idempotency-key',
+        'x-correlation-id',
+        'Origin',
+        'Accept',
+      ],
+      optionsSuccessStatus: 204,
     }),
   );
+
+  // Enable CORS pre-flight across-the-board
+  app.options('*', cors());
 
   // Request Logging
   if (env.NODE_ENV !== 'test') {

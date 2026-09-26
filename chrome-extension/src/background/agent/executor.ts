@@ -22,9 +22,8 @@ import {
   CircuitBreakerTrippedError,
 } from './agents/errors';
 import { URLNotAllowedError } from '../browser/views';
-import { chatHistoryStore } from '@extension/storage/lib/chat';
+import { chatHistoryStore, type GeneralSettingsConfig } from '@extension/storage';
 import type { AgentStepHistory } from './history';
-import type { GeneralSettingsConfig } from '@extension/storage';
 import { analytics } from '../services/analytics';
 import { verifyTaskResult } from './evaluation';
 
@@ -35,6 +34,7 @@ export interface ExecutorExtraArgs {
   extractorLLM?: BaseChatModel;
   agentOptions?: Partial<AgentOptions>;
   generalSettings?: GeneralSettingsConfig;
+  isJobApplyRun?: boolean;
 }
 
 export class Executor {
@@ -63,6 +63,7 @@ export class Executor {
       messageManager,
       eventManager,
       extraArgs?.agentOptions ?? {},
+      extraArgs?.isJobApplyRun ?? false,
     );
 
     this.generalSettings = extraArgs?.generalSettings;
@@ -89,6 +90,14 @@ export class Executor {
     this.context = context;
     // Initialize message history
     this.context.messageManager.initTaskMessages(this.navigatorPrompt.getSystemMessage(), task);
+  }
+
+  public get isJobApplyRun(): boolean {
+    return this.context.isJobApplyRun;
+  }
+
+  public set isJobApplyRun(val: boolean) {
+    this.context.isJobApplyRun = val;
   }
 
   subscribeExecutionEvents(callback: EventCallback): void {
@@ -148,9 +157,9 @@ export class Executor {
   /**
    * Execute the task
    *
-   * @returns {Promise<void>}
+   * @returns {Promise<{ success: boolean; reason?: string; finalAnswer?: string }>}
    */
-  async execute(): Promise<void> {
+  async execute(): Promise<{ success: boolean; reason?: string; finalAnswer?: string }> {
     logger.info(`🚀 Executing task: ${this.tasks[this.tasks.length - 1]}`);
     // reset the step counter
     const context = this.context;
@@ -171,6 +180,10 @@ export class Executor {
       let consecutiveStuckSteps = 0;
       let lastObservedUrl = '';
       let lastObservedTitle = '';
+      let lastFailedActionSignature = '';
+      let consecutiveFailedActionCount = 0;
+      let circuitBreakerTripped = false;
+      let circuitBreakerReason = '';
 
       for (step = 0; step < allowedMaxSteps; step++) {
         context.stepInfo = {
@@ -228,12 +241,19 @@ export class Executor {
               const failMsg =
                 'Security challenge was not resolved within timeout (3 minutes). Execution aborted safely.';
               logger.error(failMsg);
-              this.context.finalAnswer = failMsg;
-              this.context.emitEvent(Actors.SYSTEM, ExecutionState.TASK_FAIL, failMsg);
-              if (latestPlanOutput?.result) {
-                latestPlanOutput.result.done = true;
-                latestPlanOutput.result.final_answer = this.context.finalAnswer;
-              }
+              circuitBreakerTripped = true;
+              circuitBreakerReason = failMsg;
+              break;
+            }
+          }
+
+          // 0. Hard Credit Budget Enforcement (150 Credits max per run)
+          if (this.context.isJobApplyRun) {
+            this.context.estimatedCreditsUsed += 10;
+            if (this.context.estimatedCreditsUsed >= this.context.creditBudget) {
+              circuitBreakerTripped = true;
+              circuitBreakerReason = `Hard credit budget (${this.context.creditBudget} credits) reached for this run. Halted automatically to protect credit balance.`;
+              logger.warning(`🛑 Circuit Breaker: ${circuitBreakerReason}`);
               break;
             }
           }
@@ -241,35 +261,51 @@ export class Executor {
           // 1. Check for dead / removed job page signatures
           const deadPage = await currentPage.detectDeadJobOrErrorPage();
           if (deadPage.isDeadJob) {
-            const deadMsg = `Circuit Breaker: Dead/removed page detected ("${deadPage.reason}"). Terminating loop cleanly.`;
-            logger.warning(`🛑 ${deadMsg}`);
-            this.context.finalAnswer = `The requested job posting or page is no longer available ("${deadPage.reason}"). Application cannot proceed.`;
-            this.context.emitEvent(Actors.SYSTEM, ExecutionState.ACT_OK, deadMsg);
-            if (latestPlanOutput?.result) {
-              latestPlanOutput.result.done = true;
-              latestPlanOutput.result.final_answer = this.context.finalAnswer;
-            }
+            circuitBreakerTripped = true;
+            circuitBreakerReason = `Dead/removed page detected ("${deadPage.reason}"). Application cannot proceed.`;
+            logger.warning(`🛑 Circuit Breaker: ${circuitBreakerReason}`);
             break;
           }
 
-          // 2. Check for stagnant page state (stuck on same URL & Title for > 3 consecutive steps)
-          if (currentUrl && currentUrl === lastObservedUrl && currentTitle === lastObservedTitle) {
+          // 2. Check for stagnant page state / repetitive failure loop
+          const lastAction = this.context.actionResults[this.context.actionResults.length - 1];
+          const hasActionError = Boolean(lastAction?.error);
+
+          if (hasActionError && lastAction?.error) {
+            const errorSig = `${lastAction.error.slice(0, 80)}`;
+            if (errorSig === lastFailedActionSignature) {
+              consecutiveFailedActionCount++;
+              logger.warning(
+                `⚠️ Consecutive identical action failure (${consecutiveFailedActionCount}/2): ${errorSig}`,
+              );
+              if (consecutiveFailedActionCount >= 2) {
+                circuitBreakerTripped = true;
+                circuitBreakerReason = `Bot encountered repeated failures on the same action. Last error: ${lastAction.error}`;
+                logger.error(`🚨 Circuit Breaker Tripped: ${circuitBreakerReason}`);
+                break;
+              }
+            } else {
+              lastFailedActionSignature = errorSig;
+              consecutiveFailedActionCount = 1;
+            }
+          } else {
+            lastFailedActionSignature = '';
+            consecutiveFailedActionCount = 0;
+          }
+
+          if (hasActionError && currentUrl && currentUrl === lastObservedUrl && currentTitle === lastObservedTitle) {
             consecutiveStuckSteps++;
             logger.warning(
-              `⚠️ Circuit Breaker: Agent on same page for ${consecutiveStuckSteps} consecutive steps: "${currentTitle}" (${currentUrl})`,
+              `⚠️ Circuit Breaker: Action failed on same page state (${consecutiveStuckSteps}/3): "${currentTitle}"`,
             );
             if (consecutiveStuckSteps >= 3) {
-              const tripMsg = `Circuit Breaker Tripped: Bot is stuck on the same page state for 3 consecutive turns without progress.`;
-              logger.error(`🚨 ${tripMsg}`);
-              this.context.finalAnswer = `${tripMsg} The target element may not exist or the page is unresponsive.`;
-              this.context.emitEvent(Actors.SYSTEM, ExecutionState.ACT_FAIL, tripMsg);
-              if (latestPlanOutput?.result) {
-                latestPlanOutput.result.done = true;
-                latestPlanOutput.result.final_answer = this.context.finalAnswer;
-              }
+              circuitBreakerTripped = true;
+              circuitBreakerReason = `Bot encountered repeated failures on the same page state. Last error: ${lastAction?.error || 'Unknown error'}`;
+              logger.error(`🚨 Circuit Breaker Tripped: ${circuitBreakerReason}`);
               break;
             }
           } else {
+            // Action succeeded or page changed - reset stuck counter
             consecutiveStuckSteps = 0;
             lastObservedUrl = currentUrl;
             lastObservedTitle = currentTitle;
@@ -278,13 +314,26 @@ export class Executor {
           logger.debug(`Circuit breaker pre-flight inspection error: ${circuitErr}`);
         }
 
+        // Live confirmation check ONLY for explicit job apply runs (in case dialog is dismissed before done action)
+        if (this.context.isJobApplyRun && !this.context.applicationSubmissionConfirmed) {
+          try {
+            const currentPage = await this.context.browserContext.getCurrentPage();
+            const liveConfirmation = await currentPage.verifyApplicationConfirmation();
+            if (liveConfirmation.confirmed) {
+              this.context.applicationSubmissionConfirmed = true;
+              this.context.submissionConfirmationMessage = liveConfirmation.message || null;
+              logger.info(`[Executor] Live application submission confirmed: "${liveConfirmation.message}"`);
+            }
+          } catch {}
+        }
+
         // Run planner periodically for guidance
         if (this.planner && (context.nSteps % context.options.planningInterval === 0 || navigatorDone)) {
           navigatorDone = false;
           latestPlanOutput = await this.runPlanner();
 
           // Check if task is complete after planner run
-          if (await this.checkTaskCompletion(latestPlanOutput)) {
+          if (latestPlanOutput?.result?.done) {
             break;
           }
         }
@@ -298,32 +347,78 @@ export class Executor {
         }
       }
 
+      // If Circuit Breaker tripped, mark as FAILED (red) - never as OK
+      if (circuitBreakerTripped) {
+        const failMessage = `Circuit Breaker Tripped: ${circuitBreakerReason}`;
+        logger.error(`❌ ${failMessage}`);
+        this.context.finalAnswer = failMessage;
+        this.context.emitEvent(Actors.SYSTEM, ExecutionState.TASK_FAIL, failMessage);
+        const circuitError = new Error(failMessage);
+        const errorCategory = analytics.categorizeError(circuitError);
+        void analytics.trackTaskFailed(this.context.taskId, errorCategory);
+        return { success: false, reason: failMessage };
+      }
+
       // Determine task completion status
       const isCompleted = latestPlanOutput?.result?.done === true;
 
       if (isCompleted) {
+        // Success verification on page: ONLY enforced when this.context.isJobApplyRun is explicitly true.
+        // Normal AI Chat tasks never set this flag and are never affected by confirmation verification.
+        if (this.context.isJobApplyRun) {
+          let confirmed = this.context.applicationSubmissionConfirmed;
+          let confirmationMessage: string | null = this.context.submissionConfirmationMessage || null;
+
+          // If not already recorded during the run, check one last time on the page
+          if (!confirmed) {
+            const page = await this.context.browserContext.getCurrentPage();
+            const confirmation = await page.verifyApplicationConfirmation();
+            if (confirmation.confirmed) {
+              confirmed = true;
+              confirmationMessage = confirmation.message || null;
+              this.context.applicationSubmissionConfirmed = true;
+              this.context.submissionConfirmationMessage = confirmation.message || null;
+            }
+          }
+
+          if (!confirmed) {
+            const unverifiedMsg =
+              'Application submission could not be verified on page (no submission confirmation found).';
+            logger.error(`❌ Task failed verification: ${unverifiedMsg}`);
+            this.context.finalAnswer = unverifiedMsg;
+            this.context.emitEvent(Actors.SYSTEM, ExecutionState.TASK_FAIL, unverifiedMsg);
+            void analytics.trackTaskFailed(this.context.taskId, 'UNVERIFIED_SUBMISSION');
+            return { success: false, reason: unverifiedMsg };
+          }
+          logger.info(`✅ Submission verified on page: "${confirmationMessage || 'Application submitted'}"`);
+        }
+
         // Emit final answer if available, otherwise use task ID
         const finalMessage = this.context.finalAnswer || this.context.taskId;
         this.context.emitEvent(Actors.SYSTEM, ExecutionState.TASK_OK, finalMessage);
 
         // Track task completion
         void analytics.trackTaskComplete(this.context.taskId);
+        return { success: true, finalAnswer: finalMessage };
       } else if (step >= allowedMaxSteps) {
         logger.error('❌ Task failed: Max steps reached');
-        this.context.emitEvent(Actors.SYSTEM, ExecutionState.TASK_FAIL, t('exec_errors_maxStepsReached'));
+        const maxMsg = t('exec_errors_maxStepsReached');
+        this.context.emitEvent(Actors.SYSTEM, ExecutionState.TASK_FAIL, maxMsg);
 
         // Track task failure with specific error category
-        const maxStepsError = new MaxStepsReachedError(t('exec_errors_maxStepsReached'));
+        const maxStepsError = new MaxStepsReachedError(maxMsg);
         const errorCategory = analytics.categorizeError(maxStepsError);
         void analytics.trackTaskFailed(this.context.taskId, errorCategory);
+        return { success: false, reason: maxMsg };
       } else if (this.context.stopped) {
         this.context.emitEvent(Actors.SYSTEM, ExecutionState.TASK_CANCEL, t('exec_task_cancel'));
 
         // Track task cancellation
         void analytics.trackTaskCancelled(this.context.taskId);
+        return { success: false, reason: 'Task cancelled by user' };
       } else {
         this.context.emitEvent(Actors.SYSTEM, ExecutionState.TASK_PAUSE, t('exec_task_pause'));
-        // Note: We don't track pause as it's not a final state
+        return { success: false, reason: 'Task paused' };
       }
     } catch (error) {
       if (error instanceof RequestCancelledError) {
@@ -331,6 +426,7 @@ export class Executor {
 
         // Track task cancellation
         void analytics.trackTaskCancelled(this.context.taskId);
+        return { success: false, reason: 'Request cancelled' };
       } else {
         const errorMessage = error instanceof Error ? error.message : String(error);
         this.context.emitEvent(Actors.SYSTEM, ExecutionState.TASK_FAIL, t('exec_task_fail', [errorMessage]));
@@ -338,6 +434,7 @@ export class Executor {
         // Track task failure with detailed error categorization
         const errorCategory = analytics.categorizeError(error instanceof Error ? error : errorMessage);
         void analytics.trackTaskFailed(this.context.taskId, errorCategory);
+        return { success: false, reason: errorMessage };
       }
     } finally {
       if (import.meta.env.DEV) {

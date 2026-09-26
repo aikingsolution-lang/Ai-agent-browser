@@ -1,4 +1,5 @@
-import cron, { ScheduledTask } from 'node-cron';
+import type { ScheduledTask } from 'node-cron';
+import cron from 'node-cron';
 import { TrialService } from '../services/trial.service.js';
 import { logger } from '../utils/logger.js';
 

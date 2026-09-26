@@ -15,6 +15,27 @@ window.buildDomTree = (
 
   let highlightIndex = startHighlightIndex; // Reset highlight index
 
+  // Clean previous highlight attributes from light DOM and all open shadow roots so old elements never match
+  function clearExistingHighlightAttributes(root) {
+    if (!root) return;
+    try {
+      const elements = root.querySelectorAll('[data-nanobrowser-id], [browser-user-highlight-id]');
+      for (const el of Array.from(elements)) {
+        el.removeAttribute('data-nanobrowser-id');
+        el.removeAttribute('browser-user-highlight-id');
+      }
+      const all = root.querySelectorAll('*');
+      for (const el of Array.from(all)) {
+        if (el.shadowRoot) {
+          clearExistingHighlightAttributes(el.shadowRoot);
+        }
+      }
+    } catch (e) {}
+  }
+  if (typeof document !== 'undefined' && document.body) {
+    clearExistingHighlightAttributes(document.body);
+  }
+
   // Add caching mechanisms at the top level
   const DOM_CACHE = {
     boundingRects: new WeakMap(),
@@ -1205,6 +1226,9 @@ window.buildDomTree = (
       // regardless of viewport status
       if (nodeData.isInViewport || viewportExpansion === -1) {
         nodeData.highlightIndex = highlightIndex++;
+        try {
+          node.setAttribute('data-nanobrowser-id', String(nodeData.highlightIndex));
+        } catch (e) {}
 
         if (doHighlightElements) {
           if (focusHighlightIndex >= 0) {
@@ -1494,12 +1518,67 @@ window.buildDomTree = (
     return id;
   }
 
+  // Look for active Easy Apply modal, intermediate dialog, or confirmation dialog
+  function getActiveModalScope() {
+    const dialogSelectors = [
+      'div.jobs-easy-apply-modal',
+      'div[data-test-modal].jobs-easy-apply-modal',
+      'div[role="dialog"][data-test-modal]',
+      'div.artdeco-modal[role="dialog"]',
+      'div[role="dialog"][aria-modal="true"]',
+      'div[role="dialog"]',
+      'div[data-test-modal]',
+    ];
+
+    for (const sel of dialogSelectors) {
+      const elements = Array.from(document.querySelectorAll(sel));
+      for (const el of elements) {
+        // Exclude bottom right messaging overlay popups
+        if (
+          el.closest('#messaging-overlay, .msg-overlay-container, [data-view-name="message-overlay"]') ||
+          el.id?.includes('msg') ||
+          (typeof el.className === 'string' && el.className.includes('msg-overlay'))
+        ) {
+          continue;
+        }
+        if (el.isConnected) {
+          const rect = el.getBoundingClientRect();
+          if (rect.width > 50 && rect.height > 50) {
+            return el;
+          }
+        }
+      }
+    }
+
+    // Check open shadow roots (e.g. #interop-outlet)
+    const shadowHosts = document.querySelectorAll('#interop-outlet, *');
+    for (const host of Array.from(shadowHosts)) {
+      if (host.shadowRoot) {
+        for (const sel of dialogSelectors) {
+          const shadowElements = Array.from(host.shadowRoot.querySelectorAll(sel));
+          for (const el of shadowElements) {
+            if (el.isConnected) {
+              const rect = el.getBoundingClientRect();
+              if (rect.width > 50 && rect.height > 50) {
+                return el;
+              }
+            }
+          }
+        }
+      }
+    }
+
+    return null;
+  }
+
   // Reset visited nodes for new DOM tree build
   visitedNodes = null;
-  const rootId = buildDomTree(document.body);
+  const activeModalRoot = getActiveModalScope();
+  const rootElement = activeModalRoot || document.body;
+  const rootId = buildDomTree(rootElement);
 
   // Clear the cache before starting
   DOM_CACHE.clearCache();
 
-  return { rootId, map: DOM_HASH_MAP };
+  return { rootId, map: DOM_HASH_MAP, isModalScoped: Boolean(activeModalRoot) };
 };

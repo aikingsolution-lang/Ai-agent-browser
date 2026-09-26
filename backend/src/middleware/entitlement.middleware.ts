@@ -1,4 +1,4 @@
-import { Request, Response, NextFunction } from 'express';
+import type { Request, Response, NextFunction } from 'express';
 import { Subscription, type ISubscription } from '../models/subscription.model.js';
 import { TrialService } from '../services/trial.service.js';
 import { AppError } from './errorHandler.js';

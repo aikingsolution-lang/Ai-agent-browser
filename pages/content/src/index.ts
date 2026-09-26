@@ -1,94 +1,28 @@
-console.log('Nanobrowser content script active');
+// pages/content/src/index.ts
+import { initJobHarvester } from './jobHarvester';
+import { applyCurrentJobDirectly, type CandidateProfile } from './jobApplier';
 
-/**
- * Real-time YouTube Ad Skipper & Fast-Forwarder
- * Continuously detects and skips video ads on YouTube tabs.
- */
-function initYouTubeAdSkipper() {
-  if (!window.location.hostname.includes('youtube.com')) {
-    return;
+console.log('[Nanobrowser] Content script initialized for LinkedIn Automation');
+
+// 1. Initialize LinkedIn Job Harvester
+initJobHarvester();
+
+// 2. Initialize Direct LinkedIn Job Applier
+chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
+  if (request.type === 'APPLY_CURRENT_JOB_DIRECT') {
+    const profile: CandidateProfile = request.profile || {};
+    applyCurrentJobDirectly(profile)
+      .then(result => {
+        sendResponse(result);
+      })
+      .catch(err => {
+        sendResponse({
+          success: false,
+          message: String(err?.message || err),
+          title: 'Error',
+        });
+      });
+    return true; // Keep channel open for async response
   }
-
-  let wasAdShowing = false;
-
-  const skipAd = () => {
-    // 1. Check for standard skip buttons by selector
-    const skipSelectors = [
-      '.ytp-skip-ad-button',
-      '.ytp-ad-skip-button',
-      '.ytp-ad-skip-button-modern',
-      'button.ytp-ad-skip-button',
-      'button.ytp-ad-skip-button-modern',
-      '.ytp-ad-skip-button-container button',
-      'button[id^="skip-button"]',
-      '.videoAdUiSkipButton',
-      '.ytp-ad-overlay-close-button',
-      'button[aria-label*="Skip"]',
-      'button[aria-label*="skip"]',
-    ];
-
-    for (const sel of skipSelectors) {
-      const btn = document.querySelector<HTMLElement>(sel);
-      if (btn && btn.offsetParent !== null) {
-        try {
-          btn.click();
-          return;
-        } catch {}
-      }
-    }
-
-    // 2. Scan buttons with text content starting with "Skip"
-    const buttons = Array.from(document.querySelectorAll('button'));
-    for (const btn of buttons) {
-      const text = btn.innerText?.trim() || btn.textContent?.trim() || '';
-      if (text && (/^skip/i.test(text) || text.includes('Skip ad') || text.includes('Skip Ad'))) {
-        try {
-          btn.click();
-          return;
-        } catch {}
-      }
-    }
-
-    // 3. Mute ad while playing, and click skip as soon as enabled
-    const isAdShowing = Boolean(document.querySelector('.ad-showing, .ad-interrupting, .ytp-ad-player-overlay'));
-    const video = document.querySelector('video');
-
-    if (isAdShowing && video) {
-      wasAdShowing = true;
-      try {
-        video.muted = true;
-      } catch {}
-
-      // Try to click any skip button in the container
-      const adSkipBtn = document.querySelector<HTMLElement>(
-        '.ytp-ad-skip-button-modern, .ytp-skip-ad-button, .ytp-ad-skip-button, .ytp-ad-skip-button-slot button',
-      );
-      if (adSkipBtn) {
-        try {
-          adSkipBtn.click();
-        } catch {}
-      }
-    } else if (wasAdShowing && video && !isAdShowing) {
-      // Restore audio once real video starts
-      wasAdShowing = false;
-      try {
-        video.muted = false;
-      } catch {}
-    }
-  };
-
-  // Run at 250ms interval
-  setInterval(skipAd, 250);
-
-  // Also hook into DOM mutations for instant response
-  const observer = new MutationObserver(() => {
-    skipAd();
-  });
-
-  observer.observe(document.documentElement, {
-    childList: true,
-    subtree: true,
-  });
-}
-
-initYouTubeAdSkipper();
+  return false;
+});

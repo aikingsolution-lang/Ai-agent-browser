@@ -24,6 +24,18 @@ import { isUrlAllowed } from './util';
 
 const logger = createLogger('Page');
 
+export function formatElementNode(node: DOMElementNode | null | undefined): string {
+  if (!node) return '[unknown element]';
+  const idx = node.highlightIndex !== undefined && node.highlightIndex !== null ? `[#${node.highlightIndex}]` : '';
+  const tag = node.tagName ? `<${node.tagName}>` : '<element>';
+  const idAttr = node.attributes?.id ? ` id="${node.attributes.id}"` : '';
+  const nameAttr = node.attributes?.name ? ` name="${node.attributes.name}"` : '';
+  const roleAttr = node.attributes?.role ? ` role="${node.attributes.role}"` : '';
+  const ariaLabel = node.attributes?.['aria-label'] ? ` aria-label="${node.attributes['aria-label']}"` : '';
+  const classAttr = node.attributes?.class ? ` class="${node.attributes.class.split(' ').slice(0, 2).join(' ')}"` : '';
+  return `${idx} ${tag}${idAttr}${nameAttr}${roleAttr}${ariaLabel}${classAttr}`.trim();
+}
+
 export function build_initial_state(tabId?: number, url?: string, title?: string): PageState {
   return {
     elementTree: new DOMElementNode({
@@ -64,7 +76,6 @@ export default class Page {
   private _puppeteerPage: PuppeteerPage | null = null;
   private _config: BrowserContextConfig;
   private _state: PageState;
-  private _validWebPage = false;
   private _cachedState: PageState | null = null;
   private _cachedStateClickableElementsHashes: CachedStateClickableElementsHashes | null = null;
 
@@ -72,14 +83,6 @@ export default class Page {
     this._tabId = tabId;
     this._config = { ...DEFAULT_BROWSER_CONTEXT_CONFIG, ...config };
     this._state = build_initial_state(tabId, url, title);
-    // chrome://newtab/, chrome://newtab/extensions, https://chromewebstore.google.com/ are not valid web pages, can't be attached
-    const lowerCaseUrl = url.trim().toLowerCase();
-    this._validWebPage =
-      (tabId &&
-        lowerCaseUrl &&
-        lowerCaseUrl.startsWith('http') &&
-        !lowerCaseUrl.startsWith('https://chromewebstore.google.com')) ||
-      false;
   }
 
   get tabId(): number {
@@ -87,11 +90,16 @@ export default class Page {
   }
 
   get validWebPage(): boolean {
-    return this._validWebPage;
+    const currentUrl = (this._puppeteerPage?.url() || this._state.url || '').trim().toLowerCase();
+    return (
+      Boolean(this._tabId) &&
+      currentUrl.startsWith('http') &&
+      !currentUrl.startsWith('https://chromewebstore.google.com')
+    );
   }
 
   get attached(): boolean {
-    return this._validWebPage && this._puppeteerPage !== null;
+    return this.validWebPage && this._puppeteerPage !== null;
   }
 
   get puppeteerPage(): PuppeteerPage | null {
@@ -99,7 +107,17 @@ export default class Page {
   }
 
   async attachPuppeteer(): Promise<boolean> {
-    if (!this._validWebPage) {
+    try {
+      const tab = await chrome.tabs.get(this._tabId);
+      if (tab?.url) {
+        this._state.url = tab.url;
+        this._state.title = tab.title || '';
+      }
+    } catch {
+      // Tab may not be available yet
+    }
+
+    if (!this.validWebPage) {
       return false;
     }
 
@@ -115,8 +133,21 @@ export default class Page {
     });
     this._browser = browser;
 
-    const [page] = await browser.pages();
-    this._puppeteerPage = page;
+    const allPages = await browser.pages();
+    let targetPage = allPages[0];
+    for (const p of allPages) {
+      const pUrl = p.url();
+      if (!pUrl || pUrl.startsWith('chrome-extension://')) continue;
+      if (
+        this._state.url &&
+        (pUrl === this._state.url || this._state.url.includes(pUrl) || pUrl.includes(this._state.url))
+      ) {
+        targetPage = p;
+        break;
+      }
+      targetPage = p;
+    }
+    this._puppeteerPage = targetPage;
 
     // Add anti-detection scripts
     await this._addAntiDetectionScripts();
@@ -172,18 +203,26 @@ export default class Page {
       this._browser = null;
       this._puppeteerPage = null;
       // reset the state
-      this._state = build_initial_state(this._tabId);
+      this._state = build_initial_state(this._tabId, this._state.url, this._state.title);
     }
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  async evaluate<R = any>(pageFunction: any, ...args: any[]): Promise<R> {
+    if (!this._puppeteerPage) {
+      throw new Error('Puppeteer page not attached');
+    }
+    return this._puppeteerPage.evaluate(pageFunction, ...args);
+  }
+
   async removeHighlight(): Promise<void> {
-    if (this._config.displayHighlights && this._validWebPage) {
+    if (this._config.displayHighlights && this.validWebPage) {
       await _removeHighlights(this._tabId);
     }
   }
 
   async getClickableElements(showHighlightElements: boolean, focusElement: number): Promise<DOMState | null> {
-    if (!this._validWebPage) {
+    if (!this.validWebPage) {
       return null;
     }
     return _getClickableElements(
@@ -197,7 +236,7 @@ export default class Page {
 
   // Get scroll position information for the current page.
   async getScrollInfo(): Promise<[number, number, number]> {
-    if (!this._validWebPage) {
+    if (!this.validWebPage) {
       return [0, 0, 0];
     }
     return _getScrollInfo(this._tabId);
@@ -211,13 +250,13 @@ export default class Page {
 
     const element = await this.locateElement(elementNode);
     if (!element) {
-      throw new Error(`Element: ${elementNode} not found`);
+      throw new Error(`Element: ${formatElementNode(elementNode)} not found`);
     }
 
     // Find the nearest scrollable ancestor
     const scrollableElement = await this._findNearestScrollableElement(element);
     if (!scrollableElement) {
-      throw new Error(`No scrollable ancestor found for element: ${elementNode}`);
+      throw new Error(`No scrollable ancestor found for element: ${formatElementNode(elementNode)}`);
     }
 
     const scrollInfo = await scrollableElement.evaluate(el => {
@@ -343,7 +382,7 @@ export default class Page {
   }
 
   async getState(useVision = false, cacheClickableElementsHashes = false): Promise<PageState> {
-    if (!this._validWebPage) {
+    if (!this.validWebPage) {
       // return the initial state
       return build_initial_state(this._tabId);
     }
@@ -593,15 +632,73 @@ export default class Page {
     }
   }
 
+  /**
+   * Discovers scrollable modal container if a modal is currently open.
+   */
+  private async _getModalScrollContainer(): Promise<ElementHandle | null> {
+    if (!this._puppeteerPage) return null;
+    try {
+      const handle = await this._puppeteerPage.evaluateHandle(() => {
+        function findModalContainer(root: Document | ShadowRoot | Element): HTMLElement | null {
+          const selectors = [
+            '.jobs-easy-apply-modal',
+            '.artdeco-modal__content',
+            'div[role="dialog"] .artdeco-modal__content',
+            'div[role="dialog"]',
+            'dialog[open]',
+            '.modal-body',
+            '[aria-modal="true"]',
+          ];
+          for (const sel of selectors) {
+            const el = (root as Element).querySelector
+              ? ((root as Element).querySelector(sel) as HTMLElement | null)
+              : null;
+            if (el) {
+              const content = (el.querySelector('.artdeco-modal__content') ||
+                el.querySelector('.artdeco-modal__content--has-footer') ||
+                el) as HTMLElement;
+              if (content && content.scrollHeight > content.clientHeight) return content;
+              if (el.scrollHeight > el.clientHeight) return el;
+            }
+          }
+          const all = (root as Element).querySelectorAll ? (root as Element).querySelectorAll('*') : [];
+          for (let i = 0; i < all.length; i++) {
+            const child = all[i];
+            if (child.shadowRoot) {
+              const found = findModalContainer(child.shadowRoot);
+              if (found) return found;
+            }
+          }
+          return null;
+        }
+        return findModalContainer(document);
+      });
+      const el = handle.asElement();
+      return (el as ElementHandle) || null;
+    } catch {
+      return null;
+    }
+  }
+
   // scroll to a percentage of the page or element
   // if yPercent is 0, scroll to the top of the page, if 100, scroll to the bottom of the page
   // if elementNode is provided, scroll to a percentage of the element
-  // if elementNode is not provided, scroll to a percentage of the page
+  // if elementNode is not provided, scroll to a percentage of the page or active modal
   async scrollToPercent(yPercent: number, elementNode?: DOMElementNode): Promise<void> {
     if (!this._puppeteerPage) {
       throw new Error('Puppeteer is not connected');
     }
     if (!elementNode) {
+      const modalContainer = await this._getModalScrollContainer();
+      if (modalContainer) {
+        await modalContainer.evaluate((el, yPercent) => {
+          const scrollHeight = el.scrollHeight;
+          const viewportHeight = el.clientHeight;
+          const scrollTop = (scrollHeight - viewportHeight) * (yPercent / 100);
+          el.scrollTo({ top: scrollTop, left: el.scrollLeft, behavior: 'smooth' });
+        }, yPercent);
+        return;
+      }
       await this._puppeteerPage.evaluate(yPercent => {
         const scrollHeight = document.documentElement.scrollHeight;
         const viewportHeight = window.visualViewport?.height || window.innerHeight;
@@ -615,13 +712,13 @@ export default class Page {
     } else {
       const element = await this.locateElement(elementNode);
       if (!element) {
-        throw new Error(`Element: ${elementNode} not found`);
+        throw new Error(`Element: ${formatElementNode(elementNode)} not found`);
       }
 
       // Find the nearest scrollable ancestor
       const scrollableElement = await this._findNearestScrollableElement(element);
       if (!scrollableElement) {
-        throw new Error(`No scrollable ancestor found for element: ${elementNode}`);
+        throw new Error(`No scrollable ancestor found for element: ${formatElementNode(elementNode)}`);
       }
 
       await scrollableElement.evaluate((el, yPercent) => {
@@ -642,6 +739,13 @@ export default class Page {
       throw new Error('Puppeteer is not connected');
     }
     if (!elementNode) {
+      const modalContainer = await this._getModalScrollContainer();
+      if (modalContainer) {
+        await modalContainer.evaluate((el, y) => {
+          el.scrollBy({ top: y, left: 0, behavior: 'smooth' });
+        }, y);
+        return;
+      }
       await this._puppeteerPage.evaluate(y => {
         window.scrollBy({
           top: y,
@@ -652,13 +756,13 @@ export default class Page {
     } else {
       const element = await this.locateElement(elementNode);
       if (!element) {
-        throw new Error(`Element: ${elementNode} not found`);
+        throw new Error(`Element: ${formatElementNode(elementNode)} not found`);
       }
 
       // Find the nearest scrollable ancestor
       const scrollableElement = await this._findNearestScrollableElement(element);
       if (!scrollableElement) {
-        throw new Error(`No scrollable ancestor found for element: ${elementNode}`);
+        throw new Error(`No scrollable ancestor found for element: ${formatElementNode(elementNode)}`);
       }
       await scrollableElement.evaluate(el => {
         el.scrollBy({
@@ -676,19 +780,26 @@ export default class Page {
     }
 
     if (!elementNode) {
+      const modalContainer = await this._getModalScrollContainer();
+      if (modalContainer) {
+        await modalContainer.evaluate(el => {
+          el.scrollBy({ top: -el.clientHeight, left: 0, behavior: 'smooth' });
+        });
+        return;
+      }
       // Scroll the whole page up by viewport height
       await this._puppeteerPage.evaluate('window.scrollBy(0, -(window.visualViewport?.height || window.innerHeight));');
     } else {
       // Scroll the specific element up by its client height
       const element = await this.locateElement(elementNode);
       if (!element) {
-        throw new Error(`Element: ${elementNode} not found`);
+        throw new Error(`Element: ${formatElementNode(elementNode)} not found`);
       }
 
       // Find the nearest scrollable ancestor
       const scrollableElement = await this._findNearestScrollableElement(element);
       if (!scrollableElement) {
-        throw new Error(`No scrollable ancestor found for element: ${elementNode}`);
+        throw new Error(`No scrollable ancestor found for element: ${formatElementNode(elementNode)}`);
       }
 
       await scrollableElement.evaluate(el => {
@@ -703,19 +814,26 @@ export default class Page {
     }
 
     if (!elementNode) {
+      const modalContainer = await this._getModalScrollContainer();
+      if (modalContainer) {
+        await modalContainer.evaluate(el => {
+          el.scrollBy({ top: el.clientHeight, left: 0, behavior: 'smooth' });
+        });
+        return;
+      }
       // Scroll the whole page down by viewport height
       await this._puppeteerPage.evaluate('window.scrollBy(0, (window.visualViewport?.height || window.innerHeight));');
     } else {
       // Scroll the specific element down by its client height
       const element = await this.locateElement(elementNode);
       if (!element) {
-        throw new Error(`Element: ${elementNode} not found`);
+        throw new Error(`Element: ${formatElementNode(elementNode)} not found`);
       }
 
       // Find the nearest scrollable ancestor
       const scrollableElement = await this._findNearestScrollableElement(element);
       if (!scrollableElement) {
-        throw new Error(`No scrollable ancestor found for element: ${elementNode}`);
+        throw new Error(`No scrollable ancestor found for element: ${formatElementNode(elementNode)}`);
       }
 
       await scrollableElement.evaluate(el => {
@@ -1030,7 +1148,6 @@ export default class Page {
 
   async locateElement(element: DOMElementNode): Promise<ElementHandle | null> {
     if (!this._puppeteerPage) {
-      // throw new Error('Puppeteer page is not connected');
       logger.warning('Puppeteer is not connected');
       return null;
     }
@@ -1050,27 +1167,90 @@ export default class Page {
       const cssSelector = parent.enhancedCssSelectorForElement(this._config.includeDynamicAttributes);
       const frameElement: ElementHandle | null = await currentFrame.$(cssSelector);
       if (!frameElement) {
-        // throw new Error(`Could not find iframe with selector: ${cssSelector}`);
         logger.warning(`Could not find iframe with selector: ${cssSelector}`);
         return null;
       }
       const frame: Frame | null = await frameElement.contentFrame();
       if (!frame) {
-        // throw new Error(`Could not access frame content for selector: ${cssSelector}`);
-        logger.warning(`Could not access frame content for selector: ${cssSelector}`);
+        logger.warning(`Could not access frame content for selector: ${cssSelector} (cross-origin or blocked)`);
         return null;
       }
       currentFrame = frame;
       logger.info('currentFrame changed', currentFrame);
     }
 
+    // Step 1: Shadow-piercing lookup by unique data-nanobrowser-id stamped during DOM tree extraction
+    if (element.highlightIndex !== undefined && element.highlightIndex !== null) {
+      try {
+        const handle = await currentFrame.evaluateHandle(idx => {
+          function searchRoot(root: Node | ShadowRoot): Element | null {
+            if (!root) return null;
+            if ((root as Element).querySelector) {
+              const el = (root as Element).querySelector(`[data-nanobrowser-id="${idx}"]`);
+              if (el) return el;
+            }
+            const all = (root as Element).querySelectorAll ? (root as Element).querySelectorAll('*') : [];
+            for (let i = 0; i < all.length; i++) {
+              const child = all[i];
+              if (child.shadowRoot) {
+                const found = searchRoot(child.shadowRoot);
+                if (found) return found;
+              }
+            }
+            return null;
+          }
+          return searchRoot(document.body || document.documentElement);
+        }, element.highlightIndex);
+
+        const elHandle = handle.asElement() as ElementHandle<Element> | null;
+        if (elHandle) {
+          const isHidden = await elHandle.isHidden().catch(() => false);
+          if (!isHidden) {
+            await this._scrollIntoViewIfNeeded(elHandle).catch(() => {});
+          }
+          return elHandle;
+        }
+      } catch (err) {
+        logger.debug('Shadow-piercing data-nanobrowser-id search failed:', err);
+      }
+    }
+
     const cssSelector = element.enhancedCssSelectorForElement(this._config.includeDynamicAttributes);
 
     try {
-      // Try CSS selector first
+      // Step 2: Try CSS selector directly on frame
       let elementHandle: ElementHandle | null = await currentFrame.$(cssSelector);
 
-      // If CSS selector failed, try XPath
+      // Step 3: If CSS selector failed, search across open shadow roots using selector
+      if (!elementHandle && cssSelector) {
+        try {
+          const handle = await currentFrame.evaluateHandle(sel => {
+            function searchShadowWithSelector(root: Node | ShadowRoot): Element | null {
+              if (!root) return null;
+              try {
+                if ((root as Element).querySelector) {
+                  const el = (root as Element).querySelector(sel);
+                  if (el) return el;
+                }
+              } catch {}
+              const all = (root as Element).querySelectorAll ? (root as Element).querySelectorAll('*') : [];
+              for (let i = 0; i < all.length; i++) {
+                const child = all[i];
+                if (child.shadowRoot) {
+                  const found = searchShadowWithSelector(child.shadowRoot);
+                  if (found) return found;
+                }
+              }
+              return null;
+            }
+            return searchShadowWithSelector(document.body || document.documentElement);
+          }, cssSelector);
+
+          elementHandle = (handle.asElement() as ElementHandle) || null;
+        } catch {}
+      }
+
+      // Step 4: If CSS selector failed, try XPath
       if (!elementHandle) {
         const xpath = element.xpath;
         if (xpath) {
@@ -1080,21 +1260,42 @@ export default class Page {
             const xpathSelector = `::-p-xpath(${fullXpath})`;
             elementHandle = await currentFrame.$(xpathSelector);
           } catch (xpathError) {
-            logger.error('Failed to locate element using XPath:', xpathError);
+            logger.debug('Failed to locate element using XPath:', xpathError);
           }
+        }
+      }
+
+      // Step 5: Check if element might be trapped in a closed shadow root or iframe
+      if (!elementHandle) {
+        const hasClosedShadow = await currentFrame
+          .evaluate(() => {
+            const customElements = document.querySelectorAll('*');
+            for (let i = 0; i < customElements.length; i++) {
+              const el = customElements[i];
+              if (el.tagName.includes('-') && !el.shadowRoot) {
+                return true;
+              }
+            }
+            return false;
+          })
+          .catch(() => false);
+        if (hasClosedShadow) {
+          logger.warning(
+            `[locateElement] Element "${formatElementNode(element)}" not found. Page contains custom elements with closed/inaccessible shadow roots.`,
+          );
         }
       }
 
       // If element found, check visibility and scroll into view
       if (elementHandle) {
-        const isHidden = await elementHandle.isHidden();
+        const isHidden = await elementHandle.isHidden().catch(() => false);
         if (!isHidden) {
-          await this._scrollIntoViewIfNeeded(elementHandle);
+          await this._scrollIntoViewIfNeeded(elementHandle).catch(() => {});
         }
         return elementHandle;
       }
 
-      logger.info('elementHandle not located');
+      logger.info(`elementHandle not located for: ${formatElementNode(element)}`);
     } catch (error) {
       logger.error('Failed to locate element:', error);
     }
@@ -1108,14 +1309,14 @@ export default class Page {
     }
 
     try {
-      // Highlight before typing
-      // if (elementNode.highlightIndex != null) {
-      //   await this._updateState(useVision, elementNode.highlightIndex);
-      // }
-
-      const element = await this.locateElement(elementNode);
+      let element = await this.locateElement(elementNode);
       if (!element) {
-        throw new Error(`Element: ${elementNode} not found`);
+        // Retry once after brief pause
+        await new Promise(r => setTimeout(r, 300));
+        element = await this.locateElement(elementNode);
+      }
+      if (!element) {
+        throw new Error(`Element: ${formatElementNode(elementNode)} not found`);
       }
 
       // Ensure element is ready for input
@@ -1205,7 +1406,7 @@ export default class Page {
       // Wait for page stability after input
       await this.waitForPageAndFramesLoad();
     } catch (error) {
-      const errorMsg = `Failed to input text into element: ${elementNode}. Error: ${error instanceof Error ? error.message : String(error)}`;
+      const errorMsg = `Failed to input text into element: ${formatElementNode(elementNode)}. Error: ${error instanceof Error ? error.message : String(error)}`;
       logger.error(errorMsg);
       throw new Error(errorMsg);
     }
@@ -1316,7 +1517,7 @@ export default class Page {
 
       const element = await this.locateElement(elementNode);
       if (!element) {
-        throw new Error(`Element: ${elementNode} not found`);
+        throw new Error(`Element: ${formatElementNode(elementNode)} not found`);
       }
 
       // Scroll element into view if needed
@@ -1339,6 +1540,13 @@ export default class Page {
         try {
           await element.evaluate(el => {
             const htmlEl = el as HTMLElement;
+            htmlEl.scrollIntoView({ behavior: 'instant', block: 'center' });
+            htmlEl.focus();
+            const mouseOpts = { bubbles: true, cancelable: true, view: window };
+            htmlEl.dispatchEvent(new PointerEvent('pointerdown', mouseOpts));
+            htmlEl.dispatchEvent(new MouseEvent('mousedown', mouseOpts));
+            htmlEl.dispatchEvent(new PointerEvent('pointerup', mouseOpts));
+            htmlEl.dispatchEvent(new MouseEvent('mouseup', mouseOpts));
             htmlEl.click();
             const anchor = (
               htmlEl.tagName.toLowerCase() === 'a' ? htmlEl : htmlEl.closest('a') || htmlEl.querySelector('a')
@@ -1501,7 +1709,7 @@ export default class Page {
     }
 
     try {
-      return await this._puppeteerPage.evaluate(() => {
+      const result = await this._puppeteerPage.evaluate(() => {
         const url = window.location.href.toLowerCase();
 
         // 1. Explicit Checkpoint URLs (LinkedIn, Cloudflare, etc.)
@@ -1514,11 +1722,32 @@ export default class Page {
           return { isCaptcha: true, type: `Security checkpoint URL (${window.location.pathname})` };
         }
 
-        // 2. Specific dedicated CAPTCHA iframe and widget selectors
+        // Helper: Check if element is genuinely visible and >= 100x100
+        function isElementVisibleChallenge(el: Element | null): boolean {
+          if (!el) return false;
+          // Ignore invisible recaptcha badge container
+          if (el.closest('.grecaptcha-badge') || el.classList.contains('grecaptcha-badge')) {
+            return false;
+          }
+          const htmlEl = el as HTMLElement;
+          const style = window.getComputedStyle(htmlEl);
+          if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity || '1') <= 0.05) {
+            return false;
+          }
+          const rect = htmlEl.getBoundingClientRect();
+          // Must be larger than ~100x100px to be an interactive challenge (not a hidden tracker or badge)
+          if (rect.width < 100 || rect.height < 100) {
+            return false;
+          }
+          return true;
+        }
+
+        // 2. Specific dedicated CAPTCHA iframe and widget selectors (VISIBLE ONLY)
         const captchaSelectors = [
           'iframe[src*="arkoselabs.com"]',
           'iframe[src*="funcaptcha"]',
-          'iframe[src*="google.com/recaptcha"]',
+          'iframe[src*="recaptcha/api2/bframe"]',
+          'iframe[src*="recaptcha/enterprise/bframe"]',
           'iframe[src*="hcaptcha.com"]',
           'iframe[src*="challenges.cloudflare.com"]',
           'form#checkpoint-challenge-form',
@@ -1528,38 +1757,52 @@ export default class Page {
         ];
 
         for (const sel of captchaSelectors) {
-          const el = document.querySelector(sel);
-          if (el) {
-            return { isCaptcha: true, type: `Security widget (${sel})` };
+          const els = Array.from(document.querySelectorAll(sel));
+          for (const el of els) {
+            if (isElementVisibleChallenge(el)) {
+              return {
+                isCaptcha: true,
+                type: `Visible challenge widget (${sel}) [${Math.round(el.getBoundingClientRect().width)}x${Math.round(el.getBoundingClientRect().height)}]`,
+              };
+            }
           }
         }
 
-        // 3. Text signatures - ONLY check if we are on a checkpoint page or heading/h1/h2
-        // To avoid false positives matching text on general search result listings or footer links
-        const isCheckpointPage = url.includes('/checkpoint') || url.includes('/challenge');
-        if (isCheckpointPage) {
-          const headingText = Array.from(document.querySelectorAll('h1, h2, h3, [role="heading"]'))
-            .map(h => (h.textContent || '').trim().toLowerCase())
-            .join(' ');
+        // 3. Visible text signatures on page
+        const textNodes = Array.from(
+          document.querySelectorAll('h1, h2, h3, [role="heading"], [role="alert"], p, div.challenge-header'),
+        );
+        const checkpointPhrases = [
+          'quick security check',
+          'let us know you are human',
+          "let us know you're not a robot",
+          'verify you are a human',
+          'security verification',
+          'please solve this puzzle',
+          'unusual traffic from your computer network',
+        ];
 
-          const checkpointPhrases = [
-            'quick security check',
-            'let us know you are human',
-            'verify your identity',
-            'security verification',
-            'please solve this puzzle',
-            'unusual traffic from your computer network',
-          ];
-
+        for (const node of textNodes) {
+          const txt = (node.textContent || '').trim().toLowerCase();
+          if (!txt) continue;
           for (const phrase of checkpointPhrases) {
-            if (headingText.includes(phrase)) {
-              return { isCaptcha: true, type: phrase };
+            if (txt.includes(phrase)) {
+              const htmlNode = node as HTMLElement;
+              const style = window.getComputedStyle(htmlNode);
+              if (style.display !== 'none' && style.visibility !== 'hidden' && htmlNode.offsetParent !== null) {
+                return { isCaptcha: true, type: `Visible text: "${phrase}"` };
+              }
             }
           }
         }
 
         return { isCaptcha: false };
       });
+
+      if (result.isCaptcha) {
+        console.debug(`[CaptchaDetector] Triggered by: ${result.type}`);
+      }
+      return result;
     } catch {
       return { isCaptcha: false };
     }
@@ -1841,4 +2084,2685 @@ export default class Page {
       throw new URLNotAllowedError(errorMessage);
     }
   }
+
+  /**
+   * Fast check to see if the Easy Apply modal is currently open.
+   */
+  async isEasyApplyModalOpen(): Promise<boolean> {
+    if (!this._puppeteerPage) return false;
+    return this._puppeteerPage
+      .evaluate(() => {
+        function check(root: any): boolean {
+          const dialog = root.querySelector
+            ? root.querySelector('div[role="dialog"], .jobs-easy-apply-modal, [aria-modal="true"]')
+            : null;
+          if (dialog) return true;
+          const all = root.querySelectorAll ? root.querySelectorAll('*') : [];
+          for (let i = 0; i < all.length; i++) {
+            const el = all[i];
+            if (el.shadowRoot && check(el.shadowRoot)) return true;
+          }
+          return false;
+        }
+        return check(document);
+      })
+      .catch(() => false);
+  }
+
+  /**
+   * Clicks the Easy Apply button in the active job details pane.
+   * Scoped specifically to details pane in split-view to avoid clicking search result cards.
+   */
+  async clickEasyApplyButton(): Promise<{ success: boolean; error?: string }> {
+    if (!this._puppeteerPage) {
+      return { success: false, error: 'Puppeteer not connected' };
+    }
+
+    try {
+      const clickResult = await this._puppeteerPage.evaluate(() => {
+        // Find active details container in split view or standalone
+        const detailsContainer =
+          document.querySelector('.jobs-search__job-details--container') ||
+          document.querySelector('.jobs-details__main-content') ||
+          document.querySelector('.job-view-layout') ||
+          document.querySelector('.jobs-unified-top-card') ||
+          document.querySelector('[data-view-name="job-details-top-card"]') ||
+          document.body;
+
+        const candidates = Array.from(
+          detailsContainer.querySelectorAll(
+            'button.jobs-apply-button, button.jobs-apply-button--top-card, button[data-control-name="jobdetails_topcard_inapply"], button',
+          ),
+        ) as HTMLElement[];
+
+        const easyApplyBtn = candidates.find(btn => {
+          if (btn.closest('.jobs-search-results-list, .scaffold-layout__list, [data-view-name="job-card"]')) {
+            return false;
+          }
+          const text = (btn.innerText || btn.textContent || '').trim().toLowerCase();
+          const aria = (btn.getAttribute('aria-label') || '').trim().toLowerCase();
+          return (
+            btn.classList.contains('jobs-apply-button') ||
+            /^\s*easy\s*apply/i.test(text) ||
+            /^\s*easy\s*apply/i.test(aria)
+          );
+        });
+
+        if (easyApplyBtn) {
+          easyApplyBtn.scrollIntoView({ behavior: 'instant', block: 'center' });
+          easyApplyBtn.click();
+          return { clicked: true };
+        }
+        return { clicked: false, reason: 'Easy Apply button not found in active job details' };
+      });
+
+      return { success: clickResult.clicked, error: clickResult.reason };
+    } catch (err) {
+      return { success: false, error: String(err) };
+    }
+  }
+
+  /**
+   * Polls up to maxWaitMs (every pollIntervalMs) for the Easy Apply modal.
+   * Checks light DOM and open shadow roots (#interop-outlet).
+   * Automatically handles known intermediate dialogs:
+   *   - "Continue applying?" -> Clicks Continue
+   *   - "Job search safety reminder" -> Clicks Continue / Dismiss
+   *   - "Save this application?" -> Clicks Discard
+   *   - Unknown modal/dialog -> Halts with clear error!
+   * Checks if modal is already open before waiting.
+   * Provides detailed debug logging of modal and interactive elements.
+   */
+  async waitForEasyApplyModal(
+    maxWaitMs = 5000,
+    pollIntervalMs = 250,
+  ): Promise<{
+    opened: boolean;
+    inShadowRoot?: boolean;
+    interactiveCount?: number;
+    error?: string;
+  }> {
+    if (!this._puppeteerPage) {
+      return { opened: false, error: 'Puppeteer not connected' };
+    }
+
+    const startTime = Date.now();
+    let attempt = 0;
+    let lastUnknownDialog: string | null = null;
+
+    while (Date.now() - startTime < maxWaitMs) {
+      attempt++;
+
+      const checkResult = await this._puppeteerPage.evaluate(() => {
+        function inspectRoot(root: any): {
+          modalFound: boolean;
+          inShadow: boolean;
+          dialogTitle?: string;
+          isIntermediate?: boolean;
+          intermediateAction?: 'continue' | 'safety' | 'discard' | 'unknown';
+          inputsCount: number;
+          buttonsCount: number;
+          hasClosedShadow: boolean;
+        } {
+          // Helper to ensure an element is a genuine visible modal dialog
+          function isGenuineVisibleModal(dialog: HTMLElement): boolean {
+            if (!dialog || !dialog.isConnected) return false;
+
+            // 1. Exclude global navigation, headers, footers, search list, or messaging docks/flyouts
+            if (
+              dialog.closest(
+                'nav, header, #global-nav, .global-nav, .global-nav__nav, .msg-overlay-container, #msg-overlay, .msg-overlay-bubble-header, .artdeco-dropdown, .artdeco-dropdown__content, .jobs-search-results-list, .scaffold-layout__list, [data-view-name="job-card"], [role="tooltip"], .tooltip',
+              )
+            ) {
+              return false;
+            }
+
+            // 2. Exclude notification badges, counters, or alert flyouts (e.g. "0 notifications")
+            const text = (dialog.innerText || dialog.textContent || '').trim().toLowerCase();
+            const aria = (dialog.getAttribute('aria-label') || '').trim().toLowerCase();
+            if (
+              /notifications?/i.test(text) ||
+              /notifications?/i.test(aria) ||
+              dialog.classList.contains('notification-badge') ||
+              dialog.closest(
+                '.notifications-badge, .nav-item--notifications, [data-test-global-nav-link="notifications"]',
+              )
+            ) {
+              return false;
+            }
+
+            // 3. Exclude tooltips, dropdowns, and toast messages
+            if (
+              dialog.getAttribute('role') === 'tooltip' ||
+              dialog.classList.contains('artdeco-toast') ||
+              dialog.classList.contains('artdeco-hoverable-content')
+            ) {
+              return false;
+            }
+
+            // 4. Must be genuinely visible (not display: none, visibility: hidden, opacity ~ 0)
+            const style = window.getComputedStyle(dialog);
+            if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity || '1') <= 0.05) {
+              return false;
+            }
+
+            // 5. Must have genuine modal dimensions (minimum 250px width, 150px height)
+            const rect = dialog.getBoundingClientRect();
+            if (rect.width < 250 || rect.height < 150) {
+              return false;
+            }
+
+            return true;
+          }
+
+          // Check for dialogs (scoped strictly to genuine visible modals)
+          const rawDialogs = root.querySelectorAll
+            ? (Array.from(
+                root.querySelectorAll(
+                  'div.jobs-easy-apply-modal, div[data-test-modal], div.artdeco-modal, dialog[open], div[role="dialog"], [aria-modal="true"]',
+                ),
+              ) as HTMLElement[])
+            : [];
+
+          const dialogs = rawDialogs.filter(isGenuineVisibleModal);
+
+          let unknownCandidate: { title: string; inShadow: boolean } | null = null;
+
+          for (const dialog of dialogs) {
+            const text = (dialog.innerText || dialog.textContent || '').trim();
+            const titleEl = dialog.querySelector('h1, h2, h3, [id*="header"], [class*="header"]');
+            const title = (titleEl?.textContent || text.slice(0, 100)).trim();
+
+            // Known intermediate dialog 1: "Continue applying?"
+            if (/continue applying/i.test(title) || /continue applying/i.test(text)) {
+              const buttons = Array.from(dialog.querySelectorAll('button'));
+              const continueBtn = buttons.find(b => /continue/i.test(b.textContent || ''));
+              if (continueBtn) {
+                continueBtn.click();
+                return {
+                  modalFound: false,
+                  inShadow: root instanceof ShadowRoot,
+                  dialogTitle: title,
+                  isIntermediate: true,
+                  intermediateAction: 'continue',
+                  inputsCount: 0,
+                  buttonsCount: 0,
+                  hasClosedShadow: false,
+                };
+              }
+            }
+
+            // Known intermediate dialog 2: "Job search safety reminder"
+            if (/job search safety/i.test(title) || /safety reminder/i.test(title) || /safety reminder/i.test(text)) {
+              const buttons = Array.from(dialog.querySelectorAll('button'));
+              const okBtn = buttons.find(b => /continue|got it|dismiss|understand/i.test(b.textContent || ''));
+              if (okBtn) {
+                okBtn.click();
+                return {
+                  modalFound: false,
+                  inShadow: root instanceof ShadowRoot,
+                  dialogTitle: title,
+                  isIntermediate: true,
+                  intermediateAction: 'safety',
+                  inputsCount: 0,
+                  buttonsCount: 0,
+                  hasClosedShadow: false,
+                };
+              }
+            }
+
+            // Known intermediate dialog 3: "Save this application?" -> Discard
+            if (/save this application/i.test(title) || /save application/i.test(title) || /discard/i.test(text)) {
+              const buttons = Array.from(dialog.querySelectorAll('button'));
+              const discardBtn = buttons.find(b => /discard/i.test(b.textContent || ''));
+              if (discardBtn) {
+                discardBtn.click();
+                return {
+                  modalFound: false,
+                  inShadow: root instanceof ShadowRoot,
+                  dialogTitle: title,
+                  isIntermediate: true,
+                  intermediateAction: 'discard',
+                  inputsCount: 0,
+                  buttonsCount: 0,
+                  hasClosedShadow: false,
+                };
+              }
+            }
+
+            // Is it the actual Easy Apply modal?
+            const isEasyApply =
+              dialog.classList.contains('jobs-easy-apply-modal') ||
+              /easy apply/i.test(title) ||
+              dialog.querySelector('.jobs-easy-apply-content') !== null ||
+              dialog.querySelector('[data-easy-apply-modal]') !== null ||
+              /apply to/i.test(title) ||
+              /contact info/i.test(text) ||
+              /resume/i.test(text) ||
+              /additional questions/i.test(text) ||
+              /home address/i.test(text) ||
+              /work experience/i.test(text);
+
+            if (isEasyApply) {
+              const inputs = dialog.querySelectorAll('input:not([type="hidden"]), textarea, select');
+              const buttons = dialog.querySelectorAll('button');
+              return {
+                modalFound: true,
+                inShadow: root instanceof ShadowRoot,
+                dialogTitle: title,
+                inputsCount: inputs.length,
+                buttonsCount: buttons.length,
+                hasClosedShadow: false,
+              };
+            }
+
+            // Record as unknown candidate only if no Easy Apply or known intermediate is found across all candidates
+            if (!unknownCandidate) {
+              unknownCandidate = { title, inShadow: root instanceof ShadowRoot };
+            }
+          }
+
+          if (unknownCandidate) {
+            return {
+              modalFound: false,
+              inShadow: unknownCandidate.inShadow,
+              dialogTitle: unknownCandidate.title,
+              isIntermediate: true,
+              intermediateAction: 'unknown',
+              inputsCount: 0,
+              buttonsCount: 0,
+              hasClosedShadow: false,
+            };
+          }
+
+          // Check for shadow roots (e.g. #interop-outlet)
+          let foundClosed = false;
+          const allEls = root.querySelectorAll ? root.querySelectorAll('*') : [];
+          for (let i = 0; i < allEls.length; i++) {
+            const el = allEls[i];
+            if (el.shadowRoot) {
+              const res = inspectRoot(el.shadowRoot);
+              if (res.modalFound || res.isIntermediate) return res;
+            } else if (el.tagName && el.tagName.includes('-')) {
+              foundClosed = true;
+            }
+          }
+
+          return {
+            modalFound: false,
+            inShadow: false,
+            inputsCount: 0,
+            buttonsCount: 0,
+            hasClosedShadow: foundClosed,
+          };
+        }
+
+        return inspectRoot(document);
+      });
+
+      if (checkResult.isIntermediate) {
+        if (checkResult.intermediateAction === 'unknown') {
+          lastUnknownDialog = checkResult.dialogTitle || 'Unknown dialog';
+          console.debug(
+            `[JobApplyAgent] Potential unknown dialog noted: "${lastUnknownDialog}". Continuing to poll for Easy Apply modal...`,
+          );
+        } else {
+          console.debug(
+            `[JobApplyAgent] Handled intermediate dialog: ${checkResult.dialogTitle} (${checkResult.intermediateAction})`,
+          );
+          logger.info(`Handled intermediate dialog: ${checkResult.dialogTitle} (${checkResult.intermediateAction})`);
+          await new Promise(r => setTimeout(r, 400));
+          continue;
+        }
+      }
+
+      if (checkResult.modalFound) {
+        console.debug(
+          `[JobApplyAgent] Easy Apply modal detected! In shadow root: ${checkResult.inShadow}, Interactive inputs: ${checkResult.inputsCount}, Buttons: ${checkResult.buttonsCount}`,
+        );
+        logger.info(
+          `[JobApplyAgent] Easy Apply modal detected (inShadow=${checkResult.inShadow}, inputs=${checkResult.inputsCount}, buttons=${checkResult.buttonsCount})`,
+        );
+        return {
+          opened: true,
+          inShadowRoot: checkResult.inShadow,
+          interactiveCount: checkResult.inputsCount + checkResult.buttonsCount,
+        };
+      }
+
+      if (checkResult.hasClosedShadow && attempt === 1) {
+        console.debug('[JobApplyAgent] Note: Page contains custom elements. Checking accessibility...');
+      }
+
+      await new Promise(r => setTimeout(r, pollIntervalMs));
+    }
+
+    if (lastUnknownDialog) {
+      const err = `Unknown dialog encountered ("${lastUnknownDialog}"). Aborting without clicking to ensure safety.`;
+      console.debug(`[JobApplyAgent] ${err}`);
+      logger.warning(err);
+      return { opened: false, error: err };
+    }
+
+    console.debug(`[JobApplyAgent] Easy Apply modal did not appear within ${maxWaitMs}ms`);
+    return { opened: false, error: 'Easy Apply modal failed to open within timeout' };
+  }
+
+  /**
+   * Verifies if the page shows explicit application submission confirmation.
+   * Required before marking any application task as successful.
+   */
+  async verifyApplicationConfirmation(): Promise<{ confirmed: boolean; message?: string }> {
+    if (!this._puppeteerPage) {
+      return { confirmed: false, message: 'Puppeteer not connected' };
+    }
+
+    return this._puppeteerPage
+      .evaluate(() => {
+        function searchConfirmation(root: any): string | null {
+          const confirmationPatterns = [
+            /your application was sent/i,
+            /application submitted/i,
+            /your application has been submitted/i,
+            /application received/i,
+            /successfully applied/i,
+            /thanks for applying/i,
+            /thank you for applying/i,
+            /we have received your application/i,
+            /application sent to/i,
+          ];
+
+          // 1. Check headings, alerts, feedback banners
+          const headingsAndBadges = root.querySelectorAll
+            ? (Array.from(
+                root.querySelectorAll(
+                  'h1, h2, h3, h4, [role="alert"], [class*="toast"], [class*="success"], [class*="confirm"], .artdeco-inline-feedback',
+                ),
+              ) as HTMLElement[])
+            : [];
+
+          for (const el of headingsAndBadges) {
+            const txt = (el.textContent || '').trim();
+            for (const pattern of confirmationPatterns) {
+              if (pattern.test(txt)) {
+                return txt;
+              }
+            }
+          }
+
+          // 2. Check dialog text if present
+          const dialog = root.querySelector
+            ? root.querySelector('div[role="dialog"], .artdeco-modal, .jobs-easy-apply-modal')
+            : null;
+          if (dialog) {
+            const dialogText = (dialog.textContent || '').trim();
+            for (const pattern of confirmationPatterns) {
+              if (pattern.test(dialogText)) {
+                return dialogText.slice(0, 150);
+              }
+            }
+          }
+
+          // 3. Search shadow roots
+          const all = root.querySelectorAll ? root.querySelectorAll('*') : [];
+          for (let i = 0; i < all.length; i++) {
+            const child = all[i];
+            if (child.shadowRoot) {
+              const found = searchConfirmation(child.shadowRoot);
+              if (found) return found;
+            }
+          }
+
+          return null;
+        }
+
+        const match = searchConfirmation(document);
+        return match ? { confirmed: true, message: match } : { confirmed: false };
+      })
+      .catch(() => ({ confirmed: false, message: 'Error checking page confirmation' }));
+  }
+
+  /**
+   * Robust multi-selector validation guard for the active Easy Apply modal.
+   * Checks aria-invalid, inline error texts, and empty required fields.
+   */
+  async validateModalFormState(): Promise<{
+    hasErrors: boolean;
+    errors: Array<{ fieldLabel: string; errorText: string }>;
+    emptyRequiredFields: Array<{
+      id?: string;
+      label: string;
+      fieldType: 'text' | 'number' | 'radio' | 'dropdown' | 'checkbox';
+      options?: string[];
+      min?: number;
+      max?: number;
+      placeholder?: string;
+      hintText?: string;
+    }>;
+  }> {
+    if (!this._puppeteerPage) {
+      return { hasErrors: false, errors: [], emptyRequiredFields: [] };
+    }
+
+    return this._puppeteerPage
+      .evaluate(() => {
+        function findActiveModal(root: any): HTMLElement | null {
+          const candidates = root.querySelectorAll
+            ? (Array.from(
+                root.querySelectorAll(
+                  'div.jobs-easy-apply-modal, div[data-test-modal], div.artdeco-modal, div[role="dialog"]',
+                ),
+              ) as HTMLElement[])
+            : [];
+
+          for (const c of candidates) {
+            if (
+              c.closest(
+                'nav, header, #global-nav, .global-nav, .msg-overlay-container, #msg-overlay, .artdeco-dropdown',
+              )
+            ) {
+              continue;
+            }
+            const text = (c.innerText || c.textContent || '').trim().toLowerCase();
+            if (/^\d+\s*notifications?$/i.test(text) || c.closest('.notifications-badge')) {
+              continue;
+            }
+            const style = window.getComputedStyle(c);
+            if (style.display === 'none' || style.visibility === 'hidden') continue;
+            const rect = c.getBoundingClientRect();
+            if (rect.width >= 200 && rect.height >= 150) return c;
+          }
+
+          const all = root.querySelectorAll ? root.querySelectorAll('*') : [];
+          for (let i = 0; i < all.length; i++) {
+            if (all[i].shadowRoot) {
+              const found = findActiveModal(all[i].shadowRoot);
+              if (found) return found;
+            }
+          }
+          return null;
+        }
+
+        function cleanDuplicateText(rawText: string): string {
+          if (!rawText) return '';
+          let text = rawText
+            .replace(/[\n\r\t]+/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+          if (text.length <= 4) return text;
+
+          // 1. Direct concatenation without separator: "Question?Question?"
+          if (text.length % 2 === 0) {
+            const half = text.slice(0, text.length / 2);
+            if (half + half === text) return half;
+          }
+
+          // 2. Space-separated exact duplication: "Question? Question?"
+          const mid = Math.floor(text.length / 2);
+          if (text[mid] === ' ') {
+            const left = text.slice(0, mid).trim();
+            const right = text.slice(mid + 1).trim();
+            if (left === right) return left;
+          }
+
+          // 3. Word-based even split:
+          const words = text.split(/\s+/);
+          if (words.length >= 4 && words.length % 2 === 0) {
+            const halfLen = words.length / 2;
+            const w1 = words.slice(0, halfLen).join(' ');
+            const w2 = words.slice(halfLen).join(' ');
+            if (w1 === w2) return w1;
+          }
+
+          // 4. Repeated sentence split on punctuation:
+          const punctMatch = text.match(/^(.+?[?.!*])\s+(.+)$/);
+          if (punctMatch) {
+            const p1 = punctMatch[1].trim();
+            const p2 = punctMatch[2].trim();
+            const normP1 = p1.replace(/[*?.\s]/g, '').toLowerCase();
+            const normP2 = p2.replace(/[*?.\s]/g, '').toLowerCase();
+            if (normP1 && (normP1 === normP2 || normP2.startsWith(normP1))) return p1;
+          }
+
+          // 5. General substring repetition search:
+          for (let len = Math.floor(text.length / 2); len >= 8; len--) {
+            const candidate = text.slice(0, len).trim();
+            const remainder = text.slice(len).trim();
+            if (candidate.length > 6) {
+              const normC = candidate.replace(/[*?.\s]/g, '').toLowerCase();
+              const normR = remainder.replace(/[*?.\s]/g, '').toLowerCase();
+              if (normC.length > 6 && (normC === normR || normR.startsWith(normC))) {
+                return candidate;
+              }
+            }
+          }
+
+          return text;
+        }
+
+        function cleanElementText(el: Element | null): string {
+          if (!el) return '';
+          const clone = el.cloneNode(true) as HTMLElement;
+          const hidden = clone.querySelectorAll(
+            '.visually-hidden, [aria-hidden="true"], .sr-only, .u-screen-reader-only',
+          );
+          hidden.forEach(h => h.remove());
+          let txt = (clone.textContent || '')
+            .replace(/[\n\r\t]+/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+          if (!txt) {
+            txt = (el.textContent || '')
+              .replace(/[\n\r\t]+/g, ' ')
+              .replace(/\s+/g, ' ')
+              .trim();
+          }
+          return cleanDuplicateText(txt);
+        }
+
+        function cleanDuplicateString(text: string): string {
+          return cleanDuplicateText(text);
+        }
+
+        const modal = findActiveModal(document) || document.body;
+        const errors: Array<{ fieldLabel: string; errorText: string }> = [];
+        const emptyRequiredFields: Array<{
+          id?: string;
+          label: string;
+          fieldType: 'text' | 'number' | 'radio' | 'dropdown' | 'checkbox';
+          options?: string[];
+          min?: number;
+          max?: number;
+          placeholder?: string;
+          hintText?: string;
+        }> = [];
+
+        // 1. Check elements with aria-invalid="true"
+        const invalidEls = Array.from(modal.querySelectorAll('[aria-invalid="true"]')) as HTMLElement[];
+        for (const el of invalidEls) {
+          let label = '';
+          const id = el.getAttribute('id');
+          if (id) {
+            const lbl = modal.querySelector(`label[for="${id}"]`);
+            if (lbl) label = cleanElementText(lbl);
+          }
+          if (!label) {
+            const closestFieldset = el.closest('fieldset');
+            if (closestFieldset) {
+              const legend = closestFieldset.querySelector('legend');
+              if (legend) label = cleanElementText(legend);
+            }
+          }
+          if (!label) {
+            label = cleanDuplicateString(el.getAttribute('aria-label') || '');
+          }
+
+          let errorMsg = '';
+          const describedBy = el.getAttribute('aria-describedby');
+          if (describedBy) {
+            const descEl = modal.querySelector(`#${describedBy}`);
+            if (descEl) errorMsg = (descEl.textContent || '').trim();
+          }
+          if (!errorMsg) {
+            const parent = el.parentElement;
+            const feedback = parent?.querySelector?.(
+              '.artdeco-inline-feedback--error, [class*="error"], [id*="error"]',
+            );
+            if (feedback) errorMsg = (feedback.textContent || '').trim();
+          }
+          errors.push({ fieldLabel: label || 'Form Field', errorText: errorMsg || 'Field is invalid' });
+
+          // Include invalid element in emptyRequiredFields so the runner re-resolves it with correct format
+          if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement) {
+            const isSelect = el.tagName.toLowerCase() === 'select';
+            const placeholder = el.getAttribute('placeholder') || '';
+            const rawMin = el.getAttribute('min');
+            const rawMax = el.getAttribute('max');
+            const isNumeric =
+              (el as HTMLInputElement).type === 'number' ||
+              el.inputMode === 'numeric' ||
+              /number|between|larger than|greater than/i.test(errorMsg);
+            const isCheckbox = (el as HTMLInputElement).type === 'checkbox';
+            const isRadio = (el as HTMLInputElement).type === 'radio';
+
+            emptyRequiredFields.push({
+              id: el.id || undefined,
+              label: label || 'Form Field',
+              fieldType: isSelect
+                ? 'dropdown'
+                : isCheckbox
+                  ? 'checkbox'
+                  : isRadio
+                    ? 'radio'
+                    : isNumeric
+                      ? 'number'
+                      : 'text',
+              options: isSelect
+                ? Array.from((el as HTMLSelectElement).options)
+                    .map(o => cleanDuplicateString(o.text.trim()))
+                    .filter(t => !/select an option/i.test(t))
+                : undefined,
+              min:
+                rawMin !== null && !isNaN(Number(rawMin))
+                  ? Number(rawMin)
+                  : /larger than 0|greater than 0/i.test(errorMsg)
+                    ? 1
+                    : undefined,
+              max: rawMax !== null && !isNaN(Number(rawMax)) ? Number(rawMax) : undefined,
+              placeholder: placeholder || undefined,
+              hintText: errorMsg || undefined,
+            });
+          }
+        }
+
+        // 2. Check inline error feedback elements
+        const errorEls = Array.from(
+          modal.querySelectorAll(
+            '.artdeco-inline-feedback--error, .inline-feedback--error, [class*="inline-feedback--error"], p[id*="error"], [role="alert"]',
+          ),
+        ) as HTMLElement[];
+
+        const errorRegex =
+          /enter a whole number|between 0 and 99|please make a selection|please enter|required|enter a valid|select an option/i;
+
+        for (const errEl of errorEls) {
+          const txt = (errEl.textContent || '').trim();
+          if (!txt) continue;
+          if (errorRegex.test(txt) || errEl.classList.contains('artdeco-inline-feedback--error')) {
+            let label = '';
+            const container =
+              errEl.closest(
+                'div.fb-dash-form-element, div.jobs-easy-apply-form-element, fieldset, div[data-test-form-element]',
+              ) || errEl.parentElement;
+            if (container) {
+              const lbl = container.querySelector('label, legend');
+              if (lbl) label = cleanElementText(lbl);
+            }
+            if (!errors.some(e => e.errorText === txt)) {
+              errors.push({ fieldLabel: label || 'Field', errorText: txt });
+            }
+          }
+        }
+
+        // 3. Check radio groups and checkbox groups
+        const fieldsets = Array.from(
+          modal.querySelectorAll('fieldset, div[role="radiogroup"], div[role="group"]'),
+        ) as HTMLElement[];
+        for (const fs of fieldsets) {
+          const radios = Array.from(fs.querySelectorAll('input[type="radio"]')) as HTMLInputElement[];
+          const checkboxes = Array.from(fs.querySelectorAll('input[type="checkbox"]')) as HTMLInputElement[];
+
+          if (radios.length > 0) {
+            const legend = fs.querySelector('legend, [role="heading"], label');
+            const legendText = cleanElementText(legend);
+            const anyChecked = radios.some(r => r.checked);
+
+            // Check if explicitly marked optional by LinkedIn
+            const isExplicitlyOptional =
+              /\boptional\b/i.test(legendText) ||
+              Boolean(
+                fs.querySelector(
+                  '.fb-dash-form-element__label-title--optional, [data-test-form-element-optional], .artdeco-form__label--optional',
+                ) || fs.closest('.fb-dash-form-element--optional, [data-test-form-element-optional]'),
+              );
+
+            // In LinkedIn Easy Apply modals, radio groups are required screening questions unless explicitly marked optional
+            if (!anyChecked && !isExplicitlyOptional) {
+              const options = radios
+                .map(r => {
+                  const rId = r.getAttribute('id');
+                  let rLbl: HTMLElement | null = null;
+                  if (rId) {
+                    try {
+                      rLbl = fs.querySelector(`label[for="${CSS.escape(rId)}"]`);
+                    } catch {
+                      const allLabels = Array.from(fs.querySelectorAll('label'));
+                      rLbl = allLabels.find(l => l.getAttribute('for') === rId) || null;
+                    }
+                  }
+                  if (!rLbl) {
+                    rLbl = r.closest('label') || (r.parentElement?.querySelector('label') as HTMLElement | null);
+                  }
+                  return cleanElementText(rLbl) || (r.value || '').trim();
+                })
+                .filter(Boolean);
+
+              emptyRequiredFields.push({
+                label: legendText,
+                fieldType: 'radio',
+                options,
+              });
+            }
+          } else if (checkboxes.length > 0) {
+            const legend = fs.querySelector('legend, [role="heading"], label');
+            const legendText = cleanElementText(legend);
+            const anyChecked = checkboxes.some(c => c.checked);
+
+            const isExplicitlyOptional =
+              /\boptional\b/i.test(legendText) ||
+              Boolean(
+                fs.querySelector(
+                  '.fb-dash-form-element__label-title--optional, [data-test-form-element-optional], .artdeco-form__label--optional',
+                ) || fs.closest('.fb-dash-form-element--optional, [data-test-form-element-optional]'),
+              );
+
+            if (!anyChecked && !isExplicitlyOptional) {
+              const options = checkboxes
+                .map(c => {
+                  const cId = c.getAttribute('id');
+                  let cLbl: HTMLElement | null = null;
+                  if (cId) {
+                    try {
+                      cLbl = fs.querySelector(`label[for="${CSS.escape(cId)}"]`);
+                    } catch {
+                      const allLabels = Array.from(fs.querySelectorAll('label'));
+                      cLbl = allLabels.find(l => l.getAttribute('for') === cId) || null;
+                    }
+                  }
+                  if (!cLbl) {
+                    cLbl = c.closest('label') || (c.parentElement?.querySelector('label') as HTMLElement | null);
+                  }
+                  return cleanElementText(cLbl) || (c.value || '').trim();
+                })
+                .filter(Boolean);
+
+              emptyRequiredFields.push({
+                label: legendText,
+                fieldType: 'checkbox',
+                options,
+              });
+            }
+          }
+        }
+
+        // 4. Text and numeric inputs
+        const textInputs = Array.from(
+          modal.querySelectorAll(
+            'input:not([type="hidden"]):not([type="radio"]):not([type="checkbox"]):not([type="submit"]), textarea, select',
+          ),
+        ) as (HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement)[];
+
+        for (const input of textInputs) {
+          const val = (input.value || '').trim();
+          const isSelect = input.tagName.toLowerCase() === 'select';
+          const isRequired =
+            input.required || input.hasAttribute('required') || input.getAttribute('aria-required') === 'true';
+
+          let label = '';
+          const id = input.getAttribute('id');
+          if (id) {
+            const lbl = modal.querySelector(`label[for="${id}"]`);
+            if (lbl) label = cleanElementText(lbl);
+          }
+          if (!label) {
+            const parent = input.closest(
+              'div.fb-dash-form-element, div.jobs-easy-apply-form-element, div[data-test-form-element]',
+            );
+            const lbl = parent?.querySelector('label');
+            if (lbl) label = cleanElementText(lbl);
+          }
+          if (!label) {
+            label = cleanDuplicateString(input.getAttribute('aria-label') || '');
+          }
+
+          const placeholder = cleanDuplicateString(input.getAttribute('placeholder') || '');
+          let hintText = '';
+          const describedBy = input.getAttribute('aria-describedby');
+          if (describedBy) {
+            const ids = describedBy.split(/\s+/);
+            const parts: string[] = [];
+            for (const did of ids) {
+              if (!did) continue;
+              try {
+                const el = modal.querySelector(`[id="${CSS.escape(did)}"]`) || document.getElementById(did);
+                if (el) {
+                  const t = cleanElementText(el);
+                  if (t) parts.push(t);
+                }
+              } catch {}
+            }
+            if (parts.length > 0) hintText = parts.join(' ');
+          }
+          if (!hintText) {
+            const parent = input.closest(
+              'div.fb-dash-form-element, div.jobs-easy-apply-form-element, div[data-test-form-element], .artdeco-text-input',
+            );
+            const hintEl = parent?.querySelector(
+              '.fb-dash-form-element__hint, .artdeco-text-input--hint, .artdeco-form-element__sub-text, span.t-12, [id*="hint"], [id*="helper"], [data-test-form-element-hint]',
+            );
+            if (hintEl) hintText = cleanElementText(hintEl);
+          }
+
+          const rawMin = input.getAttribute('min');
+          const rawMax = input.getAttribute('max');
+          const parsedMin = rawMin !== null && !isNaN(Number(rawMin)) ? Number(rawMin) : undefined;
+          const parsedMax = rawMax !== null && !isNaN(Number(rawMax)) ? Number(rawMax) : undefined;
+
+          const combinedHint = (placeholder + ' ' + hintText).toLowerCase();
+          const isSkillOrNumeric =
+            /how many years|experience|years|\bdays\b|\bmonths\b|whole\s*number|only\s*(?:whole\s*)?numbers|in\s*inr|in\s*lpa|ctc/i.test(
+              label,
+            ) ||
+            input.type === 'number' ||
+            input.inputMode === 'numeric' ||
+            /example:\s*\d+/i.test(combinedHint) ||
+            /whole\s*number|between \d+ and \d+|0 and 99/i.test(combinedHint);
+
+          if ((isRequired || isSkillOrNumeric) && (!val || (isSelect && /select an option/i.test(val)))) {
+            let fieldType: 'text' | 'number' | 'dropdown' = 'text';
+            if (isSelect) {
+              fieldType = 'dropdown';
+            } else if (input.type === 'number' || isSkillOrNumeric) {
+              fieldType = 'number';
+            }
+
+            let options: string[] | undefined = undefined;
+            if (isSelect) {
+              options = Array.from((input as HTMLSelectElement).options)
+                .map(o => cleanDuplicateString(o.text.trim()))
+                .filter(t => !/select an option/i.test(t));
+            }
+
+            emptyRequiredFields.push({
+              id: input.id || undefined,
+              label,
+              fieldType,
+              options,
+              min: parsedMin !== undefined ? parsedMin : isSkillOrNumeric ? 0 : undefined,
+              max: parsedMax !== undefined ? parsedMax : /0 and 99/i.test(combinedHint) ? 99 : undefined,
+              placeholder: placeholder || undefined,
+              hintText: hintText || undefined,
+            });
+          }
+        }
+
+        return {
+          hasErrors: errors.length > 0 || emptyRequiredFields.length > 0,
+          errors,
+          emptyRequiredFields,
+        };
+      })
+      .catch(err => {
+        logger.warning('validateModalFormState check error:', err);
+        return { hasErrors: false, errors: [], emptyRequiredFields: [] };
+      });
+  }
+
+  /**
+   * Sets value for a form element directly inside the active modal
+   */
+  async fillModalFieldDirect(identifier: { id?: string; label?: string }, value: string): Promise<boolean> {
+    if (!this._puppeteerPage) return false;
+
+    return this._puppeteerPage.evaluate(
+      async (ident, val) => {
+        function cleanDuplicateText(rawText: string): string {
+          if (!rawText) return '';
+          let text = rawText
+            .replace(/[\n\r\t]+/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+          if (text.length <= 4) return text;
+
+          // 1. Direct concatenation without separator: "Question?Question?"
+          if (text.length % 2 === 0) {
+            const half = text.slice(0, text.length / 2);
+            if (half + half === text) return half;
+          }
+
+          // 2. Space-separated exact duplication: "Question? Question?"
+          const mid = Math.floor(text.length / 2);
+          if (text[mid] === ' ') {
+            const left = text.slice(0, mid).trim();
+            const right = text.slice(mid + 1).trim();
+            if (left === right) return left;
+          }
+
+          // 3. Word-based even split:
+          const words = text.split(/\s+/);
+          if (words.length >= 4 && words.length % 2 === 0) {
+            const halfLen = words.length / 2;
+            const w1 = words.slice(0, halfLen).join(' ');
+            const w2 = words.slice(halfLen).join(' ');
+            if (w1 === w2) return w1;
+          }
+
+          // 4. Repeated sentence split on punctuation:
+          const punctMatch = text.match(/^(.+?[?.!*])\s+(.+)$/);
+          if (punctMatch) {
+            const p1 = punctMatch[1].trim();
+            const p2 = punctMatch[2].trim();
+            const normP1 = p1.replace(/[*?.\s]/g, '').toLowerCase();
+            const normP2 = p2.replace(/[*?.\s]/g, '').toLowerCase();
+            if (normP1 && (normP1 === normP2 || normP2.startsWith(normP1))) return p1;
+          }
+
+          // 5. General substring repetition search:
+          for (let len = Math.floor(text.length / 2); len >= 8; len--) {
+            const candidate = text.slice(0, len).trim();
+            const remainder = text.slice(len).trim();
+            if (candidate.length > 6) {
+              const normC = candidate.replace(/[*?.\s]/g, '').toLowerCase();
+              const normR = remainder.replace(/[*?.\s]/g, '').toLowerCase();
+              if (normC.length > 6 && (normC === normR || normR.startsWith(normC))) {
+                return candidate;
+              }
+            }
+          }
+
+          return text;
+        }
+
+        function cleanElementText(el: Element | null): string {
+          if (!el) return '';
+          const clone = el.cloneNode(true) as HTMLElement;
+          const hidden = clone.querySelectorAll(
+            '.visually-hidden, [aria-hidden="true"], .sr-only, .u-screen-reader-only',
+          );
+          hidden.forEach(h => h.remove());
+          let txt = (clone.textContent || '')
+            .replace(/[\n\r\t]+/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+          if (!txt) {
+            txt = (el.textContent || '')
+              .replace(/[\n\r\t]+/g, ' ')
+              .replace(/\s+/g, ' ')
+              .trim();
+          }
+          return cleanDuplicateText(txt);
+        }
+
+        function cleanDuplicateString(text: string): string {
+          return cleanDuplicateText(text);
+        }
+
+        function findActiveModal(root: any): HTMLElement | null {
+          const candidates = root.querySelectorAll
+            ? (Array.from(
+                root.querySelectorAll(
+                  'div.jobs-easy-apply-modal, div[data-test-modal], div.artdeco-modal, div[role="dialog"]',
+                ),
+              ) as HTMLElement[])
+            : [];
+
+          for (const c of candidates) {
+            if (
+              c.closest(
+                'nav, header, #global-nav, .global-nav, .msg-overlay-container, #msg-overlay, .artdeco-dropdown',
+              )
+            ) {
+              continue;
+            }
+            const text = (c.innerText || c.textContent || '').trim().toLowerCase();
+            if (/^\d+\s*notifications?$/i.test(text) || c.closest('.notifications-badge')) {
+              continue;
+            }
+            const style = window.getComputedStyle(c);
+            if (style.display === 'none' || style.visibility === 'hidden') continue;
+            const rect = c.getBoundingClientRect();
+            if (rect.width >= 200 && rect.height >= 150) return c;
+          }
+
+          const all = root.querySelectorAll ? root.querySelectorAll('*') : [];
+          for (let i = 0; i < all.length; i++) {
+            if (all[i].shadowRoot) {
+              const found = findActiveModal(all[i].shadowRoot);
+              if (found) return found;
+            }
+          }
+          return null;
+        }
+
+        const modal = findActiveModal(document) || document.body;
+        let targetEl: HTMLElement | null = null;
+        let targetRadioLabel: HTMLElement | null = null;
+
+        if (ident.id) {
+          try {
+            targetEl =
+              document.getElementById(ident.id) ||
+              (modal.querySelector ? modal.querySelector(`[id="${CSS.escape(ident.id)}"]`) : null);
+          } catch {
+            targetEl = document.getElementById(ident.id);
+          }
+        }
+
+        function labelsMatch(a: string, b: string): boolean {
+          if (!a || !b) return false;
+          if (a === b || a.includes(b) || b.includes(a)) return true;
+          const normA = a
+            .replace(/[^\w\s]/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+          const normB = b
+            .replace(/[^\w\s]/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+          if (normA && normB && (normA === normB || normA.includes(normB) || normB.includes(normA))) return true;
+          return false;
+        }
+
+        if (!targetEl && ident.label) {
+          const cleanLabel = cleanDuplicateString(ident.label).toLowerCase().trim();
+
+          // 1. Check radio and checkbox groups (fieldsets / role="radiogroup") first
+          const fieldsets = Array.from(
+            modal.querySelectorAll('fieldset, div[role="radiogroup"], div[role="group"]'),
+          ) as HTMLElement[];
+          for (const fs of fieldsets) {
+            const legend = fs.querySelector('legend, [role="heading"], label');
+            const legendText = cleanElementText(legend).toLowerCase().trim();
+            if (legendText && labelsMatch(legendText, cleanLabel)) {
+              const radios = Array.from(fs.querySelectorAll('input[type="radio"]')) as HTMLInputElement[];
+              const checkboxes = Array.from(fs.querySelectorAll('input[type="checkbox"]')) as HTMLInputElement[];
+              const items = radios.length > 0 ? radios : checkboxes;
+              const normVal = val.toLowerCase().trim();
+              const isTargetYes = /^(yes|true|1|y|immediate|available|agree|authorized)$/i.test(normVal);
+              const isTargetNo = /^(no|false|0|n|not)$/i.test(normVal);
+
+              for (const r of items) {
+                const rId = r.getAttribute('id');
+                let rLbl: HTMLElement | null = null;
+                if (rId) {
+                  try {
+                    rLbl =
+                      fs.querySelector(`label[for="${CSS.escape(rId)}"]`) ||
+                      modal.querySelector(`label[for="${CSS.escape(rId)}"]`);
+                  } catch {
+                    const allLabels = Array.from(fs.querySelectorAll('label'));
+                    rLbl = allLabels.find(l => l.getAttribute('for') === rId) || null;
+                  }
+                }
+                if (!rLbl) {
+                  rLbl = r.closest('label') || (r.parentElement?.querySelector('label') as HTMLElement | null);
+                }
+
+                const rawLblText = cleanElementText(rLbl).toLowerCase().trim();
+                const rawVal = (r.value || '').toLowerCase().trim();
+
+                let matched = false;
+                if (isTargetYes && (/\byes\b/i.test(rawLblText) || /^(true|1|yes|y)$/i.test(rawVal))) {
+                  matched = true;
+                } else if (isTargetNo && (/\bno\b/i.test(rawLblText) || /^(false|0|no|n)$/i.test(rawVal))) {
+                  matched = true;
+                } else if (
+                  rawLblText &&
+                  (rawLblText === normVal || rawLblText.includes(normVal) || normVal.includes(rawLblText))
+                ) {
+                  matched = true;
+                } else if (rawVal && (rawVal === normVal || rawVal.includes(normVal) || normVal.includes(rawVal))) {
+                  matched = true;
+                }
+
+                if (matched) {
+                  targetEl = r;
+                  targetRadioLabel = rLbl;
+                  break;
+                }
+              }
+            }
+            if (targetEl) break;
+          }
+
+          // 2. If not found in fieldset, check standard labels
+          if (!targetEl) {
+            const labels = Array.from(modal.querySelectorAll('label')) as HTMLElement[];
+            for (const l of labels) {
+              const lText = cleanElementText(l).toLowerCase().trim();
+              if (lText && labelsMatch(lText, cleanLabel)) {
+                const forId = l.getAttribute('for');
+                if (forId) {
+                  try {
+                    targetEl = document.getElementById(forId) || modal.querySelector(`[id="${CSS.escape(forId)}"]`);
+                  } catch {
+                    targetEl = document.getElementById(forId);
+                  }
+                }
+                if (!targetEl) targetEl = l.querySelector('input, select, textarea');
+                if (!targetEl) {
+                  const parent = l.closest(
+                    '.fb-dash-form-element, div[data-test-form-element], .jobs-easy-apply-form-element, .artdeco-dropdown',
+                  );
+                  if (parent) {
+                    targetEl = parent.querySelector(
+                      'select, input, textarea, button[aria-haspopup="listbox"], button.artdeco-dropdown__trigger, [role="combobox"]',
+                    );
+                  }
+                }
+                if (targetEl) break;
+              }
+            }
+          }
+
+          if (!targetEl) {
+            // 3. Fallback: check standalone checkboxes by label, aria-label, or text in parent/wrapper
+            const allCheckboxes = Array.from(modal.querySelectorAll('input[type="checkbox"]')) as HTMLInputElement[];
+            for (const cb of allCheckboxes) {
+              const cbAria = cleanDuplicateString(cb.getAttribute('aria-label') || '')
+                .toLowerCase()
+                .trim();
+              if (cbAria && labelsMatch(cbAria, cleanLabel)) {
+                targetEl = cb;
+                break;
+              }
+              const parent = cb.closest('label, div, p, span, li');
+              if (parent) {
+                const pText = cleanElementText(parent).toLowerCase().trim();
+                if (pText && labelsMatch(pText, cleanLabel)) {
+                  targetEl = cb;
+                  break;
+                }
+              }
+            }
+          }
+        }
+
+        if (!targetEl) return false;
+
+        // Fill element
+        if (targetEl instanceof HTMLInputElement && (targetEl.type === 'radio' || targetEl.type === 'checkbox')) {
+          const clickable = targetRadioLabel || targetEl.closest('label') || targetEl.parentElement || targetEl;
+
+          try {
+            targetEl.focus();
+          } catch {}
+
+          const normVal = val.toLowerCase().trim();
+          const shouldBeChecked =
+            targetEl.type === 'checkbox' ? /^(yes|true|1|y|checked|agree|authorized)$/i.test(normVal) : true;
+
+          if (targetEl.type === 'checkbox') {
+            if (targetEl.checked !== shouldBeChecked) {
+              // Trigger click via clickable wrapper or element to fire framework change events
+              clickable.click();
+
+              // If framework or default action didn't match the desired state, invoke native setter and dispatch input/change
+              if (targetEl.checked !== shouldBeChecked) {
+                const proto = HTMLInputElement.prototype;
+                const setter = Object.getOwnPropertyDescriptor(proto, 'checked')?.set;
+                if (setter) {
+                  setter.call(targetEl, shouldBeChecked);
+                } else {
+                  targetEl.checked = shouldBeChecked;
+                }
+                targetEl.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+                targetEl.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+              }
+            }
+            return targetEl.checked === shouldBeChecked;
+          } else {
+            // Radio button
+            clickable.click();
+            if (!targetEl.checked) {
+              const proto = HTMLInputElement.prototype;
+              const setter = Object.getOwnPropertyDescriptor(proto, 'checked')?.set;
+              if (setter) {
+                setter.call(targetEl, true);
+              } else {
+                targetEl.checked = true;
+              }
+              targetEl.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+              targetEl.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+            }
+            return targetEl.checked;
+          }
+        } else if (targetEl instanceof HTMLInputElement || targetEl instanceof HTMLTextAreaElement) {
+          targetEl.focus();
+          const proto =
+            targetEl instanceof HTMLInputElement ? HTMLInputElement.prototype : HTMLTextAreaElement.prototype;
+          const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+          if (setter) {
+            setter.call(targetEl, val);
+          } else {
+            targetEl.value = val;
+          }
+          targetEl.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+          targetEl.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+
+          // Autocomplete / typeahead suggestion selection (e.g. Location (city), School/University, Company, Title)
+          const isTypeahead =
+            targetEl.getAttribute('role') === 'combobox' ||
+            targetEl.getAttribute('aria-autocomplete') === 'list' ||
+            targetEl.hasAttribute('aria-controls') ||
+            Boolean(targetEl.closest('.basic-typeahead, .artdeco-typeahead, [data-test-typeahead]')) ||
+            /location|city|school|college|university|company|title/i.test(ident.label || '');
+
+          if (isTypeahead) {
+            // Wait briefly for suggestions to appear
+            await new Promise(r => setTimeout(r, 450));
+
+            const listboxSelectors = [
+              'div[role="listbox"]',
+              'ul[role="listbox"]',
+              '.basic-typeahead__triggered-content',
+              '.artdeco-typeahead__results-list',
+              '.basic-typeahead__selectable-list',
+              '.typeahead-results',
+            ];
+
+            let listbox: HTMLElement | null = null;
+            const container = targetEl.closest(
+              '.basic-typeahead, .artdeco-typeahead, .fb-dash-form-element, div[data-test-form-element]',
+            );
+            if (container) {
+              listbox = container.querySelector(listboxSelectors.join(', '));
+            }
+            if (!listbox) {
+              listbox =
+                modal.querySelector(listboxSelectors.join(', ')) || document.querySelector(listboxSelectors.join(', '));
+            }
+
+            if (listbox) {
+              const optionEls = Array.from(
+                listbox.querySelectorAll(
+                  'div[role="option"], li[role="option"], .basic-typeahead__selectable-item, .artdeco-typeahead__result, [role="option"]',
+                ),
+              ) as HTMLElement[];
+
+              if (optionEls.length > 0) {
+                const normVal = val.toLowerCase().trim();
+                // Find matching option or select the first option
+                let bestOpt =
+                  optionEls.find(opt => {
+                    const txt = (opt.textContent || '').toLowerCase().trim();
+                    return txt.includes(normVal) || normVal.includes(txt);
+                  }) || optionEls[0];
+
+                if (bestOpt) {
+                  ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(evt => {
+                    bestOpt.dispatchEvent(new MouseEvent(evt, { bubbles: true, cancelable: true, view: window }));
+                  });
+                  await new Promise(r => setTimeout(r, 200));
+                }
+              }
+            }
+          }
+
+          return true;
+        } else if (targetEl instanceof HTMLSelectElement) {
+          const options = Array.from(targetEl.options);
+          const normVal = val.toLowerCase().trim();
+          const isAffirmative = /^(yes|true|1|y|immediate|available|agree|authorized)$/i.test(normVal);
+          const isNegative = /^(no|false|0|n|requires|not)$/i.test(normVal);
+
+          // 1. Exact or loose match on option text or value
+          let opt = options.find(
+            o =>
+              cleanDuplicateString(o.text).toLowerCase().trim() === normVal ||
+              o.value.toLowerCase().trim() === normVal ||
+              (normVal.length > 2 && cleanDuplicateString(o.text).toLowerCase().includes(normVal)) ||
+              (cleanDuplicateString(o.text).length > 2 && normVal.includes(cleanDuplicateString(o.text).toLowerCase())),
+          );
+
+          // 2. Boolean/affirmative fallback (e.g. "Immediate" -> "Yes", "Bengaluru" -> "Yes")
+          if (!opt) {
+            if (isAffirmative) {
+              opt = options.find(
+                o => /^(yes|agree)$/i.test(cleanDuplicateString(o.text).trim()) || /^(yes|true|1)$/i.test(o.value),
+              );
+            } else if (isNegative) {
+              opt = options.find(
+                o => /^no$/i.test(cleanDuplicateString(o.text).trim()) || /^(no|false|0)$/i.test(o.value),
+              );
+            }
+          }
+
+          // 3. City token match (e.g. "Bengaluru, India" matching "Bangalore" or "Bengaluru")
+          if (!opt && normVal.length > 3) {
+            const tokens = normVal.split(/[\s,/-]+/).filter(t => t.length > 2);
+            opt = options.find(o => {
+              const optText = cleanDuplicateString(o.text).toLowerCase();
+              return (
+                tokens.some(t => optText.includes(t)) ||
+                (normVal.includes('bengaluru') && optText.includes('bangalore')) ||
+                (normVal.includes('bangalore') && optText.includes('bengaluru'))
+              );
+            });
+          }
+
+          if (opt) {
+            targetEl.focus();
+            const proto = HTMLSelectElement.prototype;
+            const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+            if (setter) {
+              setter.call(targetEl, opt.value);
+            } else {
+              targetEl.value = opt.value;
+            }
+            opt.selected = true;
+            targetEl.selectedIndex = opt.index;
+            targetEl.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+            targetEl.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+            return true;
+          }
+        } else {
+          // Check for custom Artdeco dropdown button or combobox
+          const customTrigger =
+            targetEl.getAttribute('aria-haspopup') === 'listbox' ||
+            targetEl.getAttribute('role') === 'combobox' ||
+            targetEl.classList.contains('artdeco-dropdown__trigger')
+              ? targetEl
+              : (targetEl
+                  .closest('.artdeco-dropdown, .fb-dash-form-element')
+                  ?.querySelector(
+                    'button[aria-haspopup="listbox"], button.artdeco-dropdown__trigger, div[role="combobox"]',
+                  ) as HTMLElement | null);
+
+          if (customTrigger) {
+            // Click trigger to open dropdown
+            ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(evt => {
+              customTrigger.dispatchEvent(new MouseEvent(evt, { bubbles: true, cancelable: true, view: window }));
+            });
+            await new Promise(r => setTimeout(r, 250));
+
+            const normVal = val.toLowerCase().trim();
+            const isAffirmative = /^(yes|true|1|y|immediate|available|agree|authorized)$/i.test(normVal);
+            const isNegative = /^(no|false|0|n|requires|not)$/i.test(normVal);
+
+            const listbox = modal.querySelector('div[role="listbox"], ul[role="listbox"], .artdeco-dropdown__content');
+            if (listbox) {
+              const optionEls = Array.from(
+                listbox.querySelectorAll('[role="option"], li, .artdeco-dropdown__item'),
+              ) as HTMLElement[];
+
+              let matchedOpt = optionEls.find(o => {
+                const txt = cleanDuplicateString(o.textContent || '')
+                  .toLowerCase()
+                  .trim();
+                return txt === normVal || (normVal.length > 2 && txt.includes(normVal));
+              });
+
+              if (!matchedOpt && isAffirmative) {
+                matchedOpt = optionEls.find(o =>
+                  /^(yes|agree)$/i.test(cleanDuplicateString(o.textContent || '').trim()),
+                );
+              } else if (!matchedOpt && isNegative) {
+                matchedOpt = optionEls.find(o => /^no$/i.test(cleanDuplicateString(o.textContent || '').trim()));
+              }
+
+              if (matchedOpt) {
+                ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(evt => {
+                  matchedOpt.dispatchEvent(new MouseEvent(evt, { bubbles: true, cancelable: true, view: window }));
+                });
+                await new Promise(r => setTimeout(r, 150));
+                return true;
+              }
+            }
+          }
+        }
+
+        return false;
+      },
+      identifier,
+      value,
+    );
+  }
+
+  /**
+   * Extracts job top-card context (title, company, location, closed status, already applied, hasEasyApply, login wall)
+   * Polling up to timeoutMs to allow asynchronous page components to render.
+   */
+  async extractJobTopCardContext(timeoutMs = 12000): Promise<JobTopCardContext> {
+    const startTime = Date.now();
+    const pollInterval = 600;
+
+    while (Date.now() - startTime < timeoutMs) {
+      if (!this._puppeteerPage) {
+        break;
+      }
+
+      try {
+        const info = await this._puppeteerPage.evaluate(() => {
+          const url = window.location.href.toLowerCase();
+          const pathname = window.location.pathname.toLowerCase();
+
+          // 1. Check for Login wall / Auth redirect
+          const isAuthUrl =
+            pathname.includes('/login') ||
+            pathname.includes('/authwall') ||
+            pathname.includes('/checkpoint') ||
+            url.includes('linkedin.com/uas/login');
+
+          const hasLoginForm = !!(
+            document.querySelector('form.login__form') ||
+            document.querySelector('#username') ||
+            document.querySelector('input[name="session_key"]') ||
+            document.querySelector('.authwall-join-form') ||
+            document.querySelector('form[data-id="sign-in-form"]')
+          );
+
+          const hasJobContent = !!document.querySelector(
+            '.jobs-unified-top-card, .jobs-search__job-details--container, div[data-job-id], h1.job-details-jobs-unified-top-card__job-title, .topcard',
+          );
+
+          const isLoginWall = isAuthUrl || (hasLoginForm && !hasJobContent);
+
+          function cleanLinkedInJobTitle(raw: string): string {
+            if (!raw) return '';
+            let txt = raw
+              .replace(/\bwith verification\b/gi, '')
+              .replace(/\bactively recruiting\b/gi, '')
+              .replace(/\bpromoted\b/gi, '')
+              .replace(/\beasy apply\b/gi, '')
+              .replace(/[\n\r]+/g, ' ')
+              .replace(/\s+/g, ' ')
+              .trim();
+
+            if (txt.length > 4 && txt.length % 2 === 0) {
+              const half = txt.slice(0, txt.length / 2);
+              if (half + half === txt) {
+                txt = half;
+              }
+            }
+
+            const words = txt.split(' ');
+            if (words.length >= 2 && words.length % 2 === 0) {
+              const halfLen = words.length / 2;
+              const firstHalf = words.slice(0, halfLen).join(' ');
+              const secondHalf = words.slice(halfLen).join(' ');
+              if (firstHalf.toLowerCase() === secondHalf.toLowerCase()) {
+                txt = firstHalf;
+              }
+            }
+
+            const match = txt.match(/^(.{3,40}?)\s+\1(?:\b.*)?$/i);
+            if (match && match[1]) {
+              txt = match[1];
+            }
+
+            return txt.trim();
+          }
+
+          function cleanElementText(el: Element | null): string {
+            if (!el) return '';
+            const clone = el.cloneNode(true) as HTMLElement;
+            const hidden = clone.querySelectorAll(
+              '.visually-hidden, [aria-hidden="true"], .sr-only, .job-card-container__verification-badge, .job-details-jobs-unified-top-card__verification-badge, .artdeco-entity-lockup__badge, [data-test-icon*="verification"]',
+            );
+            hidden.forEach(h => h.remove());
+            let txt = (clone.textContent || '').replace(/\s+/g, ' ').trim();
+            if (!txt) {
+              txt = (el.textContent || '').replace(/\s+/g, ' ').trim();
+            }
+            return cleanLinkedInJobTitle(txt);
+          }
+
+          function cleanDuplicateString(text: string): string {
+            if (!text) return '';
+            text = text
+              .replace(/[\n\r\t]+/g, ' ')
+              .replace(/\s+/g, ' ')
+              .trim();
+            if (text.length <= 4) return text;
+
+            if (text.length % 2 === 0) {
+              const half = text.slice(0, text.length / 2);
+              if (half + half === text) return half;
+            }
+
+            const mid = Math.floor(text.length / 2);
+            if (text[mid] === ' ') {
+              const left = text.slice(0, mid).trim();
+              const right = text.slice(mid + 1).trim();
+              if (left === right) return left;
+            }
+
+            const words = text.split(/\s+/);
+            if (words.length >= 4 && words.length % 2 === 0) {
+              const halfLen = words.length / 2;
+              const w1 = words.slice(0, halfLen).join(' ');
+              const w2 = words.slice(halfLen).join(' ');
+              if (w1 === w2) return w1;
+            }
+
+            for (let len = Math.floor(text.length / 2); len >= 8; len--) {
+              const candidate = text.slice(0, len).trim();
+              const remainder = text.slice(len).trim();
+              if (candidate.length > 6) {
+                const normC = candidate.replace(/[*?.\s]/g, '').toLowerCase();
+                const normR = remainder.replace(/[*?.\s]/g, '').toLowerCase();
+                if (normC.length > 6 && (normC === normR || normR.startsWith(normC))) {
+                  return candidate;
+                }
+              }
+            }
+
+            return text;
+          }
+
+          // 2. Extract Title (broadened selectors for search pane, collections & standalone view)
+          const titleEl = document.querySelector(
+            'h1.job-details-jobs-unified-top-card__job-title, h2.job-details-jobs-unified-top-card__job-title, .job-details-jobs-unified-top-card__job-title a, .jobs-unified-top-card__job-title, .jobs-search__job-details--container h1, .jobs-search__job-details--container h2, .jobs-details__main-content h1, .jobs-details__main-content h2, h1.t-24, h1.top-card-layout__title, .job-view-layout h1, .job-view-layout h2, [data-job-id].jobs-search-results-list__list-item--active .job-card-list__title, [data-job-id].jobs-search-results-list__list-item--active a[href*="/jobs/view/"]',
+          );
+          let title = cleanLinkedInJobTitle(cleanElementText(titleEl));
+
+          // 3. Extract Company (broadened selectors for search pane, collections & standalone view)
+          const companyEl = document.querySelector(
+            '.job-details-jobs-unified-top-card__company-name, .job-details-jobs-unified-top-card__company-name a, .jobs-unified-top-card__company-name, .jobs-unified-top-card__company-name a, a.topcard__org-name-link, a[data-tracking-control-name*="company"], .jobs-details__main-content a[href*="/company/"], .jobs-unified-top-card__subtitle-primary-grouping a, .jobs-unified-top-card__primary-description a, .jobs-search-results-list__list-item--active .job-card-container__company-name, .jobs-search-results-list__list-item--active .artdeco-entity-lockup__subtitle',
+          );
+          let company = cleanElementText(companyEl);
+          if (!company) {
+            const compLink = document.querySelector('.jobs-unified-top-card a[href*="/company/"]');
+            company = cleanElementText(compLink);
+          }
+          if (!company) {
+            company = 'Unknown Company';
+          }
+
+          // Fallback: If title or company missing from DOM selectors, extract from document.title
+          // LinkedIn document.title pattern: "Full Stack Developer | AutoRABIT | LinkedIn" or "Job Title - Company - Location"
+          if (!title || company === 'Unknown Company') {
+            const rawDocTitle = (document.title || '')
+              .replace(/\s*\|\s*LinkedIn$/i, '')
+              .replace(/\s*-\s*LinkedIn$/i, '')
+              .trim();
+            if (rawDocTitle && !rawDocTitle.toLowerCase().includes('feed') && !/^jobs\b/i.test(rawDocTitle)) {
+              let parsedTitle = '';
+              let parsedCompany = '';
+              if (rawDocTitle.includes(' | ')) {
+                const parts = rawDocTitle.split(' | ');
+                parsedTitle = parts[0]?.trim();
+                parsedCompany = parts[1]?.trim();
+              } else if (rawDocTitle.includes(' at ')) {
+                const parts = rawDocTitle.split(' at ');
+                parsedTitle = parts[0]?.trim();
+                parsedCompany = parts[1]?.trim();
+              } else if (rawDocTitle.includes(' - ')) {
+                const parts = rawDocTitle.split(' - ');
+                parsedTitle = parts[0]?.trim();
+                parsedCompany = parts[1]?.trim();
+              }
+              if (!title && parsedTitle) title = cleanLinkedInJobTitle(cleanDuplicateString(parsedTitle));
+              if (company === 'Unknown Company' && parsedCompany) company = cleanDuplicateString(parsedCompany);
+            }
+          }
+
+          // 4. Extract Location
+          const locationEl = document.querySelector(
+            '.job-details-jobs-unified-top-card__bullet, .jobs-unified-top-card__bullet, .topcard__flavor--bullet, .jobs-unified-top-card__workplace-type, .jobs-unified-top-card__primary-description span:nth-of-type(2)',
+          );
+          let location = (locationEl?.textContent || '').trim().replace(/^·\s*/, '');
+
+          // 5. Closed check: "No longer accepting applications"
+          const fullText = document.body ? document.body.innerText || '' : '';
+          const isClosed =
+            /no longer accepting applications/i.test(fullText) ||
+            !!document.querySelector('.artdeco-inline-feedback--error, .jobs-details-top-card__closed-badge');
+
+          // 6. Already applied check
+          let isAlreadyApplied = false;
+          const appliedBadge = document.querySelector(
+            '.jobs-s-apply__application-link, .artdeco-inline-feedback--success, .jobs-details-top-card__applied-badge, [data-test-applied-badge]',
+          );
+          if (appliedBadge && /applied/i.test(appliedBadge.textContent || '')) {
+            isAlreadyApplied = true;
+          } else {
+            const applyButtons = Array.from(
+              document.querySelectorAll('button.jobs-apply-button, .jobs-apply-button--top-card, button[data-job-id]'),
+            );
+            for (const btn of applyButtons) {
+              const btnText = (btn.textContent || '').trim();
+              if (/^applied/i.test(btnText)) {
+                isAlreadyApplied = true;
+                break;
+              }
+            }
+            if (!isAlreadyApplied && /you applied on|applied \d+ (day|hour|week|month)s? ago/i.test(fullText)) {
+              isAlreadyApplied = true;
+            }
+          }
+
+          // 7. Easy Apply check: scoped to job details container to avoid search card false matches
+          let hasEasyApply = false;
+          const detailsRoot =
+            document.querySelector('.jobs-search__job-details--container') ||
+            document.querySelector('.jobs-details__main-content') ||
+            document.querySelector('.job-view-layout') ||
+            document.querySelector('.jobs-unified-top-card') ||
+            document.querySelector('[data-view-name="job-details-top-card"]') ||
+            document;
+
+          const applyButtons = Array.from(detailsRoot.querySelectorAll('button, a'));
+          for (const btn of applyButtons) {
+            if (btn.closest('.jobs-search-results-list, .scaffold-layout__list, [data-view-name="job-card"]')) {
+              continue;
+            }
+            const btnText = (btn.textContent || '').trim();
+            const ariaLabel = (btn.getAttribute('aria-label') || '').trim();
+            if (
+              btn.classList.contains('jobs-apply-button') ||
+              /easy\s*apply/i.test(btnText) ||
+              /easy\s*apply/i.test(ariaLabel)
+            ) {
+              hasEasyApply = true;
+              break;
+            }
+          }
+
+          // 8. Extract Description Snippet
+          const descEl = document.querySelector(
+            '#job-details, .jobs-description__content, .jobs-description, .jobs-box__html-content, article.jobs-description__container',
+          );
+          const descriptionSnippet = (descEl?.textContent || '')
+            .replace(/[\n\r]+/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .slice(0, 3000);
+
+          return {
+            title: title || 'LinkedIn Job',
+            company: company || 'Unknown Company',
+            location,
+            isClosed,
+            isAlreadyApplied,
+            hasEasyApply,
+            isLoginWall,
+            descriptionSnippet,
+          };
+        });
+
+        // If login wall, return immediately so runner can handle pause
+        if (info.isLoginWall) {
+          return info;
+        }
+
+        // Return immediately only if BOTH title and company were successfully resolved,
+        // or if known terminal state (closed, already applied)
+        if ((info.title && info.company) || info.isClosed || info.isAlreadyApplied) {
+          return info;
+        }
+      } catch (e) {
+        logger.debug('Error extracting job top-card:', e);
+      }
+
+      await new Promise(r => setTimeout(r, pollInterval));
+    }
+
+    return {
+      title: '',
+      company: '',
+      location: '',
+      isClosed: false,
+      isAlreadyApplied: false,
+      hasEasyApply: false,
+      isLoginWall: false,
+    };
+  }
+
+  /**
+   * Reads job cards from the LinkedIn left-hand search results pane.
+   * Scrolls the list container to trigger lazy loading of cards.
+   */
+  async readJobListFromSearchPane(scrollAttempts = 4): Promise<SearchJobCard[]> {
+    if (!this._puppeteerPage) return [];
+
+    // Scroll left-hand container gently to trigger rendering
+    for (let s = 0; s < scrollAttempts; s++) {
+      await this._puppeteerPage
+        .evaluate(() => {
+          const container =
+            document.querySelector('.jobs-search-results-list') ||
+            document.querySelector('.scaffold-layout__list') ||
+            document.querySelector('.jobs-search-results-list__list') ||
+            document.querySelector('div[data-view-name="job-card"]')?.parentElement;
+          if (container) {
+            container.scrollBy(0, 500);
+          } else {
+            window.scrollBy(0, 500);
+          }
+        })
+        .catch(() => {});
+      await new Promise(r => setTimeout(r, 800));
+    }
+
+    return await this._puppeteerPage
+      .evaluate(() => {
+        function cleanLinkedInJobTitle(raw: string): string {
+          if (!raw) return '';
+          let txt = raw
+            .replace(/\bwith verification\b/gi, '')
+            .replace(/\bactively recruiting\b/gi, '')
+            .replace(/\bpromoted\b/gi, '')
+            .replace(/\beasy apply\b/gi, '')
+            .replace(/[\n\r]+/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+
+          if (txt.length > 4 && txt.length % 2 === 0) {
+            const half = txt.slice(0, txt.length / 2);
+            if (half + half === txt) {
+              txt = half;
+            }
+          }
+
+          const words = txt.split(' ');
+          if (words.length >= 2 && words.length % 2 === 0) {
+            const halfLen = words.length / 2;
+            const firstHalf = words.slice(0, halfLen).join(' ');
+            const secondHalf = words.slice(halfLen).join(' ');
+            if (firstHalf.toLowerCase() === secondHalf.toLowerCase()) {
+              txt = firstHalf;
+            }
+          }
+
+          const match = txt.match(/^(.{3,40}?)\s+\1(?:\b.*)?$/i);
+          if (match && match[1]) {
+            txt = match[1];
+          }
+
+          return txt.trim();
+        }
+
+        function cleanElementText(el: Element | null): string {
+          if (!el) return '';
+          const clone = el.cloneNode(true) as HTMLElement;
+          const hidden = clone.querySelectorAll(
+            '.visually-hidden, [aria-hidden="true"], .sr-only, .job-card-container__verification-badge, .job-details-jobs-unified-top-card__verification-badge, .artdeco-entity-lockup__badge, [data-test-icon*="verification"]',
+          );
+          hidden.forEach(h => h.remove());
+          let txt = (clone.textContent || '').replace(/\s+/g, ' ').trim();
+          if (!txt) {
+            txt = (el.textContent || '').replace(/\s+/g, ' ').trim();
+          }
+          if (txt.length <= 4) return txt;
+
+          if (txt.length % 2 === 0) {
+            const half = txt.slice(0, txt.length / 2);
+            if (half + half === txt) return half;
+          }
+
+          const mid = Math.floor(txt.length / 2);
+          if (txt[mid] === ' ') {
+            const left = txt.slice(0, mid).trim();
+            const right = txt.slice(mid + 1).trim();
+            if (left === right) return left;
+          }
+
+          const words = txt.split(/\s+/);
+          if (words.length >= 4 && words.length % 2 === 0) {
+            const halfLen = words.length / 2;
+            const w1 = words.slice(0, halfLen).join(' ');
+            const w2 = words.slice(halfLen).join(' ');
+            if (w1 === w2) return w1;
+          }
+
+          return txt;
+        }
+
+        const listContainer =
+          document.querySelector('.jobs-search-results-list') ||
+          document.querySelector('.scaffold-layout__list') ||
+          document.querySelector('.jobs-search-results-list__list') ||
+          document;
+
+        const cards = Array.from(
+          listContainer.querySelectorAll(
+            'li.jobs-search-results__list-item, li.scaffold-layout__list-item, div.job-card-container, div[data-job-id], li[data-occludable-job-id], [data-view-name="job-card"]',
+          ),
+        ) as HTMLElement[];
+
+        const results: SearchJobCard[] = [];
+        const seenJobIds = new Set<string>();
+
+        for (const card of cards) {
+          // 1. Try finding job ID from data attributes
+          let jobId = card.getAttribute('data-job-id') || card.getAttribute('data-occludable-job-id') || '';
+
+          // 2. Try finding job link
+          const link = card.querySelector<HTMLAnchorElement>(
+            'a.job-card-container__link, a.job-card-list__title, a.job-card-container__link--cursor-pointer, a[href*="/jobs/view/"], a[href*="currentJobId="]',
+          );
+
+          if (!jobId && link) {
+            const href = link.href || '';
+            const match = href.match(/(?:\/jobs\/view\/|currentJobId=)(\d+)/);
+            if (match && match[1]) {
+              jobId = match[1];
+            }
+          }
+
+          // 3. Try finding urn
+          if (!jobId) {
+            const urn = card.getAttribute('data-entity-urn') || '';
+            const urnMatch = urn.match(/urn:li:jobPosting:(\d+)/);
+            if (urnMatch && urnMatch[1]) {
+              jobId = urnMatch[1];
+            }
+          }
+
+          if (!jobId || seenJobIds.has(jobId)) {
+            continue;
+          }
+          seenJobIds.add(jobId);
+
+          // Extract title
+          const titleEl = card.querySelector(
+            'a.job-card-list__title, .job-card-container__link, .artdeco-entity-lockup__title, strong, h3',
+          );
+          const rawTitle = cleanElementText(titleEl) || cleanElementText(link);
+          const title = cleanLinkedInJobTitle(rawTitle);
+
+          // Extract company
+          const companyEl = card.querySelector(
+            '.job-card-container__company-name, .artdeco-entity-lockup__subtitle, .job-card-container__primary-description, span.t-14',
+          );
+          const company = cleanElementText(companyEl) || 'Unknown Company';
+
+          const url = `https://www.linkedin.com/jobs/view/${jobId}/`;
+
+          results.push({
+            jobId,
+            title: title || 'LinkedIn Job',
+            company: company,
+            url,
+          });
+        }
+
+        return results;
+      })
+      .catch(() => []);
+  }
+
+  /**
+   * Clicks a specific job item in the left-hand search results pane to load it in the right details pane.
+   */
+  async clickJobInSearchList(jobId: string): Promise<boolean> {
+    if (!this._puppeteerPage) return false;
+
+    return await this._puppeteerPage
+      .evaluate((targetId: string) => {
+        const listContainer =
+          document.querySelector('.jobs-search-results-list') ||
+          document.querySelector('.scaffold-layout__list') ||
+          document.querySelector('.jobs-search-results-list__list') ||
+          document;
+
+        const cards = Array.from(
+          listContainer.querySelectorAll(
+            'li.jobs-search-results__list-item, li.scaffold-layout__list-item, div.job-card-container, div[data-job-id], li[data-occludable-job-id], [data-view-name="job-card"]',
+          ),
+        ) as HTMLElement[];
+
+        for (const card of cards) {
+          const cardJobId = card.getAttribute('data-job-id') || card.getAttribute('data-occludable-job-id') || '';
+
+          const link = card.querySelector<HTMLAnchorElement>(
+            'a.job-card-container__link, a.job-card-list__title, a[href*="/jobs/view/"], a[href*="currentJobId="]',
+          );
+
+          let matches = cardJobId === targetId;
+          if (!matches && link) {
+            matches = link.href.includes(targetId);
+          }
+
+          if (matches) {
+            card.scrollIntoView({ behavior: 'instant', block: 'center' });
+            if (link) {
+              link.click();
+            } else {
+              card.click();
+            }
+            return true;
+          }
+        }
+        return false;
+      }, jobId)
+      .catch(() => false);
+  }
+
+  /**
+   * Dismisses the active Easy Apply modal cleanly, handling any "Save application? -> Discard" dialogs.
+   */
+  async dismissEasyApplyModal(maxWaitMs = 5000): Promise<boolean> {
+    if (!this._puppeteerPage) return false;
+
+    const startTime = Date.now();
+    while (Date.now() - startTime < maxWaitMs) {
+      const status = await this._puppeteerPage
+        .evaluate(() => {
+          // Check if modal or intermediate dialog exists
+          const modal = document.querySelector(
+            'div.jobs-easy-apply-modal, div[data-test-modal], div.artdeco-modal, dialog[open], div[role="dialog"]',
+          );
+          if (!modal) {
+            return { isClosed: true };
+          }
+
+          // Check for Discard confirmation dialog buttons
+          const buttons = Array.from(document.querySelectorAll('button'));
+          const discardBtn = buttons.find(
+            b =>
+              /discard/i.test(b.textContent || '') ||
+              b.getAttribute('data-control-name') === 'discard_application_confirm_btn',
+          );
+          if (discardBtn) {
+            discardBtn.click();
+            return { clickedDiscard: true };
+          }
+
+          // Look for modal close/dismiss button
+          const closeBtn =
+            modal.querySelector<HTMLButtonElement>(
+              'button[aria-label*="Dismiss" i], button[aria-label*="Close" i], button[data-test-modal-close-btn], button[data-control-name="overlay.close_conversation_window"]',
+            ) || (document.querySelector('button[data-test-modal-close-btn]') as HTMLButtonElement);
+
+          if (closeBtn) {
+            closeBtn.click();
+            return { clickedClose: true };
+          }
+
+          return { notClosed: true };
+        })
+        .catch(() => ({ isClosed: true }));
+
+      if (status.isClosed) {
+        return true;
+      }
+      await new Promise(r => setTimeout(r, 400));
+    }
+
+    const isOpen = await this.isEasyApplyModalOpen();
+    return !isOpen;
+  }
+
+  /**
+   * Discovers all interactive form fields within the active Easy Apply modal.
+   */
+  async discoverModalFormFields(): Promise<FormFieldDescriptor[]> {
+    if (!this._puppeteerPage) return [];
+
+    return this._puppeteerPage
+      .evaluate(() => {
+        function findActiveModal(root: any): HTMLElement | null {
+          const candidates = root.querySelectorAll
+            ? (Array.from(
+                root.querySelectorAll(
+                  'div.jobs-easy-apply-modal, div[data-test-modal], div.artdeco-modal, div[role="dialog"]',
+                ),
+              ) as HTMLElement[])
+            : [];
+
+          for (const c of candidates) {
+            if (
+              c.closest(
+                'nav, header, #global-nav, .global-nav, .msg-overlay-container, #msg-overlay, .artdeco-dropdown',
+              )
+            ) {
+              continue;
+            }
+            const text = (c.innerText || c.textContent || '').trim().toLowerCase();
+            if (/^\d+\s*notifications?$/i.test(text) || c.closest('.notifications-badge')) {
+              continue;
+            }
+            const style = window.getComputedStyle(c);
+            if (style.display === 'none' || style.visibility === 'hidden') continue;
+            const rect = c.getBoundingClientRect();
+            if (rect.width >= 200 && rect.height >= 150) return c;
+          }
+
+          const all = root.querySelectorAll ? root.querySelectorAll('*') : [];
+          for (let i = 0; i < all.length; i++) {
+            if (all[i].shadowRoot) {
+              const found = findActiveModal(all[i].shadowRoot);
+              if (found) return found;
+            }
+          }
+          return null;
+        }
+
+        function cleanDuplicateText(rawText: string): string {
+          if (!rawText) return '';
+          let text = rawText
+            .replace(/[\n\r\t]+/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+          if (text.length <= 4) return text;
+
+          // 1. Direct concatenation without separator: "Question?Question?"
+          if (text.length % 2 === 0) {
+            const half = text.slice(0, text.length / 2);
+            if (half + half === text) return half;
+          }
+
+          // 2. Space-separated exact duplication: "Question? Question?"
+          const mid = Math.floor(text.length / 2);
+          if (text[mid] === ' ') {
+            const left = text.slice(0, mid).trim();
+            const right = text.slice(mid + 1).trim();
+            if (left === right) return left;
+          }
+
+          // 3. Word-based even split:
+          const words = text.split(/\s+/);
+          if (words.length >= 4 && words.length % 2 === 0) {
+            const halfLen = words.length / 2;
+            const w1 = words.slice(0, halfLen).join(' ');
+            const w2 = words.slice(halfLen).join(' ');
+            if (w1 === w2) return w1;
+          }
+
+          // 4. Repeated sentence split on punctuation:
+          const punctMatch = text.match(/^(.+?[?.!*])\s+(.+)$/);
+          if (punctMatch) {
+            const p1 = punctMatch[1].trim();
+            const p2 = punctMatch[2].trim();
+            const normP1 = p1.replace(/[*?.\s]/g, '').toLowerCase();
+            const normP2 = p2.replace(/[*?.\s]/g, '').toLowerCase();
+            if (normP1 && (normP1 === normP2 || normP2.startsWith(normP1))) return p1;
+          }
+
+          // 5. General substring repetition search:
+          for (let len = Math.floor(text.length / 2); len >= 8; len--) {
+            const candidate = text.slice(0, len).trim();
+            const remainder = text.slice(len).trim();
+            if (candidate.length > 6) {
+              const normC = candidate.replace(/[*?.\s]/g, '').toLowerCase();
+              const normR = remainder.replace(/[*?.\s]/g, '').toLowerCase();
+              if (normC.length > 6 && (normC === normR || normR.startsWith(normC))) {
+                return candidate;
+              }
+            }
+          }
+
+          return text;
+        }
+
+        function cleanElementText(el: Element | null): string {
+          if (!el) return '';
+          const clone = el.cloneNode(true) as HTMLElement;
+          const hidden = clone.querySelectorAll(
+            '.visually-hidden, [aria-hidden="true"], .sr-only, .u-screen-reader-only',
+          );
+          hidden.forEach(h => h.remove());
+          let txt = (clone.textContent || '')
+            .replace(/[\n\r\t]+/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+          if (!txt) {
+            txt = (el.textContent || '')
+              .replace(/[\n\r\t]+/g, ' ')
+              .replace(/\s+/g, ' ')
+              .trim();
+          }
+          return cleanDuplicateText(txt);
+        }
+
+        function cleanDuplicateString(text: string): string {
+          return cleanDuplicateText(text);
+        }
+
+        const modal = findActiveModal(document) || document.body;
+        const descriptors: FormFieldDescriptor[] = [];
+
+        // 1. Radio groups and Checkbox groups (fieldsets / role="radiogroup")
+        const fieldsets = Array.from(
+          modal.querySelectorAll('fieldset, div[role="radiogroup"], div[role="group"]'),
+        ) as HTMLElement[];
+        for (const fs of fieldsets) {
+          const radios = Array.from(fs.querySelectorAll('input[type="radio"]')) as HTMLInputElement[];
+          const checkboxes = Array.from(fs.querySelectorAll('input[type="checkbox"]')) as HTMLInputElement[];
+
+          if (radios.length > 0) {
+            const legend = fs.querySelector('legend, [role="heading"], label');
+            const legendText = cleanElementText(legend);
+            if (!legendText) continue;
+
+            const anyChecked = radios.some(r => r.checked);
+            if (!anyChecked) {
+              const options = radios
+                .map(r => {
+                  const rId = r.getAttribute('id');
+                  const rLbl = rId ? fs.querySelector(`label[for="${rId}"]`) : null;
+                  return cleanElementText(rLbl) || (r.value || '').trim();
+                })
+                .filter(Boolean);
+
+              let hintText = '';
+              const hintEl = fs.querySelector(
+                '.fb-dash-form-element__hint, .artdeco-text-input--hint, span.t-12, [id*="hint"], [data-test-form-element-hint]',
+              );
+              if (hintEl) hintText = cleanElementText(hintEl);
+
+              const isExplicitlyOptional =
+                /\boptional\b/i.test(legendText) ||
+                Boolean(
+                  fs.querySelector(
+                    '.fb-dash-form-element__label-title--optional, [data-test-form-element-optional], .artdeco-form__label--optional',
+                  ) || fs.closest('.fb-dash-form-element--optional, [data-test-form-element-optional]'),
+                );
+
+              descriptors.push({
+                label: legendText,
+                fieldType: 'radio',
+                options,
+                hintText: hintText || undefined,
+                required: !isExplicitlyOptional,
+              });
+            }
+          } else if (checkboxes.length > 0) {
+            const legend = fs.querySelector('legend, [role="heading"], label');
+            const legendText = cleanElementText(legend);
+            if (!legendText) continue;
+
+            const anyChecked = checkboxes.some(c => c.checked);
+            if (!anyChecked) {
+              const options = checkboxes
+                .map(c => {
+                  const cId = c.getAttribute('id');
+                  const cLbl = cId ? fs.querySelector(`label[for="${cId}"]`) : null;
+                  return cleanElementText(cLbl) || (c.value || '').trim();
+                })
+                .filter(Boolean);
+
+              const isExplicitlyOptional =
+                /\boptional\b/i.test(legendText) ||
+                Boolean(
+                  fs.querySelector(
+                    '.fb-dash-form-element__label-title--optional, [data-test-form-element-optional], .artdeco-form__label--optional',
+                  ) || fs.closest('.fb-dash-form-element--optional, [data-test-form-element-optional]'),
+                );
+
+              descriptors.push({
+                label: legendText,
+                fieldType: 'checkbox',
+                options,
+                required: !isExplicitlyOptional,
+              });
+            }
+          }
+        }
+
+        // 2. Selects / Dropdowns
+        const selects = Array.from(modal.querySelectorAll('select')) as HTMLSelectElement[];
+        for (const sel of selects) {
+          const val = sel.value || '';
+          const selectedText = sel.selectedOptions[0]?.text || '';
+          if (!val || /select an option|please select|^--/i.test(selectedText)) {
+            let label = '';
+            const id = sel.getAttribute('id');
+            if (id) {
+              const lbl = modal.querySelector(`label[for="${id}"]`);
+              if (lbl) label = cleanElementText(lbl);
+            }
+            let parent: HTMLElement | null = null;
+            if (!label) {
+              parent = sel.closest(
+                'div.fb-dash-form-element, div.jobs-easy-apply-form-element, div[data-test-form-element]',
+              );
+              const lbl = parent?.querySelector('label');
+              if (lbl) label = cleanElementText(lbl);
+            }
+            if (!label) label = cleanDuplicateString(sel.getAttribute('aria-label') || '');
+
+            let hintText = '';
+            const describedBy = sel.getAttribute('aria-describedby');
+            if (describedBy) {
+              const ids = describedBy.split(/\s+/);
+              const parts: string[] = [];
+              for (const did of ids) {
+                if (!did) continue;
+                try {
+                  const el = modal.querySelector(`[id="${CSS.escape(did)}"]`) || document.getElementById(did);
+                  if (el) {
+                    const t = cleanElementText(el);
+                    if (t) parts.push(t);
+                  }
+                } catch {}
+              }
+              if (parts.length > 0) hintText = parts.join(' ');
+            }
+            if (!hintText) {
+              if (!parent) {
+                parent = sel.closest(
+                  'div.fb-dash-form-element, div.jobs-easy-apply-form-element, div[data-test-form-element]',
+                );
+              }
+              const hintEl = parent?.querySelector(
+                '.fb-dash-form-element__hint, .artdeco-text-input--hint, span.t-12, [id*="hint"], [data-test-form-element-hint]',
+              );
+              if (hintEl) hintText = cleanElementText(hintEl);
+            }
+
+            const options = Array.from(sel.options)
+              .map(o => cleanDuplicateString(o.text.trim()))
+              .filter(t => !/select an option|please select|^--/i.test(t));
+
+            const isExplicitlyOptional =
+              /\boptional\b/i.test(label) ||
+              /\boptional\b/i.test(hintText) ||
+              Boolean(
+                sel.closest(
+                  '.fb-dash-form-element--optional, [data-test-form-element-optional], .artdeco-form__label--optional',
+                ) ||
+                  parent?.querySelector(
+                    '.fb-dash-form-element__label-title--optional, [data-test-form-element-optional]',
+                  ),
+              );
+            const isRequired =
+              sel.hasAttribute('required') || sel.getAttribute('aria-required') === 'true' || !isExplicitlyOptional;
+
+            descriptors.push({
+              id: sel.id || undefined,
+              label,
+              fieldType: 'dropdown',
+              options,
+              hintText: hintText || undefined,
+              required: isRequired,
+            });
+          }
+        }
+
+        // 3. Inputs (text, number, tel, email) & Textareas
+        const inputs = Array.from(
+          modal.querySelectorAll(
+            'input:not([type="hidden"]):not([type="radio"]):not([type="checkbox"]):not([type="submit"]):not([type="file"]), textarea',
+          ),
+        ) as (HTMLInputElement | HTMLTextAreaElement)[];
+
+        for (const input of inputs) {
+          const val = (input.value || '').trim();
+          if (!val) {
+            let label = '';
+            const id = input.getAttribute('id');
+            if (id) {
+              const lbl = modal.querySelector(`label[for="${id}"]`);
+              if (lbl) label = cleanElementText(lbl);
+            }
+            let parent: HTMLElement | null = null;
+            if (!label) {
+              parent = input.closest(
+                'div.fb-dash-form-element, div.jobs-easy-apply-form-element, div[data-test-form-element]',
+              );
+              const lbl = parent?.querySelector('label');
+              if (lbl) label = cleanElementText(lbl);
+            }
+            if (!label) label = cleanDuplicateString(input.getAttribute('aria-label') || '');
+
+            const placeholder = cleanDuplicateString(input.getAttribute('placeholder') || '');
+            let hintText = '';
+            const describedBy = input.getAttribute('aria-describedby');
+            if (describedBy) {
+              const ids = describedBy.split(/\s+/);
+              const parts: string[] = [];
+              for (const did of ids) {
+                if (!did) continue;
+                try {
+                  const el = modal.querySelector(`[id="${CSS.escape(did)}"]`) || document.getElementById(did);
+                  if (el) {
+                    const t = cleanElementText(el);
+                    if (t) parts.push(t);
+                  }
+                } catch {}
+              }
+              if (parts.length > 0) hintText = parts.join(' ');
+            }
+            if (!hintText) {
+              if (!parent) {
+                parent = input.closest(
+                  'div.fb-dash-form-element, div.jobs-easy-apply-form-element, div[data-test-form-element], .artdeco-text-input',
+                );
+              }
+              const hintEl = parent?.querySelector(
+                '.fb-dash-form-element__hint, .artdeco-text-input--hint, .artdeco-form-element__sub-text, span.t-12, [id*="hint"], [id*="helper"], [data-test-form-element-hint]',
+              );
+              if (hintEl) hintText = cleanElementText(hintEl);
+            }
+
+            const rawMin = input.getAttribute('min');
+            const rawMax = input.getAttribute('max');
+            const parsedMin = rawMin !== null && !isNaN(Number(rawMin)) ? Number(rawMin) : undefined;
+            const parsedMax = rawMax !== null && !isNaN(Number(rawMax)) ? Number(rawMax) : undefined;
+
+            const isTextArea = input.tagName.toLowerCase() === 'textarea';
+            const combinedHint = (placeholder + ' ' + hintText).toLowerCase();
+            const isSkillOrNumeric =
+              /how many years|experience|years|\bdays\b|\bmonths\b|whole\s*number|only\s*(?:whole\s*)?numbers|in\s*inr|in\s*lpa|ctc/i.test(
+                label,
+              ) ||
+              input.type === 'number' ||
+              input.inputMode === 'numeric' ||
+              /example:\s*\d+/i.test(combinedHint) ||
+              /whole\s*number|between \d+ and \d+|0 and 99/i.test(combinedHint);
+
+            const isExplicitlyOptional =
+              /\boptional\b/i.test(label) ||
+              /\boptional\b/i.test(combinedHint) ||
+              Boolean(
+                input.closest(
+                  '.fb-dash-form-element--optional, [data-test-form-element-optional], .artdeco-form__label--optional',
+                ) ||
+                  parent?.querySelector(
+                    '.fb-dash-form-element__label-title--optional, [data-test-form-element-optional]',
+                  ),
+              );
+            const isRequired =
+              input.hasAttribute('required') || input.getAttribute('aria-required') === 'true' || !isExplicitlyOptional;
+
+            descriptors.push({
+              id: input.id || undefined,
+              label,
+              fieldType: isSkillOrNumeric ? 'number' : 'text',
+              min: parsedMin !== undefined ? parsedMin : isSkillOrNumeric ? 0 : undefined,
+              max: parsedMax !== undefined ? parsedMax : /0 and 99/i.test(combinedHint) ? 99 : undefined,
+              isTextArea,
+              placeholder: placeholder || undefined,
+              hintText: hintText || undefined,
+              required: isRequired,
+            });
+          }
+        }
+
+        // 4. Standalone Checkboxes
+        const checkboxes = Array.from(
+          modal.querySelectorAll('input[type="checkbox"]:not([disabled])'),
+        ) as HTMLInputElement[];
+        for (const cb of checkboxes) {
+          if (cb.checked) continue;
+          if (cb.closest('fieldset, div[role="radiogroup"], div[role="group"]')) continue;
+
+          let label = '';
+          const id = cb.getAttribute('id');
+          if (id) {
+            const lbl = modal.querySelector(`label[for="${id}"]`);
+            if (lbl) label = cleanElementText(lbl);
+          }
+          let parent: HTMLElement | null = null;
+          if (!label) {
+            parent = cb.closest(
+              'div.fb-dash-form-element, div.jobs-easy-apply-form-element, div[data-test-form-element], label',
+            );
+            const lbl = parent instanceof HTMLLabelElement ? parent : parent?.querySelector('label');
+            if (lbl) label = cleanElementText(lbl);
+          }
+          if (!label) label = cleanDuplicateString(cb.getAttribute('aria-label') || '');
+
+          if (label) {
+            const parentEl = parent || cb.closest('div, section, fieldset, li') || cb.parentElement;
+            const parentText = parentEl ? cleanElementText(parentEl).toLowerCase() : '';
+            const isTopChoice = /top\s*choice/i.test(label) || /top\s*choice/i.test(parentText);
+            const isExplicitlyOptional =
+              isTopChoice ||
+              /\boptional\b/i.test(label) ||
+              /\boptional\b/i.test(parentText) ||
+              Boolean(
+                parentEl?.querySelector(
+                  '.fb-dash-form-element__label-title--optional, [data-test-form-element-optional], .artdeco-form__label--optional',
+                ),
+              );
+
+            const isRequired = cb.hasAttribute('required') || cb.getAttribute('aria-required') === 'true';
+
+            descriptors.push({
+              id: cb.id || undefined,
+              label,
+              fieldType: 'checkbox',
+              options: ['Yes', 'No'],
+              required: isRequired || !isExplicitlyOptional,
+            });
+          }
+        }
+
+        return descriptors;
+      })
+      .catch(() => []);
+  }
+
+  /**
+   * Inspects which forward or submission buttons are available on the active modal.
+   */
+  async getModalActionButtons(): Promise<{
+    hasNext: boolean;
+    hasReview: boolean;
+    hasSubmit: boolean;
+  }> {
+    if (!this._puppeteerPage) return { hasNext: false, hasReview: false, hasSubmit: false };
+
+    return this._puppeteerPage
+      .evaluate(() => {
+        function findActiveModal(root: any): HTMLElement | null {
+          const candidates = root.querySelectorAll
+            ? (Array.from(
+                root.querySelectorAll(
+                  'div.jobs-easy-apply-modal, div[data-test-modal], div.artdeco-modal, div[role="dialog"]',
+                ),
+              ) as HTMLElement[])
+            : [];
+
+          for (const c of candidates) {
+            if (
+              c.closest(
+                'nav, header, #global-nav, .global-nav, .msg-overlay-container, #msg-overlay, .artdeco-dropdown',
+              )
+            ) {
+              continue;
+            }
+            const text = (c.innerText || c.textContent || '').trim().toLowerCase();
+            if (/^\d+\s*notifications?$/i.test(text) || c.closest('.notifications-badge')) continue;
+            const style = window.getComputedStyle(c);
+            if (style.display === 'none' || style.visibility === 'hidden') continue;
+            const rect = c.getBoundingClientRect();
+            if (rect.width >= 200 && rect.height >= 150) return c;
+          }
+
+          const all = root.querySelectorAll ? root.querySelectorAll('*') : [];
+          for (let i = 0; i < all.length; i++) {
+            if (all[i].shadowRoot) {
+              const found = findActiveModal(all[i].shadowRoot);
+              if (found) return found;
+            }
+          }
+          return null;
+        }
+
+        const modal = findActiveModal(document) || document.body;
+        const buttons = Array.from(modal.querySelectorAll('button')) as HTMLButtonElement[];
+
+        let hasNext = false;
+        let hasReview = false;
+        let hasSubmit = false;
+
+        for (const btn of buttons) {
+          const text = (btn.textContent || '').trim();
+          const aria = (btn.getAttribute('aria-label') || '').trim();
+
+          if (/submit application|submit/i.test(aria) || /^\s*submit(\s*application)?\s*$/i.test(text)) {
+            hasSubmit = true;
+          } else if (/review/i.test(aria) || /^\s*review\s*$/i.test(text)) {
+            hasReview = true;
+          } else if (/next|continue/i.test(aria) || /^\s*(next|continue)\s*$/i.test(text)) {
+            hasNext = true;
+          }
+        }
+
+        return { hasNext, hasReview, hasSubmit };
+      })
+      .catch(() => ({ hasNext: false, hasReview: false, hasSubmit: false }));
+  }
+
+  /**
+   * Clicks the Next or Review button in the active modal.
+   */
+  async clickModalForwardButton(): Promise<{ clicked: boolean; type?: 'next' | 'review' }> {
+    if (!this._puppeteerPage) return { clicked: false };
+
+    return this._puppeteerPage
+      .evaluate(() => {
+        function findActiveModal(root: any): HTMLElement | null {
+          const candidates = root.querySelectorAll
+            ? (Array.from(
+                root.querySelectorAll(
+                  'div.jobs-easy-apply-modal, div[data-test-modal], div.artdeco-modal, div[role="dialog"]',
+                ),
+              ) as HTMLElement[])
+            : [];
+
+          for (const c of candidates) {
+            if (
+              c.closest(
+                'nav, header, #global-nav, .global-nav, .msg-overlay-container, #msg-overlay, .artdeco-dropdown',
+              )
+            ) {
+              continue;
+            }
+            const text = (c.innerText || c.textContent || '').trim().toLowerCase();
+            if (/^\d+\s*notifications?$/i.test(text) || c.closest('.notifications-badge')) continue;
+            const style = window.getComputedStyle(c);
+            if (style.display === 'none' || style.visibility === 'hidden') continue;
+            const rect = c.getBoundingClientRect();
+            if (rect.width >= 200 && rect.height >= 150) return c;
+          }
+
+          const all = root.querySelectorAll ? root.querySelectorAll('*') : [];
+          for (let i = 0; i < all.length; i++) {
+            if (all[i].shadowRoot) {
+              const found = findActiveModal(all[i].shadowRoot);
+              if (found) return found;
+            }
+          }
+          return null;
+        }
+
+        const modal = findActiveModal(document) || document.body;
+        const buttons = Array.from(modal.querySelectorAll('button')) as HTMLButtonElement[];
+
+        // Try Review first
+        for (const btn of buttons) {
+          const text = (btn.textContent || '').trim();
+          const aria = (btn.getAttribute('aria-label') || '').trim();
+          if (/review/i.test(aria) || /^\s*review\s*$/i.test(text)) {
+            btn.scrollIntoView({ behavior: 'instant', block: 'center' });
+            btn.click();
+            return { clicked: true, type: 'review' as const };
+          }
+        }
+
+        // Try Next / Continue
+        for (const btn of buttons) {
+          const text = (btn.textContent || '').trim();
+          const aria = (btn.getAttribute('aria-label') || '').trim();
+          if (/next|continue/i.test(aria) || /^\s*(next|continue)\s*$/i.test(text)) {
+            btn.scrollIntoView({ behavior: 'instant', block: 'center' });
+            btn.click();
+            return { clicked: true, type: 'next' as const };
+          }
+        }
+
+        return { clicked: false };
+      })
+      .catch(() => ({ clicked: false }));
+  }
+
+  /**
+   * Submits the application in the Review step.
+   */
+  async submitApplication(): Promise<{ clicked: boolean; error?: string }> {
+    if (!this._puppeteerPage) return { clicked: false, error: 'Puppeteer not connected' };
+
+    return this._puppeteerPage
+      .evaluate(() => {
+        function findActiveModal(root: any): HTMLElement | null {
+          const candidates = root.querySelectorAll
+            ? (Array.from(
+                root.querySelectorAll(
+                  'div.jobs-easy-apply-modal, div[data-test-modal], div.artdeco-modal, div[role="dialog"]',
+                ),
+              ) as HTMLElement[])
+            : [];
+
+          for (const c of candidates) {
+            if (
+              c.closest(
+                'nav, header, #global-nav, .global-nav, .msg-overlay-container, #msg-overlay, .artdeco-dropdown',
+              )
+            ) {
+              continue;
+            }
+            const text = (c.innerText || c.textContent || '').trim().toLowerCase();
+            if (/^\d+\s*notifications?$/i.test(text) || c.closest('.notifications-badge')) continue;
+            const style = window.getComputedStyle(c);
+            if (style.display === 'none' || style.visibility === 'hidden') continue;
+            const rect = c.getBoundingClientRect();
+            if (rect.width >= 200 && rect.height >= 150) return c;
+          }
+
+          const all = root.querySelectorAll ? root.querySelectorAll('*') : [];
+          for (let i = 0; i < all.length; i++) {
+            if (all[i].shadowRoot) {
+              const found = findActiveModal(all[i].shadowRoot);
+              if (found) return found;
+            }
+          }
+          return null;
+        }
+
+        const modal = findActiveModal(document) || document.body;
+        const buttons = Array.from(modal.querySelectorAll('button')) as HTMLButtonElement[];
+
+        for (const btn of buttons) {
+          const text = (btn.textContent || '').trim();
+          const aria = (btn.getAttribute('aria-label') || '').trim();
+          if (/submit application/i.test(aria) || /^\s*submit(\s*application)?\s*$/i.test(text)) {
+            btn.scrollIntoView({ behavior: 'instant', block: 'center' });
+            btn.click();
+            return { clicked: true };
+          }
+        }
+
+        return { clicked: false, error: 'Submit button not found in active modal' };
+      })
+      .catch(err => ({ clicked: false, error: String(err) }));
+  }
+
+  /**
+   * Verifies explicit application submission confirmation over up to maxWaitMs.
+   */
+  async verifySubmissionConfirmation(maxWaitMs = 8000): Promise<{ confirmed: boolean; message?: string }> {
+    const startTime = Date.now();
+    while (Date.now() - startTime < maxWaitMs) {
+      const check = await this.verifyApplicationConfirmation();
+      if (check.confirmed) {
+        return check;
+      }
+
+      const topCard = await this.extractJobTopCardContext(1000).catch(() => null);
+      if (topCard?.isAlreadyApplied) {
+        return { confirmed: true, message: 'Verified applied status on LinkedIn top-card' };
+      }
+
+      await new Promise(r => setTimeout(r, 600));
+    }
+    return { confirmed: false, message: 'Submission confirmation was not observed within timeout' };
+  }
+}
+
+export interface FormFieldDescriptor {
+  id?: string;
+  label: string;
+  fieldType: 'text' | 'number' | 'radio' | 'dropdown' | 'checkbox';
+  options?: string[];
+  min?: number;
+  max?: number;
+  isTextArea?: boolean;
+  placeholder?: string;
+  hintText?: string;
+  required?: boolean;
+}
+
+export interface SearchJobCard {
+  jobId: string;
+  title: string;
+  company: string;
+  url: string;
+}
+
+export interface JobTopCardContext {
+  title: string;
+  company: string;
+  location: string;
+  isClosed: boolean;
+  isAlreadyApplied: boolean;
+  hasEasyApply: boolean;
+  isLoginWall: boolean;
+  descriptionSnippet?: string;
 }

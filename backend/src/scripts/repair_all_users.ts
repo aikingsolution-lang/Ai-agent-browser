@@ -34,7 +34,7 @@ async function repairAllUsers() {
       console.log(`  trialUsedAt: ${user.trialUsedAt}`);
       console.log(`  createdAt: ${user.createdAt}`);
 
-      let subs = await Subscription.find({ userId: user._id }).sort({ createdAt: 1 });
+      const subs = await Subscription.find({ userId: user._id }).sort({ createdAt: 1 });
       let balance = await UserCreditBalance.findOne({ userId: user._id });
 
       console.log(`  Subscriptions count: ${subs.length}`);

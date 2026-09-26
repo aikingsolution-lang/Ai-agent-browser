@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { CreditController } from '../controllers/credit.controller.js';
 import { authenticate } from '../middleware/auth.middleware.js';
-import { readApiRateLimiter } from '../middleware/rateLimiter.js';
+import { readApiRateLimiter, refundRateLimiter } from '../middleware/rateLimiter.js';
 
 export const creditRouter: Router = Router();
 
@@ -14,3 +14,6 @@ creditRouter.get('/balance', CreditController.getBalance);
 
 // GET /api/v1/credits/history
 creditRouter.get('/history', CreditController.getHistory);
+
+// POST /api/v1/credits/refund
+creditRouter.post('/refund', refundRateLimiter, CreditController.refundCredits);

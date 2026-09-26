@@ -130,9 +130,9 @@ export const PremiumPlans: React.FC<PremiumPlansProps> = ({ isDarkMode }) => {
       <div
         className={`rounded-lg border ${isDarkMode ? 'border-slate-700 bg-slate-800' : 'border-blue-100 bg-gray-50'} p-6 text-left shadow-sm`}>
         {/* Header & Toggle */}
-        <div className="text-center max-w-2xl mx-auto mb-8">
-          <div className="inline-flex items-center space-x-2 rounded-full bg-indigo-500/10 px-4 py-1.5 text-xs font-semibold text-indigo-500 mb-3">
-            <FiStar className="h-4 w-4" />
+        <div className="mx-auto mb-8 max-w-2xl text-center">
+          <div className="mb-3 inline-flex items-center space-x-2 rounded-full bg-indigo-500/10 px-4 py-1.5 text-xs font-semibold text-indigo-500">
+            <FiStar className="size-4" />
             <span>NanoBrowser Premium Commercial Plans</span>
           </div>
           <h2 className={`text-3xl font-extrabold ${isDarkMode ? 'text-gray-100' : 'text-gray-900'}`}>
@@ -144,7 +144,7 @@ export const PremiumPlans: React.FC<PremiumPlansProps> = ({ isDarkMode }) => {
           </p>
 
           {/* Billing Switcher */}
-          <div className="mt-6 inline-flex items-center rounded-full p-1 border border-slate-700/30 bg-slate-900/20 backdrop-blur-sm">
+          <div className="mt-6 inline-flex items-center rounded-full border border-slate-700/30 bg-slate-900/20 p-1 backdrop-blur-sm">
             <button
               onClick={() => setBillingInterval('monthly')}
               className={`rounded-full px-4 py-1.5 text-xs font-semibold transition-all ${
@@ -191,19 +191,19 @@ export const PremiumPlans: React.FC<PremiumPlansProps> = ({ isDarkMode }) => {
 
               <ul className={`mt-6 space-y-3 text-xs ${isDarkMode ? 'text-gray-300' : 'text-gray-600'}`}>
                 <li className="flex items-center space-x-2 font-medium text-sky-500">
-                  <FiZap className="h-4 w-4 flex-shrink-0" />
+                  <FiZap className="size-4 shrink-0" />
                   <span>{starter.credits.toLocaleString()} AI Credits / month included</span>
                 </li>
                 <li className="flex items-center space-x-2">
-                  <FiCheck className="h-4 w-4 text-emerald-500 flex-shrink-0" />
+                  <FiCheck className="size-4 shrink-0 text-emerald-500" />
                   <span>AWS Bedrock Nova Lite (`amazon.nova-lite-v1:0`)</span>
                 </li>
                 <li className="flex items-center space-x-2">
-                  <FiCheck className="h-4 w-4 text-emerald-500 flex-shrink-0" />
+                  <FiCheck className="size-4 shrink-0 text-emerald-500" />
                   <span>120 tasks / minute rate limit</span>
                 </li>
                 <li className="flex items-center space-x-2">
-                  <FiCheck className="h-4 w-4 text-emerald-500 flex-shrink-0" />
+                  <FiCheck className="size-4 shrink-0 text-emerald-500" />
                   <span>Razorpay Instant Checkout</span>
                 </li>
               </ul>
@@ -212,7 +212,7 @@ export const PremiumPlans: React.FC<PremiumPlansProps> = ({ isDarkMode }) => {
             <button
               onClick={() => handleOpenCheckout('starter')}
               disabled={isProcessingPayment || currentPlan === 'starter'}
-              className="mt-8 w-full rounded-xl bg-sky-600 py-2.5 text-xs font-semibold text-white hover:bg-sky-500 transition-all shadow-md disabled:opacity-50 cursor-pointer">
+              className="mt-8 w-full cursor-pointer rounded-xl bg-sky-600 py-2.5 text-xs font-semibold text-white shadow-md transition-all hover:bg-sky-500 disabled:opacity-50">
               {currentPlan === 'starter' ? 'Active Plan' : `Subscribe to Starter (₹${starter.price}/mo)`}
             </button>
           </div>
@@ -252,19 +252,19 @@ export const PremiumPlans: React.FC<PremiumPlansProps> = ({ isDarkMode }) => {
 
               <ul className={`mt-6 space-y-3 text-xs ${isDarkMode ? 'text-gray-300' : 'text-gray-600'}`}>
                 <li className="flex items-center space-x-2 font-medium text-indigo-500 dark:text-indigo-400">
-                  <FiZap className="h-4 w-4 flex-shrink-0" />
+                  <FiZap className="size-4 shrink-0" />
                   <span>{pro.credits.toLocaleString()} AI Credits / month included</span>
                 </li>
                 <li className="flex items-center space-x-2">
-                  <FiCheck className="h-4 w-4 text-emerald-500 flex-shrink-0" />
+                  <FiCheck className="size-4 shrink-0 text-emerald-500" />
                   <span>AWS Bedrock Nova Lite & Pro Models</span>
                 </li>
                 <li className="flex items-center space-x-2">
-                  <FiCheck className="h-4 w-4 text-emerald-500 flex-shrink-0" />
+                  <FiCheck className="size-4 shrink-0 text-emerald-500" />
                   <span>300 tasks / minute rate limit</span>
                 </li>
                 <li className="flex items-center space-x-2">
-                  <FiCheck className="h-4 w-4 text-emerald-500 flex-shrink-0" />
+                  <FiCheck className="size-4 shrink-0 text-emerald-500" />
                   <span>Priority task execution & SSE streaming</span>
                 </li>
               </ul>
@@ -273,9 +273,9 @@ export const PremiumPlans: React.FC<PremiumPlansProps> = ({ isDarkMode }) => {
             <button
               onClick={() => handleOpenCheckout('pro')}
               disabled={isProcessingPayment || currentPlan === 'pro'}
-              className={`mt-8 w-full rounded-xl py-2.5 text-xs font-semibold shadow-md transition-all cursor-pointer ${
+              className={`mt-8 w-full cursor-pointer rounded-xl py-2.5 text-xs font-semibold shadow-md transition-all ${
                 currentPlan === 'pro'
-                  ? 'bg-indigo-500/20 text-indigo-400 cursor-default'
+                  ? 'cursor-default bg-indigo-500/20 text-indigo-400'
                   : 'bg-gradient-to-r from-sky-500 to-indigo-600 text-white hover:from-sky-600 hover:to-indigo-700'
               }`}>
               {currentPlan === 'pro' ? 'Active Plan' : `Subscribe to Pro (₹${pro.price.toLocaleString()}/mo)`}
@@ -312,15 +312,15 @@ export const PremiumPlans: React.FC<PremiumPlansProps> = ({ isDarkMode }) => {
 
               <ul className={`mt-6 space-y-3 text-xs ${isDarkMode ? 'text-gray-300' : 'text-gray-600'}`}>
                 <li className="flex items-center space-x-2 font-medium text-purple-400">
-                  <FiZap className="h-4 w-4 flex-shrink-0" />
+                  <FiZap className="size-4 shrink-0" />
                   <span>{power.credits.toLocaleString()} AI Credits / month included</span>
                 </li>
                 <li className="flex items-center space-x-2">
-                  <FiCheck className="h-4 w-4 text-emerald-500 flex-shrink-0" />
+                  <FiCheck className="size-4 shrink-0 text-emerald-500" />
                   <span>600 tasks / minute rate limit</span>
                 </li>
                 <li className="flex items-center space-x-2">
-                  <FiCheck className="h-4 w-4 text-emerald-500 flex-shrink-0" />
+                  <FiCheck className="size-4 shrink-0 text-emerald-500" />
                   <span>Dedicated priority concurrency pool</span>
                 </li>
               </ul>
@@ -329,16 +329,16 @@ export const PremiumPlans: React.FC<PremiumPlansProps> = ({ isDarkMode }) => {
             <button
               onClick={() => handleOpenCheckout('power')}
               disabled={isProcessingPayment || currentPlan === 'power'}
-              className="mt-8 w-full rounded-xl bg-purple-600 hover:bg-purple-500 py-2.5 text-xs font-semibold text-white transition-all shadow-md cursor-pointer">
+              className="mt-8 w-full cursor-pointer rounded-xl bg-purple-600 py-2.5 text-xs font-semibold text-white shadow-md transition-all hover:bg-purple-500">
               {currentPlan === 'power' ? 'Active Plan' : `Subscribe to Power (₹${power.price.toLocaleString()}/mo)`}
             </button>
           </div>
         </div>
 
         {/* Value Proposition Highlights */}
-        <div className="mt-12 grid grid-cols-1 gap-4 md:grid-cols-3 pt-6 border-t border-slate-700/30">
+        <div className="mt-12 grid grid-cols-1 gap-4 border-t border-slate-700/30 pt-6 md:grid-cols-3">
           <div className="flex items-center space-x-3">
-            <FiShield className="h-6 w-6 text-sky-500 flex-shrink-0" />
+            <FiShield className="size-6 shrink-0 text-sky-500" />
             <div>
               <h4 className={`text-xs font-bold ${isDarkMode ? 'text-gray-200' : 'text-gray-800'}`}>
                 Monetization & Revenue
@@ -349,7 +349,7 @@ export const PremiumPlans: React.FC<PremiumPlansProps> = ({ isDarkMode }) => {
             </div>
           </div>
           <div className="flex items-center space-x-3">
-            <FiCpu className="h-6 w-6 text-indigo-500 flex-shrink-0" />
+            <FiCpu className="size-6 shrink-0 text-indigo-500" />
             <div>
               <h4 className={`text-xs font-bold ${isDarkMode ? 'text-gray-200' : 'text-gray-800'}`}>
                 User Convenience
@@ -360,7 +360,7 @@ export const PremiumPlans: React.FC<PremiumPlansProps> = ({ isDarkMode }) => {
             </div>
           </div>
           <div className="flex items-center space-x-3">
-            <FiTrendingUp className="h-6 w-6 text-emerald-500 flex-shrink-0" />
+            <FiTrendingUp className="size-6 shrink-0 text-emerald-500" />
             <div>
               <h4 className={`text-xs font-bold ${isDarkMode ? 'text-gray-200' : 'text-gray-800'}`}>
                 Ultimate Flexibility

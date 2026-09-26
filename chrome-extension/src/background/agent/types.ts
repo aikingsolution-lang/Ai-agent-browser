@@ -49,6 +49,11 @@ export class AgentContext {
   stateMessageAdded: boolean;
   history: AgentStepHistory;
   finalAnswer: string | null;
+  applicationSubmissionConfirmed: boolean;
+  submissionConfirmationMessage?: string | null;
+  isJobApplyRun: boolean;
+  creditBudget: number;
+  estimatedCreditsUsed: number;
 
   constructor(
     taskId: string,
@@ -56,6 +61,7 @@ export class AgentContext {
     messageManager: MessageManager,
     eventManager: EventManager,
     options: Partial<AgentOptions>,
+    isJobApplyRun = false,
   ) {
     this.controller = new AbortController();
     this.taskId = taskId;
@@ -73,6 +79,11 @@ export class AgentContext {
     this.stateMessageAdded = false;
     this.history = new AgentStepHistory();
     this.finalAnswer = null;
+    this.applicationSubmissionConfirmed = false;
+    this.submissionConfirmationMessage = null;
+    this.isJobApplyRun = isJobApplyRun;
+    this.creditBudget = 150;
+    this.estimatedCreditsUsed = 0;
   }
 
   async emitEvent(actor: Actors, state: ExecutionState, eventDetails: string) {

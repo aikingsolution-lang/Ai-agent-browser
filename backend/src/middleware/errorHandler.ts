@@ -24,6 +24,17 @@ export function errorHandler(err: Error | AppError, _req: Request, res: Response
     return;
   }
 
+  // Handle Mongo buffering / connection timeout error
+  if (err.message?.includes('buffering timed out')) {
+    sendError(
+      res,
+      'Database connection timed out. Please check that MongoDB is running and network access is allowed.',
+      503,
+      'DATABASE_UNAVAILABLE',
+    );
+    return;
+  }
+
   const statusCode = err instanceof AppError ? err.statusCode : 500;
   const code = err instanceof AppError ? err.code : 'INTERNAL_SERVER_ERROR';
 

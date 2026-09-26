@@ -112,7 +112,7 @@ export const TeamManagement: React.FC<TeamManagementProps> = ({ isDarkMode }) =>
       <div
         className={`rounded-lg border ${isDarkMode ? 'border-slate-700 bg-slate-800' : 'border-blue-100 bg-gray-50'} p-6 text-left shadow-sm`}>
         {/* Header */}
-        <div className="flex items-center justify-between mb-6">
+        <div className="mb-6 flex items-center justify-between">
           <div>
             <h2 className={`text-xl font-bold ${isDarkMode ? 'text-gray-100' : 'text-gray-900'}`}>
               Team & Enterprise Seat Management
@@ -122,19 +122,19 @@ export const TeamManagement: React.FC<TeamManagementProps> = ({ isDarkMode }) =>
             </p>
           </div>
           <div className="flex items-center space-x-2 rounded-full bg-indigo-500/10 px-3.5 py-1 text-xs font-semibold text-indigo-400">
-            <FiUsers className="h-4 w-4" />
+            <FiUsers className="size-4" />
             <span>{settings.team.teamName}</span>
           </div>
         </div>
 
         {/* Seat Quota & License Key Card */}
-        <div className="grid grid-cols-1 gap-6 md:grid-cols-2 mb-8">
+        <div className="mb-8 grid grid-cols-1 gap-6 md:grid-cols-2">
           {/* Seat Quota Card */}
           <div
             className={`rounded-xl border p-5 ${
               isDarkMode ? 'border-slate-700 bg-slate-700/40' : 'border-gray-200 bg-white'
             }`}>
-            <div className="flex items-center justify-between mb-2">
+            <div className="mb-2 flex items-center justify-between">
               <span className={`text-xs font-medium ${isDarkMode ? 'text-gray-300' : 'text-gray-700'}`}>
                 Team Seat Allocation
               </span>
@@ -142,7 +142,7 @@ export const TeamManagement: React.FC<TeamManagementProps> = ({ isDarkMode }) =>
                 {allocatedSeats} / {maxSeats} Seats Occupied ({seatPercent}%)
               </span>
             </div>
-            <div className={`h-2.5 w-full rounded-full overflow-hidden ${isDarkMode ? 'bg-slate-600' : 'bg-gray-200'}`}>
+            <div className={`h-2.5 w-full overflow-hidden rounded-full ${isDarkMode ? 'bg-slate-600' : 'bg-gray-200'}`}>
               <div
                 className="h-full bg-gradient-to-r from-sky-500 to-indigo-600 transition-all duration-300"
                 style={{ width: `${seatPercent}%` }}></div>
@@ -157,9 +157,9 @@ export const TeamManagement: React.FC<TeamManagementProps> = ({ isDarkMode }) =>
             className={`rounded-xl border p-5 ${
               isDarkMode ? 'border-slate-700 bg-slate-700/40' : 'border-gray-200 bg-white'
             }`}>
-            <div className="flex items-center justify-between mb-2">
+            <div className="mb-2 flex items-center justify-between">
               <div className="flex items-center space-x-2">
-                <FiKey className="h-4 w-4 text-sky-500" />
+                <FiKey className="size-4 text-sky-500" />
                 <span className={`text-xs font-medium ${isDarkMode ? 'text-gray-300' : 'text-gray-700'}`}>
                   Enterprise License Key
                 </span>
@@ -171,12 +171,12 @@ export const TeamManagement: React.FC<TeamManagementProps> = ({ isDarkMode }) =>
                 {showLicenseKey ? 'Hide' : 'Reveal'}
               </button>
             </div>
-            <div className="flex items-center space-x-2 mt-2">
+            <div className="mt-2 flex items-center space-x-2">
               <input
                 type={showLicenseKey ? 'text' : 'password'}
                 readOnly
                 value={settings.team.licenseKey}
-                className={`w-full rounded-lg border p-2 text-xs font-mono ${
+                className={`w-full rounded-lg border p-2 font-mono text-xs ${
                   isDarkMode
                     ? 'border-slate-600 bg-slate-800 text-gray-200'
                     : 'border-gray-300 bg-gray-50 text-gray-800'
@@ -185,8 +185,8 @@ export const TeamManagement: React.FC<TeamManagementProps> = ({ isDarkMode }) =>
               <button
                 type="button"
                 onClick={handleCopyLicenseKey}
-                className="inline-flex items-center space-x-1 rounded-lg bg-sky-600 px-3 py-2 text-xs font-semibold text-white shadow hover:bg-sky-700 transition-colors">
-                {copiedKey ? <FiCheck className="h-4 w-4" /> : <FiCopy className="h-4 w-4" />}
+                className="inline-flex items-center space-x-1 rounded-lg bg-sky-600 px-3 py-2 text-xs font-semibold text-white shadow transition-colors hover:bg-sky-700">
+                {copiedKey ? <FiCheck className="size-4" /> : <FiCopy className="size-4" />}
               </button>
             </div>
           </div>
@@ -194,15 +194,15 @@ export const TeamManagement: React.FC<TeamManagementProps> = ({ isDarkMode }) =>
 
         {/* Invite Team Member Form */}
         <div
-          className={`rounded-xl border p-5 mb-8 ${isDarkMode ? 'border-slate-700 bg-slate-700/30' : 'border-gray-200 bg-gray-50'}`}>
-          <div className="flex items-center space-x-2 mb-3">
-            <FiUserPlus className="h-5 w-5 text-indigo-500" />
+          className={`mb-8 rounded-xl border p-5 ${isDarkMode ? 'border-slate-700 bg-slate-700/30' : 'border-gray-200 bg-gray-50'}`}>
+          <div className="mb-3 flex items-center space-x-2">
+            <FiUserPlus className="size-5 text-indigo-500" />
             <h3 className={`text-base font-semibold ${isDarkMode ? 'text-gray-200' : 'text-gray-800'}`}>
               Invite Team Member
             </h3>
           </div>
-          <form onSubmit={handleInviteMember} className="flex flex-col md:flex-row gap-3">
-            <div className="flex-1 relative">
+          <form onSubmit={handleInviteMember} className="flex flex-col gap-3 md:flex-row">
+            <div className="relative flex-1">
               <input
                 type="email"
                 required
@@ -213,7 +213,7 @@ export const TeamManagement: React.FC<TeamManagementProps> = ({ isDarkMode }) =>
                   isDarkMode ? 'border-slate-600 bg-slate-800 text-gray-200' : 'border-gray-300 bg-white text-gray-800'
                 }`}
               />
-              <FiMail className="absolute left-3 top-3 h-4 w-4 text-gray-400" />
+              <FiMail className="absolute left-3 top-3 size-4 text-gray-400" />
             </div>
 
             <select
@@ -229,8 +229,8 @@ export const TeamManagement: React.FC<TeamManagementProps> = ({ isDarkMode }) =>
             <button
               type="submit"
               disabled={isInviting}
-              className="inline-flex items-center justify-center space-x-2 rounded-lg bg-gradient-to-r from-sky-500 to-indigo-600 px-5 py-2.5 text-xs font-bold text-white shadow hover:from-sky-600 hover:to-indigo-700 transition-all">
-              <FiUserPlus className="h-4 w-4" />
+              className="inline-flex items-center justify-center space-x-2 rounded-lg bg-gradient-to-r from-sky-500 to-indigo-600 px-5 py-2.5 text-xs font-bold text-white shadow transition-all hover:from-sky-600 hover:to-indigo-700">
+              <FiUserPlus className="size-4" />
               <span>{inviteSuccess ? 'Invite Sent!' : 'Send Seat Invitation'}</span>
             </button>
           </form>
@@ -245,7 +245,7 @@ export const TeamManagement: React.FC<TeamManagementProps> = ({ isDarkMode }) =>
           <div className={`overflow-x-auto rounded-xl border ${isDarkMode ? 'border-slate-700' : 'border-gray-200'}`}>
             <table className="w-full text-left text-xs">
               <thead
-                className={`${isDarkMode ? 'bg-slate-700/60 text-gray-300' : 'bg-gray-100 text-gray-700'} uppercase font-semibold`}>
+                className={`${isDarkMode ? 'bg-slate-700/60 text-gray-300' : 'bg-gray-100 text-gray-700'} font-semibold uppercase`}>
                 <tr>
                   <th className="p-3.5">Member</th>
                   <th className="p-3.5">Role</th>
@@ -261,7 +261,7 @@ export const TeamManagement: React.FC<TeamManagementProps> = ({ isDarkMode }) =>
                     className={`${isDarkMode ? 'hover:bg-slate-700/20' : 'hover:bg-gray-50'} transition-colors`}>
                     <td className="p-3.5">
                       <div className="flex items-center space-x-3">
-                        <div className="flex h-8 w-8 items-center justify-center rounded-full bg-gradient-to-r from-sky-500 to-indigo-500 font-bold text-white uppercase text-xs shadow-sm">
+                        <div className="flex size-8 items-center justify-center rounded-full bg-gradient-to-r from-sky-500 to-indigo-500 text-xs font-bold uppercase text-white shadow-sm">
                           {member.email.substring(0, 2)}
                         </div>
                         <span className={`font-medium ${isDarkMode ? 'text-gray-200' : 'text-gray-900'}`}>
@@ -273,9 +273,9 @@ export const TeamManagement: React.FC<TeamManagementProps> = ({ isDarkMode }) =>
                       <span
                         className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-[10px] font-bold ${
                           member.role === 'owner'
-                            ? 'bg-purple-500/20 text-purple-400 border border-purple-500/30'
+                            ? 'border border-purple-500/30 bg-purple-500/20 text-purple-400'
                             : member.role === 'admin'
-                              ? 'bg-sky-500/20 text-sky-400 border border-sky-500/30'
+                              ? 'border border-sky-500/30 bg-sky-500/20 text-sky-400'
                               : 'bg-slate-700 text-gray-300'
                         }`}>
                         {member.role.toUpperCase()}
@@ -289,9 +289,9 @@ export const TeamManagement: React.FC<TeamManagementProps> = ({ isDarkMode }) =>
                             : 'bg-amber-500/20 text-amber-400'
                         }`}>
                         {member.status === 'active' ? (
-                          <FiUserCheck className="h-3 w-3" />
+                          <FiUserCheck className="size-3" />
                         ) : (
-                          <FiClock className="h-3 w-3" />
+                          <FiClock className="size-3" />
                         )}
                         <span>{member.status === 'active' ? 'Active' : 'Pending Invite'}</span>
                       </span>
@@ -304,9 +304,9 @@ export const TeamManagement: React.FC<TeamManagementProps> = ({ isDarkMode }) =>
                         <button
                           type="button"
                           onClick={() => handleRemoveMember(member.id)}
-                          className="rounded-lg p-1.5 text-red-400 hover:bg-red-500/10 transition-colors"
+                          className="rounded-lg p-1.5 text-red-400 transition-colors hover:bg-red-500/10"
                           title="Revoke seat access">
-                          <FiTrash2 className="h-4 w-4" />
+                          <FiTrash2 className="size-4" />
                         </button>
                       )}
                     </td>

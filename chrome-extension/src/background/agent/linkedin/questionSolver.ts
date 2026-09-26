@@ -6,6 +6,7 @@
  * flags for manual review without guessing.
  */
 
+import { z } from 'zod';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { HumanMessage, SystemMessage } from '@langchain/core/messages';
 import { createLogger } from '@src/background/log';
@@ -13,6 +14,111 @@ import type { ICareerBrain } from '@extension/storage';
 import type { IScreeningQuestion } from './types';
 
 const logger = createLogger('LinkedInQuestionSolver');
+
+// 1. The Output Contract (Zod Schema)
+export const aiFormResponseSchema = z.object({
+  answers: z.array(
+    z.object({
+      fieldId: z.string().describe('The exact ID or name attribute of the input field provided in the prompt'),
+      answer: z.string().describe('The exact string, number, or dropdown text to inject'),
+      is_answerable: z
+        .boolean()
+        .describe('False ONLY if the answer cannot be confidently deduced from the Context blocks'),
+      confidence_reasoning: z.string().describe('One short sentence explaining why this answer was chosen or skipped'),
+    }),
+  ),
+});
+
+export type AIFormResponse = z.infer<typeof aiFormResponseSchema>;
+
+// 2. The Strict Prompt Template
+export const generateBedrockPrompt = (resumeText: string, goldenAnswers: string, formQuestions: string) => {
+  return `You are an elite, highly precise job application assistant. Your ONLY goal is to map the user's professional data to the provided job application form questions.
+
+RULES:
+1. ZERO HALLUCINATION: If an answer is not explicitly found or logically deducible from the Context blocks, set "is_answerable" to false. Do not guess.
+2. STRICT MATCHING: For dropdowns or radio buttons, your "answer" must exactly match one of the provided options.
+3. CONCISENESS: Keep answers strictly formatted. If asked for years of experience, return just the number.
+
+=== CONTEXT: USER RESUME ===
+${resumeText}
+
+=== CONTEXT: GOLDEN Q&A (Strict Overrides) ===
+${goldenAnswers}
+
+=== TARGET FORM QUESTIONS ===
+${formQuestions}
+
+Analyze the Target Form Questions against the Context blocks and return the JSON payload.`;
+};
+
+// 3. The Bedrock Executor
+export async function solveFormQuestionsWithBedrock(
+  llm: BaseChatModel,
+  resumeText: string,
+  goldenAnswers: string,
+  formQuestions: string,
+): Promise<AIFormResponse | null> {
+  try {
+    const systemPrompt = generateBedrockPrompt(resumeText, goldenAnswers, formQuestions);
+
+    // Forces Bedrock (e.g., Claude 3 via AWS) to bind the Zod schema as a tool/function call
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const modelWithTools = (llm as any).withStructuredOutput(aiFormResponseSchema, {
+        name: 'FormSolver',
+        strict: true,
+      });
+
+      const response = await modelWithTools.invoke([
+        new SystemMessage(systemPrompt),
+        new HumanMessage('Process the target form questions based on the provided context.'),
+      ]);
+
+      const parsed = aiFormResponseSchema.safeParse(response);
+      if (parsed.success) {
+        return parsed.data;
+      }
+    } catch (structuredErr) {
+      logger.warning(
+        '[QuestionSolver] withStructuredOutput call failed, falling back to direct JSON prompt:',
+        structuredErr,
+      );
+    }
+
+    // Direct JSON fallback for models without tool-calling capability
+    const rawResponse = await llm.invoke([
+      new SystemMessage(
+        `${systemPrompt}\n\nRespond ONLY with a valid JSON object strictly matching this schema: {"answers": [{"fieldId": "...", "answer": "...", "is_answerable": true/false, "confidence_reasoning": "..."}]}`,
+      ),
+      new HumanMessage('Process the target form questions based on the provided context.'),
+    ]);
+
+    const content =
+      typeof rawResponse.content === 'string'
+        ? rawResponse.content
+        : Array.isArray(rawResponse.content)
+          ? rawResponse.content.map(c => (typeof c === 'string' ? c : 'text' in c ? c.text : '')).join('')
+          : '';
+
+    // Strip markdown code fences that Bedrock/Nova models sometimes add
+    const cleanContent = content.replace(/```json\s*|```\s*/gi, '').trim();
+
+    const match = cleanContent.match(/\{[\s\S]*\}/);
+    if (match) {
+      const json = JSON.parse(match[0]);
+      const validated = aiFormResponseSchema.safeParse(json);
+      if (validated.success) {
+        return validated.data;
+      }
+    }
+
+    return null;
+  } catch (error) {
+    logger.error('[QuestionSolver] Bedrock execution failed or schema validation bypassed:', error);
+    return null;
+  }
+}
 
 export interface QuestionSolution {
   questionId: string;
@@ -32,7 +138,25 @@ export async function solveScreeningQuestion(
 ): Promise<QuestionSolution> {
   const qTextLower = question.questionText.toLowerCase();
 
-  // 1. Check custom saved answers first
+  // 1. Check Golden Q&A ground-truth answers first
+  if (Array.isArray(careerBrain.goldenAnswers)) {
+    for (const ga of careerBrain.goldenAnswers) {
+      if (!ga.question || !ga.answer) continue;
+      const gaQuestionLower = ga.question.toLowerCase().trim();
+      if (qTextLower.includes(gaQuestionLower) || gaQuestionLower.includes(qTextLower)) {
+        logger.info(`[QuestionSolver] Matched Golden Q&A for "${question.questionText}": "${ga.answer}"`);
+        return {
+          questionId: question.questionId,
+          answer: ga.answer,
+          confidence: 1.0,
+          isConfident: true,
+          reasoning: `Matched Golden Q&A ground-truth rule: "${ga.question}"`,
+        };
+      }
+    }
+  }
+
+  // 1b. Check custom saved answers
   for (const [key, savedAnswer] of Object.entries(careerBrain.customAnswers || {})) {
     if (qTextLower.includes(key.toLowerCase()) || key.toLowerCase().includes(qTextLower)) {
       logger.info(`[QuestionSolver] Found exact match in customAnswers for "${question.questionText}": ${savedAnswer}`);
@@ -72,35 +196,50 @@ export async function solveScreeningQuestion(
     );
   }
 
-  // Years of Experience for a specific technology
+  // Years of Experience for a specific technology / skill
   if (
-    qTextLower.includes('how many years of') ||
+    qTextLower.includes('how many years') ||
     qTextLower.includes('years of experience') ||
-    qTextLower.includes('years of work experience')
+    qTextLower.includes('years of work experience') ||
+    qTextLower.includes('experience with')
   ) {
-    // Check if technology is in candidate skills
-    const matchedSkill = careerBrain.skills.find(s => qTextLower.includes(s.toLowerCase()));
-    if (matchedSkill) {
-      const years = String(Math.max(1, careerBrain.yearsOfExperience));
-      return formatStandardAnswer(
-        question,
-        years,
-        0.9,
-        `Matched skill "${matchedSkill}". Using career experience (${years} yrs).`,
-      );
-    } else {
-      // Check if skill is mentioned in narrative
-      const mentionedInNarrative = careerBrain.backgroundNarrative
-        .toLowerCase()
-        .includes(qTextLower.split(' ')[0] || '');
-      const years = mentionedInNarrative ? '1' : '0';
-      return formatStandardAnswer(question, years, 0.7, 'Estimated from background narrative.');
+    // 1. Check skillExperience map first
+    if (careerBrain.skillExperience && typeof careerBrain.skillExperience === 'object') {
+      for (const [skill, yrs] of Object.entries(careerBrain.skillExperience)) {
+        if (skill && qTextLower.includes(skill.toLowerCase())) {
+          return formatStandardAnswer(
+            question,
+            String(yrs),
+            1.0,
+            `Matched skillExperience for "${skill}": ${yrs} yrs.`,
+          );
+        }
+      }
     }
+    // Never fall back to total years of experience! Leave confidence low so ask_user or LLM triggers
   }
 
   // Notice Period
-  if (qTextLower.includes('notice period') || qTextLower.includes('how soon can you start')) {
+  if (
+    (qTextLower.includes('notice period') || qTextLower.includes('how soon can you start')) &&
+    careerBrain.noticePeriod
+  ) {
     return formatStandardAnswer(question, careerBrain.noticePeriod, 0.95, 'Derived from notice period setting.');
+  }
+
+  // Phone Number / Mobile
+  if (qTextLower.includes('phone') || qTextLower.includes('mobile') || qTextLower.includes('contact number')) {
+    return formatStandardAnswer(
+      question,
+      careerBrain.phoneNumber,
+      0.99,
+      'Derived from candidate contact phone number.',
+    );
+  }
+
+  // Email Address
+  if (qTextLower.includes('email') || qTextLower.includes('e-mail')) {
+    return formatStandardAnswer(question, careerBrain.email, 0.99, 'Derived from candidate contact email address.');
   }
 
   // City / Location
@@ -111,6 +250,70 @@ export async function solveScreeningQuestion(
       0.9,
       'Derived from preferred location setting.',
     );
+  }
+
+  // GitHub Profile URL
+  if (qTextLower.includes('github')) {
+    const gitUrl = careerBrain.githubUrl || 'https://github.com';
+    return formatStandardAnswer(question, gitUrl, 0.95, 'Derived from candidate GitHub URL.');
+  }
+
+  // Portfolio / Website URL
+  if (qTextLower.includes('portfolio') || qTextLower.includes('website') || qTextLower.includes('personal site')) {
+    const portfolio = careerBrain.portfolioUrl || careerBrain.githubUrl || '';
+    return formatStandardAnswer(question, portfolio, 0.9, 'Derived from candidate portfolio URL.');
+  }
+
+  // LinkedIn Profile URL
+  if (qTextLower.includes('linkedin')) {
+    const linkedUrl = careerBrain.linkedinUrl || 'https://linkedin.com';
+    return formatStandardAnswer(question, linkedUrl, 0.95, 'Derived from candidate LinkedIn URL.');
+  }
+
+  // Education / Degree
+  if (
+    qTextLower.includes('highest level of education') ||
+    qTextLower.includes('degree') ||
+    qTextLower.includes('qualification')
+  ) {
+    let answer = careerBrain.education || "Bachelor's Degree";
+    if (question.options.length > 0) {
+      const match = question.options.find(
+        opt =>
+          opt.toLowerCase().includes('bachelor') ||
+          opt.toLowerCase().includes('b.tech') ||
+          opt.toLowerCase().includes('undergraduate'),
+      );
+      if (match) answer = match;
+    }
+    return formatStandardAnswer(question, answer, 0.95, 'Derived from candidate education profile.');
+  }
+
+  // CGPA / GPA / Percentage
+  if (qTextLower.includes('cgpa') || qTextLower.includes('gpa') || qTextLower.includes('percentage')) {
+    let answer = '8.57';
+    if (question.options.length > 0) {
+      const match = question.options.find(
+        opt =>
+          opt.includes('8') ||
+          opt.includes('8.5') ||
+          opt.toLowerCase().includes('above 8') ||
+          opt.toLowerCase().includes('70%') ||
+          opt.toLowerCase().includes('80%'),
+      );
+      if (match) answer = match;
+    }
+    return formatStandardAnswer(question, answer, 0.95, 'Derived from candidate CGPA (8.57/10).');
+  }
+
+  // Candidate Name
+  if (qTextLower === 'first name' || qTextLower.includes('first name')) {
+    const firstName = careerBrain.fullName ? careerBrain.fullName.split(' ')[0] : 'Mubasshir';
+    return formatStandardAnswer(question, firstName, 0.99, 'Derived from candidate first name.');
+  }
+  if (qTextLower === 'last name' || qTextLower.includes('last name')) {
+    const lastName = careerBrain.fullName ? careerBrain.fullName.split(' ').slice(1).join(' ') : 'Ali';
+    return formatStandardAnswer(question, lastName, 0.99, 'Derived from candidate last name.');
   }
 
   // 3. LLM-Based Reasoning for Custom/Open-Ended Questions
@@ -149,14 +352,14 @@ async function solveWithLLM(
 CRITICAL RULES:
 1. NO CHAT: You must NOT output any conversational text, greetings, markdown formatting, or preambles (do not say "Here is the answer" or use markdown code blocks).
 2. JSON ONLY: Your entire response MUST be a single, valid, parseable JSON object.
-3. STRICT TRUTH: Base your answers ONLY on the provided Candidate Profile ("Career Brain"). Do not hallucinate skills or experience. If the answer is unknown, make a logical safe guess or indicate low confidence.
+3. STRICT ZERO HALLUCINATION: Base your answers ONLY on the provided Candidate Profile ("Career Brain"). Never fabricate skills, certifications, degrees, or experience. If the answer is unknown or missing from the profile, set requiresManualReview: true and confidenceScore: 20 so the user can be prompted.
 
 JSON SCHEMA REQUIREMENT:
 {
   "question": "The exact question you are answering",
   "answer": "The specific value to inject (e.g., '5', 'Yes', 'React')",
   "confidenceScore": <number between 0 and 100>,
-  "requiresManualReview": <boolean, set to true if the question is highly subjective or missing from profile>
+  "requiresManualReview": <boolean, set to true if the question is missing from profile or requires human review>
 }`;
 
   const userPrompt = `Target Question: "${question.questionText}"
@@ -165,13 +368,20 @@ Available Options: ${question.options.length > 0 ? JSON.stringify(question.optio
 Required: ${question.required}
 
 Candidate Career Brain Profile:
+- Full Name: ${careerBrain.fullName || 'Mubasshir Ali'}
+- Education: ${careerBrain.education || 'B.Tech CSE, MAKAUT'}
 - Background Narrative: ${careerBrain.backgroundNarrative}
+- Raw Resume Content:
+${careerBrain.resumeText || ''}
 - Skills: ${careerBrain.skills.join(', ')}
 - Years of Experience: ${careerBrain.yearsOfExperience}
 - Current Title: ${careerBrain.currentTitle}
 - Notice Period: ${careerBrain.noticePeriod}
 - Work Authorization: ${careerBrain.workAuthorization}
 - Preferred Location: ${careerBrain.preferredLocation}
+- GitHub: ${careerBrain.githubUrl || ''}
+- Portfolio: ${careerBrain.portfolioUrl || ''}
+- LinkedIn: ${careerBrain.linkedinUrl || ''}
 
 Provide the response in the required JSON format. If options are provided, your "answer" must match one of the options.`;
 
@@ -184,7 +394,10 @@ Provide the response in the required JSON format. If options are provided, your 
         ? response.content.map(c => (typeof c === 'string' ? c : 'text' in c ? c.text : '')).join('')
         : '';
 
-  const jsonMatch = text.match(/\{[\s\S]*\}/);
+  // Strip markdown code fences that Bedrock/Nova models sometimes add
+  const cleanText = text.replace(/```json\s*|```\s*/gi, '').trim();
+
+  const jsonMatch = cleanText.match(/\{[\s\S]*\}/);
   if (jsonMatch) {
     const parsed = JSON.parse(jsonMatch[0]);
     const score = Number(parsed.confidenceScore ?? parsed.confidence ?? 0);
@@ -239,4 +452,93 @@ function formatStandardAnswer(
     isConfident: confidence >= 0.7,
     reasoning,
   };
+}
+
+/**
+ * Batch solves multiple screening questions using Career Brain context and Bedrock AI.
+ */
+export async function solveQuestions(
+  questions: IScreeningQuestion[],
+  careerBrain: ICareerBrain,
+  llm?: BaseChatModel,
+): Promise<QuestionSolution[]> {
+  const solutions: QuestionSolution[] = [];
+  const unresolvedQuestions: IScreeningQuestion[] = [];
+
+  // Fast evaluation: Golden Q&A and deterministic rules first (0 tokens, instantaneous)
+  for (const q of questions) {
+    const fastSol = await solveScreeningQuestion(q, careerBrain, undefined);
+    if (fastSol.isConfident) {
+      solutions.push(fastSol);
+    } else {
+      unresolvedQuestions.push(q);
+    }
+  }
+
+  // If there are unresolved questions and Bedrock LLM is available, execute batch structured inference
+  if (unresolvedQuestions.length > 0 && llm) {
+    const goldenText = (careerBrain.goldenAnswers || []).map(ga => `Q: ${ga.question}\nA: ${ga.answer}`).join('\n\n');
+
+    const formQuestionsText = unresolvedQuestions
+      .map(
+        q =>
+          `FieldId: ${q.questionId} | Type: ${q.questionType} | Question: ${q.questionText}${q.options.length > 0 ? ` | Options: [${q.options.join(', ')}]` : ''}`,
+      )
+      .join('\n');
+
+    const candidateContext =
+      careerBrain.resumeText && careerBrain.resumeText.trim().length > 20
+        ? careerBrain.resumeText
+        : `Candidate Profile:
+Name: ${careerBrain.fullName?.trim() || 'NOT PROVIDED'}
+Current Role: ${careerBrain.currentTitle?.trim() || 'NOT PROVIDED'}
+Years of Experience: ${careerBrain.yearsOfExperience !== undefined && careerBrain.yearsOfExperience !== null ? careerBrain.yearsOfExperience : 'NOT PROVIDED'}
+Skills: ${(careerBrain.skills || []).join(', ') || 'NOT PROVIDED'}
+Education: ${careerBrain.education?.trim() || 'NOT PROVIDED'}
+College: ${careerBrain.college?.trim() || 'NOT PROVIDED'}
+CGPA: ${careerBrain.cgpa?.trim() || 'NOT PROVIDED'}
+Current CTC: ${careerBrain.currentCTC?.trim() || 'NOT PROVIDED'}
+Expected CTC: ${careerBrain.expectedCTC?.trim() || 'NOT PROVIDED'}
+Work Authorization: ${careerBrain.workAuthorization?.trim() || 'NOT PROVIDED'}
+Notice Period: ${careerBrain.noticePeriod?.trim() || 'NOT PROVIDED'}
+Preferred Location: ${careerBrain.preferredLocation?.trim() || 'NOT PROVIDED'}
+Current Location: ${careerBrain.currentLocation?.trim() || 'NOT PROVIDED'}
+Narrative: ${careerBrain.backgroundNarrative?.trim() || 'NOT PROVIDED'}`;
+
+    const bedrockResult = await solveFormQuestionsWithBedrock(llm, candidateContext, goldenText, formQuestionsText);
+
+    if (bedrockResult && Array.isArray(bedrockResult.answers)) {
+      const answerMap = new Map(bedrockResult.answers.map(a => [a.fieldId, a]));
+      for (const q of unresolvedQuestions) {
+        const aiAns = answerMap.get(q.questionId);
+        if (aiAns && aiAns.is_answerable) {
+          solutions.push({
+            questionId: q.questionId,
+            answer: aiAns.answer,
+            confidence: 0.95,
+            isConfident: true,
+            reasoning: aiAns.confidence_reasoning || 'Deduced via AWS Bedrock from Career Brain context.',
+          });
+        } else {
+          // Low confidence or unanswerable
+          solutions.push({
+            questionId: q.questionId,
+            answer: '',
+            confidence: 0.2,
+            isConfident: false,
+            reasoning: aiAns?.confidence_reasoning || 'Unanswerable based on Career Brain context.',
+          });
+        }
+      }
+      return solutions;
+    }
+  }
+
+  // Fallback for remaining unresolved questions
+  for (const q of unresolvedQuestions) {
+    const sol = await solveScreeningQuestion(q, careerBrain, llm);
+    solutions.push(sol);
+  }
+
+  return solutions;
 }
