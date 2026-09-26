@@ -30,6 +30,7 @@ import {
   cleanLinkedInJobTitle,
   adaptAnswerToFieldFormat,
   solveQuestionAutonomousWithLLM,
+  matchRuleBased,
 } from './formQuestionResolver';
 import type { FormFieldDescriptor } from '../../browser/page';
 
@@ -1960,15 +1961,33 @@ export class DedicatedJobRunner {
         // Re-check validation
         const recheck = await page.validateModalFormState();
         if (recheck.hasErrors) {
-          if (scopedLLM && recheck.emptyRequiredFields && recheck.emptyRequiredFields.length > 0) {
+          if (recheck.emptyRequiredFields && recheck.emptyRequiredFields.length > 0) {
             logger.info(
-              `[DedicatedJobRunner] Attempting emergency LLM fill for ${recheck.emptyRequiredFields.length} unfilled required fields...`,
+              `[DedicatedJobRunner] Attempting emergency resolution for ${recheck.emptyRequiredFields.length} invalid/unfilled fields...`,
             );
             for (const reqF of recheck.emptyRequiredFields) {
               try {
-                const autoSol = await solveQuestionAutonomousWithLLM(reqF, careerBrain, scopedLLM);
-                if (autoSol.success && autoSol.answer) {
-                  await page.fillModalFieldDirect(reqF, autoSol.answer);
+                // Try rule-based adaptation first (with newly detected error/numeric context in hintText)
+                const ruleMatch = matchRuleBased(reqF, careerBrain);
+                if (ruleMatch.matched && ruleMatch.answer) {
+                  const fillSuccess = await page.fillModalFieldDirect(reqF, ruleMatch.answer);
+                  onAuditLog(
+                    'MATCHED',
+                    reqF.label,
+                    ruleMatch.answer,
+                    `Validation auto-heal | DOM fill: ${fillSuccess ? 'SUCCESS' : 'FAILED'}`,
+                  );
+                } else if (scopedLLM) {
+                  const autoSol = await solveQuestionAutonomousWithLLM(reqF, careerBrain, scopedLLM);
+                  if (autoSol.success && autoSol.answer) {
+                    const fillSuccess = await page.fillModalFieldDirect(reqF, autoSol.answer);
+                    onAuditLog(
+                      'GENERATED',
+                      reqF.label,
+                      autoSol.answer,
+                      `Validation recovery LLM | DOM fill: ${fillSuccess ? 'SUCCESS' : 'FAILED'}`,
+                    );
+                  }
                 }
               } catch {}
             }
@@ -1983,7 +2002,15 @@ export class DedicatedJobRunner {
             const testAdvance = await page.clickModalForwardButton();
             if (testAdvance.clicked) {
               await new Promise(r => setTimeout(r, 1500));
-              continue; // Modal advanced successfully!
+              const postAdvanceCheck = await page.validateModalFormState();
+              if (!postAdvanceCheck.hasErrors || postAdvanceCheck.emptyRequiredFields.length === 0) {
+                continue; // Modal advanced successfully!
+              }
+              // If errors still block the exact same fields, don't increment step; re-try on this step
+              logger.warning(
+                `[DedicatedJobRunner] Modal forward click was blocked by validation errors. Re-correcting on step ${step}...`,
+              );
+              step = Math.max(0, step - 1);
             }
           }
         }

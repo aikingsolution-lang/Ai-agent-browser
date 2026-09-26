@@ -2894,11 +2894,11 @@ export default class Page {
             const lbl = modal.querySelector(`label[for="${id}"]`);
             if (lbl) label = cleanElementText(lbl);
           }
-          if (!label) {
-            const parent = input.closest(
-              'div.fb-dash-form-element, div.jobs-easy-apply-form-element, div[data-test-form-element]',
-            );
-            const lbl = parent?.querySelector('label');
+          const parentEl = input.closest(
+            'div.fb-dash-form-element, div.jobs-easy-apply-form-element, div[data-test-form-element], .artdeco-text-input',
+          );
+          if (!label && parentEl) {
+            const lbl = parentEl.querySelector('label');
             if (lbl) label = cleanElementText(lbl);
           }
           if (!label) {
@@ -2923,36 +2923,59 @@ export default class Page {
             }
             if (parts.length > 0) hintText = parts.join(' ');
           }
-          if (!hintText) {
-            const parent = input.closest(
-              'div.fb-dash-form-element, div.jobs-easy-apply-form-element, div[data-test-form-element], .artdeco-text-input',
-            );
-            const hintEl = parent?.querySelector(
+          if (!hintText && parentEl) {
+            const hintEl = parentEl.querySelector(
               '.fb-dash-form-element__hint, .artdeco-text-input--hint, .artdeco-form-element__sub-text, span.t-12, [id*="hint"], [id*="helper"], [data-test-form-element-hint]',
             );
             if (hintEl) hintText = cleanElementText(hintEl);
           }
+          // Also check for inline error text right next to the input
+          const errEl = parentEl?.querySelector(
+            '.artdeco-inline-feedback--error, .inline-feedback--error, [class*="inline-feedback--error"], p[id*="error"], [role="alert"]',
+          );
+          const activeErrorText = errEl ? cleanElementText(errEl) : '';
+          if (activeErrorText) {
+            hintText = hintText ? `${hintText} ${activeErrorText}` : activeErrorText;
+          }
 
           const rawMin = input.getAttribute('min');
           const rawMax = input.getAttribute('max');
-          const parsedMin = rawMin !== null && !isNaN(Number(rawMin)) ? Number(rawMin) : undefined;
+          let parsedMin = rawMin !== null && !isNaN(Number(rawMin)) ? Number(rawMin) : undefined;
           const parsedMax = rawMax !== null && !isNaN(Number(rawMax)) ? Number(rawMax) : undefined;
 
           const combinedHint = (placeholder + ' ' + hintText).toLowerCase();
           const isSkillOrNumeric =
-            /how many years|experience|years|\bdays\b|\bmonths\b|whole\s*number|only\s*(?:whole\s*)?numbers|in\s*inr|in\s*lpa|ctc/i.test(
-              label,
+            /how many years|experience|years|\bdays\b|\bmonths\b|whole\s*number|only\s*(?:whole\s*)?numbers|in\s*inr|in\s*lpa|ctc|decimal\s*number|larger\s*than|greater\s*than/i.test(
+              label + ' ' + combinedHint,
             ) ||
             input.type === 'number' ||
             input.inputMode === 'numeric' ||
+            input.inputMode === 'decimal' ||
+            input.getAttribute('data-test-fb-numeric-input') === 'true' ||
+            input.getAttribute('data-test-fb-decimal-input') === 'true' ||
+            input.hasAttribute('step') ||
             /example:\s*\d+/i.test(combinedHint) ||
-            /whole\s*number|between \d+ and \d+|0 and 99/i.test(combinedHint);
+            /whole\s*number|decimal\s*number|between \d+ and \d+|larger than \d+|greater than \d+|0 and 99/i.test(
+              combinedHint,
+            );
 
-          if ((isRequired || isSkillOrNumeric) && (!val || (isSelect && /select an option/i.test(val)))) {
+          if (/larger\s*than\s*0(?:\.0)?|greater\s*than\s*0(?:\.0)?/i.test(combinedHint)) {
+            parsedMin = Math.max(1, parsedMin || 1);
+          }
+
+          const hasActiveError = Boolean(activeErrorText);
+          const isInvalidValue =
+            hasActiveError || (!val && (isRequired || isSkillOrNumeric)) || (isSelect && /select an option/i.test(val));
+
+          if (isInvalidValue) {
             let fieldType: 'text' | 'number' | 'dropdown' = 'text';
             if (isSelect) {
               fieldType = 'dropdown';
-            } else if (input.type === 'number' || isSkillOrNumeric) {
+            } else if (
+              input.type === 'number' ||
+              isSkillOrNumeric ||
+              /decimal\s*number|whole\s*number|larger than|greater than/i.test(combinedHint)
+            ) {
               fieldType = 'number';
             }
 
@@ -2968,7 +2991,7 @@ export default class Page {
               label,
               fieldType,
               options,
-              min: parsedMin !== undefined ? parsedMin : isSkillOrNumeric ? 0 : undefined,
+              min: parsedMin !== undefined ? parsedMin : fieldType === 'number' ? 0 : undefined,
               max: parsedMax !== undefined ? parsedMax : /0 and 99/i.test(combinedHint) ? 99 : undefined,
               placeholder: placeholder || undefined,
               hintText: hintText || undefined,
@@ -4397,33 +4420,51 @@ export default class Page {
               }
               if (parts.length > 0) hintText = parts.join(' ');
             }
+            if (!parent) {
+              parent = input.closest(
+                'div.fb-dash-form-element, div.jobs-easy-apply-form-element, div[data-test-form-element], .artdeco-text-input',
+              );
+            }
             if (!hintText) {
-              if (!parent) {
-                parent = input.closest(
-                  'div.fb-dash-form-element, div.jobs-easy-apply-form-element, div[data-test-form-element], .artdeco-text-input',
-                );
-              }
               const hintEl = parent?.querySelector(
                 '.fb-dash-form-element__hint, .artdeco-text-input--hint, .artdeco-form-element__sub-text, span.t-12, [id*="hint"], [id*="helper"], [data-test-form-element-hint]',
               );
               if (hintEl) hintText = cleanElementText(hintEl);
             }
+            // Also check for inline error text right next to the input
+            const errEl = parent?.querySelector(
+              '.artdeco-inline-feedback--error, .inline-feedback--error, [class*="inline-feedback--error"], p[id*="error"], [role="alert"]',
+            );
+            const activeErrorText = errEl ? cleanElementText(errEl) : '';
+            if (activeErrorText) {
+              hintText = hintText ? `${hintText} ${activeErrorText}` : activeErrorText;
+            }
 
             const rawMin = input.getAttribute('min');
             const rawMax = input.getAttribute('max');
-            const parsedMin = rawMin !== null && !isNaN(Number(rawMin)) ? Number(rawMin) : undefined;
+            let parsedMin = rawMin !== null && !isNaN(Number(rawMin)) ? Number(rawMin) : undefined;
             const parsedMax = rawMax !== null && !isNaN(Number(rawMax)) ? Number(rawMax) : undefined;
 
             const isTextArea = input.tagName.toLowerCase() === 'textarea';
             const combinedHint = (placeholder + ' ' + hintText).toLowerCase();
             const isSkillOrNumeric =
-              /how many years|experience|years|\bdays\b|\bmonths\b|whole\s*number|only\s*(?:whole\s*)?numbers|in\s*inr|in\s*lpa|ctc/i.test(
-                label,
+              /how many years|experience|years|\bdays\b|\bmonths\b|whole\s*number|only\s*(?:whole\s*)?numbers|in\s*inr|in\s*lpa|ctc|decimal\s*number|larger\s*than|greater\s*than/i.test(
+                label + ' ' + combinedHint,
               ) ||
               input.type === 'number' ||
               input.inputMode === 'numeric' ||
+              input.inputMode === 'decimal' ||
+              input.getAttribute('data-test-fb-numeric-input') === 'true' ||
+              input.getAttribute('data-test-fb-decimal-input') === 'true' ||
+              input.hasAttribute('step') ||
               /example:\s*\d+/i.test(combinedHint) ||
-              /whole\s*number|between \d+ and \d+|0 and 99/i.test(combinedHint);
+              /whole\s*number|decimal\s*number|between \d+ and \d+|larger than \d+|greater than \d+|0 and 99/i.test(
+                combinedHint,
+              );
+
+            if (/larger\s*than\s*0(?:\.0)?|greater\s*than\s*0(?:\.0)?/i.test(combinedHint)) {
+              parsedMin = Math.max(1, parsedMin || 1);
+            }
 
             const isExplicitlyOptional =
               /\boptional\b/i.test(label) ||

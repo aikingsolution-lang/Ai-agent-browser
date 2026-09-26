@@ -637,25 +637,31 @@ export function adaptAnswerToFieldFormat(
 
   const isNumericField =
     field.fieldType === 'number' ||
-    /whole\s*number|only\s*(?:whole\s*)?numbers|digits?\s*only/i.test(combinedContext) ||
+    /whole\s*number|only\s*(?:whole\s*)?numbers|digits?\s*only|decimal\s*number|larger\s*than|greater\s*than/i.test(
+      combinedContext,
+    ) ||
     /example:\s*\d+/i.test(hintLower);
 
-  // 1. Notice Period in Days
+  // 1. Notice Period in Days / Months / Numeric
   const isNoticePeriod = /notice\s*period|how\s*soon\s*can\s*you\s*start|availability\s*to\s*join|joining\s*time/i.test(
     labelLower,
   );
 
-  const expectsDays =
+  const expectsDaysOrNumber =
     isNoticePeriod &&
-    (/\bin\s*days\b|\bdays\b/i.test(combinedContext) || isNumericField || /example:\s*\d+/i.test(hintLower));
+    (/\bin\s*days\b|\bdays\b/i.test(combinedContext) ||
+      /\bin\s*months?\b|\bmonths?\b/i.test(combinedContext) ||
+      isNumericField ||
+      /larger\s*than|greater\s*than|decimal|number/i.test(combinedContext) ||
+      /example:\s*\d+/i.test(hintLower));
 
-  if (expectsDays) {
-    // Check if 0 is forbidden by min attribute, error message, or hint text
+  if (expectsDaysOrNumber) {
+    // Check if 0 is forbidden by min attribute, error message, or hint text (e.g. "larger than 0.0")
     const minVal = field.min;
     const requiresGreaterThanZero =
-      (minVal !== undefined && minVal >= 1) ||
-      /larger\s+than\s+0|greater\s+than\s+0|more\s+than\s+0|enter\s+a\s+whole\s+number\s+larger\s+than\s+0/i.test(
-        hintLower,
+      (minVal !== undefined && minVal > 0) ||
+      /larger\s+than\s+0(?:\.0)?|greater\s+than\s+0(?:\.0)?|more\s+than\s+0(?:\.0)?|enter\s+a\s+(?:whole\s+|decimal\s+)?number\s+larger\s+than\s+0/i.test(
+        combinedContext,
       );
 
     // a) Immediate / Zero / Now
@@ -666,14 +672,14 @@ export function adaptAnswerToFieldFormat(
           valid: true,
           value: val,
           wasConverted: true,
-          sourceNote: `[MATCHED] notice period '${answer}' -> ${val} days (adjusted to satisfy > 0 constraint)`,
+          sourceNote: `[MATCHED] notice period '${answer}' -> ${val} (adjusted to satisfy > 0 constraint)`,
         };
       }
       return {
         valid: true,
         value: '0',
         wasConverted: true,
-        sourceNote: `[MATCHED] notice period '${answer}' -> 0 days`,
+        sourceNote: `[MATCHED] notice period '${answer}' -> 0`,
       };
     }
 
@@ -712,20 +718,30 @@ export function adaptAnswerToFieldFormat(
       };
     }
 
-    // e) Pure integer
-    if (/^\d+$/.test(answer)) {
-      if (answer === '0' && requiresGreaterThanZero) {
+    // e) Pure number or decimal
+    if (/^\d+(?:\.\d+)?$/.test(answer)) {
+      if ((answer === '0' || answer === '0.0') && requiresGreaterThanZero) {
         return {
           valid: true,
           value: '1',
           wasConverted: true,
-          sourceNote: `[MATCHED] notice period '0' -> 1 days (adjusted to satisfy > 0 constraint)`,
+          sourceNote: `[MATCHED] notice period '0' -> 1 (adjusted to satisfy > 0 constraint)`,
         };
       }
       return { valid: true, value: answer, wasConverted: false };
     }
 
-    // Unconvertible string for numeric days field (e.g. "Negotiable", "To be discussed")
+    // Fallback: If numeric constraint is required, default to 1 (if > 0) or 0
+    if (isNumericField || requiresGreaterThanZero) {
+      const fallback = requiresGreaterThanZero ? '1' : '0';
+      return {
+        valid: true,
+        value: fallback,
+        wasConverted: true,
+        sourceNote: `[MATCHED] notice period '${answer}' -> ${fallback} (safe numeric fallback)`,
+      };
+    }
+
     return { valid: false, value: answer, wasConverted: false };
   }
 
@@ -958,6 +974,46 @@ export function matchRuleBased(
           sourceDetail: adapted.sourceNote || `careerBrain.yearsOfExperience (${adapted.value} yrs)`,
         };
       }
+    }
+  }
+
+  // 1c. Domain / Full Stack / Front End & Back End / Software / Web Development Experience
+  const isDomainExperience =
+    /(?:how\s*many\s*years|years\s*of|experience).*?(?:in|with)?\s*(?:front[-\s]*end\s*(?:&|and)\s*back[-\s]*end|full[-\s]*stack|software\s*(?:development|engineering)|web\s*development|front[-\s]*end|back[-\s]*end)\s*(?:development|engineering)?/i.test(
+      labelLower,
+    );
+
+  if (isDomainExperience) {
+    const rawYoe = careerBrain.yearsOfExperience ?? 1;
+    const skillsMap = careerBrain.skillExperience || {};
+    const frontendSkills = Object.entries(skillsMap).filter(([s]) =>
+      /react|vue|angular|next\.?js|front[-\s]*end|javascript|typescript|html|css/i.test(s),
+    );
+    const backendSkills = Object.entries(skillsMap).filter(([s]) =>
+      /node\.?js|express|python|django|flask|java|spring|back[-\s]*end|sql|mongo|postgres/i.test(s),
+    );
+
+    let calculatedYoe = rawYoe;
+    if (/front[-\s]*end\s*(?:&|and)\s*back[-\s]*end|full[-\s]*stack/i.test(labelLower)) {
+      if (frontendSkills.length > 0 && backendSkills.length > 0) {
+        const maxFe = Math.max(...frontendSkills.map(([_, y]) => y));
+        const maxBe = Math.max(...backendSkills.map(([_, y]) => y));
+        calculatedYoe = Math.min(maxFe, maxBe, rawYoe) || rawYoe || 1;
+      }
+    } else if (/front[-\s]*end/i.test(labelLower) && frontendSkills.length > 0) {
+      calculatedYoe = Math.max(...frontendSkills.map(([_, y]) => y));
+    } else if (/back[-\s]*end/i.test(labelLower) && backendSkills.length > 0) {
+      calculatedYoe = Math.max(...backendSkills.map(([_, y]) => y));
+    }
+
+    const formattedYoe = String(Math.max(1, Math.round(calculatedYoe)));
+    const adapted = adaptAnswerToFieldFormat(formattedYoe, field);
+    if (adapted.valid) {
+      return {
+        matched: true,
+        answer: adapted.value,
+        sourceDetail: `domain experience: calculated from candidate profile & stack (${adapted.value} yrs)`,
+      };
     }
   }
 
@@ -1259,64 +1315,73 @@ export function matchRuleBased(
   }
 
   // 6. Work History & Employment Date Fields
-  // a) Start Month: "Month of From", "From: Month", "Start Month", etc.
-  if (
-    (/month/i.test(labelLower) && /from|start/i.test(labelLower)) ||
-    /from.*month/i.test(labelLower) ||
-    /start.*month/i.test(labelLower)
-  ) {
-    const dates = extractWorkHistoryDates(careerBrain);
-    const ans = matchDateOption(field, dates.startMonth, 'month');
-    return {
-      matched: true,
-      answer: ans,
-      sourceDetail: `work history: start month (${dates.startMonth})`,
-    };
-  }
+  // CRITICAL: Strictly guard against experience, years of experience, and skills questions
+  // (e.g. "How many years of experience do you have in front end & back end development?")
+  const isExperienceOrDurationQuestion =
+    /how\s*many\s*years|years\s*of|experience|duration|\(in\s*years?\)|notice\s*period|ctc|salary|when\s*can\s*you/i.test(
+      labelLower,
+    );
 
-  // b) Start Year: "Year of From", "From: Year", "Start Year", etc.
-  if (
-    (/year/i.test(labelLower) && /from|start/i.test(labelLower)) ||
-    /from.*year/i.test(labelLower) ||
-    /start.*year/i.test(labelLower)
-  ) {
-    const dates = extractWorkHistoryDates(careerBrain);
-    const ans = matchDateOption(field, dates.startYear, 'year');
-    return {
-      matched: true,
-      answer: ans,
-      sourceDetail: `work history: start year (${dates.startYear})`,
-    };
-  }
+  if (!isExperienceOrDurationQuestion) {
+    // a) Start Month: "Month of From", "From: Month", "Start Month", etc.
+    if (
+      (/\b(?:from|start)\s*(?:month|date)\b|\bmonth\s+(?:of\s+)?(?:from|start)\b/i.test(labelLower) ||
+        /^(?:start|from)\s*month$/i.test(labelLower)) &&
+      !/start\s*(?:salary|ctc|compensation)/i.test(labelLower)
+    ) {
+      const dates = extractWorkHistoryDates(careerBrain);
+      const ans = matchDateOption(field, dates.startMonth, 'month');
+      return {
+        matched: true,
+        answer: ans,
+        sourceDetail: `work history: start month (${dates.startMonth})`,
+      };
+    }
 
-  // c) End Month: "Month of To", "To: Month", "End Month", "Month of end", etc.
-  if (
-    (/month/i.test(labelLower) && /to\b|end|until/i.test(labelLower)) ||
-    /to.*month/i.test(labelLower) ||
-    /end.*month/i.test(labelLower)
-  ) {
-    const dates = extractWorkHistoryDates(careerBrain);
-    const ans = matchDateOption(field, dates.endMonth, 'month');
-    return {
-      matched: true,
-      answer: ans,
-      sourceDetail: `work history: end month (${dates.endMonth})`,
-    };
-  }
+    // b) Start Year: "Year of From", "From: Year", "Start Year", etc.
+    if (
+      (/\b(?:from|start)\s*year\b|\byear\s+(?:of\s+)?(?:from|start)\b/i.test(labelLower) ||
+        /^(?:start|from)\s*year$/i.test(labelLower)) &&
+      !/start\s*(?:salary|ctc|compensation)/i.test(labelLower)
+    ) {
+      const dates = extractWorkHistoryDates(careerBrain);
+      const ans = matchDateOption(field, dates.startYear, 'year');
+      return {
+        matched: true,
+        answer: ans,
+        sourceDetail: `work history: start year (${dates.startYear})`,
+      };
+    }
 
-  // d) End Year: "Year of To", "To: Year", "End Year", "Year of end", etc.
-  if (
-    (/year/i.test(labelLower) && /to\b|end|until/i.test(labelLower)) ||
-    /to.*year/i.test(labelLower) ||
-    /end.*year/i.test(labelLower)
-  ) {
-    const dates = extractWorkHistoryDates(careerBrain);
-    const ans = matchDateOption(field, dates.endYear, 'year');
-    return {
-      matched: true,
-      answer: ans,
-      sourceDetail: `work history: end year (${dates.endYear})`,
-    };
+    // c) End Month: "Month of To", "To: Month", "End Month", "Month of end", etc.
+    if (
+      !/front[-\s]*end|back[-\s]*end|end[-\s]*to[-\s]*end/i.test(labelLower) &&
+      (/\b(?:to|end|completion|finish)\s*(?:month|date)\b|\bmonth\s+(?:of\s+)?(?:to|end)\b/i.test(labelLower) ||
+        /^(?:end|to)\s*month$/i.test(labelLower))
+    ) {
+      const dates = extractWorkHistoryDates(careerBrain);
+      const ans = matchDateOption(field, dates.endMonth, 'month');
+      return {
+        matched: true,
+        answer: ans,
+        sourceDetail: `work history: end month (${dates.endMonth})`,
+      };
+    }
+
+    // d) End Year: "Year of To", "To: Year", "End Year", "Year of end", etc.
+    if (
+      !/front[-\s]*end|back[-\s]*end|end[-\s]*to[-\s]*end/i.test(labelLower) &&
+      (/\b(?:to|end|completion|finish)\s*year\b|\byear\s+(?:of\s+)?(?:to|end)\b/i.test(labelLower) ||
+        /^(?:end|to)\s*year$/i.test(labelLower))
+    ) {
+      const dates = extractWorkHistoryDates(careerBrain);
+      const ans = matchDateOption(field, dates.endYear, 'year');
+      return {
+        matched: true,
+        answer: ans,
+        sourceDetail: `work history: end year (${dates.endYear})`,
+      };
+    }
   }
 
   // e) "Currently working here" / "I currently work here" / "Current company" / "Present employer"
