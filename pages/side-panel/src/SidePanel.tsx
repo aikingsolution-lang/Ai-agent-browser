@@ -889,51 +889,55 @@ const SidePanel = () => {
     setShowStopButton(false);
   };
 
-  const handleStartAutoApply = useCallback(async () => {
-    try {
-      const brain = await careerBrainStore.getCareerBrain();
-      const check = validateProfileCompleteness(brain);
-      if (!check.isValid) {
-        const msg = `⚠️ Incomplete profile. Missing required fields: ${check.missingFields.join(', ')}. Please complete your profile in the "Resume & Profile" tab before applying.`;
-        setActiveStatusText(msg);
-        setAppliedLogs(prev => [
-          {
-            id: String(Date.now()),
-            text: msg,
-            status: 'fail',
-            timestamp: Date.now(),
-          },
-          ...prev,
-        ]);
-        setMainTab('resume');
-        return;
+  const handleStartAutoApply = useCallback(
+    async (platform: 'linkedin' | 'naukri' | 'indeed' = 'linkedin') => {
+      try {
+        const brain = await careerBrainStore.getCareerBrain();
+        const check = validateProfileCompleteness(brain);
+        if (!check.isValid) {
+          const msg = `⚠️ Incomplete profile. Missing required fields: ${check.missingFields.join(', ')}. Please complete your profile in the "Resume & Profile" tab before applying.`;
+          setActiveStatusText(msg);
+          setAppliedLogs(prev => [
+            {
+              id: String(Date.now()),
+              text: msg,
+              status: 'fail',
+              timestamp: Date.now(),
+            },
+            ...prev,
+          ]);
+          setMainTab('resume');
+          return;
+        }
+      } catch {}
+
+      if (!portRef.current) {
+        setupConnection();
       }
-    } catch {}
 
-    if (!portRef.current) {
-      setupConnection();
-    }
+      const platformName = platform === 'naukri' ? 'Naukri.com' : 'LinkedIn';
+      setIsApplying(true);
+      setActiveStatusText(`Initializing autonomous search and apply loop on ${platformName}...`);
+      setAppliedLogs(prev => [
+        {
+          id: String(Date.now()),
+          text: `🚀 Starting Auto Apply loop on ${platformName}...`,
+          status: 'info',
+          timestamp: Date.now(),
+        },
+        ...prev,
+      ]);
 
-    setIsApplying(true);
-    setActiveStatusText('Initializing autonomous search and apply loop...');
-    setAppliedLogs(prev => [
-      {
-        id: String(Date.now()),
-        text: '🚀 Starting Auto Apply loop (searching jobs with Easy Apply filter)...',
-        status: 'info',
-        timestamp: Date.now(),
-      },
-      ...prev,
-    ]);
-
-    try {
-      portRef.current?.postMessage({ type: 'START_AUTO_APPLY' });
-    } catch (err) {
-      console.error('Failed to post START_AUTO_APPLY:', err);
-      setIsApplying(false);
-      setActiveStatusText('Failed to start application run.');
-    }
-  }, [setupConnection]);
+      try {
+        portRef.current?.postMessage({ type: 'START_AUTO_APPLY', platform });
+      } catch (err) {
+        console.error('Failed to post START_AUTO_APPLY:', err);
+        setIsApplying(false);
+        setActiveStatusText('Failed to start application run.');
+      }
+    },
+    [setupConnection],
+  );
 
   const handleStopLinkedInApply = useCallback(() => {
     setIsApplying(false);

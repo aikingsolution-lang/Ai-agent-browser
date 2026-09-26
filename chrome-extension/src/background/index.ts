@@ -1087,7 +1087,8 @@ chrome.runtime.onConnect.addListener(port => {
             dedicatedJobRunner
               .startAutonomousJobLoop({
                 portToSend: port,
-                maxJobs: 10,
+                maxJobs: message.maxJobs || 10,
+                platform: message.platform || 'linkedin',
               })
               .finally(() => {
                 isJobApplyInProgress = false;

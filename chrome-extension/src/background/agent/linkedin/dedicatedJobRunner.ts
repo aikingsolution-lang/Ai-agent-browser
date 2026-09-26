@@ -20,6 +20,8 @@ import { DailyQuotaManager } from './rateLimiter';
 import { normalizeLinkedInJobUrl } from './urlUtils';
 import { dedicatedWindowManager } from './dedicatedWindow';
 import { buildLinkedInApplyTaskDetails } from './taskBuilder';
+import { naukriAdapter } from '../platforms/naukri/naukriAdapter';
+import type { SupportedPlatform } from '../platforms/types';
 import { Actors, ExecutionState } from '../event/types';
 import { createChatModel } from '../helper';
 import { ChatOpenAI } from '@langchain/openai';
@@ -254,6 +256,7 @@ export interface RunJobOptions {
 
 export interface AutonomousLoopOptions {
   maxJobs?: number;
+  platform?: SupportedPlatform;
   portToSend?: chrome.runtime.Port | null;
   onLiveActivity?: (activity: {
     jobId: string;
@@ -1013,6 +1016,10 @@ export class DedicatedJobRunner {
         role = 'Software Engineer';
       }
 
+      if (options.platform === 'naukri') {
+        return await this.startNaukriJobLoop(options, careerBrain, role, location, runId, stats);
+      }
+
       this.notifyStatus(
         portToSend,
         `🎯 Search Criteria: Role="${role}" | Location="${location}" | Easy Apply=true`,
@@ -1577,6 +1584,307 @@ export class DedicatedJobRunner {
       this.cleanupRun();
       return { status: 'error', message: errMsg, stats };
     }
+  }
+
+  /**
+   * Autonomous application loop for Naukri.com
+   */
+  private async startNaukriJobLoop(
+    options: AutonomousLoopOptions,
+    careerBrain: ICareerBrain,
+    role: string,
+    location: string,
+    runId: string,
+    stats: { totalFound: number; applied: number; modalOpened: number; skipped: number; failed: number },
+  ): Promise<{
+    status: 'success' | 'stopped' | 'error';
+    message: string;
+    stats: typeof stats;
+  }> {
+    const { portToSend, onLiveActivity } = options;
+    const BATCH_CAP = Math.min(options.maxJobs || 10, 10);
+
+    const searchUrl = naukriAdapter.buildSearchUrl(role, location);
+    this.notifyStatus(
+      portToSend,
+      `🎯 [Naukri.com] Search Criteria: Role="${role}" | Location="${location || 'All India'}"`,
+      'info',
+    );
+
+    this.notifyStatus(portToSend, `🌐 Opening dedicated runner window for Naukri...`, 'info');
+    const { windowId, tabId } = await dedicatedWindowManager.getOrCreateRunnerWindow(searchUrl);
+    this.browserContext!.updateCurrentTabId(tabId);
+
+    this.unregisterWindowCloseListener = dedicatedWindowManager.onWindowClosed(async () => {
+      if (this.isRunning && this.activeRunId === runId) {
+        logger.warning(`Dedicated runner window closed while Naukri auto loop ${runId} was active.`);
+        this.notifyStatus(portToSend, '🛑 Auto Apply stopped: Runner window was closed.', 'fail');
+        this.stop();
+      }
+    });
+
+    // Wait 4s for navigation
+    await new Promise(r => setTimeout(r, 4000));
+    if (!this.isRunning) {
+      return { status: 'stopped', message: 'Stopped by user', stats };
+    }
+
+    const currentPage = await this.browserContext!.getCurrentPage();
+
+    // Session / Login check
+    let session = await naukriAdapter.validateSession(currentPage);
+    if (session.isLoginWall) {
+      this.notifyStatus(
+        portToSend,
+        '⚠️ Naukri login required. Please log in to Naukri in the runner window. (Pausing without spending credits...)',
+        'info',
+      );
+
+      this.notifyActivity(portToSend, onLiveActivity, {
+        jobId: 'naukri_login',
+        url: searchUrl,
+        title: 'Waiting for login',
+        company: 'Naukri.com',
+        status: 'running',
+        reason: 'Please log in to Naukri in the runner window',
+        creditsUsed: 0,
+      });
+
+      const loginStart = Date.now();
+      let loggedIn = false;
+      while (Date.now() - loginStart < 300_000) {
+        await new Promise(r => setTimeout(r, 3000));
+        if (!this.isRunning) break;
+
+        session = await naukriAdapter.validateSession(currentPage);
+        if (!session.isLoginWall && session.isLoggedIn) {
+          loggedIn = true;
+          this.notifyStatus(portToSend, '✅ Naukri login detected! Resuming autonomous search...', 'ok');
+          break;
+        }
+      }
+
+      if (!loggedIn && !session.isLoggedIn) {
+        const timeoutMsg = 'Login timeout (5 minutes reached). Please log in to Naukri and retry.';
+        this.notifyStatus(portToSend, `🛑 ${timeoutMsg}`, 'fail');
+        this.cleanupRun();
+        return { status: 'error', message: timeoutMsg, stats };
+      }
+    }
+
+    // Scan jobs
+    this.notifyStatus(portToSend, '🔍 Scanning Naukri job search results...', 'info');
+    const jobs = await naukriAdapter.extractJobCards(currentPage);
+    stats.totalFound = jobs.length;
+
+    if (jobs.length === 0) {
+      const noJobsMsg = 'No job listings found on Naukri for these criteria.';
+      this.notifyStatus(portToSend, `ℹ️ ${noJobsMsg}`, 'info');
+      this.cleanupRun();
+      return { status: 'success', message: noJobsMsg, stats };
+    }
+
+    // Deduplicate against processedJobsStore
+    const eligibleJobs: typeof jobs = [];
+    for (const job of jobs) {
+      const proc = await processedJobsStore.isJobProcessed(job.jobId);
+      if (proc.isProcessed && proc.status === 'applied') {
+        stats.skipped++;
+        this.notifyActivity(portToSend, onLiveActivity, {
+          jobId: job.jobId,
+          url: job.url,
+          title: job.title,
+          company: job.company,
+          status: 'skipped',
+          reason: 'Already applied previously',
+          creditsUsed: 0,
+        });
+        continue;
+      }
+      eligibleJobs.push(job);
+    }
+
+    const queue = eligibleJobs.slice(0, BATCH_CAP);
+    this.notifyStatus(
+      portToSend,
+      `🎯 Queued ${queue.length} eligible Naukri jobs for this run (capped at max ${BATCH_CAP}).`,
+      'info',
+    );
+
+    // Execution loop
+    for (let i = 0; i < queue.length; i++) {
+      if (!this.isRunning) break;
+
+      const job = queue[i];
+      const jobRunId = `${runId}_${job.jobId}`;
+      this.activeJobId = job.jobId;
+
+      // Quota check
+      const quota = await DailyQuotaManager.canApplyToday();
+      if (!quota.allowed) {
+        const quotaMsg = `🛑 Daily application quota reached (${quota.currentCount} today). Stopping run.`;
+        this.notifyStatus(portToSend, quotaMsg, 'fail');
+        break;
+      }
+
+      // Hard credit budget check
+      const balanceRes = await backendApiClient.getCreditsBalance().catch(() => null);
+      if (balanceRes?.data?.remainingCredits !== undefined && balanceRes.data.remainingCredits < 1) {
+        const creditMsg = `🛑 Insufficient credits (${balanceRes.data.remainingCredits} remaining). Halting run.`;
+        this.notifyStatus(portToSend, creditMsg, 'fail');
+        break;
+      }
+
+      // Relevance check
+      const relevance = checkJobSkillRelevance(job.title, undefined, careerBrain);
+      if (!relevance.relevant) {
+        this.notifyStatus(portToSend, `ℹ️ Skipped "${job.title}": Skills do not match profile.`, 'info');
+        stats.skipped++;
+        await processedJobsStore.recordJob({
+          jobId: job.jobId,
+          url: job.url,
+          title: job.title,
+          company: job.company,
+          status: 'skipped',
+          reason: 'Skills do not closely match profile',
+          creditsUsed: 0,
+        });
+        this.notifyActivity(portToSend, onLiveActivity, {
+          jobId: job.jobId,
+          url: job.url,
+          title: job.title,
+          company: job.company,
+          status: 'skipped',
+          reason: 'Low skill match',
+          creditsUsed: 0,
+        });
+        continue;
+      }
+
+      this.notifyStatus(
+        portToSend,
+        `💼 [Naukri] Applying to job ${i + 1} of ${queue.length}: "${job.title}" (${job.company})`,
+        'info',
+      );
+
+      this.notifyActivity(portToSend, onLiveActivity, {
+        jobId: job.jobId,
+        url: job.url,
+        title: job.title,
+        company: job.company,
+        status: 'running',
+        reason: 'Applying on Naukri...',
+        creditsUsed: 0,
+      });
+
+      const applyResult = await naukriAdapter.applyToJob(job, {
+        page: currentPage,
+        browserContext: this.browserContext!,
+        careerBrain,
+        portToSend,
+        onLiveActivity,
+        signal: this.abortController?.signal,
+        runId: jobRunId,
+      });
+
+      if (applyResult.status === 'applied') {
+        stats.applied++;
+        await DailyQuotaManager.incrementAppliedCount();
+        await processedJobsStore.recordJob({
+          jobId: job.jobId,
+          url: job.url,
+          title: job.title,
+          company: job.company,
+          status: 'applied',
+          creditsUsed: 1,
+        });
+
+        this.notifyStatus(portToSend, `✅ Successfully applied to "${job.title}" at ${job.company}!`, 'ok');
+
+        this.notifyActivity(portToSend, onLiveActivity, {
+          jobId: job.jobId,
+          url: job.url,
+          title: job.title,
+          company: job.company,
+          status: 'applied',
+          creditsUsed: 1,
+        });
+      } else if (applyResult.status === 'skipped') {
+        stats.skipped++;
+        await processedJobsStore.recordJob({
+          jobId: job.jobId,
+          url: job.url,
+          title: job.title,
+          company: job.company,
+          status: 'skipped',
+          reason: applyResult.reason || 'Skipped',
+          creditsUsed: 0,
+        });
+        this.notifyStatus(portToSend, `ℹ️ Skipped "${job.title}": ${applyResult.reason || 'Skipped'}`, 'info');
+        this.notifyActivity(portToSend, onLiveActivity, {
+          jobId: job.jobId,
+          url: job.url,
+          title: job.title,
+          company: job.company,
+          status: 'skipped',
+          reason: applyResult.reason,
+          creditsUsed: 0,
+        });
+      } else {
+        stats.failed++;
+        await processedJobsStore.recordJob({
+          jobId: job.jobId,
+          url: job.url,
+          title: job.title,
+          company: job.company,
+          status: 'failed',
+          reason: applyResult.reason || 'Failed',
+          creditsUsed: 0,
+        });
+        this.notifyStatus(
+          portToSend,
+          `❌ Failed application for "${job.title}": ${applyResult.reason || 'Failed'}`,
+          'fail',
+        );
+        this.notifyActivity(portToSend, onLiveActivity, {
+          jobId: job.jobId,
+          url: job.url,
+          title: job.title,
+          company: job.company,
+          status: 'failed',
+          reason: applyResult.reason,
+          creditsUsed: 0,
+        });
+      }
+
+      // Anti-bot pacing delay (15-25s) between Naukri jobs
+      if (i < queue.length - 1 && this.isRunning) {
+        const delayMs = 15000 + Math.floor(Math.random() * 10000);
+        this.notifyStatus(
+          portToSend,
+          `⏳ Pacing delay: waiting ${(delayMs / 1000).toFixed(0)}s before next job...`,
+          'info',
+        );
+        const aborted = await this.interruptibleSleep(delayMs);
+        if (aborted) break;
+      }
+    }
+
+    const summaryMsg = `Naukri Apply complete: ${stats.applied} applied, ${stats.skipped} skipped, ${stats.failed} failed.`;
+    this.notifyStatus(portToSend, `🏁 ${summaryMsg}`, 'ok');
+
+    if (portToSend) {
+      try {
+        portToSend.postMessage({
+          type: 'LINKEDIN_RUN_FINISHED',
+          summary: summaryMsg,
+          stats,
+        });
+      } catch {}
+    }
+
+    this.cleanupRun();
+    return { status: 'success', message: summaryMsg, stats };
   }
 
   /**

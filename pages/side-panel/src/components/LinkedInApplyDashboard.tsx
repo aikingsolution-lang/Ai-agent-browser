@@ -44,7 +44,7 @@ export interface StructuredActivityItem {
 
 interface LinkedInApplyDashboardProps {
   isDarkMode?: boolean;
-  onStartAutoApply?: () => void;
+  onStartAutoApply?: (platform?: 'linkedin' | 'naukri' | 'indeed') => void;
   onStop: () => void;
   isApplying: boolean;
   activeStatusText: string;
@@ -69,6 +69,7 @@ export function LinkedInApplyDashboard({
   pendingBatch,
   onAnswerQuestionBatch,
 }: LinkedInApplyDashboardProps) {
+  const [selectedPlatform, setSelectedPlatform] = useState<'linkedin' | 'naukri' | 'indeed'>('linkedin');
   const [quota, setQuota] = useState<DailyQuotaData | null>(null);
 
   // Question answering state (single)
@@ -160,6 +161,42 @@ export function LinkedInApplyDashboard({
   return (
     <div
       className={`flex flex-1 flex-col overflow-y-auto p-4 space-y-4 ${isDarkMode ? 'text-gray-100' : 'text-gray-800'}`}>
+      {/* Platform Switcher */}
+      <div
+        className={`flex rounded-xl p-1 border text-xs font-semibold ${
+          isDarkMode ? 'bg-slate-900/60 border-slate-700/60' : 'bg-gray-100 border-gray-200'
+        }`}>
+        <button
+          type="button"
+          onClick={() => setSelectedPlatform('linkedin')}
+          disabled={isApplying}
+          className={`flex-1 py-1.5 px-2 rounded-lg text-center transition-all cursor-pointer ${
+            selectedPlatform === 'linkedin'
+              ? 'bg-sky-600 text-white shadow-sm font-bold'
+              : 'text-gray-400 hover:text-gray-200'
+          }`}>
+          LinkedIn
+        </button>
+        <button
+          type="button"
+          onClick={() => setSelectedPlatform('naukri')}
+          disabled={isApplying}
+          className={`flex-1 py-1.5 px-2 rounded-lg text-center transition-all cursor-pointer ${
+            selectedPlatform === 'naukri'
+              ? 'bg-blue-600 text-white shadow-sm font-bold'
+              : 'text-gray-400 hover:text-gray-200'
+          }`}>
+          Naukri.com
+        </button>
+        <button
+          type="button"
+          disabled={true}
+          title="Coming soon in Phase 3"
+          className="flex-1 py-1.5 px-2 rounded-lg text-center opacity-40 cursor-not-allowed text-gray-500">
+          Indeed <span className="text-[9px]">(Soon)</span>
+        </button>
+      </div>
+
       {/* Quota Tracker */}
       <div
         className={`rounded-xl border p-3 flex items-center justify-between text-xs ${isDarkMode ? 'border-sky-900 bg-slate-800/60' : 'border-sky-100 bg-white/80 shadow-sm'}`}>
@@ -192,7 +229,7 @@ export function LinkedInApplyDashboard({
       {/* Single Entry Point: Start Auto Apply */}
       <div className="space-y-2">
         <button
-          onClick={onStartAutoApply}
+          onClick={() => onStartAutoApply?.(selectedPlatform)}
           disabled={isApplying}
           className={`w-full flex items-center justify-center space-x-2 rounded-xl py-3 px-4 font-bold text-sm shadow-md transition-all ${
             isApplying
@@ -200,9 +237,11 @@ export function LinkedInApplyDashboard({
               : 'bg-gradient-to-r from-sky-500 to-blue-600 text-white hover:from-sky-600 hover:to-blue-700 hover:shadow-sky-500/20 active:scale-[0.99] cursor-pointer'
           }`}>
           <FiPlay className="size-4 text-emerald-300" />
-          <span>Start Auto Apply</span>
+          <span>Start Auto Apply ({selectedPlatform === 'naukri' ? 'Naukri' : 'LinkedIn'})</span>
         </button>
-        <p className="text-[11px] text-center opacity-60">Autonomous end-to-end LinkedIn application flow</p>
+        <p className="text-[11px] text-center opacity-60">
+          Autonomous end-to-end {selectedPlatform === 'naukri' ? 'Naukri.com' : 'LinkedIn'} application flow
+        </p>
 
         {/* Visible Stop Application Button */}
         {isApplying && (
