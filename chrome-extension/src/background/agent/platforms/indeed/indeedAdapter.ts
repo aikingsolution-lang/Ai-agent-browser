@@ -860,10 +860,37 @@ export class IndeedAdapter implements IPlatformAdapter {
           if (!f.labelText) continue;
           let answer = resolveIndeedQuestion(f.labelText, f.fieldType as any, f.options, careerBrain);
 
-          // If rule-based confidence is low (< 0.8) and scopedLLM is available, consult LLM for 100% accuracy!
-          if (answer.confidence < 0.8 && scopedLLM) {
+          // If the question is outside simple static contact/consent fields, or presents multiple-choice options,
+          // ALWAYS ask the autonomous LLM to make the optimal, qualifying determination!
+          const labelLo = f.labelText.toLowerCase();
+          const isBasicIdentityField =
+            f.fieldType === 'text' &&
+            (labelLo === 'first name' ||
+              labelLo === 'last name' ||
+              labelLo === 'full name' ||
+              labelLo === 'email' ||
+              labelLo === 'email address' ||
+              labelLo === 'phone' ||
+              labelLo === 'phone number' ||
+              labelLo === 'mobile' ||
+              labelLo.includes('github') ||
+              labelLo.includes('linkedin'));
+
+          const isDirectConsentField =
+            f.fieldType === 'checkbox' &&
+            (labelLo.includes('consent') ||
+              labelLo.includes('agree') ||
+              labelLo.includes('policy') ||
+              labelLo.includes('terms'));
+
+          const shouldUseLLM =
+            scopedLLM && ((!isBasicIdentityField && !isDirectConsentField) || answer.confidence < 0.9);
+
+          if (shouldUseLLM) {
             try {
-              logger.info(`[IndeedAdapter] Asking LLM to resolve field: "${f.labelText}" (${f.fieldType})`);
+              logger.info(
+                `[IndeedAdapter] 🧠 Asking LLM to resolve field: "${f.labelText}" (${f.fieldType}, ${f.options.length} options)`,
+              );
               const llmRes = await solveQuestionAutonomousWithLLM(
                 {
                   label: f.labelText,
@@ -874,11 +901,11 @@ export class IndeedAdapter implements IPlatformAdapter {
                 scopedLLM,
               );
               if (llmRes.success && llmRes.answer) {
-                answer = { value: llmRes.answer, confidence: 0.95, source: 'profile' };
-                logger.info(`[IndeedAdapter] LLM resolved "${f.labelText}" -> "${answer.value}"`);
+                answer = { value: llmRes.answer, confidence: 0.99, source: 'profile' };
+                logger.info(`[IndeedAdapter] ✅ LLM resolved "${f.labelText}" -> "${answer.value}"`);
               }
             } catch (err) {
-              logger.warning(`[IndeedAdapter] LLM field resolution fallback error:`, err);
+              logger.warning(`[IndeedAdapter] LLM field resolution fallback error, using rule answer:`, err);
             }
           }
 
