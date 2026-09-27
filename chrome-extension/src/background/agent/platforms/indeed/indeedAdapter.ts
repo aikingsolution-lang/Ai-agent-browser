@@ -194,9 +194,9 @@ export class IndeedAdapter implements IPlatformAdapter {
         })
         .catch(() => {});
 
-      // 1. Navigate to job URL if not already there
+      // 1. Navigate to job URL if not already there or if stuck in smartapply
       const currentUrl = puppeteerPage.url().toLowerCase();
-      if (!currentUrl.includes(job.jobId)) {
+      if (!currentUrl.includes(job.jobId) || currentUrl.includes('smartapply')) {
         await page.navigateTo(job.url).catch(async () => {
           await puppeteerPage.goto(job.url, { waitUntil: 'domcontentloaded', timeout: 30000 });
         });
@@ -366,6 +366,23 @@ export class IndeedAdapter implements IPlatformAdapter {
           .executeScript({
             target: { tabId: activeTabId, allFrames: true },
             func: (selectors: typeof INDEED_SELECTORS) => {
+              function isElementVisible(el: HTMLElement): boolean {
+                if (!el) return false;
+                const style = window.getComputedStyle(el);
+                if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+                const rect = el.getBoundingClientRect();
+                return rect.width > 0 && rect.height > 0;
+              }
+
+              function triggerClick(el: HTMLElement) {
+                el.scrollIntoView({ behavior: 'instant', block: 'center' });
+                el.focus();
+                el.click();
+                el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+                el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
+                el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+              }
+
               const url = window.location.href.toLowerCase();
               const isApplyContext =
                 url.includes('smartapply') ||
@@ -376,24 +393,25 @@ export class IndeedAdapter implements IPlatformAdapter {
 
               for (const sel of selectors.SUBMIT_BUTTON_SELECTORS) {
                 const btn = document.querySelector(sel) as HTMLElement | null;
-                if (btn && btn.offsetParent !== null) {
-                  btn.scrollIntoView({ block: 'center' });
-                  btn.focus();
-                  btn.click();
-                  btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+                if (btn && isElementVisible(btn)) {
+                  triggerClick(btn);
                   return true;
                 }
               }
 
-              const buttons = Array.from(document.querySelectorAll('button, [role="button"]')) as HTMLElement[];
+              const buttons = Array.from(
+                document.querySelectorAll('button, [role="button"], input[type="submit"]'),
+              ) as HTMLElement[];
               for (const b of buttons) {
-                if (b.offsetParent === null) continue;
-                const t = (b.textContent || '').trim().toLowerCase();
-                if (t === 'submit your application' || t === 'submit application' || t === 'submit') {
-                  b.scrollIntoView({ block: 'center' });
-                  b.focus();
-                  b.click();
-                  b.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+                if (!isElementVisible(b)) continue;
+                const t = (b.textContent || (b as HTMLInputElement).value || '').trim().toLowerCase();
+                if (
+                  t === 'submit your application' ||
+                  t === 'submit application' ||
+                  t === 'submit' ||
+                  t.includes('submit your application')
+                ) {
+                  triggerClick(b);
                   return true;
                 }
               }
@@ -436,35 +454,64 @@ export class IndeedAdapter implements IPlatformAdapter {
         let continueClicked = false;
         let clickedButtonText = '';
 
-        for (let clickAttempt = 0; clickAttempt < 2; clickAttempt++) {
+        for (let clickAttempt = 0; clickAttempt < 4; clickAttempt++) {
           const continueResults = await chrome.scripting
             .executeScript({
               target: { tabId: activeTabId, allFrames: true },
               func: (selectors: typeof INDEED_SELECTORS) => {
-                // 1. Check known forward selectors
+                function isElementVisible(el: HTMLElement): boolean {
+                  if (!el) return false;
+                  const style = window.getComputedStyle(el);
+                  if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+                  const rect = el.getBoundingClientRect();
+                  return rect.width > 0 && rect.height > 0;
+                }
+
+                function triggerClick(el: HTMLElement) {
+                  el.scrollIntoView({ behavior: 'instant', block: 'center' });
+                  el.focus();
+                  el.click();
+                  el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+                  el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
+                  el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+                }
+
+                // 1. Selector check
                 for (const sel of selectors.FORWARD_BUTTON_SELECTORS) {
                   const btn = document.querySelector(sel) as HTMLElement | null;
-                  if (btn && btn.offsetParent !== null) {
-                    btn.scrollIntoView({ block: 'center' });
-                    btn.focus();
-                    btn.click();
-                    btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
-                    return { clicked: true, text: btn.textContent?.trim() || '' };
+                  if (btn && isElementVisible(btn)) {
+                    const txt = btn.textContent?.trim() || '';
+                    triggerClick(btn);
+                    return { clicked: true, text: txt };
                   }
                 }
 
-                // 2. Check all visible buttons by text
+                // 2. Broad search across all buttons and clickable elements
                 const buttons = Array.from(
-                  document.querySelectorAll('button, [role="button"], a.is-primary'),
+                  document.querySelectorAll(
+                    'button, [role="button"], a.is-primary, input[type="button"], input[type="submit"]',
+                  ),
                 ) as HTMLElement[];
+
                 for (const b of buttons) {
-                  if (b.offsetParent === null) continue;
-                  const t = (b.textContent || '').trim().toLowerCase();
-                  if (selectors.FORWARD_BUTTON_TEXTS.some(txt => t === txt || t.includes(txt))) {
-                    b.scrollIntoView({ block: 'center' });
-                    b.focus();
-                    b.click();
-                    b.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+                  if (!isElementVisible(b)) continue;
+                  const t = (b.textContent || (b as HTMLInputElement).value || '').trim().toLowerCase();
+                  if (!t) continue;
+
+                  const isMatch =
+                    t === 'continue' ||
+                    t.startsWith('continue') ||
+                    t.includes('continue') ||
+                    t === 'next' ||
+                    t.includes('next') ||
+                    t.includes('review your application') ||
+                    t.includes('review application') ||
+                    t.includes('save and continue') ||
+                    b.getAttribute('data-testid') === 'continue-button' ||
+                    b.getAttribute('aria-label')?.toLowerCase().includes('continue');
+
+                  if (isMatch) {
+                    triggerClick(b);
                     return { clicked: true, text: t };
                   }
                 }
@@ -481,7 +528,7 @@ export class IndeedAdapter implements IPlatformAdapter {
             clickedButtonText = hit.result.text || '';
             break;
           }
-          await new Promise(r => setTimeout(r, 1500));
+          await new Promise(r => setTimeout(r, 1200));
         }
 
         if (!continueClicked) {
@@ -560,9 +607,17 @@ export class IndeedAdapter implements IPlatformAdapter {
               !!document.querySelector('#indeedapply-modal');
             if (!isApplyContext) return [];
 
-            const inputs = Array.from(document.querySelectorAll('input, select, textarea'));
+            function isElementVisible(el: HTMLElement): boolean {
+              if (!el) return false;
+              const style = window.getComputedStyle(el);
+              if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+              const rect = el.getBoundingClientRect();
+              return rect.width > 0 && rect.height > 0;
+            }
+
+            const inputs = Array.from(document.querySelectorAll('input, select, textarea')) as HTMLElement[];
             return inputs
-              .filter((el: any) => el.offsetParent !== null && !el.disabled)
+              .filter((el: any) => isElementVisible(el) && !el.disabled)
               .map((el, idx) => {
                 const labelEl =
                   el.closest('label') ||
@@ -616,19 +671,33 @@ export class IndeedAdapter implements IPlatformAdapter {
             .executeScript({
               target: { tabId, frameIds: [frameId] },
               func: (idx: number, val: string, fType: string) => {
-                const visibleInputs = Array.from(document.querySelectorAll('input, select, textarea')).filter(
-                  (el: any) => el.offsetParent !== null && !el.disabled,
-                );
+                function isElementVisible(el: HTMLElement): boolean {
+                  if (!el) return false;
+                  const style = window.getComputedStyle(el);
+                  if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+                  const rect = el.getBoundingClientRect();
+                  return rect.width > 0 && rect.height > 0;
+                }
+
+                const visibleInputs = (
+                  Array.from(document.querySelectorAll('input, select, textarea')) as HTMLElement[]
+                ).filter((el: any) => isElementVisible(el) && !el.disabled);
                 const el = visibleInputs[idx] as any;
                 if (!el) return;
 
                 if (fType === 'select') {
+                  let matched = false;
                   for (let i = 0; i < el.options.length; i++) {
                     if (el.options[i].text.toLowerCase().includes(val.toLowerCase())) {
                       el.selectedIndex = i;
                       el.dispatchEvent(new Event('change', { bubbles: true }));
+                      matched = true;
                       break;
                     }
+                  }
+                  if (!matched && el.options.length > 1 && el.selectedIndex <= 0) {
+                    el.selectedIndex = 1;
+                    el.dispatchEvent(new Event('change', { bubbles: true }));
                   }
                 } else if (fType === 'radio') {
                   const rText = (
@@ -638,11 +707,12 @@ export class IndeedAdapter implements IPlatformAdapter {
                     ''
                   ).toLowerCase();
                   const valLo = val.toLowerCase();
-                  if (valLo.startsWith('y') && (rText.includes('yes') || el.value.toLowerCase() === 'yes')) {
-                    el.checked = true;
-                    el.dispatchEvent(new Event('change', { bubbles: true }));
-                    el.click();
-                  } else if (valLo.startsWith('n') && (rText.includes('no') || el.value.toLowerCase() === 'no')) {
+                  const matchesYes =
+                    valLo.startsWith('y') && (rText.includes('yes') || el.value.toLowerCase() === 'yes');
+                  const matchesNo = valLo.startsWith('n') && (rText.includes('no') || el.value.toLowerCase() === 'no');
+                  const matchesVal = valLo && (rText.includes(valLo) || el.value.toLowerCase().includes(valLo));
+
+                  if (matchesYes || matchesNo || matchesVal) {
                     el.checked = true;
                     el.dispatchEvent(new Event('change', { bubbles: true }));
                     el.click();
@@ -655,7 +725,7 @@ export class IndeedAdapter implements IPlatformAdapter {
                   }
                 } else {
                   if (!el.value) {
-                    el.value = val;
+                    el.value = val || '1';
                     el.dispatchEvent(new Event('input', { bubbles: true }));
                     el.dispatchEvent(new Event('change', { bubbles: true }));
                   }
