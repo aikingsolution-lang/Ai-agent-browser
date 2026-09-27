@@ -311,7 +311,7 @@ export class IndeedAdapter implements IPlatformAdapter {
         }
       }, INDEED_SELECTORS);
 
-      await new Promise(r => setTimeout(r, 3500));
+      await new Promise(r => setTimeout(r, 4000));
 
       // Check if a popup page was opened for smartapply
       try {
@@ -331,43 +331,98 @@ export class IndeedAdapter implements IPlatformAdapter {
         }
       } catch {}
 
-      const activePage = popupPage || puppeteerPage;
+      // Helper to find the active frame or page where the application form lives
+      const getActiveTarget = async (): Promise<any> => {
+        const candidates: any[] = [];
+        if (popupPage && !popupPage.isClosed?.()) {
+          candidates.push(popupPage);
+        }
+        if (puppeteerPage.frames) {
+          for (const f of puppeteerPage.frames()) {
+            candidates.push(f);
+          }
+        }
+        candidates.push(puppeteerPage);
 
-      // 6. Multi-Step Modal / SmartApply Flow (up to 10 steps)
-      const maxSteps = 10;
+        for (const c of candidates) {
+          try {
+            const hasApplyForm = await c.evaluate((selectors: typeof INDEED_SELECTORS) => {
+              const u = window.location.href.toLowerCase();
+              if (u.includes('smartapply') || u.includes('indeedapply')) return true;
+
+              const hasForwardSelector = selectors.FORWARD_BUTTON_SELECTORS.some(sel => {
+                const el = document.querySelector(sel);
+                return el && (el as HTMLElement).offsetParent !== null;
+              });
+              if (hasForwardSelector) return true;
+
+              const btns = Array.from(document.querySelectorAll('button, [role="button"]')) as HTMLElement[];
+              return btns.some(b => {
+                if (b.offsetParent === null) return false;
+                const t = (b.textContent || '').trim().toLowerCase();
+                return selectors.FORWARD_BUTTON_TEXTS.some(txt => t === txt || t.includes(txt));
+              });
+            }, INDEED_SELECTORS);
+
+            if (hasApplyForm) {
+              return c;
+            }
+          } catch {}
+        }
+
+        return popupPage || puppeteerPage;
+      };
+
+      let activeTarget = await getActiveTarget();
+
+      // 6. Multi-Step Modal / SmartApply Flow (up to 12 steps)
+      const maxSteps = 12;
+      let applicationSubmitted = false;
+
       for (let step = 1; step <= maxSteps; step++) {
         logger.info(`[IndeedAdapter] Handling application step ${step}...`);
 
+        // Refresh activeTarget in case step navigation changed frames
+        activeTarget = await getActiveTarget();
+
         // Check if application is already submitted
-        const isDone = await activePage.evaluate((selectors: typeof INDEED_SELECTORS) => {
+        const isDone = await activeTarget.evaluate((selectors: typeof INDEED_SELECTORS) => {
           const bodyText = (document.body.innerText || '').toLowerCase();
           return selectors.SUCCESS_INDICATORS.some(ind => bodyText.includes(ind));
         }, INDEED_SELECTORS);
 
         if (isDone) {
-          logger.info('[IndeedAdapter] Successfully submitted Indeed application!');
-          return { status: 'applied', creditsUsed: 1 };
+          logger.info('[IndeedAdapter] Successfully submitted Indeed application (confirmed via success indicator)!');
+          applicationSubmitted = true;
+          break;
         }
 
         // Fill any visible questions/inputs on this step
-        await this.fillIndeedStepFields(activePage, careerBrain);
+        await this.fillIndeedStepFields(activeTarget, careerBrain);
 
-        // Check for Submit button
-        const submitClicked = await activePage.evaluate((selectors: typeof INDEED_SELECTORS) => {
+        // Check for Submit button (Only genuine final submit buttons, never "apply now")
+        const submitClicked = await activeTarget.evaluate((selectors: typeof INDEED_SELECTORS) => {
           // 1. Check known submit selectors
           for (const sel of selectors.SUBMIT_BUTTON_SELECTORS) {
             const btn = document.querySelector(sel) as HTMLElement | null;
             if (btn && btn.offsetParent !== null) {
+              btn.scrollIntoView({ block: 'center' });
               btn.click();
               return true;
             }
           }
-          // 2. Check all visible buttons by text
+          // 2. Check all visible buttons by text (strict matching against SUBMIT_BUTTON_TEXTS)
           const buttons = Array.from(document.querySelectorAll('button, [role="button"]')) as HTMLElement[];
           for (const b of buttons) {
             if (b.offsetParent === null) continue;
             const t = (b.textContent || '').trim().toLowerCase();
-            if (selectors.SUBMIT_BUTTON_TEXTS.some(txt => t === txt || t.includes(txt))) {
+            if (
+              t === 'submit your application' ||
+              t === 'submit application' ||
+              t === 'submit' ||
+              selectors.SUBMIT_BUTTON_TEXTS.some(txt => t === txt)
+            ) {
+              b.scrollIntoView({ block: 'center' });
               b.click();
               return true;
             }
@@ -376,18 +431,49 @@ export class IndeedAdapter implements IPlatformAdapter {
         }, INDEED_SELECTORS);
 
         if (submitClicked) {
-          logger.info('[IndeedAdapter] Clicked Submit button. Waiting for confirmation...');
-          await new Promise(r => setTimeout(r, 4000));
-          return { status: 'applied', creditsUsed: 1 };
+          logger.info('[IndeedAdapter] Clicked Submit button. Waiting for submission confirmation...');
+          await new Promise(r => setTimeout(r, 4500));
+
+          // Verify submission success indicator
+          const confirmed = await activeTarget.evaluate((selectors: typeof INDEED_SELECTORS) => {
+            const bodyText = (document.body.innerText || '').toLowerCase();
+            return selectors.SUCCESS_INDICATORS.some(ind => bodyText.includes(ind));
+          }, INDEED_SELECTORS);
+
+          if (confirmed) {
+            logger.info('[IndeedAdapter] Application submission confirmed!');
+            applicationSubmitted = true;
+            break;
+          }
+
+          // Also check parent page in case modal closed upon submission
+          const parentConfirmed = await puppeteerPage.evaluate((selectors: typeof INDEED_SELECTORS) => {
+            const bodyText = (document.body.innerText || '').toLowerCase();
+            return selectors.SUCCESS_INDICATORS.some(ind => bodyText.includes(ind));
+          }, INDEED_SELECTORS);
+
+          if (parentConfirmed) {
+            logger.info('[IndeedAdapter] Application submission confirmed on parent page!');
+            applicationSubmitted = true;
+            break;
+          }
+
+          // If submit was clicked on the final review step, treat as submitted
+          logger.info('[IndeedAdapter] Final submit button was clicked successfully.');
+          applicationSubmitted = true;
+          break;
         }
 
         // Otherwise click Continue / Next
-        const continueClicked = await activePage.evaluate((selectors: typeof INDEED_SELECTORS) => {
+        const continueClicked = await activeTarget.evaluate((selectors: typeof INDEED_SELECTORS) => {
           // 1. Check known forward selectors
           for (const sel of selectors.FORWARD_BUTTON_SELECTORS) {
             const btn = document.querySelector(sel) as HTMLElement | null;
             if (btn && btn.offsetParent !== null) {
+              btn.scrollIntoView({ block: 'center' });
+              btn.focus();
               btn.click();
+              btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
               return true;
             }
           }
@@ -397,32 +483,54 @@ export class IndeedAdapter implements IPlatformAdapter {
             if (b.offsetParent === null) continue;
             const t = (b.textContent || '').trim().toLowerCase();
             if (selectors.FORWARD_BUTTON_TEXTS.some(txt => t === txt || t.includes(txt))) {
+              b.scrollIntoView({ block: 'center' });
+              b.focus();
               b.click();
+              btnDispatch(b);
               return true;
             }
           }
+
+          function btnDispatch(el: HTMLElement) {
+            el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+          }
+
           return false;
         }, INDEED_SELECTORS);
 
         if (!continueClicked) {
           // Check once more if success indicator appeared after submitting
-          const doneCheck = await activePage.evaluate((selectors: typeof INDEED_SELECTORS) => {
+          const doneCheck = await activeTarget.evaluate((selectors: typeof INDEED_SELECTORS) => {
             const bodyText = (document.body.innerText || '').toLowerCase();
             return selectors.SUCCESS_INDICATORS.some(ind => bodyText.includes(ind));
           }, INDEED_SELECTORS);
 
           if (doneCheck) {
-            return { status: 'applied', creditsUsed: 1 };
+            applicationSubmitted = true;
+            break;
           }
 
-          logger.info('[IndeedAdapter] No further navigation button found. Step loop finished.');
-          break;
+          logger.warning(
+            `[IndeedAdapter] No forward or submit button found at step ${step}. Application cannot proceed.`,
+          );
+          return {
+            status: 'failed',
+            reason: `Application incomplete: reached step ${step} without finding Next/Submit button`,
+          };
         }
 
-        await new Promise(r => setTimeout(r, 2500));
+        logger.info(`[IndeedAdapter] Clicked Continue for step ${step}. Waiting for next step...`);
+        await new Promise(r => setTimeout(r, 3000));
       }
 
-      return { status: 'applied', creditsUsed: 1 };
+      if (applicationSubmitted) {
+        return { status: 'applied', creditsUsed: 1 };
+      }
+
+      return {
+        status: 'failed',
+        reason: 'Indeed Apply reached step limit without final submission confirmation',
+      };
     } catch (err: any) {
       logger.error('[IndeedAdapter] Error applying to Indeed job:', err);
       return { status: 'failed', reason: err?.message || 'Application error' };
