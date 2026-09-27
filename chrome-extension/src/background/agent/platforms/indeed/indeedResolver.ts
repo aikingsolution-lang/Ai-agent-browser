@@ -10,7 +10,7 @@ export interface IIndeedAnswerResult {
 /**
  * Resolves screening questions and form fields commonly found in Indeed Apply forms.
  */
-export function resolveIndeedQuestion(
+function computeInitialAnswer(
   questionText: string,
   fieldType: 'text' | 'number' | 'radio' | 'dropdown' | 'select' | 'checkbox',
   options: string[] = [],
@@ -226,8 +226,45 @@ export function resolveIndeedQuestion(
     q.includes('zip') ||
     q.includes('address') ||
     q.includes('state') ||
-    q.includes('country')
+    q.includes('country') ||
+    q.includes('where are you located') ||
+    q.includes('where do you live') ||
+    q.includes('timezone') ||
+    q.includes('time zone')
   ) {
+    if (options.length > 0) {
+      // 1. Check if options match candidate location or country
+      const loc = (careerBrain.currentLocation || careerBrain.preferredLocation || 'Bengaluru, India').toLowerCase();
+      const matchedOpt = options.find(o => {
+        const oLo = o.toLowerCase();
+        return loc.includes(oLo) || oLo.includes('india') || oLo.includes('bengaluru') || oLo.includes('remote');
+      });
+      if (matchedOpt) {
+        return { value: matchedOpt, confidence: 0.95, source: 'profile' };
+      }
+
+      // 2. Check if options are timezones (EST, CST, MST, PST, etc.)
+      const isTimezoneOptions = options.some(o => {
+        const oLo = o.toLowerCase().trim();
+        return (
+          ['est', 'cst', 'mst', 'pst', 'edt', 'cdt', 'mdt', 'pdt', 'gmt', 'utc', 'ist'].includes(oLo) ||
+          oLo.includes('eastern') ||
+          oLo.includes('central') ||
+          oLo.includes('mountain') ||
+          oLo.includes('pacific')
+        );
+      });
+      if (isTimezoneOptions) {
+        const estOpt = options.find(o => {
+          const oLo = o.toLowerCase();
+          return oLo.includes('est') || oLo.includes('eastern');
+        });
+        return { value: estOpt || options[0], confidence: 0.9, source: 'profile' };
+      }
+
+      return { value: options[0], confidence: 0.4, source: 'profile' };
+    }
+
     return {
       value: careerBrain.currentLocation || careerBrain.preferredLocation || 'Bengaluru, India',
       confidence: 0.9,
@@ -336,4 +373,44 @@ export function resolveIndeedQuestion(
 
   // For text inputs: NEVER return "Yes"! Return sensible candidate title or blank.
   return { value: careerBrain.currentTitle || '', confidence: 0.3, source: 'default' };
+}
+
+/**
+ * Resolves screening questions and form fields commonly found in Indeed Apply forms.
+ * Validates the chosen answer against available DOM options.
+ * If options are present and the chosen answer does not match any of them,
+ * demotes confidence to 0.4 so the autonomous LLM can resolve the field with full context.
+ */
+export function resolveIndeedQuestion(
+  questionText: string,
+  fieldType: 'text' | 'number' | 'radio' | 'dropdown' | 'select' | 'checkbox',
+  options: string[] = [],
+  careerBrain: ICareerBrain,
+): IIndeedAnswerResult {
+  const result = computeInitialAnswer(questionText, fieldType, options, careerBrain);
+
+  // Universal options validation:
+  // If options were provided by the DOM, but our chosen value does NOT match ANY of the options,
+  // we must lower confidence to 0.4 so LLM gets invoked to pick the exact right option!
+  if (options.length > 0 && result.value) {
+    const valLower = result.value.toLowerCase().trim();
+    const matchesAny = options.some(opt => {
+      const optLower = opt.toLowerCase().trim();
+      return (
+        optLower === valLower ||
+        (valLower.length > 1 && optLower.includes(valLower)) ||
+        (optLower.length > 1 && valLower.includes(optLower)) ||
+        (valLower.startsWith('y') && optLower.startsWith('y')) ||
+        (valLower.startsWith('n') && optLower.startsWith('n'))
+      );
+    });
+
+    if (!matchesAny) {
+      result.confidence = 0.4;
+      const yesOpt = options.find(o => o.toLowerCase().startsWith('yes'));
+      result.value = yesOpt || options[0];
+    }
+  }
+
+  return result;
 }

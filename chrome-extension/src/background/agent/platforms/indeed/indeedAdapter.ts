@@ -235,37 +235,33 @@ export class IndeedAdapter implements IPlatformAdapter {
         })
         .catch(() => {});
 
-      // 2. Check for Cloudflare / Captcha Challenge (only visible challenges)
-      const hasCaptcha = await puppeteerPage.evaluate((selectors: typeof INDEED_SELECTORS) => {
-        const title = (document.title || '').toLowerCase();
-        if (
-          title.includes('just a moment') ||
-          title.includes('attention required') ||
-          title.includes('security check')
-        ) {
-          return true;
-        }
-        for (const sel of selectors.CAPTCHA_CONTAINERS) {
-          const el = document.querySelector(sel) as HTMLElement | null;
-          if (el) {
-            const style = window.getComputedStyle(el);
-            if (
-              style.display !== 'none' &&
-              style.visibility !== 'hidden' &&
-              (el.offsetWidth > 0 || el.offsetHeight > 0)
-            ) {
-              return true;
-            }
+      // 2. Check for Cloudflare / Captcha Challenge (with 20s auto-solve/grace wait)
+      let hasCaptcha = await this.checkCaptchaPresent(puppeteerPage);
+      if (hasCaptcha) {
+        logger.warning(
+          `[IndeedAdapter] Cloudflare / Bot Challenge detected on "${job.title}". Waiting up to 20s for auto-verification or user intervention in runner window...`,
+        );
+
+        const startTime = Date.now();
+        const maxWaitMs = 20000;
+
+        while (Date.now() - startTime < maxWaitMs) {
+          await this.attemptTurnstileClick(puppeteerPage, page.tabId).catch(() => {});
+          await new Promise(r => setTimeout(r, 2000));
+
+          hasCaptcha = await this.checkCaptchaPresent(puppeteerPage);
+          if (!hasCaptcha) {
+            logger.info('[IndeedAdapter] Cloudflare challenge passed! Proceeding with job application...');
+            break;
           }
         }
-        return false;
-      }, INDEED_SELECTORS);
 
-      if (hasCaptcha) {
-        return {
-          status: 'failed',
-          reason: 'Indeed Captcha/Bot Challenge detected. Please solve captcha in the runner window.',
-        };
+        if (hasCaptcha) {
+          return {
+            status: 'failed',
+            reason: 'Indeed Captcha/Bot Challenge detected. Timed out after 20s waiting for solution in runner window.',
+          };
+        }
       }
 
       // 3. Check if already applied
@@ -954,13 +950,18 @@ export class IndeedAdapter implements IPlatformAdapter {
                     el.getAttribute('aria-label') ||
                     el.value ||
                     ''
-                  ).toLowerCase();
-                  const valLo = (val || '').toLowerCase();
+                  )
+                    .toLowerCase()
+                    .trim();
+                  const valLo = (val || '').toLowerCase().trim();
                   const isMatch =
+                    rText === valLo ||
+                    (valLo.length > 0 && rText.includes(valLo)) ||
+                    (rText.length > 0 && valLo.includes(rText)) ||
                     (valLo.startsWith('y') && (rText.includes('yes') || (el.value || '').toLowerCase() === 'yes')) ||
                     (valLo.startsWith('n') && (rText.includes('no') || (el.value || '').toLowerCase() === 'no')) ||
                     (valLo.includes('consent') && (rText.includes('consent') || rText.includes('agree'))) ||
-                    (valLo && (rText.includes(valLo) || (el.value || '').toLowerCase().includes(valLo)));
+                    (el.value || '').toLowerCase() === valLo;
 
                   if (isMatch) {
                     el.focus();
@@ -968,8 +969,10 @@ export class IndeedAdapter implements IPlatformAdapter {
                     if (!el.checked && el.getAttribute('aria-checked') !== 'true') {
                       el.checked = true;
                       el.setAttribute('aria-checked', 'true');
+                      el.dispatchEvent(new Event('input', { bubbles: true }));
                       el.dispatchEvent(new Event('change', { bubbles: true }));
                     }
+                    el.closest('label')?.click();
                   }
                 } else if (fType === 'checkbox') {
                   const isChecked = el.checked === true || el.getAttribute('aria-checked') === 'true';
@@ -1011,6 +1014,56 @@ export class IndeedAdapter implements IPlatformAdapter {
           await new Promise(r => setTimeout(r, 100));
         }
       }
+
+      // Safety pass across all frames: ensure every visible radio group has at least one selection
+      await chrome.scripting
+        .executeScript({
+          target: { tabId, allFrames: true },
+          func: () => {
+            function isElementVisible(el: HTMLElement): boolean {
+              if (!el) return false;
+              const style = window.getComputedStyle(el);
+              if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+              const rect = el.getBoundingClientRect();
+              return rect.width > 0 && rect.height > 0;
+            }
+
+            const radios = (
+              Array.from(document.querySelectorAll('input[type="radio"], [role="radio"]')) as HTMLElement[]
+            ).filter(el => isElementVisible(el) && !(el as any).disabled);
+
+            const radioGroups = new Map<string, HTMLElement[]>();
+            radios.forEach((r, idx) => {
+              const name = r.getAttribute('name') || r.closest('fieldset')?.id || `group_${Math.floor(idx / 4)}`;
+              if (!radioGroups.has(name)) radioGroups.set(name, []);
+              radioGroups.get(name)!.push(r);
+            });
+
+            for (const [_, groupRadios] of radioGroups) {
+              const anyChecked = groupRadios.some(
+                r => (r as HTMLInputElement).checked || r.getAttribute('aria-checked') === 'true',
+              );
+              if (!anyChecked && groupRadios.length > 0) {
+                const preferred =
+                  groupRadios.find(r => {
+                    const txt = (r.closest('label')?.textContent || (r as any).value || '').toLowerCase();
+                    return txt.startsWith('yes') || txt.includes('consent') || txt.includes('agree');
+                  }) || groupRadios[0];
+
+                try {
+                  preferred.focus();
+                  preferred.click();
+                  (preferred as HTMLInputElement).checked = true;
+                  preferred.setAttribute('aria-checked', 'true');
+                  preferred.dispatchEvent(new Event('input', { bubbles: true }));
+                  preferred.dispatchEvent(new Event('change', { bubbles: true }));
+                  preferred.closest('label')?.click();
+                } catch {}
+              }
+            }
+          },
+        })
+        .catch(() => {});
     } catch (err) {
       logger.warning('[IndeedAdapter] Error filling step fields:', err);
     }
@@ -1039,9 +1092,23 @@ export class IndeedAdapter implements IPlatformAdapter {
             // Find red error messages or invalid inputs
             const errorContainers = Array.from(
               document.querySelectorAll(
-                '.ia-Feedback-error, [aria-invalid="true"], [data-testid*="error" i], div[class*="error" i], span[class*="error" i], p[class*="error" i]',
+                '.ia-Feedback-error, [aria-invalid="true"], [data-testid*="error" i], div[class*="error" i], span[class*="error" i], p[class*="error" i], div[class*="feedback" i], div[role="alert"]',
               ),
-            ).filter((el: any) => isElementVisible(el) && (el.textContent || '').trim().length > 0);
+            ).filter((el: any) => {
+              if (!isElementVisible(el)) return false;
+              const txt = (el.textContent || '').trim().toLowerCase();
+              return (
+                txt.includes('choose') ||
+                txt.includes('select') ||
+                txt.includes('required') ||
+                txt.includes('valid') ||
+                txt.includes('error') ||
+                txt.includes('fill') ||
+                txt.includes('option') ||
+                txt.includes('agree') ||
+                txt.includes('consent')
+              );
+            });
 
             if (!errorContainers.length) return { hasErrors: false, fieldsToFix: [] };
 
@@ -1051,6 +1118,7 @@ export class IndeedAdapter implements IPlatformAdapter {
               ) as HTMLElement[]
             ).filter(el => isElementVisible(el) && !(el as any).disabled);
 
+            const handledRadioGroups = new Set<string>();
             const fieldsToFix: Array<{
               index: number;
               type: string;
@@ -1060,40 +1128,94 @@ export class IndeedAdapter implements IPlatformAdapter {
             }> = [];
 
             allInputs.forEach((el, idx) => {
+              const fType =
+                el.getAttribute('type') === 'checkbox' || el.getAttribute('role') === 'checkbox'
+                  ? 'checkbox'
+                  : el.getAttribute('type') === 'radio' || el.getAttribute('role') === 'radio'
+                    ? 'radio'
+                    : el.tagName.toLowerCase() === 'select'
+                      ? 'select'
+                      : 'text';
+
               const isInvalid = el.getAttribute('aria-invalid') === 'true';
               const isUncheckedCheckbox =
-                (el.getAttribute('type') === 'checkbox' || el.getAttribute('role') === 'checkbox') &&
-                !(el as HTMLInputElement).checked &&
-                el.getAttribute('aria-checked') !== 'true';
+                fType === 'checkbox' && !(el as HTMLInputElement).checked && el.getAttribute('aria-checked') !== 'true';
 
               const container =
                 el.closest('fieldset, .ia-BasePage-component, div[class*="field" i], div[class*="question" i]') ||
                 el.parentElement;
               const hasNearbyError = container ? errorContainers.some(err => container.contains(err)) : false;
 
-              if (isInvalid || isUncheckedCheckbox || hasNearbyError) {
-                const label =
-                  el.closest('label')?.textContent ||
-                  container?.querySelector('legend, label, p, span')?.textContent ||
-                  el.getAttribute('aria-label') ||
-                  el.getAttribute('name') ||
-                  '';
+              let isUncheckedRadioGroup = false;
+              let siblingOptions: string[] = [];
+
+              if (fType === 'radio') {
+                const groupName = el.getAttribute('name') || el.closest('fieldset')?.id || '';
+                if (groupName && handledRadioGroups.has(groupName)) {
+                  return;
+                }
+
+                const siblings = groupName
+                  ? (Array.from(document.querySelectorAll(`input[name="${groupName}"]`)) as HTMLElement[])
+                  : container
+                    ? (Array.from(container.querySelectorAll('input[type="radio"], [role="radio"]')) as HTMLElement[])
+                    : [el];
+
+                const anyChecked = siblings.some(
+                  s => (s as HTMLInputElement).checked || s.getAttribute('aria-checked') === 'true',
+                );
+
+                if (!anyChecked) {
+                  isUncheckedRadioGroup = true;
+                  if (groupName) handledRadioGroups.add(groupName);
+                }
+
+                siblingOptions = siblings
+                  .map(s => (s.closest('label')?.textContent || (s as any).value || '').trim())
+                  .filter(Boolean);
+              }
+
+              if (isInvalid || isUncheckedCheckbox || hasNearbyError || isUncheckedRadioGroup) {
+                let label = '';
+                if (fType === 'radio') {
+                  const groupLegend = container?.querySelector(
+                    'legend, [role="heading"], h3, h4, [class*="header" i], [class*="title" i]',
+                  )?.textContent;
+                  label = (
+                    groupLegend ||
+                    container?.querySelector('p, span')?.textContent ||
+                    el.closest('label')?.textContent ||
+                    el.getAttribute('aria-label') ||
+                    ''
+                  ).trim();
+                } else {
+                  label = (
+                    el.closest('label')?.textContent ||
+                    container?.querySelector('legend, label, p, span')?.textContent ||
+                    el.getAttribute('aria-label') ||
+                    el.getAttribute('name') ||
+                    ''
+                  ).trim();
+                }
+
                 const errorMsg =
-                  errorContainers.find(err => container?.contains(err))?.textContent?.trim() || 'Required';
-                const fType =
-                  el.getAttribute('type') === 'checkbox' || el.getAttribute('role') === 'checkbox'
-                    ? 'checkbox'
-                    : el.getAttribute('type') === 'radio' || el.getAttribute('role') === 'radio'
-                      ? 'radio'
-                      : el.tagName.toLowerCase() === 'select'
-                        ? 'select'
-                        : 'text';
+                  errorContainers.find(err => container?.contains(err))?.textContent?.trim() ||
+                  (fType === 'radio' ? 'Choose an option to continue' : 'Required');
+
+                let options: string[] = [];
+                if (fType === 'radio') {
+                  options = siblingOptions;
+                } else if (fType === 'select') {
+                  options = Array.from((el as HTMLSelectElement).querySelectorAll('option'))
+                    .map(o => (o.textContent || '').trim())
+                    .filter(t => t && !t.toLowerCase().includes('select'));
+                }
 
                 fieldsToFix.push({
                   index: idx,
                   type: fType,
-                  label: label.trim(),
-                  options: [],
+                  label,
+                  options,
                   errorMsg,
                 });
               }
@@ -1191,10 +1313,35 @@ export class IndeedAdapter implements IPlatformAdapter {
               if (!el) return;
 
               if (fType === 'radio') {
-                el.focus();
-                el.click();
-                el.checked = true;
-                el.dispatchEvent(new Event('change', { bubbles: true }));
+                const groupName = el.getAttribute('name');
+                const container =
+                  el.closest('fieldset, div[class*="field" i], div[class*="question" i]') || el.parentElement;
+                const siblings = groupName
+                  ? (Array.from(document.querySelectorAll(`input[name="${groupName}"]`)) as HTMLElement[])
+                  : container
+                    ? (Array.from(container.querySelectorAll('input[type="radio"], [role="radio"]')) as HTMLElement[])
+                    : [el];
+
+                const valLo = (val || '').toLowerCase().trim();
+                const matched =
+                  siblings.find(s => {
+                    const sTxt = (s.closest('label')?.textContent || (s as any).value || '').toLowerCase().trim();
+                    return (
+                      sTxt === valLo ||
+                      (valLo.length > 0 && sTxt.includes(valLo)) ||
+                      (sTxt.length > 0 && valLo.includes(sTxt))
+                    );
+                  }) || siblings[0];
+
+                if (matched) {
+                  (matched as any).focus();
+                  (matched as any).click();
+                  (matched as HTMLInputElement).checked = true;
+                  matched.setAttribute('aria-checked', 'true');
+                  matched.dispatchEvent(new Event('input', { bubbles: true }));
+                  matched.dispatchEvent(new Event('change', { bubbles: true }));
+                  (matched as any).closest('label')?.click();
+                }
               } else if (fType === 'select') {
                 el.focus();
                 for (let i = 0; i < el.options.length; i++) {
@@ -1234,6 +1381,92 @@ export class IndeedAdapter implements IPlatformAdapter {
       logger.warning('[IndeedAdapter] Error in autoHealValidationErrors:', err);
       return false;
     }
+  }
+
+  private async checkCaptchaPresent(puppeteerPage: any): Promise<boolean> {
+    try {
+      return await puppeteerPage.evaluate((selectors: typeof INDEED_SELECTORS) => {
+        const title = (document.title || '').toLowerCase();
+        if (
+          title.includes('just a moment') ||
+          title.includes('attention required') ||
+          title.includes('security check') ||
+          title.includes('verify you are human') ||
+          title.includes('cloudflare')
+        ) {
+          return true;
+        }
+        for (const sel of selectors.CAPTCHA_CONTAINERS) {
+          const el = document.querySelector(sel) as HTMLElement | null;
+          if (el) {
+            const style = window.getComputedStyle(el);
+            if (
+              style.display !== 'none' &&
+              style.visibility !== 'hidden' &&
+              (el.offsetWidth > 0 || el.offsetHeight > 0)
+            ) {
+              return true;
+            }
+          }
+        }
+        return false;
+      }, INDEED_SELECTORS);
+    } catch {
+      return false;
+    }
+  }
+
+  private async attemptTurnstileClick(puppeteerPage: any, tabId: number): Promise<void> {
+    try {
+      // 1. Attempt clicking Turnstile checkbox within puppeteer frames
+      const frames = puppeteerPage.frames();
+      for (const frame of frames) {
+        try {
+          const checkbox = await frame.$(
+            'input[type="checkbox"], .ctp-checkbox-label, #challenge-stage input, div[id*="turnstile"], span.mark',
+          );
+          if (checkbox) {
+            await checkbox.click().catch(() => {});
+          }
+        } catch {}
+      }
+
+      // 2. Attempt clicking in main page context
+      await puppeteerPage
+        .evaluate(() => {
+          const targets = Array.from(
+            document.querySelectorAll(
+              '#challenge-stage, .cf-turnstile-wrapper, div[class*="turnstile" i], iframe[src*="cloudflare" i], iframe[src*="turnstile" i]',
+            ),
+          ) as HTMLElement[];
+          for (const t of targets) {
+            try {
+              t.scrollIntoView({ behavior: 'instant', block: 'center' });
+              t.focus();
+              t.click();
+            } catch {}
+          }
+        })
+        .catch(() => {});
+
+      // 3. Scripting click across all chrome frames
+      await chrome.scripting
+        .executeScript({
+          target: { tabId, allFrames: true },
+          func: () => {
+            const cb = document.querySelector(
+              'input[type="checkbox"], .ctp-checkbox-label, span.mark, div.spacer',
+            ) as HTMLElement | null;
+            if (cb) {
+              try {
+                cb.focus();
+                cb.click();
+              } catch {}
+            }
+          },
+        })
+        .catch(() => {});
+    } catch {}
   }
 }
 
