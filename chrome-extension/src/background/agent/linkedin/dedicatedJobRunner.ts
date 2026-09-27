@@ -1709,7 +1709,9 @@ export class DedicatedJobRunner {
       eligibleJobs.push(job);
     }
 
-    const queue = eligibleJobs.slice(0, BATCH_CAP);
+    // Prioritize direct Quick Apply jobs first
+    const sortedJobs = [...eligibleJobs].sort((a, b) => (b.isQuickApply ? 1 : 0) - (a.isQuickApply ? 1 : 0));
+    const queue = sortedJobs.slice(0, BATCH_CAP);
     this.notifyStatus(
       portToSend,
       `🎯 Queued ${queue.length} eligible Naukri jobs for this run (capped at max ${BATCH_CAP}).`,
@@ -1862,16 +1864,21 @@ export class DedicatedJobRunner {
         });
       }
 
-      // Anti-bot pacing delay (15-25s) between Naukri jobs
+      // Anti-bot pacing delay (15-25s) between Naukri jobs only when applied!
       if (i < queue.length - 1 && this.isRunning) {
-        const delayMs = 15000 + Math.floor(Math.random() * 10000);
-        this.notifyStatus(
-          portToSend,
-          `⏳ Pacing delay: waiting ${(delayMs / 1000).toFixed(0)}s before next job...`,
-          'info',
-        );
-        const aborted = await this.interruptibleSleep(delayMs);
-        if (aborted) break;
+        if (applyResult.status === 'applied') {
+          const delayMs = 15000 + Math.floor(Math.random() * 10000);
+          this.notifyStatus(
+            portToSend,
+            `⏳ Pacing delay: waiting ${(delayMs / 1000).toFixed(0)}s before next job...`,
+            'info',
+          );
+          const aborted = await this.interruptibleSleep(delayMs);
+          if (aborted) break;
+        } else {
+          // If skipped, quick 1.5s delay to avoid hammer without 20s freeze
+          await this.interruptibleSleep(1500);
+        }
       }
     }
 
@@ -2163,16 +2170,20 @@ export class DedicatedJobRunner {
         });
       }
 
-      // Anti-bot pacing delay (20-35s) between Indeed jobs
+      // Anti-bot pacing delay (20-35s) between Indeed jobs only when applied!
       if (i < queue.length - 1 && this.isRunning) {
-        const delayMs = 20000 + Math.floor(Math.random() * 15000);
-        this.notifyStatus(
-          portToSend,
-          `⏳ Pacing delay: waiting ${(delayMs / 1000).toFixed(0)}s before next job...`,
-          'info',
-        );
-        const aborted = await this.interruptibleSleep(delayMs);
-        if (aborted) break;
+        if (applyResult.status === 'applied') {
+          const delayMs = 20000 + Math.floor(Math.random() * 15000);
+          this.notifyStatus(
+            portToSend,
+            `⏳ Pacing delay: waiting ${(delayMs / 1000).toFixed(0)}s before next job...`,
+            'info',
+          );
+          const aborted = await this.interruptibleSleep(delayMs);
+          if (aborted) break;
+        } else {
+          await this.interruptibleSleep(1500);
+        }
       }
     }
 

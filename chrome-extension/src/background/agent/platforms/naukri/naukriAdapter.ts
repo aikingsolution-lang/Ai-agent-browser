@@ -25,7 +25,11 @@ export class NaukriAdapter implements IPlatformAdapter {
 
   public buildSearchUrl(role: string, location: string): string {
     const cleanRole = (role || 'Software Engineer').trim();
-    const cleanLoc = (location || '').trim();
+    // Normalize city for Naukri (e.g. "Bengaluru, India" -> "Bengaluru")
+    const cleanLoc = (location || '')
+      .replace(/,\s*India\b/gi, '')
+      .replace(/,\s*IN\b/gi, '')
+      .trim();
 
     const params = new URLSearchParams();
     params.set('k', cleanRole);
@@ -99,6 +103,7 @@ export class NaukriAdapter implements IPlatformAdapter {
 
         // Query job containers
         const tupleElements = Array.from(document.querySelectorAll(selectors.JOB_TUPLES.join(', ')));
+        const seenJobIds = new Set<string>();
 
         for (const el of tupleElements) {
           try {
@@ -108,7 +113,7 @@ export class NaukriAdapter implements IPlatformAdapter {
 
             const title = (titleEl.textContent || '').trim();
             const href = titleEl.getAttribute('href') || titleEl.href || '';
-            if (!title || !href) continue;
+            if (!title || !href || href.startsWith('javascript:')) continue;
 
             const fullUrl = href.startsWith('http') ? href : `https://www.naukri.com${href}`;
 
@@ -118,6 +123,13 @@ export class NaukriAdapter implements IPlatformAdapter {
               const match = fullUrl.match(/-([0-9a-zA-Z]{6,30})(?:\?|$)/);
               jobId = match ? match[1] : String(Math.abs(hashString(fullUrl)));
             }
+
+            // Deduplicate
+            if (seenJobIds.has(jobId) || seenJobIds.has(fullUrl)) {
+              continue;
+            }
+            seenJobIds.add(jobId);
+            seenJobIds.add(fullUrl);
 
             // Company
             const compEl = el.querySelector(selectors.COMPANY_NAME.join(', '));
@@ -189,11 +201,17 @@ export class NaukriAdapter implements IPlatformAdapter {
 
       // 1. Navigate to job page if not already there
       const currentUrl = puppeteerPage.url().toLowerCase();
-      if (!currentUrl.includes(job.jobId)) {
-        await page.navigateTo(job.url).catch(async () => {
-          await puppeteerPage.goto(job.url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      if (
+        currentUrl.includes('/jobs?') ||
+        currentUrl.includes('-jobs') ||
+        !job.jobId ||
+        !currentUrl.includes(job.jobId.toLowerCase())
+      ) {
+        logger.info(`[NaukriAdapter] Navigating to job page: ${job.url}`);
+        await puppeteerPage.goto(job.url, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(async () => {
+          await page.navigateTo(job.url);
         });
-        await new Promise(r => setTimeout(r, 3000));
+        await new Promise(r => setTimeout(r, 4000));
       }
 
       // 2. Check if already applied
@@ -206,41 +224,39 @@ export class NaukriAdapter implements IPlatformAdapter {
         return { status: 'skipped', reason: 'You already applied to this job earlier on Naukri.' };
       }
 
-      // 3. Find Apply Button and check for external redirects
+      // 3. Find Apply Button with strict priority: Direct Apply > External Site
       const applyBtnState = await puppeteerPage.evaluate((selectors: typeof NAUKRI_SELECTORS) => {
-        let btn: HTMLElement | null = null;
-        for (const sel of selectors.PRIMARY_APPLY_BUTTON) {
-          const el = document.querySelector(sel) as HTMLElement | null;
-          if (el && el.offsetParent !== null) {
-            btn = el;
-            break;
+        // Direct apply button has highest priority
+        const directBtn = document.querySelector(
+          'button#apply-button, button.apply-button, button.waves-effect',
+        ) as HTMLElement | null;
+        if (directBtn && directBtn.offsetParent !== null) {
+          const directText = (directBtn.textContent || '').trim().toLowerCase();
+          const isExt = selectors.EXTERNAL_APPLY_INDICATORS.some(ind => directText.includes(ind));
+          return { found: true, isExternal: isExt, text: (directBtn.textContent || '').trim() };
+        }
+
+        // Dedicated external company site button
+        const externalBtn = document.querySelector(
+          'button#company-site-button, button.company-site-button, .company-site-button',
+        ) as HTMLElement | null;
+        if (externalBtn && externalBtn.offsetParent !== null) {
+          return { found: true, isExternal: true, text: (externalBtn.textContent || '').trim() };
+        }
+
+        // Fallback: search visible action buttons
+        const buttons = Array.from(document.querySelectorAll('button, a'));
+        for (const b of buttons) {
+          const bText = (b.textContent || '').trim().toLowerCase();
+          if (bText === 'apply' || bText === 'quick apply') {
+            return { found: true, isExternal: false, text: (b.textContent || '').trim() };
+          }
+          if (selectors.EXTERNAL_APPLY_INDICATORS.some(ind => bText.includes(ind))) {
+            return { found: true, isExternal: true, text: (b.textContent || '').trim() };
           }
         }
 
-        if (!btn) {
-          // Search any button containing "Apply"
-          const buttons = Array.from(document.querySelectorAll('button, a'));
-          for (const b of buttons) {
-            const bText = (b.textContent || '').trim().toLowerCase();
-            if (bText === 'apply' || bText === 'apply on website' || bText.startsWith('apply')) {
-              btn = b as HTMLElement;
-              break;
-            }
-          }
-        }
-
-        if (!btn) {
-          return { found: false, isExternal: false, text: '' };
-        }
-
-        const btnText = (btn.textContent || '').trim().toLowerCase();
-        const isExternal = selectors.EXTERNAL_APPLY_INDICATORS.some(ind => btnText.includes(ind));
-
-        return {
-          found: true,
-          isExternal,
-          text: btnText,
-        };
+        return { found: false, isExternal: false, text: '' };
       }, NAUKRI_SELECTORS);
 
       if (!applyBtnState.found) {
