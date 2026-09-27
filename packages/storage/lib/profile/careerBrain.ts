@@ -584,7 +584,21 @@ Tools: Git, GitHub, Docker, Postman, VS Code`,
   ],
   yearsOfExperience: 1,
   hasWorkExperience: true,
-  workExperience: [],
+  workExperience: [
+    {
+      id: 'exp-1',
+      title: 'Next.js Developer Intern',
+      company: 'AI-King Solutions',
+      startMonth: 'August',
+      startYear: '2024',
+      endMonth: null,
+      endYear: null,
+      isCurrent: true,
+      description:
+        'Contributing to live client projects built with Next.js, React.js, and TypeScript. Integrating REST APIs with backend services and databases.',
+      source: 'manual',
+    },
+  ],
   education:
     'Bachelor of Technology in Computer Science & Engineering, Maulana Abul Kalam Azad University of Technology (2020 – 2024), CGPA: 8.57/10',
   college: 'Maulana Abul Kalam Azad University of Technology',

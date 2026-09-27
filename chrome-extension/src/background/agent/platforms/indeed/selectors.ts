@@ -56,6 +56,7 @@ export const INDEED_SELECTORS = {
   MODAL_CONTAINER: ['div#indeedapply-modal', 'div.ia-BasePage', 'div[role="dialog"]', 'iframe[name*="indeedapply"]'],
   FORWARD_BUTTON_SELECTORS: [
     'button[data-testid="continue-button"]',
+    'button[data-testid="save-button"]',
     'button.ia-continueButton',
     'button.ia-SmartApplyCard-primaryButton',
     'button[data-testid="review-button"]',
@@ -64,7 +65,14 @@ export const INDEED_SELECTORS = {
     'div.ia-BasePage-footer button',
     'footer button',
   ],
-  FORWARD_BUTTON_TEXTS: ['continue', 'next', 'review your application', 'review application', 'save and continue'],
+  FORWARD_BUTTON_TEXTS: [
+    'continue',
+    'next',
+    'review your application',
+    'review application',
+    'save and continue',
+    'save',
+  ],
   SUBMIT_BUTTON_SELECTORS: ['button[data-testid="submit-button"]', 'button.ia-submitButton', 'button.ia-SubmitButton'],
   SUBMIT_BUTTON_TEXTS: ['submit your application', 'submit application', 'submit'],
 };
