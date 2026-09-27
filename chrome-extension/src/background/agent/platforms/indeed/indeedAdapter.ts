@@ -253,35 +253,41 @@ export class IndeedAdapter implements IPlatformAdapter {
         return { status: 'skipped', reason: 'You already applied to this job on Indeed.' };
       }
 
-      // 4. Find Apply Button
-      const applyBtn = await puppeteerPage.evaluate((selectors: typeof INDEED_SELECTORS) => {
-        let btn: HTMLElement | null = null;
-        for (const sel of selectors.PRIMARY_APPLY_BUTTON) {
-          const el = document.querySelector(sel) as HTMLElement | null;
-          if (el && el.offsetParent !== null) {
-            btn = el;
-            break;
-          }
-        }
-
-        if (!btn) {
-          const buttons = Array.from(document.querySelectorAll('button, a'));
-          for (const b of buttons) {
-            const bText = (b.textContent || '').trim().toLowerCase();
-            if (bText === 'apply now' || bText === 'easily apply') {
-              btn = b as HTMLElement;
+      // 4. Find Apply Button (with up to 6s retry for dynamic rendering)
+      let applyBtn = { found: false, isExternal: false };
+      for (let retries = 0; retries < 6; retries++) {
+        applyBtn = await puppeteerPage.evaluate((selectors: typeof INDEED_SELECTORS) => {
+          let btn: HTMLElement | null = null;
+          for (const sel of selectors.PRIMARY_APPLY_BUTTON) {
+            const el = document.querySelector(sel) as HTMLElement | null;
+            if (el && el.offsetParent !== null) {
+              btn = el;
               break;
             }
           }
-        }
 
-        if (!btn) return { found: false, isExternal: false };
+          if (!btn) {
+            const buttons = Array.from(document.querySelectorAll('button, a'));
+            for (const b of buttons) {
+              const bText = (b.textContent || '').trim().toLowerCase();
+              if (bText === 'apply now' || bText === 'easily apply' || bText.includes('apply now')) {
+                btn = b as HTMLElement;
+                break;
+              }
+            }
+          }
 
-        const btnText = (btn.textContent || '').toLowerCase();
-        const isExternal = selectors.EXTERNAL_APPLY_INDICATORS.some(ind => btnText.includes(ind));
+          if (!btn) return { found: false, isExternal: false };
 
-        return { found: true, isExternal };
-      }, INDEED_SELECTORS);
+          const btnText = (btn.textContent || '').toLowerCase();
+          const isExternal = selectors.EXTERNAL_APPLY_INDICATORS.some(ind => btnText.includes(ind));
+
+          return { found: true, isExternal };
+        }, INDEED_SELECTORS);
+
+        if (applyBtn.found) break;
+        await new Promise(r => setTimeout(r, 1000));
+      }
 
       if (!applyBtn.found) {
         return { status: 'skipped', reason: 'No active Apply button found.' };
@@ -297,6 +303,7 @@ export class IndeedAdapter implements IPlatformAdapter {
         for (const sel of selectors.PRIMARY_APPLY_BUTTON) {
           const el = document.querySelector(sel) as HTMLElement | null;
           if (el && el.offsetParent !== null) {
+            el.scrollIntoView({ block: 'center' });
             el.click();
             return;
           }
@@ -304,223 +311,206 @@ export class IndeedAdapter implements IPlatformAdapter {
         const buttons = Array.from(document.querySelectorAll('button, a'));
         for (const b of buttons) {
           const bText = (b.textContent || '').trim().toLowerCase();
-          if (bText === 'apply now' || bText === 'easily apply') {
+          if (bText === 'apply now' || bText === 'easily apply' || bText.includes('apply now')) {
+            (b as HTMLElement).scrollIntoView({ block: 'center' });
             (b as HTMLElement).click();
             return;
           }
         }
       }, INDEED_SELECTORS);
 
-      await new Promise(r => setTimeout(r, 4000));
+      await new Promise(r => setTimeout(r, 4500));
 
-      // Check if a popup page was opened for smartapply
+      // Determine active tab ID (handles if Indeed opened in an iframe or in a popup tab)
+      let activeTabId: number = page.tabId;
       try {
-        const browser = puppeteerPage.browser();
-        const pages = await browser.pages();
-        for (const p of pages) {
-          if (p !== puppeteerPage && p.url().toLowerCase().includes('smartapply')) {
-            popupPage = p;
-            popupPage.on('dialog', dialogHandler);
-            await popupPage
-              .evaluate(() => {
-                window.onbeforeunload = null;
-              })
-              .catch(() => {});
-            break;
-          }
+        const currentTab = await chrome.tabs.get(page.tabId);
+        const winTabs = await chrome.tabs.query({ windowId: currentTab.windowId });
+        const popup = winTabs.find(t => t.id !== page.tabId && (t.url || '').toLowerCase().includes('smartapply'));
+        if (popup?.id) {
+          activeTabId = popup.id;
+          logger.info(`[IndeedAdapter] Found smartapply in popup tab ${activeTabId}`);
         }
       } catch {}
 
-      // Helper to find the active frame or page where the application form lives
-      const getActiveTarget = async (): Promise<any> => {
-        const candidates: any[] = [];
-        if (popupPage && !popupPage.isClosed?.()) {
-          candidates.push(popupPage);
-        }
-        if (puppeteerPage.frames) {
-          for (const f of puppeteerPage.frames()) {
-            candidates.push(f);
-          }
-        }
-        candidates.push(puppeteerPage);
-
-        for (const c of candidates) {
-          try {
-            const hasApplyForm = await c.evaluate((selectors: typeof INDEED_SELECTORS) => {
-              const u = window.location.href.toLowerCase();
-              if (u.includes('smartapply') || u.includes('indeedapply')) return true;
-
-              const hasForwardSelector = selectors.FORWARD_BUTTON_SELECTORS.some(sel => {
-                const el = document.querySelector(sel);
-                return el && (el as HTMLElement).offsetParent !== null;
-              });
-              if (hasForwardSelector) return true;
-
-              const btns = Array.from(document.querySelectorAll('button, [role="button"]')) as HTMLElement[];
-              return btns.some(b => {
-                if (b.offsetParent === null) return false;
-                const t = (b.textContent || '').trim().toLowerCase();
-                return selectors.FORWARD_BUTTON_TEXTS.some(txt => t === txt || t.includes(txt));
-              });
-            }, INDEED_SELECTORS);
-
-            if (hasApplyForm) {
-              return c;
-            }
-          } catch {}
-        }
-
-        return popupPage || puppeteerPage;
-      };
-
-      let activeTarget = await getActiveTarget();
-
-      // 6. Multi-Step Modal / SmartApply Flow (up to 12 steps)
+      // 6. Multi-Step Flow (up to 12 steps) using chrome.scripting across all frames
       const maxSteps = 12;
       let applicationSubmitted = false;
 
       for (let step = 1; step <= maxSteps; step++) {
         logger.info(`[IndeedAdapter] Handling application step ${step}...`);
 
-        // Refresh activeTarget in case step navigation changed frames
-        activeTarget = await getActiveTarget();
+        // Check if application is already submitted in ANY frame
+        const isDoneResults = await chrome.scripting
+          .executeScript({
+            target: { tabId: activeTabId, allFrames: true },
+            func: (selectors: typeof INDEED_SELECTORS) => {
+              const bodyText = (document.body?.innerText || '').toLowerCase();
+              return selectors.SUCCESS_INDICATORS.some(ind => bodyText.includes(ind));
+            },
+            args: [INDEED_SELECTORS],
+          })
+          .catch(() => []);
 
-        // Check if application is already submitted
-        const isDone = await activeTarget.evaluate((selectors: typeof INDEED_SELECTORS) => {
-          const bodyText = (document.body.innerText || '').toLowerCase();
-          return selectors.SUCCESS_INDICATORS.some(ind => bodyText.includes(ind));
-        }, INDEED_SELECTORS);
-
-        if (isDone) {
+        if (isDoneResults.some(r => r.result === true)) {
           logger.info('[IndeedAdapter] Successfully submitted Indeed application (confirmed via success indicator)!');
           applicationSubmitted = true;
           break;
         }
 
-        // Fill any visible questions/inputs on this step
-        await this.fillIndeedStepFields(activeTarget, careerBrain);
+        // Fill any visible questions/inputs on this step across all frames
+        await this.fillIndeedStepFields(activeTabId, careerBrain);
 
-        // Check for Submit button (Only genuine final submit buttons, never "apply now")
-        const submitClicked = await activeTarget.evaluate((selectors: typeof INDEED_SELECTORS) => {
-          // 1. Check known submit selectors
-          for (const sel of selectors.SUBMIT_BUTTON_SELECTORS) {
-            const btn = document.querySelector(sel) as HTMLElement | null;
-            if (btn && btn.offsetParent !== null) {
-              btn.scrollIntoView({ block: 'center' });
-              btn.click();
-              return true;
-            }
-          }
-          // 2. Check all visible buttons by text (strict matching against SUBMIT_BUTTON_TEXTS)
-          const buttons = Array.from(document.querySelectorAll('button, [role="button"]')) as HTMLElement[];
-          for (const b of buttons) {
-            if (b.offsetParent === null) continue;
-            const t = (b.textContent || '').trim().toLowerCase();
-            if (
-              t === 'submit your application' ||
-              t === 'submit application' ||
-              t === 'submit' ||
-              selectors.SUBMIT_BUTTON_TEXTS.some(txt => t === txt)
-            ) {
-              b.scrollIntoView({ block: 'center' });
-              b.click();
-              return true;
-            }
-          }
-          return false;
-        }, INDEED_SELECTORS);
+        // Check for Submit button across all frames (ONLY in apply/modal contexts)
+        const submitResults = await chrome.scripting
+          .executeScript({
+            target: { tabId: activeTabId, allFrames: true },
+            func: (selectors: typeof INDEED_SELECTORS) => {
+              const url = window.location.href.toLowerCase();
+              const isApplyContext =
+                url.includes('smartapply') ||
+                url.includes('indeedapply') ||
+                !!document.querySelector('div.ia-BasePage') ||
+                !!document.querySelector('#indeedapply-modal');
+              if (!isApplyContext) return false;
+
+              for (const sel of selectors.SUBMIT_BUTTON_SELECTORS) {
+                const btn = document.querySelector(sel) as HTMLElement | null;
+                if (btn && btn.offsetParent !== null) {
+                  btn.scrollIntoView({ block: 'center' });
+                  btn.focus();
+                  btn.click();
+                  btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+                  return true;
+                }
+              }
+
+              const buttons = Array.from(document.querySelectorAll('button, [role="button"]')) as HTMLElement[];
+              for (const b of buttons) {
+                if (b.offsetParent === null) continue;
+                const t = (b.textContent || '').trim().toLowerCase();
+                if (t === 'submit your application' || t === 'submit application' || t === 'submit') {
+                  b.scrollIntoView({ block: 'center' });
+                  b.focus();
+                  b.click();
+                  b.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+                  return true;
+                }
+              }
+              return false;
+            },
+            args: [INDEED_SELECTORS],
+          })
+          .catch(() => []);
+
+        const submitClicked = submitResults.some(r => r.result === true);
 
         if (submitClicked) {
           logger.info('[IndeedAdapter] Clicked Submit button. Waiting for submission confirmation...');
           await new Promise(r => setTimeout(r, 4500));
 
-          // Verify submission success indicator
-          const confirmed = await activeTarget.evaluate((selectors: typeof INDEED_SELECTORS) => {
-            const bodyText = (document.body.innerText || '').toLowerCase();
-            return selectors.SUCCESS_INDICATORS.some(ind => bodyText.includes(ind));
-          }, INDEED_SELECTORS);
+          // Verify submission success indicator across all frames
+          const confirmResults = await chrome.scripting
+            .executeScript({
+              target: { tabId: activeTabId, allFrames: true },
+              func: (selectors: typeof INDEED_SELECTORS) => {
+                const bodyText = (document.body?.innerText || '').toLowerCase();
+                return selectors.SUCCESS_INDICATORS.some(ind => bodyText.includes(ind));
+              },
+              args: [INDEED_SELECTORS],
+            })
+            .catch(() => []);
 
-          if (confirmed) {
+          if (confirmResults.some(r => r.result === true)) {
             logger.info('[IndeedAdapter] Application submission confirmed!');
             applicationSubmitted = true;
             break;
           }
 
-          // Also check parent page in case modal closed upon submission
-          const parentConfirmed = await puppeteerPage.evaluate((selectors: typeof INDEED_SELECTORS) => {
-            const bodyText = (document.body.innerText || '').toLowerCase();
-            return selectors.SUCCESS_INDICATORS.some(ind => bodyText.includes(ind));
-          }, INDEED_SELECTORS);
-
-          if (parentConfirmed) {
-            logger.info('[IndeedAdapter] Application submission confirmed on parent page!');
-            applicationSubmitted = true;
-            break;
-          }
-
-          // If submit was clicked on the final review step, treat as submitted
-          logger.info('[IndeedAdapter] Final submit button was clicked successfully.');
+          logger.info('[IndeedAdapter] Final submit button was clicked on review step.');
           applicationSubmitted = true;
           break;
         }
 
-        // Otherwise click Continue / Next
-        const continueClicked = await activeTarget.evaluate((selectors: typeof INDEED_SELECTORS) => {
-          // 1. Check known forward selectors
-          for (const sel of selectors.FORWARD_BUTTON_SELECTORS) {
-            const btn = document.querySelector(sel) as HTMLElement | null;
-            if (btn && btn.offsetParent !== null) {
-              btn.scrollIntoView({ block: 'center' });
-              btn.focus();
-              btn.click();
-              btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
-              return true;
-            }
-          }
-          // 2. Check all visible buttons by text
-          const buttons = Array.from(document.querySelectorAll('button, [role="button"]')) as HTMLElement[];
-          for (const b of buttons) {
-            if (b.offsetParent === null) continue;
-            const t = (b.textContent || '').trim().toLowerCase();
-            if (selectors.FORWARD_BUTTON_TEXTS.some(txt => t === txt || t.includes(txt))) {
-              b.scrollIntoView({ block: 'center' });
-              b.focus();
-              b.click();
-              btnDispatch(b);
-              return true;
-            }
-          }
+        // Otherwise click Continue / Next button across all frames
+        let continueClicked = false;
+        let clickedButtonText = '';
 
-          function btnDispatch(el: HTMLElement) {
-            el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
-          }
+        for (let clickAttempt = 0; clickAttempt < 2; clickAttempt++) {
+          const continueResults = await chrome.scripting
+            .executeScript({
+              target: { tabId: activeTabId, allFrames: true },
+              func: (selectors: typeof INDEED_SELECTORS) => {
+                // 1. Check known forward selectors
+                for (const sel of selectors.FORWARD_BUTTON_SELECTORS) {
+                  const btn = document.querySelector(sel) as HTMLElement | null;
+                  if (btn && btn.offsetParent !== null) {
+                    btn.scrollIntoView({ block: 'center' });
+                    btn.focus();
+                    btn.click();
+                    btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+                    return { clicked: true, text: btn.textContent?.trim() || '' };
+                  }
+                }
 
-          return false;
-        }, INDEED_SELECTORS);
+                // 2. Check all visible buttons by text
+                const buttons = Array.from(
+                  document.querySelectorAll('button, [role="button"], a.is-primary'),
+                ) as HTMLElement[];
+                for (const b of buttons) {
+                  if (b.offsetParent === null) continue;
+                  const t = (b.textContent || '').trim().toLowerCase();
+                  if (selectors.FORWARD_BUTTON_TEXTS.some(txt => t === txt || t.includes(txt))) {
+                    b.scrollIntoView({ block: 'center' });
+                    b.focus();
+                    b.click();
+                    b.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+                    return { clicked: true, text: t };
+                  }
+                }
+
+                return { clicked: false, text: '' };
+              },
+              args: [INDEED_SELECTORS],
+            })
+            .catch(() => []);
+
+          const hit = continueResults.find(r => r.result?.clicked === true);
+          if (hit && hit.result) {
+            continueClicked = true;
+            clickedButtonText = hit.result.text || '';
+            break;
+          }
+          await new Promise(r => setTimeout(r, 1500));
+        }
 
         if (!continueClicked) {
-          // Check once more if success indicator appeared after submitting
-          const doneCheck = await activeTarget.evaluate((selectors: typeof INDEED_SELECTORS) => {
-            const bodyText = (document.body.innerText || '').toLowerCase();
-            return selectors.SUCCESS_INDICATORS.some(ind => bodyText.includes(ind));
-          }, INDEED_SELECTORS);
+          // Final check: did success indicator appear?
+          const doneCheckResults = await chrome.scripting
+            .executeScript({
+              target: { tabId: activeTabId, allFrames: true },
+              func: (selectors: typeof INDEED_SELECTORS) => {
+                const bodyText = (document.body?.innerText || '').toLowerCase();
+                return selectors.SUCCESS_INDICATORS.some(ind => bodyText.includes(ind));
+              },
+              args: [INDEED_SELECTORS],
+            })
+            .catch(() => []);
 
-          if (doneCheck) {
+          if (doneCheckResults.some(r => r.result === true)) {
             applicationSubmitted = true;
             break;
           }
 
-          logger.warning(
-            `[IndeedAdapter] No forward or submit button found at step ${step}. Application cannot proceed.`,
-          );
+          logger.warning(`[IndeedAdapter] No forward or submit button found at step ${step}.`);
           return {
             status: 'failed',
             reason: `Application incomplete: reached step ${step} without finding Next/Submit button`,
           };
         }
 
-        logger.info(`[IndeedAdapter] Clicked Continue for step ${step}. Waiting for next step...`);
-        await new Promise(r => setTimeout(r, 3000));
+        logger.info(`[IndeedAdapter] Clicked "${clickedButtonText}" for step ${step}. Waiting for next step...`);
+        await new Promise(r => setTimeout(r, 3500));
       }
 
       if (applicationSubmitted) {
@@ -535,7 +525,6 @@ export class IndeedAdapter implements IPlatformAdapter {
       logger.error('[IndeedAdapter] Error applying to Indeed job:', err);
       return { status: 'failed', reason: err?.message || 'Application error' };
     } finally {
-      // Neutralize beforeunload and clean up listeners
       await puppeteerPage
         .evaluate(() => {
           window.onbeforeunload = null;
@@ -557,109 +546,127 @@ export class IndeedAdapter implements IPlatformAdapter {
     }
   }
 
-  private async fillIndeedStepFields(pageOrFrame: any, careerBrain: any): Promise<void> {
+  private async fillIndeedStepFields(tabId: number, careerBrain: any): Promise<void> {
     try {
-      const fields = await pageOrFrame.evaluate(() => {
-        const inputs = Array.from(document.querySelectorAll('input, select, textarea'));
-        return inputs
-          .filter((el: any) => el.offsetParent !== null && !el.disabled)
-          .map((el, idx) => {
-            const labelEl =
-              el.closest('label') ||
-              el.parentElement?.querySelector('label') ||
-              (el.id ? document.querySelector(`label[for="${el.id}"]`) : null);
-            const placeholder = el.getAttribute('placeholder') || '';
-            const name = el.getAttribute('name') || '';
-            const ariaLabel = el.getAttribute('aria-label') || '';
-            const fieldset = el.closest('fieldset');
-            const legend = fieldset ? fieldset.querySelector('legend')?.textContent : '';
+      const scanResults = await chrome.scripting
+        .executeScript({
+          target: { tabId, allFrames: true },
+          func: () => {
+            const url = window.location.href.toLowerCase();
+            const isApplyContext =
+              url.includes('smartapply') ||
+              url.includes('indeedapply') ||
+              !!document.querySelector('div.ia-BasePage') ||
+              !!document.querySelector('#indeedapply-modal');
+            if (!isApplyContext) return [];
 
-            const labelText = (legend || labelEl?.textContent || ariaLabel || placeholder || name || '').trim();
+            const inputs = Array.from(document.querySelectorAll('input, select, textarea'));
+            return inputs
+              .filter((el: any) => el.offsetParent !== null && !el.disabled)
+              .map((el, idx) => {
+                const labelEl =
+                  el.closest('label') ||
+                  el.parentElement?.querySelector('label') ||
+                  (el.id ? document.querySelector(`label[for="${el.id}"]`) : null);
+                const placeholder = el.getAttribute('placeholder') || '';
+                const name = el.getAttribute('name') || '';
+                const ariaLabel = el.getAttribute('aria-label') || '';
+                const fieldset = el.closest('fieldset');
+                const legend = fieldset ? fieldset.querySelector('legend')?.textContent : '';
 
-            const tagName = el.tagName.toLowerCase();
-            let fieldType = 'text';
-            if (tagName === 'select') fieldType = 'select';
-            else if (el.getAttribute('type') === 'radio') fieldType = 'radio';
-            else if (el.getAttribute('type') === 'checkbox') fieldType = 'checkbox';
-            else if (el.getAttribute('type') === 'number') fieldType = 'number';
+                const labelText = (legend || labelEl?.textContent || ariaLabel || placeholder || name || '').trim();
 
-            const options: string[] = [];
-            if (tagName === 'select') {
-              const optEls = Array.from(el.querySelectorAll('option'));
-              for (const o of optEls) {
-                const t = (o.textContent || '').trim();
-                if (t && !t.toLowerCase().includes('select')) options.push(t);
-              }
-            }
+                const tagName = el.tagName.toLowerCase();
+                let fieldType = 'text';
+                if (tagName === 'select') fieldType = 'select';
+                else if (el.getAttribute('type') === 'radio') fieldType = 'radio';
+                else if (el.getAttribute('type') === 'checkbox') fieldType = 'checkbox';
+                else if (el.getAttribute('type') === 'number') fieldType = 'number';
 
-            return {
-              index: idx,
-              labelText,
-              fieldType,
-              options,
-            };
-          });
-      });
-
-      for (const f of fields) {
-        if (!f.labelText) continue;
-        const answer = resolveIndeedQuestion(f.labelText, f.fieldType as any, f.options, careerBrain);
-
-        await pageOrFrame.evaluate(
-          (idx: number, val: string, fType: string) => {
-            const visibleInputs = Array.from(document.querySelectorAll('input, select, textarea')).filter(
-              (el: any) => el.offsetParent !== null && !el.disabled,
-            );
-            const el = visibleInputs[idx] as any;
-            if (!el) return;
-
-            if (fType === 'select') {
-              for (let i = 0; i < el.options.length; i++) {
-                if (el.options[i].text.toLowerCase().includes(val.toLowerCase())) {
-                  el.selectedIndex = i;
-                  el.dispatchEvent(new Event('change', { bubbles: true }));
-                  break;
+                const options: string[] = [];
+                if (tagName === 'select') {
+                  const optEls = Array.from(el.querySelectorAll('option'));
+                  for (const o of optEls) {
+                    const t = (o.textContent || '').trim();
+                    if (t && !t.toLowerCase().includes('select')) options.push(t);
+                  }
                 }
-              }
-            } else if (fType === 'radio') {
-              // Only check radio button if value matches or if not already checked
-              const rText = (
-                el.closest('label')?.textContent ||
-                el.parentElement?.textContent ||
-                el.value ||
-                ''
-              ).toLowerCase();
-              const valLo = val.toLowerCase();
-              if (valLo.startsWith('y') && (rText.includes('yes') || el.value.toLowerCase() === 'yes')) {
-                el.checked = true;
-                el.dispatchEvent(new Event('change', { bubbles: true }));
-                el.click();
-              } else if (valLo.startsWith('n') && (rText.includes('no') || el.value.toLowerCase() === 'no')) {
-                el.checked = true;
-                el.dispatchEvent(new Event('change', { bubbles: true }));
-                el.click();
-              }
-            } else if (fType === 'checkbox') {
-              if (!el.checked && (val.toLowerCase().startsWith('y') || val.toLowerCase() === 'true')) {
-                el.checked = true;
-                el.dispatchEvent(new Event('change', { bubbles: true }));
-                el.click();
-              }
-            } else {
-              // Text or number - don't overwrite if user already has a valid value
-              if (!el.value) {
-                el.value = val;
-                el.dispatchEvent(new Event('input', { bubbles: true }));
-                el.dispatchEvent(new Event('change', { bubbles: true }));
-              }
-            }
-          },
-          f.index,
-          answer.value,
-          f.fieldType,
-        );
 
-        await new Promise(r => setTimeout(r, 150));
+                return {
+                  index: idx,
+                  labelText,
+                  fieldType,
+                  options,
+                };
+              });
+          },
+        })
+        .catch(() => []);
+
+      for (const frameResult of scanResults) {
+        const frameId = frameResult.frameId;
+        const fields = frameResult.result || [];
+        if (!fields.length) continue;
+
+        for (const f of fields) {
+          if (!f.labelText) continue;
+          const answer = resolveIndeedQuestion(f.labelText, f.fieldType as any, f.options, careerBrain);
+
+          await chrome.scripting
+            .executeScript({
+              target: { tabId, frameIds: [frameId] },
+              func: (idx: number, val: string, fType: string) => {
+                const visibleInputs = Array.from(document.querySelectorAll('input, select, textarea')).filter(
+                  (el: any) => el.offsetParent !== null && !el.disabled,
+                );
+                const el = visibleInputs[idx] as any;
+                if (!el) return;
+
+                if (fType === 'select') {
+                  for (let i = 0; i < el.options.length; i++) {
+                    if (el.options[i].text.toLowerCase().includes(val.toLowerCase())) {
+                      el.selectedIndex = i;
+                      el.dispatchEvent(new Event('change', { bubbles: true }));
+                      break;
+                    }
+                  }
+                } else if (fType === 'radio') {
+                  const rText = (
+                    el.closest('label')?.textContent ||
+                    el.parentElement?.textContent ||
+                    el.value ||
+                    ''
+                  ).toLowerCase();
+                  const valLo = val.toLowerCase();
+                  if (valLo.startsWith('y') && (rText.includes('yes') || el.value.toLowerCase() === 'yes')) {
+                    el.checked = true;
+                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                    el.click();
+                  } else if (valLo.startsWith('n') && (rText.includes('no') || el.value.toLowerCase() === 'no')) {
+                    el.checked = true;
+                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                    el.click();
+                  }
+                } else if (fType === 'checkbox') {
+                  if (!el.checked && (val.toLowerCase().startsWith('y') || val.toLowerCase() === 'true')) {
+                    el.checked = true;
+                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                    el.click();
+                  }
+                } else {
+                  if (!el.value) {
+                    el.value = val;
+                    el.dispatchEvent(new Event('input', { bubbles: true }));
+                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                  }
+                }
+              },
+              args: [f.index, answer.value, f.fieldType],
+            })
+            .catch(() => {});
+
+          await new Promise(r => setTimeout(r, 100));
+        }
       }
     } catch (err) {
       logger.warning('[IndeedAdapter] Error filling step fields:', err);
