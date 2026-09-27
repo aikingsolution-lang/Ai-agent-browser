@@ -278,6 +278,8 @@ export const careerBrainSchema = z.object({
   resumeFileName: z.string().optional(),
   /** Skills auto-extracted from resume to display "from resume" indicator */
   autoExtractedSkills: z.array(z.string()).default([]),
+  /** Candidate gender identity (Male, Female, Other, Prefer not to say) */
+  gender: z.string().default('Male'),
   /** Timestamp of last update */
   updatedAt: z.number().default(() => Date.now()),
 });
@@ -627,6 +629,7 @@ Tools: Git, GitHub, Docker, Postman, VS Code`,
   experienceLevels: ['Fresher', 'Entry Level', 'Internship'],
   jobTypes: ['Full-time', 'Internship'],
   autoExtractedSkills: [],
+  gender: 'Male',
   updatedAt: Date.now(),
 };
 
@@ -722,6 +725,7 @@ export async function getCareerBrainData(): Promise<ICareerBrain> {
         currentLocation: raw.currentLocation !== undefined ? raw.currentLocation : undefined,
         noticePeriod:
           raw.noticePeriod !== undefined ? raw.noticePeriod : (DEFAULT_CAREER_BRAIN.noticePeriod ?? 'Immediate'),
+        gender: raw.gender !== undefined ? raw.gender : 'Male',
         goldenAnswers:
           Array.isArray(raw.goldenAnswers) && raw.goldenAnswers.length > 0 ? raw.goldenAnswers : DEFAULT_GOLDEN_ANSWERS,
         customAnswers: raw.customAnswers || {},

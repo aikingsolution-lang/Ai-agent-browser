@@ -2133,6 +2133,7 @@ HINT / PLACEHOLDER: ${field.hintText || field.placeholder || 'None'}
 
 CANDIDATE BACKGROUND:
 - Total Experience: ${yoe} years
+- Gender: ${careerBrain.gender || 'Male'}
 - Education: ${edu}
 - Work Authorization: ${workAuth}
 - Notice Period: ${noticePeriod}
@@ -2154,6 +2155,8 @@ DECISION RULES:
    - You MUST pick EXACTLY one string from the provided OPTIONS list that best represents the candidate's qualification.
 5. OPEN-ENDED TEXT / PARAGRAPH:
    - Provide a concise, highly professional, compelling answer (1-3 sentences) tailored to the candidate's profile.
+6. GENDER / EQUAL OPPORTUNITY:
+   - If asked for gender or sex, answer with candidate's gender ("${careerBrain.gender || 'Male'}") or pick the matching option from OPTIONS.
 
 OUTPUT STRICTLY VALID JSON ONLY:
 {

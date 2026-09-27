@@ -212,6 +212,19 @@ function computeInitialAnswer(
     return { value: careerBrain.fullName || 'Mubasshir Ali', confidence: 0.95, source: 'profile' };
   }
 
+  // 7.5 Gender / Sex / Identity
+  if (q.includes('gender') || q === 'sex' || q.includes('gender identity')) {
+    const candidateGender = careerBrain.gender || 'Male';
+    if (options.length > 0) {
+      const match = options.find(
+        o =>
+          o.toLowerCase() === candidateGender.toLowerCase() || o.toLowerCase().includes(candidateGender.toLowerCase()),
+      );
+      return { value: match || options[0], confidence: 0.95, source: 'profile' };
+    }
+    return { value: candidateGender, confidence: 0.95, source: 'profile' };
+  }
+
   // 8. Contact Info / City / Phone / Email
   if (q.includes('email')) {
     return { value: careerBrain.email || '', confidence: 0.95, source: 'profile' };

@@ -210,7 +210,21 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
         setEditForm(data);
       }
     });
-  }, []);
+
+    // Real-time synchronization with Options Page and background storage
+    const handleStorageChange = (changes: { [key: string]: chrome.storage.StorageChange }, areaName: string) => {
+      if (areaName === 'local' && changes['linkedin_career_brain']?.newValue) {
+        const newData = changes['linkedin_career_brain'].newValue as ICareerBrain;
+        setProfile(newData);
+        setEditForm(prev => (isEditing ? prev : newData));
+      }
+    };
+
+    chrome.storage.onChanged.addListener(handleStorageChange);
+    return () => {
+      chrome.storage.onChanged.removeListener(handleStorageChange);
+    };
+  }, [isEditing]);
 
   const handleFileUpload = useCallback(
     async (file: File) => {
@@ -501,8 +515,12 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
   const handleSaveProfile = async () => {
     setIsSaving(true);
     try {
+      const current = await getCareerBrainData();
       const updated: ICareerBrain = {
+        ...current,
         ...editForm,
+        expectedCTC: editForm.expectedCTC || editForm.salaryExpectation || '',
+        salaryExpectation: editForm.salaryExpectation || editForm.expectedCTC || '',
         updatedAt: Date.now(),
       };
       await saveCareerBrainData(updated);
@@ -663,16 +681,18 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
             </div>
             <div className="grid grid-cols-2 gap-2">
               <div>
-                <label className="block text-[11px] font-semibold opacity-70 mb-1">Phone Number</label>
-                <input
-                  type="tel"
-                  value={editForm.phoneNumber}
-                  onChange={e => setEditForm(prev => ({ ...prev, phoneNumber: e.target.value }))}
+                <label className="block text-[11px] font-semibold opacity-70 mb-1">Gender</label>
+                <select
+                  value={editForm.gender || 'Male'}
+                  onChange={e => setEditForm(prev => ({ ...prev, gender: e.target.value }))}
                   className={`w-full rounded-lg border px-3 py-1.5 text-xs outline-none ${
                     isDarkMode ? 'border-sky-800 bg-slate-900 text-white' : 'border-sky-200 bg-white text-gray-900'
-                  }`}
-                  placeholder="+91 9876543210"
-                />
+                  }`}>
+                  <option value="Male">Male</option>
+                  <option value="Female">Female</option>
+                  <option value="Other">Other</option>
+                  <option value="Prefer not to say">Prefer not to say</option>
+                </select>
               </div>
               <div>
                 <label className="block text-[11px] font-semibold opacity-70 mb-1">Years of Exp</label>
@@ -687,17 +707,31 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
                 />
               </div>
             </div>
-            <div>
-              <label className="block text-[11px] font-semibold opacity-70 mb-1">Email</label>
-              <input
-                type="email"
-                value={editForm.email}
-                onChange={e => setEditForm(prev => ({ ...prev, email: e.target.value }))}
-                className={`w-full rounded-lg border px-3 py-1.5 text-xs outline-none ${
-                  isDarkMode ? 'border-sky-800 bg-slate-900 text-white' : 'border-sky-200 bg-white text-gray-900'
-                }`}
-                placeholder="rahul@example.com"
-              />
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="block text-[11px] font-semibold opacity-70 mb-1">Phone Number</label>
+                <input
+                  type="tel"
+                  value={editForm.phoneNumber}
+                  onChange={e => setEditForm(prev => ({ ...prev, phoneNumber: e.target.value }))}
+                  className={`w-full rounded-lg border px-3 py-1.5 text-xs outline-none ${
+                    isDarkMode ? 'border-sky-800 bg-slate-900 text-white' : 'border-sky-200 bg-white text-gray-900'
+                  }`}
+                  placeholder="+91 9876543210"
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] font-semibold opacity-70 mb-1">Email</label>
+                <input
+                  type="email"
+                  value={editForm.email}
+                  onChange={e => setEditForm(prev => ({ ...prev, email: e.target.value }))}
+                  className={`w-full rounded-lg border px-3 py-1.5 text-xs outline-none ${
+                    isDarkMode ? 'border-sky-800 bg-slate-900 text-white' : 'border-sky-200 bg-white text-gray-900'
+                  }`}
+                  placeholder="rahul@example.com"
+                />
+              </div>
             </div>
             <div>
               <label className="block text-[11px] font-semibold opacity-70 mb-1">Target Job Title</label>
@@ -895,6 +929,12 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
             <div className="flex items-center space-x-2">
               <FiBriefcase className="size-3.5 shrink-0 text-sky-400" />
               <span className="font-semibold">{profile.currentTitle || 'Full Stack Developer'}</span>
+            </div>
+            <div className="flex items-center space-x-2">
+              <FiUser className="size-3.5 shrink-0 text-sky-400" />
+              <span>
+                Gender: <strong>{profile.gender || 'Male'}</strong> ({profile.yearsOfExperience ?? 0} yrs exp)
+              </span>
             </div>
             <div className="flex items-center space-x-2">
               <FiMail className="size-3.5 shrink-0 text-sky-400" />

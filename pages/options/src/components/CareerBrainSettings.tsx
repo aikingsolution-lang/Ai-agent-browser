@@ -62,6 +62,19 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
       // Live-Mode is temporarily hardcode-disabled / locked for safety verification
       setConfig({ ...configData, dryRun: true });
     });
+
+    // Real-time bidirectional synchronization with Side Panel and background storage
+    const handleStorageChange = (changes: { [key: string]: chrome.storage.StorageChange }, areaName: string) => {
+      if (areaName === 'local' && changes['linkedin_career_brain']?.newValue) {
+        const newData = changes['linkedin_career_brain'].newValue as ICareerBrain;
+        setCareerBrain(newData);
+      }
+    };
+
+    chrome.storage.onChanged.addListener(handleStorageChange);
+    return () => {
+      chrome.storage.onChanged.removeListener(handleStorageChange);
+    };
   }, []);
 
   // Close suggestions on outside click
@@ -79,13 +92,27 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
     setSaveError(null);
     setValidationErrors({});
 
+    // Read latest from storage to preserve non-visible background fields
+    const current = await getCareerBrainData();
+    const toSave: ICareerBrain = {
+      ...current,
+      ...careerBrain,
+      expectedCTC: careerBrain.expectedCTC || careerBrain.salaryExpectation || '',
+      salaryExpectation: careerBrain.salaryExpectation || careerBrain.expectedCTC || '',
+      updatedAt: Date.now(),
+    };
+
     // 1. Strict Zod Validation & Safe Storage
-    const result = await saveCareerBrainData(careerBrain);
+    const result = await saveCareerBrainData(toSave);
 
     if (!result.success) {
       setSaveError(result.error || 'Validation failed. Please correct the highlighted fields.');
       setValidationErrors(result.validationErrors || {});
       return;
+    }
+
+    if (result.data) {
+      setCareerBrain(result.data);
     }
 
     // 2. Keep dryRun strictly locked to true for safety
@@ -421,6 +448,21 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
           </div>
 
           <div>
+            <label className="mb-1 block text-xs font-semibold text-gray-700 dark:text-gray-300">Gender</label>
+            <select
+              value={careerBrain.gender || 'Male'}
+              onChange={e => setCareerBrain(prev => ({ ...prev, gender: e.target.value }))}
+              className={`w-full rounded-md border ${
+                isDarkMode ? 'border-slate-600 bg-slate-700 text-gray-100' : 'border-gray-300 bg-white text-gray-800'
+              } px-3 py-2 text-sm`}>
+              <option value="Male">Male</option>
+              <option value="Female">Female</option>
+              <option value="Other">Other</option>
+              <option value="Prefer not to say">Prefer not to say</option>
+            </select>
+          </div>
+
+          <div>
             <label className="mb-1 block text-xs font-semibold text-gray-700 dark:text-gray-300">
               Education & Degree
             </label>
@@ -429,6 +471,36 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
               value={careerBrain.education || ''}
               onChange={e => setCareerBrain(prev => ({ ...prev, education: e.target.value }))}
               placeholder="e.g. B.Tech Computer Science, MAKAUT (2020-2024), CGPA 8.57"
+              className={`w-full rounded-md border ${
+                isDarkMode ? 'border-slate-600 bg-slate-700 text-gray-100' : 'border-gray-300 bg-white text-gray-800'
+              } px-3 py-2 text-sm`}
+            />
+          </div>
+
+          <div>
+            <label className="mb-1 block text-xs font-semibold text-gray-700 dark:text-gray-300">
+              College / University
+            </label>
+            <input
+              type="text"
+              value={careerBrain.college || ''}
+              onChange={e => setCareerBrain(prev => ({ ...prev, college: e.target.value }))}
+              placeholder="e.g. Maulana Abul Kalam Azad University"
+              className={`w-full rounded-md border ${
+                isDarkMode ? 'border-slate-600 bg-slate-700 text-gray-100' : 'border-gray-300 bg-white text-gray-800'
+              } px-3 py-2 text-sm`}
+            />
+          </div>
+
+          <div>
+            <label className="mb-1 block text-xs font-semibold text-gray-700 dark:text-gray-300">
+              CGPA / Percentage
+            </label>
+            <input
+              type="text"
+              value={careerBrain.cgpa || ''}
+              onChange={e => setCareerBrain(prev => ({ ...prev, cgpa: e.target.value }))}
+              placeholder="e.g. 8.57 / 10"
               className={`w-full rounded-md border ${
                 isDarkMode ? 'border-slate-600 bg-slate-700 text-gray-100' : 'border-gray-300 bg-white text-gray-800'
               } px-3 py-2 text-sm`}
@@ -468,6 +540,36 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
 
           <div>
             <label className="mb-1 block text-xs font-semibold text-gray-700 dark:text-gray-300">
+              Current Location (City)
+            </label>
+            <input
+              type="text"
+              value={careerBrain.currentLocation || ''}
+              onChange={e => setCareerBrain(prev => ({ ...prev, currentLocation: e.target.value }))}
+              placeholder="e.g. Bengaluru, India"
+              className={`w-full rounded-md border ${
+                isDarkMode ? 'border-slate-600 bg-slate-700 text-gray-100' : 'border-gray-300 bg-white text-gray-800'
+              } px-3 py-2 text-sm`}
+            />
+          </div>
+
+          <div>
+            <label className="mb-1 block text-xs font-semibold text-gray-700 dark:text-gray-300">
+              Preferred Location / Remote
+            </label>
+            <input
+              type="text"
+              value={careerBrain.preferredLocation}
+              onChange={e => setCareerBrain(prev => ({ ...prev, preferredLocation: e.target.value }))}
+              placeholder="e.g. Remote / Bengaluru / Hybrid"
+              className={`w-full rounded-md border ${
+                isDarkMode ? 'border-slate-600 bg-slate-700 text-gray-100' : 'border-gray-300 bg-white text-gray-800'
+              } px-3 py-2 text-sm`}
+            />
+          </div>
+
+          <div>
+            <label className="mb-1 block text-xs font-semibold text-gray-700 dark:text-gray-300">
               Notice Period / Availability
             </label>
             <input
@@ -497,14 +599,12 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
           </div>
 
           <div>
-            <label className="mb-1 block text-xs font-semibold text-gray-700 dark:text-gray-300">
-              Target Salary Expectation
-            </label>
+            <label className="mb-1 block text-xs font-semibold text-gray-700 dark:text-gray-300">Current CTC</label>
             <input
               type="text"
-              value={careerBrain.salaryExpectation}
-              onChange={e => setCareerBrain(prev => ({ ...prev, salaryExpectation: e.target.value }))}
-              placeholder="e.g. ₹18,00,000 - ₹24,00,000 / $130k"
+              value={careerBrain.currentCTC || ''}
+              onChange={e => setCareerBrain(prev => ({ ...prev, currentCTC: e.target.value }))}
+              placeholder="e.g. ₹6,00,000"
               className={`w-full rounded-md border ${
                 isDarkMode ? 'border-slate-600 bg-slate-700 text-gray-100' : 'border-gray-300 bg-white text-gray-800'
               } px-3 py-2 text-sm`}
@@ -513,13 +613,16 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
 
           <div>
             <label className="mb-1 block text-xs font-semibold text-gray-700 dark:text-gray-300">
-              Preferred Location / Remote
+              Expected CTC / Target Salary
             </label>
             <input
               type="text"
-              value={careerBrain.preferredLocation}
-              onChange={e => setCareerBrain(prev => ({ ...prev, preferredLocation: e.target.value }))}
-              placeholder="e.g. Remote / Bengaluru / Hybrid"
+              value={careerBrain.expectedCTC || careerBrain.salaryExpectation || ''}
+              onChange={e => {
+                const val = e.target.value;
+                setCareerBrain(prev => ({ ...prev, expectedCTC: val, salaryExpectation: val }));
+              }}
+              placeholder="e.g. ₹6,00,000 - ₹12,00,000"
               className={`w-full rounded-md border ${
                 isDarkMode ? 'border-slate-600 bg-slate-700 text-gray-100' : 'border-gray-300 bg-white text-gray-800'
               } px-3 py-2 text-sm`}
