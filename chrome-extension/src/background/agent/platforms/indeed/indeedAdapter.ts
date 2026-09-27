@@ -182,15 +182,36 @@ export class IndeedAdapter implements IPlatformAdapter {
     };
     puppeteerPage.on('dialog', dialogHandler);
 
-    let popupPage: any = null;
+    let activeTabId: number = page.tabId;
 
     try {
+      // Clean up any stray smartapply popup tabs from previous runs
+      try {
+        const existingTabs = await chrome.tabs.query({});
+        for (const t of existingTabs) {
+          if (t.id && t.id !== page.tabId && (t.url || '').toLowerCase().includes('smartapply')) {
+            await chrome.tabs.remove(t.id).catch(() => {});
+          }
+        }
+      } catch {}
+
       logger.info(`[IndeedAdapter] Navigating to Indeed job: ${job.title} (${job.url})`);
 
       // Disable beforeunload on current page to prevent navigation hangs
-      await puppeteerPage
-        .evaluate(() => {
-          window.onbeforeunload = null;
+      await chrome.scripting
+        .executeScript({
+          target: { tabId: page.tabId, allFrames: true },
+          func: () => {
+            window.onbeforeunload = null;
+            window.addEventListener(
+              'beforeunload',
+              e => {
+                e.preventDefault();
+                delete (e as any).returnValue;
+              },
+              { capture: true },
+            );
+          },
         })
         .catch(() => {});
 
@@ -204,9 +225,12 @@ export class IndeedAdapter implements IPlatformAdapter {
       }
 
       // Disable beforeunload again after page loads
-      await puppeteerPage
-        .evaluate(() => {
-          window.onbeforeunload = null;
+      await chrome.scripting
+        .executeScript({
+          target: { tabId: page.tabId, allFrames: true },
+          func: () => {
+            window.onbeforeunload = null;
+          },
         })
         .catch(() => {});
 
@@ -300,11 +324,18 @@ export class IndeedAdapter implements IPlatformAdapter {
       // 5. Click the Apply button
       logger.info('[IndeedAdapter] Clicking Apply button...');
       await puppeteerPage.evaluate((selectors: typeof INDEED_SELECTORS) => {
+        function triggerClick(el: HTMLElement) {
+          el.scrollIntoView({ behavior: 'instant', block: 'center' });
+          el.focus();
+          el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+          el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
+          el.click();
+        }
+
         for (const sel of selectors.PRIMARY_APPLY_BUTTON) {
           const el = document.querySelector(sel) as HTMLElement | null;
           if (el && el.offsetParent !== null) {
-            el.scrollIntoView({ block: 'center' });
-            el.click();
+            triggerClick(el);
             return;
           }
         }
@@ -312,33 +343,73 @@ export class IndeedAdapter implements IPlatformAdapter {
         for (const b of buttons) {
           const bText = (b.textContent || '').trim().toLowerCase();
           if (bText === 'apply now' || bText === 'easily apply' || bText.includes('apply now')) {
-            (b as HTMLElement).scrollIntoView({ block: 'center' });
-            (b as HTMLElement).click();
+            triggerClick(b as HTMLElement);
             return;
           }
         }
       }, INDEED_SELECTORS);
 
-      await new Promise(r => setTimeout(r, 4500));
+      // Wait up to 10 seconds for the application modal or popup tab to appear
+      activeTabId = page.tabId;
+      for (let waitSec = 0; waitSec < 10; waitSec++) {
+        await new Promise(r => setTimeout(r, 1000));
 
-      // Determine active tab ID (handles if Indeed opened in an iframe or in a popup tab)
-      let activeTabId: number = page.tabId;
-      try {
-        const currentTab = await chrome.tabs.get(page.tabId);
-        const winTabs = await chrome.tabs.query({ windowId: currentTab.windowId });
-        const popup = winTabs.find(t => t.id !== page.tabId && (t.url || '').toLowerCase().includes('smartapply'));
-        if (popup?.id) {
-          activeTabId = popup.id;
-          logger.info(`[IndeedAdapter] Found smartapply in popup tab ${activeTabId}`);
+        // 1. Check if a new tab or window opened for smartapply
+        try {
+          const allTabs = await chrome.tabs.query({});
+          const smartTab = allTabs.find(t => {
+            const u = (t.url || '').toLowerCase();
+            return u.includes('smartapply') || u.includes('indeedapply');
+          });
+          if (smartTab?.id) {
+            activeTabId = smartTab.id;
+            logger.info(`[IndeedAdapter] Found smartapply in tab ${activeTabId} (url: ${smartTab.url})`);
+            break;
+          }
+        } catch {}
+
+        // 2. Check if current page has indeedapply iframe or modal or action buttons
+        const checkModal = await chrome.scripting
+          .executeScript({
+            target: { tabId: page.tabId, allFrames: true },
+            func: () => {
+              const u = window.location.href.toLowerCase();
+              if (u.includes('smartapply') || u.includes('indeedapply')) return true;
+              if (
+                document.querySelector(
+                  'div.ia-BasePage, #indeedapply-modal, iframe[id*="indeedapply" i], iframe[src*="smartapply" i], iframe[name*="indeedapply" i]',
+                )
+              ) {
+                return true;
+              }
+              const btns = Array.from(document.querySelectorAll('button, [role="button"], a.is-primary'));
+              return btns.some(b => {
+                const t = (b.textContent || '').trim().toLowerCase();
+                return (
+                  t === 'continue' ||
+                  t === 'next' ||
+                  t.includes('review your application') ||
+                  t.includes('submit your application') ||
+                  t === 'save and continue'
+                );
+              });
+            },
+          })
+          .catch(() => []);
+
+        if (checkModal.some(r => r.result === true)) {
+          logger.info(`[IndeedAdapter] Application container or buttons detected on page tab ${page.tabId}`);
+          activeTabId = page.tabId;
+          break;
         }
-      } catch {}
+      }
 
       // 6. Multi-Step Flow (up to 12 steps) using chrome.scripting across all frames
       const maxSteps = 12;
       let applicationSubmitted = false;
 
       for (let step = 1; step <= maxSteps; step++) {
-        logger.info(`[IndeedAdapter] Handling application step ${step}...`);
+        logger.info(`[IndeedAdapter] Handling application step ${step} on tab ${activeTabId}...`);
 
         // Check if application is already submitted in ANY frame
         const isDoneResults = await chrome.scripting
@@ -360,6 +431,7 @@ export class IndeedAdapter implements IPlatformAdapter {
 
         // Fill any visible questions/inputs on this step across all frames
         await this.fillIndeedStepFields(activeTabId, careerBrain);
+        await new Promise(r => setTimeout(r, 600));
 
         // Check for Submit button across all frames (ONLY in apply/modal contexts)
         const submitResults = await chrome.scripting
@@ -374,13 +446,18 @@ export class IndeedAdapter implements IPlatformAdapter {
                 return rect.width > 0 && rect.height > 0;
               }
 
+              function isElementEnabled(el: HTMLElement): boolean {
+                if ((el as any).disabled) return false;
+                if (el.getAttribute('aria-disabled') === 'true') return false;
+                return true;
+              }
+
               function triggerClick(el: HTMLElement) {
                 el.scrollIntoView({ behavior: 'instant', block: 'center' });
                 el.focus();
-                el.click();
                 el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
                 el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
-                el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+                el.click();
               }
 
               const url = window.location.href.toLowerCase();
@@ -393,7 +470,7 @@ export class IndeedAdapter implements IPlatformAdapter {
 
               for (const sel of selectors.SUBMIT_BUTTON_SELECTORS) {
                 const btn = document.querySelector(sel) as HTMLElement | null;
-                if (btn && isElementVisible(btn)) {
+                if (btn && isElementVisible(btn) && isElementEnabled(btn)) {
                   triggerClick(btn);
                   return true;
                 }
@@ -403,7 +480,7 @@ export class IndeedAdapter implements IPlatformAdapter {
                 document.querySelectorAll('button, [role="button"], input[type="submit"]'),
               ) as HTMLElement[];
               for (const b of buttons) {
-                if (!isElementVisible(b)) continue;
+                if (!isElementVisible(b) || !isElementEnabled(b)) continue;
                 const t = (b.textContent || (b as HTMLInputElement).value || '').trim().toLowerCase();
                 if (
                   t === 'submit your application' ||
@@ -454,7 +531,7 @@ export class IndeedAdapter implements IPlatformAdapter {
         let continueClicked = false;
         let clickedButtonText = '';
 
-        for (let clickAttempt = 0; clickAttempt < 4; clickAttempt++) {
+        for (let clickAttempt = 0; clickAttempt < 6; clickAttempt++) {
           const continueResults = await chrome.scripting
             .executeScript({
               target: { tabId: activeTabId, allFrames: true },
@@ -467,22 +544,33 @@ export class IndeedAdapter implements IPlatformAdapter {
                   return rect.width > 0 && rect.height > 0;
                 }
 
+                function isElementEnabled(el: HTMLElement): boolean {
+                  if ((el as any).disabled) return false;
+                  if (el.getAttribute('aria-disabled') === 'true') return false;
+                  return true;
+                }
+
                 function triggerClick(el: HTMLElement) {
                   el.scrollIntoView({ behavior: 'instant', block: 'center' });
                   el.focus();
-                  el.click();
                   el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
                   el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
-                  el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+                  el.click();
+                }
+
+                // Check for loading spinner
+                const spinner = document.querySelector('svg.ia-LoadingSpinner, svg[aria-label="Loading"], .is-loading');
+                if (spinner && isElementVisible(spinner as HTMLElement)) {
+                  return { clicked: false, loading: true, text: 'loading_spinner', diag: [] };
                 }
 
                 // 1. Selector check
                 for (const sel of selectors.FORWARD_BUTTON_SELECTORS) {
                   const btn = document.querySelector(sel) as HTMLElement | null;
-                  if (btn && isElementVisible(btn)) {
+                  if (btn && isElementVisible(btn) && isElementEnabled(btn)) {
                     const txt = btn.textContent?.trim() || '';
                     triggerClick(btn);
-                    return { clicked: true, text: txt };
+                    return { clicked: true, loading: false, text: txt || 'Forward Selector', diag: [] };
                   }
                 }
 
@@ -494,7 +582,7 @@ export class IndeedAdapter implements IPlatformAdapter {
                 ) as HTMLElement[];
 
                 for (const b of buttons) {
-                  if (!isElementVisible(b)) continue;
+                  if (!isElementVisible(b) || !isElementEnabled(b)) continue;
                   const t = (b.textContent || (b as HTMLInputElement).value || '').trim().toLowerCase();
                   if (!t) continue;
 
@@ -507,16 +595,36 @@ export class IndeedAdapter implements IPlatformAdapter {
                     t.includes('review your application') ||
                     t.includes('review application') ||
                     t.includes('save and continue') ||
+                    t.includes('save & continue') ||
+                    t === 'save' ||
                     b.getAttribute('data-testid') === 'continue-button' ||
+                    b.getAttribute('data-testid') === 'save-button' ||
                     b.getAttribute('aria-label')?.toLowerCase().includes('continue');
 
                   if (isMatch) {
                     triggerClick(b);
-                    return { clicked: true, text: t };
+                    return { clicked: true, loading: false, text: t, diag: [] };
                   }
                 }
 
-                return { clicked: false, text: '' };
+                // 3. Fallback: Check for "Skip" button (e.g. optional Review work experience)
+                for (const b of buttons) {
+                  if (!isElementVisible(b) || !isElementEnabled(b)) continue;
+                  const t = (b.textContent || '').trim().toLowerCase();
+                  if (t === 'skip' || t.startsWith('skip')) {
+                    triggerClick(b);
+                    return { clicked: true, loading: false, text: 'Skip (optional step)', diag: [] };
+                  }
+                }
+
+                const diag = buttons.filter(isElementVisible).map(b => ({
+                  tag: b.tagName,
+                  text: (b.textContent || '').trim().slice(0, 30),
+                  disabled: !isElementEnabled(b),
+                  testId: b.getAttribute('data-testid') || '',
+                }));
+
+                return { clicked: false, loading: false, text: '', diag };
               },
               args: [INDEED_SELECTORS],
             })
@@ -528,6 +636,24 @@ export class IndeedAdapter implements IPlatformAdapter {
             clickedButtonText = hit.result.text || '';
             break;
           }
+
+          const isLoading = continueResults.some(r => r.result?.loading === true);
+          if (isLoading) {
+            logger.info(`[IndeedAdapter] Step ${step}: Button in loading state, waiting...`);
+            await new Promise(r => setTimeout(r, 1500));
+            continue;
+          }
+
+          if (clickAttempt === 5) {
+            for (const r of continueResults) {
+              if (r.result?.diag?.length) {
+                logger.info(
+                  `[IndeedAdapter] Step ${step} Frame ${r.frameId} visible buttons: ${JSON.stringify(r.result.diag)}`,
+                );
+              }
+            }
+          }
+
           await new Promise(r => setTimeout(r, 1200));
         }
 
@@ -572,22 +698,20 @@ export class IndeedAdapter implements IPlatformAdapter {
       logger.error('[IndeedAdapter] Error applying to Indeed job:', err);
       return { status: 'failed', reason: err?.message || 'Application error' };
     } finally {
-      await puppeteerPage
-        .evaluate(() => {
-          window.onbeforeunload = null;
+      await chrome.scripting
+        .executeScript({
+          target: { tabId: page.tabId, allFrames: true },
+          func: () => {
+            window.onbeforeunload = null;
+          },
         })
         .catch(() => {});
+
       puppeteerPage.off('dialog', dialogHandler);
 
-      if (popupPage) {
+      if (activeTabId && activeTabId !== page.tabId) {
         try {
-          await popupPage
-            .evaluate(() => {
-              window.onbeforeunload = null;
-            })
-            .catch(() => {});
-          popupPage.off('dialog', dialogHandler);
-          await popupPage.close();
+          await chrome.tabs.remove(activeTabId);
         } catch {}
       }
     }
@@ -679,6 +803,28 @@ export class IndeedAdapter implements IPlatformAdapter {
                   return rect.width > 0 && rect.height > 0;
                 }
 
+                function setReactInputValue(input: HTMLInputElement | HTMLTextAreaElement, value: string) {
+                  input.focus();
+                  input.dispatchEvent(new Event('focus', { bubbles: true }));
+
+                  const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
+                    input instanceof HTMLTextAreaElement
+                      ? window.HTMLTextAreaElement.prototype
+                      : window.HTMLInputElement.prototype,
+                    'value',
+                  )?.set;
+
+                  if (nativeInputValueSetter) {
+                    nativeInputValueSetter.call(input, value);
+                  } else {
+                    input.value = value;
+                  }
+
+                  input.dispatchEvent(new Event('input', { bubbles: true }));
+                  input.dispatchEvent(new Event('change', { bubbles: true }));
+                  input.dispatchEvent(new Event('blur', { bubbles: true }));
+                }
+
                 const visibleInputs = (
                   Array.from(document.querySelectorAll('input, select, textarea')) as HTMLElement[]
                 ).filter((el: any) => isElementVisible(el) && !el.disabled);
@@ -686,9 +832,13 @@ export class IndeedAdapter implements IPlatformAdapter {
                 if (!el) return;
 
                 if (fType === 'select') {
+                  el.focus();
                   let matched = false;
                   for (let i = 0; i < el.options.length; i++) {
-                    if (el.options[i].text.toLowerCase().includes(val.toLowerCase())) {
+                    if (
+                      el.options[i].text.toLowerCase().includes(val.toLowerCase()) ||
+                      el.options[i].value.toLowerCase().includes(val.toLowerCase())
+                    ) {
                       el.selectedIndex = i;
                       el.dispatchEvent(new Event('change', { bubbles: true }));
                       matched = true;
@@ -699,6 +849,7 @@ export class IndeedAdapter implements IPlatformAdapter {
                     el.selectedIndex = 1;
                     el.dispatchEvent(new Event('change', { bubbles: true }));
                   }
+                  el.dispatchEvent(new Event('blur', { bubbles: true }));
                 } else if (fType === 'radio') {
                   const rText = (
                     el.closest('label')?.textContent ||
@@ -724,10 +875,10 @@ export class IndeedAdapter implements IPlatformAdapter {
                     el.click();
                   }
                 } else {
-                  if (!el.value) {
-                    el.value = val || '1';
-                    el.dispatchEvent(new Event('input', { bubbles: true }));
-                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                  // Only fill if empty or if invalid placeholder/default like "Yes"/"No"
+                  const curVal = (el.value || '').trim().toLowerCase();
+                  if (!curVal || curVal === 'yes' || curVal === 'no') {
+                    setReactInputValue(el, val || '1');
                   }
                 }
               },
