@@ -1784,6 +1784,7 @@ export class DedicatedJobRunner {
         creditsUsed: 0,
       });
 
+      const scopedLLM = await getJobScopedLLM(jobRunId);
       const applyResult = await naukriAdapter.applyToJob(job, {
         page: currentPage,
         browserContext: this.browserContext!,
@@ -1792,6 +1793,7 @@ export class DedicatedJobRunner {
         onLiveActivity,
         signal: this.abortController?.signal,
         runId: jobRunId,
+        scopedLLM,
       });
 
       if (applyResult.status === 'applied') {
@@ -2090,6 +2092,7 @@ export class DedicatedJobRunner {
         creditsUsed: 0,
       });
 
+      const scopedLLM = await getJobScopedLLM(jobRunId);
       const applyResult = await indeedAdapter.applyToJob(job, {
         page: currentPage,
         browserContext: this.browserContext!,
@@ -2098,6 +2101,7 @@ export class DedicatedJobRunner {
         onLiveActivity,
         signal: this.abortController?.signal,
         runId: jobRunId,
+        scopedLLM,
       });
 
       if (applyResult.status === 'applied') {

@@ -9,6 +9,7 @@ import type {
 } from '../types';
 import { INDEED_SELECTORS } from './selectors';
 import { resolveIndeedQuestion } from './indeedResolver';
+import { solveQuestionAutonomousWithLLM } from '../../linkedin/formQuestionResolver';
 import { createLogger } from '@src/background/log';
 
 const logger = createLogger('IndeedAdapter');
@@ -430,7 +431,7 @@ export class IndeedAdapter implements IPlatformAdapter {
         }
 
         // Fill any visible questions/inputs on this step across all frames
-        await this.fillIndeedStepFields(activeTabId, careerBrain);
+        await this.fillIndeedStepFields(activeTabId, careerBrain, context.scopedLLM);
         await new Promise(r => setTimeout(r, 600));
 
         // Check for Submit button across all frames (ONLY in apply/modal contexts)
@@ -658,6 +659,14 @@ export class IndeedAdapter implements IPlatformAdapter {
         }
 
         if (!continueClicked) {
+          // If continue button wasn't clicked, try auto-healing validation errors (like missing consent checkbox) first!
+          const healed = await this.autoHealValidationErrors(activeTabId, careerBrain, context.scopedLLM);
+          if (healed) {
+            logger.info(`[IndeedAdapter] Healed validation errors before failure check. Re-trying step ${step}...`);
+            await new Promise(r => setTimeout(r, 1000));
+            continue;
+          }
+
           // Final check: did success indicator appear?
           const doneCheckResults = await chrome.scripting
             .executeScript({
@@ -683,7 +692,45 @@ export class IndeedAdapter implements IPlatformAdapter {
         }
 
         logger.info(`[IndeedAdapter] Clicked "${clickedButtonText}" for step ${step}. Waiting for next step...`);
-        await new Promise(r => setTimeout(r, 3500));
+        await new Promise(r => setTimeout(r, 2000));
+
+        // Check if a red validation error appeared (e.g. "Choose an option to continue" / consent error)
+        const healedAfterClick = await this.autoHealValidationErrors(activeTabId, careerBrain, context.scopedLLM);
+        if (healedAfterClick) {
+          logger.info(`[IndeedAdapter] Step ${step}: Validation error healed! Re-triggering forward button...`);
+          await new Promise(r => setTimeout(r, 600));
+          await chrome.scripting
+            .executeScript({
+              target: { tabId: activeTabId, allFrames: true },
+              func: () => {
+                const btns = Array.from(
+                  document.querySelectorAll('button, [role="button"], a.is-primary'),
+                ) as HTMLElement[];
+                for (const b of btns) {
+                  const t = (b.textContent || (b as any).value || '').trim().toLowerCase();
+                  if (
+                    t === 'continue' ||
+                    t.startsWith('continue') ||
+                    t === 'next' ||
+                    t.includes('review') ||
+                    t === 'save and continue'
+                  ) {
+                    b.scrollIntoView({ behavior: 'instant', block: 'center' });
+                    b.focus();
+                    b.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+                    b.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
+                    b.click();
+                    return true;
+                  }
+                }
+                return false;
+              },
+            })
+            .catch(() => []);
+          await new Promise(r => setTimeout(r, 2500));
+        } else {
+          await new Promise(r => setTimeout(r, 1500));
+        }
       }
 
       if (applicationSubmitted) {
@@ -717,7 +764,7 @@ export class IndeedAdapter implements IPlatformAdapter {
     }
   }
 
-  private async fillIndeedStepFields(tabId: number, careerBrain: any): Promise<void> {
+  private async fillIndeedStepFields(tabId: number, careerBrain: any, scopedLLM?: any): Promise<void> {
     try {
       const scanResults = await chrome.scripting
         .executeScript({
@@ -739,7 +786,10 @@ export class IndeedAdapter implements IPlatformAdapter {
               return rect.width > 0 && rect.height > 0;
             }
 
-            const inputs = Array.from(document.querySelectorAll('input, select, textarea')) as HTMLElement[];
+            const inputs = Array.from(
+              document.querySelectorAll('input, select, textarea, [role="checkbox"], [role="radio"]'),
+            ) as HTMLElement[];
+
             return inputs
               .filter((el: any) => isElementVisible(el) && !el.disabled)
               .map((el, idx) => {
@@ -752,14 +802,26 @@ export class IndeedAdapter implements IPlatformAdapter {
                 const ariaLabel = el.getAttribute('aria-label') || '';
                 const fieldset = el.closest('fieldset');
                 const legend = fieldset ? fieldset.querySelector('legend')?.textContent : '';
+                const containerText =
+                  el.closest('.ia-BasePage-component, div[class*="field" i], div[class*="question" i]')?.textContent ||
+                  '';
 
-                const labelText = (legend || labelEl?.textContent || ariaLabel || placeholder || name || '').trim();
+                const labelText = (
+                  legend ||
+                  labelEl?.textContent ||
+                  ariaLabel ||
+                  placeholder ||
+                  name ||
+                  containerText ||
+                  ''
+                ).trim();
 
                 const tagName = el.tagName.toLowerCase();
+                const role = el.getAttribute('role');
                 let fieldType = 'text';
                 if (tagName === 'select') fieldType = 'select';
-                else if (el.getAttribute('type') === 'radio') fieldType = 'radio';
-                else if (el.getAttribute('type') === 'checkbox') fieldType = 'checkbox';
+                else if (el.getAttribute('type') === 'radio' || role === 'radio') fieldType = 'radio';
+                else if (el.getAttribute('type') === 'checkbox' || role === 'checkbox') fieldType = 'checkbox';
                 else if (el.getAttribute('type') === 'number') fieldType = 'number';
 
                 const options: string[] = [];
@@ -768,6 +830,17 @@ export class IndeedAdapter implements IPlatformAdapter {
                   for (const o of optEls) {
                     const t = (o.textContent || '').trim();
                     if (t && !t.toLowerCase().includes('select')) options.push(t);
+                  }
+                } else if (fieldType === 'radio') {
+                  const groupName = el.getAttribute('name');
+                  const siblings = groupName
+                    ? Array.from(document.querySelectorAll(`input[name="${groupName}"]`))
+                    : fieldset
+                      ? Array.from(fieldset.querySelectorAll('input[type="radio"], [role="radio"]'))
+                      : [];
+                  for (const sib of siblings) {
+                    const sibText = (sib.closest('label')?.textContent || (sib as any).value || '').trim();
+                    if (sibText) options.push(sibText);
                   }
                 }
 
@@ -789,7 +862,29 @@ export class IndeedAdapter implements IPlatformAdapter {
 
         for (const f of fields) {
           if (!f.labelText) continue;
-          const answer = resolveIndeedQuestion(f.labelText, f.fieldType as any, f.options, careerBrain);
+          let answer = resolveIndeedQuestion(f.labelText, f.fieldType as any, f.options, careerBrain);
+
+          // If rule-based confidence is low (< 0.8) and scopedLLM is available, consult LLM for 100% accuracy!
+          if (answer.confidence < 0.8 && scopedLLM) {
+            try {
+              logger.info(`[IndeedAdapter] Asking LLM to resolve field: "${f.labelText}" (${f.fieldType})`);
+              const llmRes = await solveQuestionAutonomousWithLLM(
+                {
+                  label: f.labelText,
+                  fieldType: f.fieldType as any,
+                  options: f.options,
+                },
+                careerBrain,
+                scopedLLM,
+              );
+              if (llmRes.success && llmRes.answer) {
+                answer = { value: llmRes.answer, confidence: 0.95, source: 'profile' };
+                logger.info(`[IndeedAdapter] LLM resolved "${f.labelText}" -> "${answer.value}"`);
+              }
+            } catch (err) {
+              logger.warning(`[IndeedAdapter] LLM field resolution fallback error:`, err);
+            }
+          }
 
           await chrome.scripting
             .executeScript({
@@ -826,7 +921,9 @@ export class IndeedAdapter implements IPlatformAdapter {
                 }
 
                 const visibleInputs = (
-                  Array.from(document.querySelectorAll('input, select, textarea')) as HTMLElement[]
+                  Array.from(
+                    document.querySelectorAll('input, select, textarea, [role="checkbox"], [role="radio"]'),
+                  ) as HTMLElement[]
                 ).filter((el: any) => isElementVisible(el) && !el.disabled);
                 const el = visibleInputs[idx] as any;
                 if (!el) return;
@@ -854,25 +951,50 @@ export class IndeedAdapter implements IPlatformAdapter {
                   const rText = (
                     el.closest('label')?.textContent ||
                     el.parentElement?.textContent ||
+                    el.getAttribute('aria-label') ||
                     el.value ||
                     ''
                   ).toLowerCase();
-                  const valLo = val.toLowerCase();
-                  const matchesYes =
-                    valLo.startsWith('y') && (rText.includes('yes') || el.value.toLowerCase() === 'yes');
-                  const matchesNo = valLo.startsWith('n') && (rText.includes('no') || el.value.toLowerCase() === 'no');
-                  const matchesVal = valLo && (rText.includes(valLo) || el.value.toLowerCase().includes(valLo));
+                  const valLo = (val || '').toLowerCase();
+                  const isMatch =
+                    (valLo.startsWith('y') && (rText.includes('yes') || (el.value || '').toLowerCase() === 'yes')) ||
+                    (valLo.startsWith('n') && (rText.includes('no') || (el.value || '').toLowerCase() === 'no')) ||
+                    (valLo.includes('consent') && (rText.includes('consent') || rText.includes('agree'))) ||
+                    (valLo && (rText.includes(valLo) || (el.value || '').toLowerCase().includes(valLo)));
 
-                  if (matchesYes || matchesNo || matchesVal) {
-                    el.checked = true;
-                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                  if (isMatch) {
+                    el.focus();
                     el.click();
+                    if (!el.checked && el.getAttribute('aria-checked') !== 'true') {
+                      el.checked = true;
+                      el.setAttribute('aria-checked', 'true');
+                      el.dispatchEvent(new Event('change', { bubbles: true }));
+                    }
                   }
                 } else if (fType === 'checkbox') {
-                  if (!el.checked && (val.toLowerCase().startsWith('y') || val.toLowerCase() === 'true')) {
-                    el.checked = true;
-                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                  const isChecked = el.checked === true || el.getAttribute('aria-checked') === 'true';
+                  const valLo = (val || '').toLowerCase();
+                  const shouldCheck =
+                    valLo.startsWith('y') ||
+                    valLo === 'true' ||
+                    valLo.includes('consent') ||
+                    valLo.includes('agree') ||
+                    valLo.includes('accept') ||
+                    valLo.includes('acknowledge') ||
+                    valLo.includes('policy') ||
+                    valLo.includes('terms');
+
+                  if (!isChecked && shouldCheck) {
+                    el.focus();
                     el.click();
+                    const stillUnchecked = !el.checked && el.getAttribute('aria-checked') !== 'true';
+                    if (stillUnchecked) {
+                      el.checked = true;
+                      el.setAttribute('aria-checked', 'true');
+                      el.dispatchEvent(new Event('input', { bubbles: true }));
+                      el.dispatchEvent(new Event('change', { bubbles: true }));
+                      el.closest('label')?.click();
+                    }
                   }
                 } else {
                   // Only fill if empty or if invalid placeholder/default like "Yes"/"No"
@@ -891,6 +1013,226 @@ export class IndeedAdapter implements IPlatformAdapter {
       }
     } catch (err) {
       logger.warning('[IndeedAdapter] Error filling step fields:', err);
+    }
+  }
+
+  /**
+   * Auto-heals validation errors in the Indeed application DOM.
+   * If red error banners like "Choose an option to continue" or unchecked required checkboxes appear,
+   * this identifies the errored fields, ticks missing consent checkboxes, calls LLM for unknown questions,
+   * fills the fields, and returns true so the runner can re-advance.
+   */
+  private async autoHealValidationErrors(tabId: number, careerBrain: any, scopedLLM?: any): Promise<boolean> {
+    try {
+      const errorScan = await chrome.scripting
+        .executeScript({
+          target: { tabId, allFrames: true },
+          func: () => {
+            function isElementVisible(el: HTMLElement): boolean {
+              if (!el) return false;
+              const style = window.getComputedStyle(el);
+              if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+              const rect = el.getBoundingClientRect();
+              return rect.width > 0 && rect.height > 0;
+            }
+
+            // Find red error messages or invalid inputs
+            const errorContainers = Array.from(
+              document.querySelectorAll(
+                '.ia-Feedback-error, [aria-invalid="true"], [data-testid*="error" i], div[class*="error" i], span[class*="error" i], p[class*="error" i]',
+              ),
+            ).filter((el: any) => isElementVisible(el) && (el.textContent || '').trim().length > 0);
+
+            if (!errorContainers.length) return { hasErrors: false, fieldsToFix: [] };
+
+            const allInputs = (
+              Array.from(
+                document.querySelectorAll('input, select, textarea, [role="checkbox"], [role="radio"]'),
+              ) as HTMLElement[]
+            ).filter(el => isElementVisible(el) && !(el as any).disabled);
+
+            const fieldsToFix: Array<{
+              index: number;
+              type: string;
+              label: string;
+              options: string[];
+              errorMsg: string;
+            }> = [];
+
+            allInputs.forEach((el, idx) => {
+              const isInvalid = el.getAttribute('aria-invalid') === 'true';
+              const isUncheckedCheckbox =
+                (el.getAttribute('type') === 'checkbox' || el.getAttribute('role') === 'checkbox') &&
+                !(el as HTMLInputElement).checked &&
+                el.getAttribute('aria-checked') !== 'true';
+
+              const container =
+                el.closest('fieldset, .ia-BasePage-component, div[class*="field" i], div[class*="question" i]') ||
+                el.parentElement;
+              const hasNearbyError = container ? errorContainers.some(err => container.contains(err)) : false;
+
+              if (isInvalid || isUncheckedCheckbox || hasNearbyError) {
+                const label =
+                  el.closest('label')?.textContent ||
+                  container?.querySelector('legend, label, p, span')?.textContent ||
+                  el.getAttribute('aria-label') ||
+                  el.getAttribute('name') ||
+                  '';
+                const errorMsg =
+                  errorContainers.find(err => container?.contains(err))?.textContent?.trim() || 'Required';
+                const fType =
+                  el.getAttribute('type') === 'checkbox' || el.getAttribute('role') === 'checkbox'
+                    ? 'checkbox'
+                    : el.getAttribute('type') === 'radio' || el.getAttribute('role') === 'radio'
+                      ? 'radio'
+                      : el.tagName.toLowerCase() === 'select'
+                        ? 'select'
+                        : 'text';
+
+                fieldsToFix.push({
+                  index: idx,
+                  type: fType,
+                  label: label.trim(),
+                  options: [],
+                  errorMsg,
+                });
+              }
+            });
+
+            return { hasErrors: true, fieldsToFix };
+          },
+        })
+        .catch(() => []);
+
+      const hit = errorScan.find(r => r.result?.hasErrors);
+      if (!hit || !hit.result || !hit.result.fieldsToFix.length) {
+        return false;
+      }
+
+      logger.warning(
+        `[IndeedAdapter] Auto-healing ${hit.result.fieldsToFix.length} validation errors on tab ${tabId}...`,
+      );
+
+      const frameId = hit.frameId;
+      for (const fix of hit.result.fieldsToFix) {
+        // If it's a checkbox (e.g. "I consent"), ALWAYS tick it!
+        if (fix.type === 'checkbox') {
+          logger.info(`[IndeedAdapter] Auto-healing checkbox: Ticking "${fix.label || 'Consent'}"`);
+          await chrome.scripting
+            .executeScript({
+              target: { tabId, frameIds: [frameId] },
+              func: (idx: number) => {
+                const inputs = (
+                  Array.from(
+                    document.querySelectorAll('input, select, textarea, [role="checkbox"], [role="radio"]'),
+                  ) as HTMLElement[]
+                ).filter(el => !(el as any).disabled);
+                const el = inputs[idx] as any;
+                if (el) {
+                  el.focus();
+                  el.click();
+                  if (!el.checked && el.getAttribute('aria-checked') !== 'true') {
+                    el.checked = true;
+                    el.setAttribute('aria-checked', 'true');
+                    el.dispatchEvent(new Event('input', { bubbles: true }));
+                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                    el.closest('label')?.click();
+                  }
+                }
+              },
+              args: [fix.index],
+            })
+            .catch(() => {});
+          continue;
+        }
+
+        // If it's a radio or text question, use LLM to solve the exact error!
+        let resolvedAnswer = 'Yes';
+        if (scopedLLM) {
+          try {
+            logger.info(
+              `[IndeedAdapter] Calling LLM to resolve errored question: "${fix.label}" (error: ${fix.errorMsg})`,
+            );
+            const llmSol = await solveQuestionAutonomousWithLLM(
+              {
+                label: `${fix.label} (Validation error: ${fix.errorMsg})`,
+                fieldType: fix.type as any,
+                options: fix.options,
+                required: true,
+              },
+              careerBrain,
+              scopedLLM,
+            );
+            if (llmSol.success && llmSol.answer) {
+              resolvedAnswer = llmSol.answer;
+              logger.info(`[IndeedAdapter] LLM resolved error for "${fix.label}" -> "${resolvedAnswer}"`);
+            }
+          } catch (e) {
+            logger.warning('[IndeedAdapter] LLM error resolution failed, using rule fallback:', e);
+            const rMatch = resolveIndeedQuestion(fix.label, fix.type as any, fix.options, careerBrain);
+            resolvedAnswer = rMatch.value;
+          }
+        } else {
+          const rMatch = resolveIndeedQuestion(fix.label, fix.type as any, fix.options, careerBrain);
+          resolvedAnswer = rMatch.value;
+        }
+
+        // Fill resolved answer into DOM
+        await chrome.scripting
+          .executeScript({
+            target: { tabId, frameIds: [frameId] },
+            func: (idx: number, val: string, fType: string) => {
+              const inputs = (
+                Array.from(
+                  document.querySelectorAll('input, select, textarea, [role="checkbox"], [role="radio"]'),
+                ) as HTMLElement[]
+              ).filter(el => !(el as any).disabled);
+              const el = inputs[idx] as any;
+              if (!el) return;
+
+              if (fType === 'radio') {
+                el.focus();
+                el.click();
+                el.checked = true;
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+              } else if (fType === 'select') {
+                el.focus();
+                for (let i = 0; i < el.options.length; i++) {
+                  if (el.options[i].text.toLowerCase().includes(val.toLowerCase())) {
+                    el.selectedIndex = i;
+                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                    break;
+                  }
+                }
+                if (el.selectedIndex <= 0 && el.options.length > 1) {
+                  el.selectedIndex = 1;
+                  el.dispatchEvent(new Event('change', { bubbles: true }));
+                }
+                el.dispatchEvent(new Event('blur', { bubbles: true }));
+              } else {
+                el.focus();
+                const nativeSetter = Object.getOwnPropertyDescriptor(
+                  el instanceof HTMLTextAreaElement
+                    ? window.HTMLTextAreaElement.prototype
+                    : window.HTMLInputElement.prototype,
+                  'value',
+                )?.set;
+                if (nativeSetter) nativeSetter.call(el, val);
+                else el.value = val;
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+                el.dispatchEvent(new Event('blur', { bubbles: true }));
+              }
+            },
+            args: [fix.index, resolvedAnswer, fix.type],
+          })
+          .catch(() => {});
+      }
+
+      return true;
+    } catch (err) {
+      logger.warning('[IndeedAdapter] Error in autoHealValidationErrors:', err);
+      return false;
     }
   }
 }

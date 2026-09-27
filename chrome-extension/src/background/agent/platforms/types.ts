@@ -48,6 +48,7 @@ export interface IPlatformExecutionContext {
   }) => void;
   signal?: AbortSignal;
   runId: string;
+  scopedLLM?: any;
 }
 
 export interface IPlatformAdapter {

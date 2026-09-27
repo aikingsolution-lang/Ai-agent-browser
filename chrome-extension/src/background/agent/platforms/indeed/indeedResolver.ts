@@ -24,6 +24,32 @@ export function resolveIndeedQuestion(
       ? careerBrain.workExperience.find(item => item.isCurrent) || careerBrain.workExperience[0]
       : null;
 
+  // 0. Consent, Policy, Terms, Acknowledgment & Equal Opportunity
+  if (
+    q.includes('consent') ||
+    q.includes('agree') ||
+    q.includes('policy') ||
+    q.includes('terms') ||
+    q.includes('acknowledge') ||
+    q.includes('confirm') ||
+    q.includes('disclaimer') ||
+    q.includes('equal opportunity') ||
+    q.includes('code of conduct')
+  ) {
+    if (options.length > 0) {
+      const consentOpt = options.find(
+        o =>
+          o.toLowerCase().includes('consent') ||
+          o.toLowerCase().includes('agree') ||
+          o.toLowerCase().includes('yes') ||
+          o.toLowerCase().includes('accept') ||
+          o.toLowerCase().includes('acknowledge'),
+      );
+      return { value: consentOpt || options[0], confidence: 0.99, source: 'profile' };
+    }
+    return { value: 'I consent', confidence: 0.99, source: 'profile' };
+  }
+
   // 1. Work Authorization & Sponsorship
   if (q.includes('sponsorship') || q.includes('require sponsor') || q.includes('visa sponsor')) {
     if (options.length > 0) {
