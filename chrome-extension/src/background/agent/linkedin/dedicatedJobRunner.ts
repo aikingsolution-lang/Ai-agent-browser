@@ -1864,10 +1864,10 @@ export class DedicatedJobRunner {
         });
       }
 
-      // Anti-bot pacing delay (15-25s) between Naukri jobs only when applied!
+      // Anti-bot pacing delay (5-8s) between Naukri jobs only when applied!
       if (i < queue.length - 1 && this.isRunning) {
         if (applyResult.status === 'applied') {
-          const delayMs = 15000 + Math.floor(Math.random() * 10000);
+          const delayMs = 5000 + Math.floor(Math.random() * 3000);
           this.notifyStatus(
             portToSend,
             `⏳ Pacing delay: waiting ${(delayMs / 1000).toFixed(0)}s before next job...`,
@@ -2170,10 +2170,10 @@ export class DedicatedJobRunner {
         });
       }
 
-      // Anti-bot pacing delay (20-35s) between Indeed jobs only when applied!
+      // Anti-bot pacing delay (5-8s) between Indeed jobs only when applied!
       if (i < queue.length - 1 && this.isRunning) {
         if (applyResult.status === 'applied') {
-          const delayMs = 20000 + Math.floor(Math.random() * 15000);
+          const delayMs = 5000 + Math.floor(Math.random() * 3000);
           this.notifyStatus(
             portToSend,
             `⏳ Pacing delay: waiting ${(delayMs / 1000).toFixed(0)}s before next job...`,
