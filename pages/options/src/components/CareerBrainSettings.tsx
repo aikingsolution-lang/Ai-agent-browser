@@ -11,6 +11,7 @@ import {
   DEFAULT_CAREER_BRAIN,
   DEFAULT_GOLDEN_ANSWERS,
   DEFAULT_LINKEDIN_CONFIG,
+  GOLDEN_ANSWER_CATEGORIES,
 } from '@extension/storage';
 import {
   FiUser,
@@ -27,6 +28,11 @@ import {
   FiTrash2,
   FiAlertCircle,
   FiHelpCircle,
+  FiSearch,
+  FiRotateCcw,
+  FiFilter,
+  FiTag,
+  FiLayers,
 } from 'react-icons/fi';
 import { PREDEFINED_TECH_SKILLS } from '../constants/skillsList';
 
@@ -42,6 +48,10 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
   const [saveError, setSaveError] = useState<string | null>(null);
   const [validationErrors, setValidationErrors] = useState<Record<string, string>>({});
   const [showSafetyModal, setShowSafetyModal] = useState<boolean>(false);
+
+  // Golden Answers Category Tab & Search Filter state
+  const [selectedCategoryTab, setSelectedCategoryTab] = useState<string>('All');
+  const [goldenSearchQuery, setGoldenSearchQuery] = useState<string>('');
 
   // Autocomplete dropdown state
   const [showSuggestions, setShowSuggestions] = useState<boolean>(false);
@@ -139,19 +149,54 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
     }
   };
 
-  const handleAddGoldenAnswer = () => {
+  const handleUpdateGoldenCategory = (id: string, newCategory: string) => {
+    setCareerBrain(prev => ({
+      ...prev,
+      goldenAnswers: prev.goldenAnswers.map(ga => (ga.id === id ? { ...ga, category: newCategory } : ga)),
+    }));
+  };
+
+  const handleAddGoldenAnswerForCategory = (categoryToUse?: string) => {
     const newId = `custom_${Date.now()}`;
+    const targetCategory =
+      categoryToUse && categoryToUse !== 'All'
+        ? categoryToUse
+        : selectedCategoryTab !== 'All'
+          ? selectedCategoryTab
+          : 'Eligibility / Legal';
     const newItem: IGoldenAnswer = {
       id: newId,
       question: '',
       answer: '',
-      category: 'Custom Rule',
+      category: targetCategory,
       isDefault: false,
     };
     setCareerBrain(prev => ({
       ...prev,
-      goldenAnswers: [...prev.goldenAnswers, newItem],
+      goldenAnswers: [newItem, ...prev.goldenAnswers],
     }));
+  };
+
+  const handleRestoreStandardSuite = () => {
+    if (
+      window.confirm(
+        'Restore the standard 33 Golden Answers covering all 7 categories? Custom rules not in the defaults will be preserved.',
+      )
+    ) {
+      setCareerBrain(prev => {
+        const existingCustom = prev.goldenAnswers.filter(ga => !ga.isDefault);
+        const merged = [
+          ...DEFAULT_GOLDEN_ANSWERS,
+          ...existingCustom.filter(
+            c => !DEFAULT_GOLDEN_ANSWERS.some(d => d.question.toLowerCase() === c.question.toLowerCase()),
+          ),
+        ];
+        return {
+          ...prev,
+          goldenAnswers: merged,
+        };
+      });
+    }
   };
 
   const handleRemoveGoldenAnswer = (id: string) => {
@@ -160,6 +205,61 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
       goldenAnswers: prev.goldenAnswers.filter(ga => ga.id !== id),
     }));
   };
+
+  const getCategoryCount = (category: string) => {
+    if (category === 'All') return careerBrain.goldenAnswers.length;
+    return careerBrain.goldenAnswers.filter(
+      ga => (ga.category || '').toLowerCase().trim() === category.toLowerCase().trim(),
+    ).length;
+  };
+
+  const getCategoryBadgeClass = (category?: string) => {
+    const cat = (category || '').toLowerCase();
+    if (cat.includes('eligibility') || cat.includes('legal')) {
+      return 'border-indigo-300 bg-indigo-50 text-indigo-800 dark:border-indigo-800 dark:bg-indigo-950/60 dark:text-indigo-300';
+    }
+    if (cat.includes('location') || cat.includes('relocation')) {
+      return 'border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300';
+    }
+    if (cat.includes('compensation') || cat.includes('salary') || cat.includes('ctc')) {
+      return 'border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-800 dark:bg-amber-950/60 dark:text-amber-300';
+    }
+    if (cat.includes('experience') || cat.includes('education')) {
+      return 'border-purple-300 bg-purple-50 text-purple-800 dark:border-purple-800 dark:bg-purple-950/60 dark:text-purple-300';
+    }
+    if (cat.includes('availability') || cat.includes('shift')) {
+      return 'border-cyan-300 bg-cyan-50 text-cyan-800 dark:border-cyan-800 dark:bg-cyan-950/60 dark:text-cyan-300';
+    }
+    if (cat.includes('yes/no') || cat.includes('screening')) {
+      return 'border-rose-300 bg-rose-50 text-rose-800 dark:border-rose-800 dark:bg-rose-950/60 dark:text-rose-300';
+    }
+    if (cat.includes('diversity') || cat.includes('self-identification')) {
+      return 'border-fuchsia-300 bg-fuchsia-50 text-fuchsia-800 dark:border-fuchsia-800 dark:bg-fuchsia-950/60 dark:text-fuchsia-300';
+    }
+    return 'border-gray-300 bg-gray-50 text-gray-800 dark:border-slate-750 dark:bg-slate-800 dark:text-gray-300';
+  };
+
+  const filteredGoldenAnswers = careerBrain.goldenAnswers.filter(item => {
+    // Category filter
+    if (selectedCategoryTab !== 'All') {
+      const itemCat = (item.category || '').toLowerCase().trim();
+      const tabCat = selectedCategoryTab.toLowerCase().trim();
+      if (itemCat !== tabCat && !itemCat.includes(tabCat) && !tabCat.includes(itemCat)) {
+        return false;
+      }
+    }
+    // Search query filter
+    if (goldenSearchQuery.trim()) {
+      const qLower = goldenSearchQuery.toLowerCase().trim();
+      const questionMatch = (item.question || '').toLowerCase().includes(qLower);
+      const answerMatch = (item.answer || '').toLowerCase().includes(qLower);
+      const categoryMatch = (item.category || '').toLowerCase().includes(qLower);
+      if (!questionMatch && !answerMatch && !categoryMatch) {
+        return false;
+      }
+    }
+    return true;
+  });
 
   // Compute filtered suggestions based on typed input
   const query = newSkill.trim().toLowerCase();
@@ -630,6 +730,118 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
           </div>
 
           <div>
+            <label className="mb-1 block text-xs font-semibold text-gray-700 dark:text-gray-300">
+              Date of Birth (Age 18+ Confirmation)
+            </label>
+            <input
+              type="date"
+              value={careerBrain.dateOfBirth || '2000-01-01'}
+              onChange={e => setCareerBrain(prev => ({ ...prev, dateOfBirth: e.target.value }))}
+              className={`w-full rounded-md border ${
+                isDarkMode ? 'border-slate-600 bg-slate-700 text-gray-100' : 'border-gray-300 bg-white text-gray-800'
+              } px-3 py-2 text-sm`}
+            />
+          </div>
+
+          <div>
+            <label className="mb-1 block text-xs font-semibold text-gray-700 dark:text-gray-300">
+              Highest Completed Education
+            </label>
+            <select
+              value={careerBrain.highestEducation || "Bachelor's Degree"}
+              onChange={e => setCareerBrain(prev => ({ ...prev, highestEducation: e.target.value }))}
+              className={`w-full rounded-md border ${
+                isDarkMode ? 'border-slate-600 bg-slate-700 text-gray-100' : 'border-gray-300 bg-white text-gray-800'
+              } px-3 py-2 text-sm`}>
+              <option value="High School">High School</option>
+              <option value="Associate's Degree">Associate's Degree</option>
+              <option value="Bachelor's Degree">Bachelor's Degree</option>
+              <option value="Master's Degree">Master's Degree</option>
+              <option value="Doctorate / PhD">Doctorate / PhD</option>
+            </select>
+          </div>
+
+          <div>
+            <label className="mb-1 block text-xs font-semibold text-gray-700 dark:text-gray-300">
+              Willing to Relocate?
+            </label>
+            <select
+              value={careerBrain.willingToRelocate || 'Yes'}
+              onChange={e => setCareerBrain(prev => ({ ...prev, willingToRelocate: e.target.value }))}
+              className={`w-full rounded-md border ${
+                isDarkMode ? 'border-slate-600 bg-slate-700 text-gray-100' : 'border-gray-300 bg-white text-gray-800'
+              } px-3 py-2 text-sm`}>
+              <option value="Yes">Yes</option>
+              <option value="No">No</option>
+              <option value="Negotiable">Negotiable</option>
+            </select>
+          </div>
+
+          <div>
+            <label className="mb-1 block text-xs font-semibold text-gray-700 dark:text-gray-300">
+              Preferred Work Shift
+            </label>
+            <select
+              value={careerBrain.preferredShift || 'Day / Flexible'}
+              onChange={e => setCareerBrain(prev => ({ ...prev, preferredShift: e.target.value }))}
+              className={`w-full rounded-md border ${
+                isDarkMode ? 'border-slate-600 bg-slate-700 text-gray-100' : 'border-gray-300 bg-white text-gray-800'
+              } px-3 py-2 text-sm`}>
+              <option value="Day / Flexible">Day / Flexible</option>
+              <option value="Day Shift">Day Shift</option>
+              <option value="Night Shift">Night Shift</option>
+              <option value="Rotational / Any">Rotational / Any</option>
+            </select>
+          </div>
+
+          <div>
+            <label className="mb-1 block text-xs font-semibold text-gray-700 dark:text-gray-300">
+              Valid Driver's License
+            </label>
+            <select
+              value={careerBrain.driverLicense || 'Yes'}
+              onChange={e => setCareerBrain(prev => ({ ...prev, driverLicense: e.target.value }))}
+              className={`w-full rounded-md border ${
+                isDarkMode ? 'border-slate-600 bg-slate-700 text-gray-100' : 'border-gray-300 bg-white text-gray-800'
+              } px-3 py-2 text-sm`}>
+              <option value="Yes">Yes</option>
+              <option value="No">No</option>
+            </select>
+          </div>
+
+          <div>
+            <label className="mb-1 block text-xs font-semibold text-gray-700 dark:text-gray-300">
+              Veteran Status (Self-Identification)
+            </label>
+            <select
+              value={careerBrain.veteranStatus || 'I am not a protected veteran'}
+              onChange={e => setCareerBrain(prev => ({ ...prev, veteranStatus: e.target.value }))}
+              className={`w-full rounded-md border ${
+                isDarkMode ? 'border-slate-600 bg-slate-700 text-gray-100' : 'border-gray-300 bg-white text-gray-800'
+              } px-3 py-2 text-sm`}>
+              <option value="I am not a protected veteran">I am not a protected veteran</option>
+              <option value="I identify as a protected veteran">I identify as a protected veteran</option>
+              <option value="I choose not to self-identify">I choose not to self-identify</option>
+            </select>
+          </div>
+
+          <div>
+            <label className="mb-1 block text-xs font-semibold text-gray-700 dark:text-gray-300">
+              Disability Status (Self-Identification)
+            </label>
+            <select
+              value={careerBrain.disabilityStatus || 'No, I do not have a disability'}
+              onChange={e => setCareerBrain(prev => ({ ...prev, disabilityStatus: e.target.value }))}
+              className={`w-full rounded-md border ${
+                isDarkMode ? 'border-slate-600 bg-slate-700 text-gray-100' : 'border-gray-300 bg-white text-gray-800'
+              } px-3 py-2 text-sm`}>
+              <option value="No, I do not have a disability">No, I do not have a disability</option>
+              <option value="Yes, I have a disability">Yes, I have a disability</option>
+              <option value="I choose not to specify">I choose not to specify</option>
+            </select>
+          </div>
+
+          <div>
             <label className="mb-1 block text-xs font-semibold text-gray-700 dark:text-gray-300">Contact Phone</label>
             <input
               type="tel"
@@ -813,105 +1025,236 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
       <div
         className={`rounded-xl border ${
           isDarkMode ? 'border-slate-700 bg-slate-800' : 'border-gray-200 bg-white'
-        } space-y-4 p-6 shadow-sm`}>
-        <div className="flex items-center justify-between border-b border-gray-100 pb-3 dark:border-gray-700">
+        } space-y-5 p-6 shadow-sm`}>
+        {/* Header & Main Actions */}
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-gray-100 pb-4 dark:border-gray-700">
           <div className="flex items-center gap-2.5">
             <div className="rounded-lg bg-amber-100 p-2 text-amber-600 dark:bg-amber-900/60 dark:text-amber-300">
               <FiHelpCircle className="size-5" />
             </div>
             <div>
-              <h3 className="text-base font-bold text-gray-900 dark:text-white">Golden Q&A — Screening Answer Bank</h3>
+              <div className="flex items-center gap-2">
+                <h3 className="text-base font-bold text-gray-900 dark:text-white">
+                  Golden Q&A — Screening Answer Bank
+                </h3>
+                <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-800 dark:bg-amber-900/60 dark:text-amber-300">
+                  {careerBrain.goldenAnswers.length} Rules
+                </span>
+              </div>
               <p className="text-xs text-gray-500 dark:text-gray-400">
-                Ground-truth answers for common questions (visa sponsorship, notice period, CTC, relocation). Add custom
-                rules to ensure the Bedrock AI form-filler never hallucinates.
+                Ground-truth screening answers categorized across Eligibility, Location, Compensation, Experience,
+                Availability, Screening, and Diversity.
               </p>
             </div>
           </div>
-          <button
-            type="button"
-            onClick={handleAddGoldenAnswer}
-            className="flex items-center gap-1.5 rounded-lg bg-amber-600 px-3 py-1.5 text-xs font-semibold text-white shadow-xs transition-colors hover:bg-amber-700">
-            <FiPlus className="size-3.5" />
-            Add Custom Rule
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={handleRestoreStandardSuite}
+              title="Reset or update all standard screening rules across all 7 categories"
+              className={`flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold transition-colors cursor-pointer ${
+                isDarkMode
+                  ? 'border-slate-600 bg-slate-700 text-gray-200 hover:bg-slate-650'
+                  : 'border-gray-300 bg-gray-50 text-gray-700 hover:bg-gray-100'
+              }`}>
+              <FiRotateCcw className="size-3.5 text-amber-500" />
+              Restore 33 Standard Defaults
+            </button>
+            <button
+              type="button"
+              onClick={() => handleAddGoldenAnswerForCategory()}
+              className="flex items-center gap-1.5 rounded-lg bg-amber-600 px-3.5 py-1.5 text-xs font-semibold text-white shadow-xs transition-colors hover:bg-amber-700 cursor-pointer">
+              <FiPlus className="size-3.5" />
+              Add Custom Rule
+            </button>
+          </div>
         </div>
 
+        {/* Category Tabs & Real-time Search Filter */}
         <div className="space-y-3">
-          {careerBrain.goldenAnswers.map((item, index) => {
-            const hasQError = validationErrors[`goldenAnswers.${index}.question`];
-            const hasAError = validationErrors[`goldenAnswers.${index}.answer`];
+          {/* Category Tabs */}
+          <div className="flex flex-wrap gap-1.5">
+            {['All', ...GOLDEN_ANSWER_CATEGORIES].map(cat => {
+              const count = getCategoryCount(cat);
+              const isActive = selectedCategoryTab === cat;
+              return (
+                <button
+                  key={cat}
+                  type="button"
+                  onClick={() => setSelectedCategoryTab(cat)}
+                  className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-all cursor-pointer ${
+                    isActive
+                      ? 'bg-amber-600 text-white font-semibold shadow-xs'
+                      : isDarkMode
+                        ? 'bg-slate-700 text-gray-300 hover:bg-slate-650'
+                        : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                  }`}>
+                  <span>{cat}</span>
+                  <span
+                    className={`rounded-full px-1.5 py-0.2 text-[10px] ${
+                      isActive
+                        ? 'bg-white/20 text-white'
+                        : isDarkMode
+                          ? 'bg-slate-800 text-gray-400'
+                          : 'bg-gray-200 text-gray-600'
+                    }`}>
+                    {count}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
 
-            return (
-              <div
-                key={item.id}
-                className={`rounded-lg border ${
-                  hasQError || hasAError
-                    ? 'border-red-300 bg-red-50/40 dark:border-red-800 dark:bg-red-950/20'
-                    : isDarkMode
-                      ? 'border-slate-700/80 bg-slate-750'
-                      : 'border-gray-200 bg-gray-50/50'
-                } p-3.5 transition-all`}>
-                <div className="flex items-start gap-3">
-                  <div className="flex-1 space-y-2">
-                    <div>
-                      <div className="mb-1 flex items-center justify-between">
-                        <label className="text-xs font-semibold text-gray-700 dark:text-gray-300">
-                          Question / Screening Prompt
-                        </label>
-                        {item.category && (
-                          <span className="rounded bg-sky-100 px-1.5 py-0.5 text-[10px] font-medium text-sky-800 dark:bg-sky-900/70 dark:text-sky-300">
-                            {item.category}
+          {/* Search bar & quick stats */}
+          <div className="flex items-center gap-3">
+            <div className="relative flex-1">
+              <FiSearch className="absolute left-3 top-2.5 size-3.5 text-gray-400" />
+              <input
+                type="text"
+                value={goldenSearchQuery}
+                onChange={e => setGoldenSearchQuery(e.target.value)}
+                placeholder="Search screening questions, answers, or keywords (e.g. visa, ctc, driver, relocation, shift)..."
+                className={`w-full rounded-lg border pl-9 pr-8 py-1.5 text-xs outline-none ${
+                  isDarkMode
+                    ? 'border-slate-600 bg-slate-700 text-gray-100 placeholder:text-gray-400'
+                    : 'border-gray-300 bg-gray-50 text-gray-800 placeholder:text-gray-400'
+                }`}
+              />
+              {goldenSearchQuery && (
+                <button
+                  type="button"
+                  onClick={() => setGoldenSearchQuery('')}
+                  className="absolute right-2.5 top-2.5 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200">
+                  <FiX className="size-3.5" />
+                </button>
+              )}
+            </div>
+            {selectedCategoryTab !== 'All' && (
+              <button
+                type="button"
+                onClick={() => setSelectedCategoryTab('All')}
+                className="text-xs text-amber-600 hover:underline dark:text-amber-400 shrink-0">
+                Clear filter
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Cards List */}
+        <div className="space-y-3">
+          {filteredGoldenAnswers.length === 0 ? (
+            <div className="rounded-lg border border-dashed border-gray-300 p-8 text-center dark:border-slate-700">
+              <p className="text-xs text-gray-500 dark:text-gray-400">
+                No screening questions match the current filter "{selectedCategoryTab}"
+                {goldenSearchQuery ? ` and query "${goldenSearchQuery}"` : ''}.
+              </p>
+              <button
+                type="button"
+                onClick={() => handleAddGoldenAnswerForCategory(selectedCategoryTab)}
+                className="mt-2 text-xs font-semibold text-amber-600 hover:underline dark:text-amber-400 cursor-pointer">
+                + Add rule to {selectedCategoryTab}
+              </button>
+            </div>
+          ) : (
+            filteredGoldenAnswers.map(item => {
+              const originalIndex = careerBrain.goldenAnswers.findIndex(ga => ga.id === item.id);
+              const hasQError = validationErrors[`goldenAnswers.${originalIndex}.question`];
+              const hasAError = validationErrors[`goldenAnswers.${originalIndex}.answer`];
+
+              return (
+                <div
+                  key={item.id}
+                  className={`rounded-lg border ${
+                    hasQError || hasAError
+                      ? 'border-red-300 bg-red-50/40 dark:border-red-800 dark:bg-red-950/20'
+                      : isDarkMode
+                        ? 'border-slate-700/80 bg-slate-750'
+                        : 'border-gray-200 bg-gray-50/50'
+                  } p-3.5 transition-all`}>
+                  <div className="flex items-start gap-3">
+                    <div className="flex-1 space-y-2.5">
+                      {/* Top bar: Category Selector & Tag */}
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex items-center gap-2">
+                          <label className="text-[11px] font-semibold text-gray-500 dark:text-gray-400">
+                            Category:
+                          </label>
+                          <select
+                            value={item.category || 'Eligibility / Legal'}
+                            onChange={e => handleUpdateGoldenCategory(item.id, e.target.value)}
+                            className={`rounded-md border px-2 py-0.5 text-[11px] font-medium outline-none ${getCategoryBadgeClass(
+                              item.category,
+                            )}`}>
+                            {GOLDEN_ANSWER_CATEGORIES.map(c => (
+                              <option key={c} value={c}>
+                                {c}
+                              </option>
+                            ))}
+                            <option value="Custom Rule">Custom Rule</option>
+                          </select>
+                        </div>
+                        {item.isDefault && (
+                          <span className="rounded bg-gray-200/60 px-1.5 py-0.5 text-[10px] font-medium text-gray-600 dark:bg-slate-700 dark:text-gray-300">
+                            Standard Recommended
                           </span>
                         )}
                       </div>
-                      <input
-                        type="text"
-                        value={item.question}
-                        onChange={e => handleUpdateGoldenAnswer(item.id, 'question', e.target.value)}
-                        placeholder="e.g. Do you require visa sponsorship?"
-                        className={`w-full rounded-md border ${
-                          hasQError
-                            ? 'border-red-400'
-                            : isDarkMode
-                              ? 'border-slate-600 bg-slate-700 text-gray-100'
-                              : 'border-gray-300 bg-white text-gray-800'
-                        } px-3 py-1.5 text-xs`}
-                      />
-                      {hasQError && <p className="mt-0.5 text-[11px] text-red-500">{hasQError}</p>}
+
+                      {/* Question */}
+                      <div>
+                        <label className="mb-1 block text-xs font-semibold text-gray-700 dark:text-gray-300">
+                          Question / Screening Prompt
+                        </label>
+                        <input
+                          type="text"
+                          value={item.question}
+                          onChange={e => handleUpdateGoldenAnswer(item.id, 'question', e.target.value)}
+                          placeholder="e.g. Do you require visa sponsorship?"
+                          className={`w-full rounded-md border ${
+                            hasQError
+                              ? 'border-red-400'
+                              : isDarkMode
+                                ? 'border-slate-600 bg-slate-700 text-gray-100'
+                                : 'border-gray-300 bg-white text-gray-800'
+                          } px-3 py-1.5 text-xs`}
+                        />
+                        {hasQError && <p className="mt-0.5 text-[11px] text-red-500">{hasQError}</p>}
+                      </div>
+
+                      {/* Answer */}
+                      <div>
+                        <label className="mb-1 block text-xs font-semibold text-gray-700 dark:text-gray-300">
+                          Exact Ground-Truth Answer
+                        </label>
+                        <input
+                          type="text"
+                          value={item.answer}
+                          onChange={e => handleUpdateGoldenAnswer(item.id, 'answer', e.target.value)}
+                          placeholder="e.g. Yes / No / Immediate / ₹10,00,000"
+                          className={`w-full rounded-md border ${
+                            hasAError
+                              ? 'border-red-400'
+                              : isDarkMode
+                                ? 'border-slate-600 bg-slate-700 text-gray-100'
+                                : 'border-gray-300 bg-white text-gray-800'
+                          } px-3 py-1.5 text-xs font-semibold text-amber-700 dark:text-amber-300`}
+                        />
+                        {hasAError && <p className="mt-0.5 text-[11px] text-red-500">{hasAError}</p>}
+                      </div>
                     </div>
 
-                    <div>
-                      <label className="mb-1 block text-xs font-semibold text-gray-700 dark:text-gray-300">
-                        Exact Ground-Truth Answer
-                      </label>
-                      <input
-                        type="text"
-                        value={item.answer}
-                        onChange={e => handleUpdateGoldenAnswer(item.id, 'answer', e.target.value)}
-                        placeholder="e.g. No / Immediate / ₹10,00,000"
-                        className={`w-full rounded-md border ${
-                          hasAError
-                            ? 'border-red-400'
-                            : isDarkMode
-                              ? 'border-slate-600 bg-slate-700 text-gray-100'
-                              : 'border-gray-300 bg-white text-gray-800'
-                        } px-3 py-1.5 text-xs font-medium text-indigo-700 dark:text-indigo-300`}
-                      />
-                      {hasAError && <p className="mt-0.5 text-[11px] text-red-500">{hasAError}</p>}
-                    </div>
+                    <button
+                      type="button"
+                      onClick={() => handleRemoveGoldenAnswer(item.id)}
+                      title="Remove rule"
+                      className="mt-6 text-gray-400 transition-colors hover:text-red-500 focus:outline-none cursor-pointer">
+                      <FiTrash2 className="size-4" />
+                    </button>
                   </div>
-
-                  <button
-                    type="button"
-                    onClick={() => handleRemoveGoldenAnswer(item.id)}
-                    title="Remove rule"
-                    className="mt-6 text-gray-400 transition-colors hover:text-red-500 focus:outline-none">
-                    <FiTrash2 className="size-4" />
-                  </button>
                 </div>
-              </div>
-            );
-          })}
+              );
+            })
+          )}
         </div>
       </div>
 

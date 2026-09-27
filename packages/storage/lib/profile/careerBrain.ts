@@ -280,9 +280,35 @@ export const careerBrainSchema = z.object({
   autoExtractedSkills: z.array(z.string()).default([]),
   /** Candidate gender identity (Male, Female, Other, Prefer not to say) */
   gender: z.string().default('Male'),
+  /** Candidate date of birth (YYYY-MM-DD or DD/MM/YYYY) */
+  dateOfBirth: z.string().optional(),
+  /** Highest completed education level */
+  highestEducation: z.string().default("Bachelor's Degree"),
+  /** Willingness to relocate for the job */
+  willingToRelocate: z.string().default('Yes'),
+  /** Preferred work shift (Day / Flexible, Night Shift, Any) */
+  preferredShift: z.string().default('Day / Flexible'),
+  /** Valid driver's license possession */
+  driverLicense: z.string().default('Yes'),
+  /** Military / Protected Veteran status */
+  veteranStatus: z.string().default('I am not a protected veteran'),
+  /** Disability self-identification status */
+  disabilityStatus: z.string().default('No, I do not have a disability'),
   /** Timestamp of last update */
   updatedAt: z.number().default(() => Date.now()),
 });
+
+export const GOLDEN_ANSWER_CATEGORIES = [
+  'Eligibility / Legal',
+  'Location & Relocation',
+  'Compensation',
+  'Experience & Education',
+  'Availability & Shifts',
+  'Yes/No Screening',
+  'Diversity / Self-Identification',
+] as const;
+
+export type GoldenAnswerCategory = (typeof GOLDEN_ANSWER_CATEGORIES)[number];
 
 export type ICareerBrain = z.infer<typeof careerBrainSchema>;
 
@@ -340,207 +366,248 @@ export function validateProfileCompleteness(profile?: Partial<ICareerBrain> | nu
 }
 
 export const DEFAULT_GOLDEN_ANSWERS: IGoldenAnswer[] = [
+  // ── 1. Eligibility / Legal ──
   {
     id: 'work_auth',
-    question: 'Are you legally authorized to work in this country?',
+    question: 'Are you legally authorized to work in this country / India?',
     answer: 'Yes',
-    category: 'Eligibility',
+    category: 'Eligibility / Legal',
     isDefault: true,
   },
   {
     id: 'visa_sponsorship',
-    question: 'Do you now or in the future require visa sponsorship?',
+    question: 'Will you now or in the future require visa sponsorship?',
     answer: 'No',
-    category: 'Eligibility',
-    isDefault: true,
-  },
-  {
-    id: 'notice_period',
-    question: 'What is your current notice period / availability to join?',
-    answer: 'Immediate',
-    category: 'Availability',
-    isDefault: true,
-  },
-  {
-    id: 'expected_ctc',
-    question: 'What is your expected CTC / Salary expectation?',
-    answer: '₹6,00,000 - ₹12,00,000',
-    category: 'Compensation',
-    isDefault: true,
-  },
-  {
-    id: 'current_ctc',
-    question: 'What is your current CTC / Salary?',
-    answer: '₹6,00,000',
-    category: 'Compensation',
-    isDefault: true,
-  },
-  {
-    id: 'relocation',
-    question: 'Are you willing to relocate for this role?',
-    answer: 'Yes',
-    category: 'Location',
-    isDefault: true,
-  },
-  {
-    id: 'commute_onsite',
-    question: 'Are you comfortable working onsite or in a hybrid model?',
-    answer: 'Yes',
-    category: 'Location',
-    isDefault: true,
-  },
-  {
-    id: 'remote_work',
-    question: 'Are you comfortable working in a fully remote or distributed team?',
-    answer: 'Yes',
-    category: 'Location',
-    isDefault: true,
-  },
-  {
-    id: 'experience_years',
-    question: 'Total years of relevant experience in software development?',
-    answer: '1 year',
-    category: 'Experience',
-    isDefault: true,
-  },
-  {
-    id: 'currently_employed',
-    question: 'Are you currently employed / I currently work here?',
-    answer: 'Yes',
-    category: 'Experience',
-    isDefault: true,
-  },
-  {
-    id: 'background_check',
-    question: 'Are you willing to undergo a standard background check?',
-    answer: 'Yes',
-    category: 'Compliance',
-    isDefault: true,
-  },
-  {
-    id: 'drug_test',
-    question: 'Are you willing to undergo a drug screening test if required?',
-    answer: 'Yes',
-    category: 'Compliance',
+    category: 'Eligibility / Legal',
     isDefault: true,
   },
   {
     id: 'age_requirement',
     question: 'Are you at least 18 years of age or older?',
     answer: 'Yes',
-    category: 'Eligibility',
-    isDefault: true,
-  },
-  {
-    id: 'education_degree',
-    question: 'Have you completed a Bachelor’s degree or higher?',
-    answer: 'Yes',
-    category: 'Education',
-    isDefault: true,
-  },
-  {
-    id: 'highest_education',
-    question: 'What is your highest level of completed education?',
-    answer: "Bachelor's Degree",
-    category: 'Education',
-    isDefault: true,
-  },
-  {
-    id: 'driver_license',
-    question: 'Do you possess a valid driver’s license?',
-    answer: 'Yes',
-    category: 'General',
-    isDefault: true,
-  },
-  {
-    id: 'travel_willingness',
-    question: 'Are you willing to travel for work if required?',
-    answer: 'Yes',
-    category: 'General',
-    isDefault: true,
-  },
-  {
-    id: 'english_proficiency',
-    question: 'What is your level of English proficiency?',
-    answer: 'Professional / Fluent',
-    category: 'Language',
-    isDefault: true,
-  },
-  {
-    id: 'former_employee',
-    question: 'Have you previously worked for or been employed by this company?',
-    answer: 'No',
-    category: 'Eligibility',
-    isDefault: true,
-  },
-  {
-    id: 'relative_employed',
-    question: 'Do you have any relatives or family currently working at this company?',
-    answer: 'No',
-    category: 'Compliance',
-    isDefault: true,
-  },
-  {
-    id: 'non_compete',
-    question: 'Are you bound by any non-compete or restrictive employment agreement?',
-    answer: 'No',
-    category: 'Legal',
-    isDefault: true,
-  },
-  {
-    id: 'felony_conviction',
-    question: 'Have you ever been convicted of a criminal offense or felony?',
-    answer: 'No',
-    category: 'Legal',
-    isDefault: true,
-  },
-  {
-    id: 'shift_flexibility',
-    question: 'Are you open to working flexible hours or rotating shifts?',
-    answer: 'Yes',
-    category: 'Availability',
+    category: 'Eligibility / Legal',
     isDefault: true,
   },
   {
     id: 'security_clearance',
     question: 'Do you currently hold or require an active security clearance?',
     answer: 'No',
-    category: 'Eligibility',
+    category: 'Eligibility / Legal',
+    isDefault: true,
+  },
+  {
+    id: 'non_compete',
+    question: 'Are you bound by any non-compete or restrictive employment agreement?',
+    answer: 'No',
+    category: 'Eligibility / Legal',
+    isDefault: true,
+  },
+  {
+    id: 'felony_conviction',
+    question: 'Have you ever been convicted of a criminal offense or felony?',
+    answer: 'No',
+    category: 'Eligibility / Legal',
+    isDefault: true,
+  },
+
+  // ── 2. Location & Relocation ──
+  {
+    id: 'current_location_city',
+    question: 'What is your current location / city of residence?',
+    answer: 'Bengaluru, India',
+    category: 'Location & Relocation',
+    isDefault: true,
+  },
+  {
+    id: 'relocation',
+    question: 'Are you willing to relocate for this role?',
+    answer: 'Yes',
+    category: 'Location & Relocation',
+    isDefault: true,
+  },
+  {
+    id: 'work_mode_preference',
+    question: 'Are you willing to work from office / hybrid / remote?',
+    answer: 'Yes (Open to Remote, Hybrid, or Onsite)',
+    category: 'Location & Relocation',
+    isDefault: true,
+  },
+  {
+    id: 'commute_onsite',
+    question: 'Are you able to reliably commute or work onsite?',
+    answer: 'Yes',
+    category: 'Location & Relocation',
+    isDefault: true,
+  },
+
+  // ── 3. Compensation ──
+  {
+    id: 'current_ctc',
+    question: 'What is your current CTC / Annual Salary?',
+    answer: '₹6,00,000',
+    category: 'Compensation',
+    isDefault: true,
+  },
+  {
+    id: 'expected_ctc',
+    question: 'What is your expected CTC / Annual Salary expectation?',
+    answer: '₹10,00,000',
+    category: 'Compensation',
+    isDefault: true,
+  },
+  {
+    id: 'salary_range_acceptable',
+    question: 'Is the posted salary range acceptable to you?',
+    answer: 'Yes',
+    category: 'Compensation',
+    isDefault: true,
+  },
+
+  // ── 4. Experience & Education ──
+  {
+    id: 'experience_years',
+    question: 'Total years of relevant professional experience?',
+    answer: '1',
+    category: 'Experience & Education',
+    isDefault: true,
+  },
+  {
+    id: 'highest_education',
+    question: 'What is your highest level of completed education?',
+    answer: "Bachelor's Degree",
+    category: 'Experience & Education',
+    isDefault: true,
+  },
+  {
+    id: 'skill_react_exp',
+    question: 'How many years of experience do you have with React / Next.js?',
+    answer: '1',
+    category: 'Experience & Education',
+    isDefault: true,
+  },
+  {
+    id: 'skill_node_exp',
+    question: 'How many years of experience do you have with Node.js / TypeScript?',
+    answer: '1',
+    category: 'Experience & Education',
+    isDefault: true,
+  },
+  {
+    id: 'skill_sql_exp',
+    question: 'How many years of experience do you have with SQL / Databases?',
+    answer: '1',
+    category: 'Experience & Education',
+    isDefault: true,
+  },
+  {
+    id: 'production_llm_shipped',
+    question: 'Have you built and shipped software integrated with LLMs / AI APIs?',
+    answer: 'Yes',
+    category: 'Experience & Education',
+    isDefault: true,
+  },
+
+  // ── 5. Availability & Shifts ──
+  {
+    id: 'notice_period',
+    question: 'What is your current notice period / When can you join?',
+    answer: 'Immediate',
+    category: 'Availability & Shifts',
     isDefault: true,
   },
   {
     id: 'start_immediately',
     question: 'Can you start immediately upon hire?',
     answer: 'Yes',
-    category: 'Availability',
+    category: 'Availability & Shifts',
+    isDefault: true,
+  },
+  {
+    id: 'preferred_shift',
+    question: 'What is your preferred shift timing (Day / Night / Rotational)?',
+    answer: 'Day / Flexible',
+    category: 'Availability & Shifts',
+    isDefault: true,
+  },
+  {
+    id: 'shift_flexibility',
+    question: 'Are you open to working flexible hours, weekends, or on-call if required?',
+    answer: 'Yes',
+    category: 'Availability & Shifts',
     isDefault: true,
   },
   {
     id: 'timezone_overlap',
     question: 'Can you commit to daily overlap with US / client working hours?',
     answer: 'Yes',
-    category: 'Availability',
+    category: 'Availability & Shifts',
     isDefault: true,
   },
+
+  // ── 6. Yes/No Screening ──
   {
-    id: 'production_llm_shipped',
-    question: 'Have you built and shipped something on top of a language model that is still running in production?',
+    id: 'driver_license',
+    question: 'Do you possess a valid driver’s license?',
     answer: 'Yes',
-    category: 'Experience',
+    category: 'Yes/No Screening',
     isDefault: true,
   },
   {
-    id: 'remote_availability',
-    question: 'Are you available to work remotely in a distributed global team?',
+    id: 'background_check',
+    question: 'Are you comfortable with undergoing a standard background verification check?',
     answer: 'Yes',
-    category: 'Availability',
+    category: 'Yes/No Screening',
     isDefault: true,
   },
   {
-    id: 'top_choice',
-    question: 'Mark job as a top choice',
+    id: 'drug_test',
+    question: 'Are you willing to undergo a drug screening test if required?',
+    answer: 'Yes',
+    category: 'Yes/No Screening',
+    isDefault: true,
+  },
+  {
+    id: 'former_employee',
+    question: 'Have you previously worked for or been employed by this company?',
     answer: 'No',
-    category: 'General',
+    category: 'Yes/No Screening',
+    isDefault: true,
+  },
+  {
+    id: 'currently_employed',
+    question: 'Are you currently employed?',
+    answer: 'Yes',
+    category: 'Yes/No Screening',
+    isDefault: true,
+  },
+
+  // ── 7. Diversity / Self-Identification ──
+  {
+    id: 'gender_identity',
+    question: 'What is your gender / gender identity?',
+    answer: 'Male',
+    category: 'Diversity / Self-Identification',
+    isDefault: true,
+  },
+  {
+    id: 'date_of_birth',
+    question: 'What is your date of birth?',
+    answer: '2000-01-01',
+    category: 'Diversity / Self-Identification',
+    isDefault: true,
+  },
+  {
+    id: 'veteran_status',
+    question: 'What is your military or veteran status?',
+    answer: 'I am not a protected veteran',
+    category: 'Diversity / Self-Identification',
+    isDefault: true,
+  },
+  {
+    id: 'disability_status',
+    question: 'Do you have a physical or mental disability?',
+    answer: 'No, I do not have a disability',
+    category: 'Diversity / Self-Identification',
     isDefault: true,
   },
 ];
@@ -630,6 +697,13 @@ Tools: Git, GitHub, Docker, Postman, VS Code`,
   jobTypes: ['Full-time', 'Internship'],
   autoExtractedSkills: [],
   gender: 'Male',
+  dateOfBirth: '2000-01-01',
+  highestEducation: "Bachelor's Degree",
+  willingToRelocate: 'Yes',
+  preferredShift: 'Day / Flexible',
+  driverLicense: 'Yes',
+  veteranStatus: 'I am not a protected veteran',
+  disabilityStatus: 'No, I do not have a disability',
   updatedAt: Date.now(),
 };
 
@@ -726,6 +800,13 @@ export async function getCareerBrainData(): Promise<ICareerBrain> {
         noticePeriod:
           raw.noticePeriod !== undefined ? raw.noticePeriod : (DEFAULT_CAREER_BRAIN.noticePeriod ?? 'Immediate'),
         gender: raw.gender !== undefined ? raw.gender : 'Male',
+        dateOfBirth: raw.dateOfBirth !== undefined ? raw.dateOfBirth : undefined,
+        highestEducation: raw.highestEducation !== undefined ? raw.highestEducation : "Bachelor's Degree",
+        willingToRelocate: raw.willingToRelocate !== undefined ? raw.willingToRelocate : 'Yes',
+        preferredShift: raw.preferredShift !== undefined ? raw.preferredShift : 'Day / Flexible',
+        driverLicense: raw.driverLicense !== undefined ? raw.driverLicense : 'Yes',
+        veteranStatus: raw.veteranStatus !== undefined ? raw.veteranStatus : 'I am not a protected veteran',
+        disabilityStatus: raw.disabilityStatus !== undefined ? raw.disabilityStatus : 'No, I do not have a disability',
         goldenAnswers:
           Array.isArray(raw.goldenAnswers) && raw.goldenAnswers.length > 0 ? raw.goldenAnswers : DEFAULT_GOLDEN_ANSWERS,
         customAnswers: raw.customAnswers || {},

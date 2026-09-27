@@ -305,7 +305,7 @@ function computeInitialAnswer(
     };
   }
   if (q.includes('highest level of education') || q.includes('degree') || q.includes('level of education')) {
-    const candidateEdu = (careerBrain.education || '').toLowerCase();
+    const candidateEdu = (careerBrain.highestEducation || careerBrain.education || "Bachelor's Degree").toLowerCase();
     if (options.length > 0) {
       const matched = options.find(o => {
         const lo = o.toLowerCase();
@@ -315,14 +315,33 @@ function computeInitialAnswer(
           lo.includes('bachelor')
         )
           return true;
+        if (
+          (candidateEdu.includes('doctor') || candidateEdu.includes('phd')) &&
+          (lo.includes('doctor') || lo.includes('phd'))
+        )
+          return true;
         return false;
       });
-      return { value: matched || options[0], confidence: 0.85, source: 'profile' };
+      return { value: matched || options[0], confidence: 0.9, source: 'profile' };
     }
-    return { value: "Bachelor's Degree", confidence: 0.85, source: 'profile' };
+    return { value: careerBrain.highestEducation || "Bachelor's Degree", confidence: 0.9, source: 'profile' };
   }
 
   // 11. Salary / Notice Period / Compensation
+  if (q.includes('salary range') || q.includes('range acceptable') || q.includes('compensation acceptable')) {
+    if (options.length > 0) {
+      const yesOpt = options.find(o => o.toLowerCase().startsWith('yes'));
+      return { value: yesOpt || options[0], confidence: 0.95, source: 'profile' };
+    }
+    return { value: 'Yes', confidence: 0.95, source: 'profile' };
+  }
+  if (q.includes('current salary') || q.includes('current ctc') || q.includes('current compensation')) {
+    return {
+      value: careerBrain.currentCTC || '₹6,00,000',
+      confidence: 0.9,
+      source: 'profile',
+    };
+  }
   if (
     q.includes('salary') ||
     q.includes('compensation') ||
@@ -331,12 +350,17 @@ function computeInitialAnswer(
     q.includes('expected')
   ) {
     return {
-      value: careerBrain.expectedCTC || careerBrain.salaryExpectation || 'Competitive',
+      value: careerBrain.expectedCTC || careerBrain.salaryExpectation || '₹10,00,000',
       confidence: 0.85,
       source: 'profile',
     };
   }
-  if (q.includes('notice period') || q.includes('availability') || q.includes('how soon')) {
+  if (
+    q.includes('notice period') ||
+    q.includes('availability') ||
+    q.includes('how soon') ||
+    q.includes('when can you start')
+  ) {
     return {
       value: careerBrain.noticePeriod || 'Immediate',
       confidence: 0.9,
@@ -344,11 +368,142 @@ function computeInitialAnswer(
     };
   }
 
-  // 12. Golden Answers
-  if (Array.isArray(careerBrain.goldenAnswers)) {
+  // 11.2 Age Confirmation & Date of Birth
+  if (
+    q.includes('18 years') ||
+    q.includes('18 or older') ||
+    q.includes('at least 18') ||
+    q.includes('age requirement') ||
+    q.includes('are you 18')
+  ) {
+    if (options.length > 0) {
+      const yesOpt = options.find(o => o.toLowerCase().startsWith('yes'));
+      return { value: yesOpt || options[0], confidence: 0.98, source: 'profile' };
+    }
+    return { value: 'Yes', confidence: 0.98, source: 'profile' };
+  }
+  if (q.includes('date of birth') || q.includes('birth date') || q === 'dob' || q.includes('birth year')) {
+    const dob = careerBrain.dateOfBirth || '2000-01-01';
+    if (q.includes('year') && !q.includes('date')) {
+      const year = dob.split(/[-/]/)[0] || '2000';
+      return { value: year, confidence: 0.9, source: 'profile' };
+    }
+    return { value: dob, confidence: 0.9, source: 'profile' };
+  }
+
+  // 11.3 Driver's License
+  if (
+    q.includes('driver') ||
+    q.includes('driving license') ||
+    q.includes("driver's license") ||
+    q.includes('valid driver')
+  ) {
+    const val = careerBrain.driverLicense || 'Yes';
+    if (options.length > 0) {
+      const yesOpt = options.find(o => o.toLowerCase().startsWith('yes'));
+      return { value: yesOpt || options[0], confidence: 0.95, source: 'profile' };
+    }
+    return { value: val, confidence: 0.95, source: 'profile' };
+  }
+
+  // 11.4 Shifts, Working Hours & Weekends
+  if (
+    q.includes('shift') ||
+    q.includes('night shift') ||
+    q.includes('day shift') ||
+    q.includes('weekend') ||
+    q.includes('on-call') ||
+    q.includes('flexible hours')
+  ) {
+    const pref = careerBrain.preferredShift || 'Day / Flexible';
+    if (options.length > 0) {
+      const match = options.find(o => {
+        const lo = o.toLowerCase();
+        return lo.includes('day') || lo.includes('flex') || lo.includes('yes') || lo.includes('any');
+      });
+      return { value: match || options[0], confidence: 0.9, source: 'profile' };
+    }
+    return { value: pref, confidence: 0.9, source: 'profile' };
+  }
+
+  // 11.5 Background Check & Drug Screening
+  if (
+    q.includes('background check') ||
+    q.includes('background investigation') ||
+    q.includes('drug screen') ||
+    q.includes('drug test')
+  ) {
+    if (options.length > 0) {
+      const yesOpt = options.find(o => o.toLowerCase().startsWith('yes'));
+      return { value: yesOpt || options[0], confidence: 0.98, source: 'profile' };
+    }
+    return { value: 'Yes', confidence: 0.98, source: 'profile' };
+  }
+
+  // 11.6 Previous Employment & Current Employment
+  if (
+    q.includes('previously worked') ||
+    q.includes('previous employee') ||
+    q.includes('worked for this company') ||
+    q.includes('employed by this company')
+  ) {
+    if (options.length > 0) {
+      const noOpt = options.find(o => o.toLowerCase().startsWith('no'));
+      return { value: noOpt || options[0], confidence: 0.95, source: 'profile' };
+    }
+    return { value: 'No', confidence: 0.95, source: 'profile' };
+  }
+  if (q.includes('currently employed') || q.includes('are you currently working')) {
+    if (options.length > 0) {
+      const yesOpt = options.find(o => o.toLowerCase().startsWith('yes'));
+      return { value: yesOpt || options[0], confidence: 0.95, source: 'profile' };
+    }
+    return { value: 'Yes', confidence: 0.95, source: 'profile' };
+  }
+
+  // 11.7 Diversity: Veteran Status & Disability
+  if (q.includes('veteran') || q.includes('military service') || q.includes('protected veteran')) {
+    const vet = careerBrain.veteranStatus || 'I am not a protected veteran';
+    if (options.length > 0) {
+      const match = options.find(o => {
+        const lo = o.toLowerCase();
+        return lo.includes('not a protected') || lo.includes('not a veteran') || lo.startsWith('no');
+      });
+      return { value: match || options[0], confidence: 0.95, source: 'profile' };
+    }
+    return { value: vet, confidence: 0.95, source: 'profile' };
+  }
+  if (q.includes('disability') || q.includes('handicap') || q.includes('impairment')) {
+    const dis = careerBrain.disabilityStatus || 'No, I do not have a disability';
+    if (options.length > 0) {
+      const match = options.find(o => {
+        const lo = o.toLowerCase();
+        return (
+          lo.includes('no, i do not') ||
+          lo.includes("don't have") ||
+          lo.includes('not have a disability') ||
+          lo === 'no' ||
+          lo.startsWith('no')
+        );
+      });
+      return { value: match || options[0], confidence: 0.95, source: 'profile' };
+    }
+    return { value: dis, confidence: 0.95, source: 'profile' };
+  }
+
+  // 12. Smart Golden Answers Lookup (Exact & Loose Matching)
+  if (Array.isArray(careerBrain.goldenAnswers) && careerBrain.goldenAnswers.length > 0) {
     for (const ga of careerBrain.goldenAnswers) {
-      if (ga.question && q.includes(ga.question.toLowerCase())) {
-        return { value: ga.answer, confidence: 0.85, source: 'golden_answer' };
+      if (!ga.question || !ga.answer) continue;
+      const gaQ = ga.question.toLowerCase().trim();
+      // Match exact substring or multi-token overlap
+      if (q.includes(gaQ) || gaQ.includes(q)) {
+        if (options.length > 0) {
+          const ansLo = ga.answer.toLowerCase();
+          const optMatch = options.find(o => o.toLowerCase() === ansLo || o.toLowerCase().includes(ansLo));
+          return { value: optMatch || ga.answer, confidence: 0.95, source: 'golden_answer' };
+        }
+        return { value: ga.answer, confidence: 0.95, source: 'golden_answer' };
       }
     }
   }

@@ -1634,12 +1634,87 @@ export function matchRuleBased(
     };
   }
 
-  // h) Explicitly optional checkbox
-  if (field.fieldType === 'checkbox' && (/\boptional\b/i.test(labelLower) || field.required === false)) {
+  // i) Driver's License
+  if (/(?:valid\s*)?driver(?:'s)?\s*license|driving\s*licen[sc]e/i.test(labelLower)) {
+    return {
+      matched: true,
+      answer: careerBrain.driverLicense || 'Yes',
+      sourceDetail: 'profile: driverLicense',
+    };
+  }
+
+  // j) Age requirement / 18+
+  if (/18\s*years(?:\s*of\s*age)?|at\s*least\s*18|age\s*requirement|are\s*you\s*18/i.test(labelLower)) {
+    return {
+      matched: true,
+      answer: 'Yes',
+      sourceDetail: 'profile: age requirement (18+ confirmed)',
+    };
+  }
+  if (/date\s*of\s*birth|\bdob\b|birth\s*date/i.test(labelLower)) {
+    return {
+      matched: true,
+      answer: careerBrain.dateOfBirth || '2000-01-01',
+      sourceDetail: 'profile: dateOfBirth',
+    };
+  }
+
+  // k) Shifts, Working Hours & Weekend Flexibility
+  if (
+    /preferred\s*shift|night\s*shift|day\s*shift|rotat(?:ing|ional)\s*shift|work(?:ing)?\s*weekends|on-call/i.test(
+      labelLower,
+    )
+  ) {
+    const isYesNo = field.options && field.options.some(o => /^(yes|no)$/i.test(o.trim()));
+    return {
+      matched: true,
+      answer: isYesNo ? 'Yes' : careerBrain.preferredShift || 'Day / Flexible',
+      sourceDetail: 'profile: preferredShift',
+    };
+  }
+
+  // l) Veteran Status
+  if (/veteran|military\s*(?:status|service)|protected\s*veteran/i.test(labelLower)) {
+    const isYesNo = field.options && field.options.some(o => /^(yes|no)$/i.test(o.trim()));
+    return {
+      matched: true,
+      answer: isYesNo ? 'No' : careerBrain.veteranStatus || 'I am not a protected veteran',
+      sourceDetail: 'profile: veteranStatus',
+    };
+  }
+
+  // m) Disability Status
+  if (/disability|impairment|handicap/i.test(labelLower)) {
+    const isYesNo = field.options && field.options.some(o => /^(yes|no)$/i.test(o.trim()));
+    return {
+      matched: true,
+      answer: isYesNo ? 'No' : careerBrain.disabilityStatus || 'No, I do not have a disability',
+      sourceDetail: 'profile: disabilityStatus',
+    };
+  }
+
+  // n) Previously employed at this company / Currently employed
+  if (/previously\s*worked|previous\s*employee|worked\s*(?:at|for)\s*(?:this\s*)?company/i.test(labelLower)) {
     return {
       matched: true,
       answer: 'No',
-      sourceDetail: 'optional checkbox: left unticked',
+      sourceDetail: 'profile standard: not previously employed at this company',
+    };
+  }
+  if (/currently\s*employed|are\s*you\s*currently\s*working/i.test(labelLower)) {
+    return {
+      matched: true,
+      answer: 'Yes',
+      sourceDetail: 'profile standard: currently employed',
+    };
+  }
+
+  // o) Salary range acceptable
+  if (/salary\s*range|range\s*acceptable|compensation\s*acceptable/i.test(labelLower)) {
+    return {
+      matched: true,
+      answer: 'Yes',
+      sourceDetail: 'profile standard: salary range acceptable',
     };
   }
 
@@ -2134,9 +2209,17 @@ HINT / PLACEHOLDER: ${field.hintText || field.placeholder || 'None'}
 CANDIDATE BACKGROUND:
 - Total Experience: ${yoe} years
 - Gender: ${careerBrain.gender || 'Male'}
-- Education: ${edu}
+- Date of Birth: ${careerBrain.dateOfBirth || '2000-01-01'} (18+ confirmed)
+- Education: ${edu} (Highest Level: ${careerBrain.highestEducation || "Bachelor's Degree"})
 - Work Authorization: ${workAuth}
 - Notice Period: ${noticePeriod}
+- Willing to Relocate: ${careerBrain.willingToRelocate || 'Yes'}
+- Preferred Shift: ${careerBrain.preferredShift || 'Day / Flexible'}
+- Valid Driver's License: ${careerBrain.driverLicense || 'Yes'}
+- Veteran Status: ${careerBrain.veteranStatus || 'I am not a protected veteran'}
+- Disability Status: ${careerBrain.disabilityStatus || 'No, I do not have a disability'}
+- Current CTC: ${careerBrain.currentCTC || '₹6,00,000'}
+- Expected CTC: ${careerBrain.expectedCTC || careerBrain.salaryExpectation || '₹10,00,000'}
 - Core Skills: ${skillsList || 'Software Engineering / Full Stack'}
 - Resume Summary:
 ${resumeExcerpt || narrative || 'Full Stack Software Engineer with production web and software development experience.'}
@@ -2155,8 +2238,16 @@ DECISION RULES:
    - You MUST pick EXACTLY one string from the provided OPTIONS list that best represents the candidate's qualification.
 5. OPEN-ENDED TEXT / PARAGRAPH:
    - Provide a concise, highly professional, compelling answer (1-3 sentences) tailored to the candidate's profile.
-6. GENDER / EQUAL OPPORTUNITY:
+6. GENDER / EQUAL OPPORTUNITY / DIVERSITY:
    - If asked for gender or sex, answer with candidate's gender ("${careerBrain.gender || 'Male'}") or pick the matching option from OPTIONS.
+   - For military/veteran status, pick "${careerBrain.veteranStatus || 'I am not a protected veteran'}" or "No".
+   - For disability status, pick "${careerBrain.disabilityStatus || 'No, I do not have a disability'}" or "No".
+   - For age confirmation (18+), answer "Yes".
+7. RELOCATION, DRIVER LICENSE & EMPLOYMENT:
+   - For driver's license: "${careerBrain.driverLicense || 'Yes'}".
+   - For relocation: "${careerBrain.willingToRelocate || 'Yes'}".
+   - For shift: "${careerBrain.preferredShift || 'Day / Flexible'}".
+   - For previous employment at this company: "No". For currently employed: "Yes".
 
 OUTPUT STRICTLY VALID JSON ONLY:
 {
