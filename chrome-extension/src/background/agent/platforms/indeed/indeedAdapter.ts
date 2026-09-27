@@ -85,6 +85,7 @@ export class IndeedAdapter implements IPlatformAdapter {
           isQuickApply?: boolean;
         }> = [];
 
+        const seenJk = new Set<string>();
         const cards = Array.from(document.querySelectorAll(selectors.JOB_CARDS.join(', ')));
 
         for (const el of cards) {
@@ -103,6 +104,12 @@ export class IndeedAdapter implements IPlatformAdapter {
 
             const companyEl = el.querySelector(selectors.COMPANY_NAME.join(', '));
             const company = (companyEl?.textContent || '').trim();
+
+            const uniqueKey = jk || (title + '::' + company).toLowerCase();
+            if (seenJk.has(uniqueKey)) {
+              continue;
+            }
+            seenJk.add(uniqueKey);
 
             const locEl = el.querySelector(selectors.LOCATION.join(', '));
             const location = (locEl?.textContent || '').trim();
@@ -141,10 +148,18 @@ export class IndeedAdapter implements IPlatformAdapter {
         return results;
       }, INDEED_SELECTORS);
 
-      return rawJobs.map((j: any) => ({
-        ...j,
-        platform: 'indeed' as const,
-      }));
+      const seen = new Set<string>();
+      return rawJobs
+        .filter((j: any) => {
+          const key = j.jobId || j.url;
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        })
+        .map((j: any) => ({
+          ...j,
+          platform: 'indeed' as const,
+        }));
     } catch (err) {
       logger.error('[IndeedAdapter] Failed to extract job cards:', err);
       return [];
@@ -153,14 +168,31 @@ export class IndeedAdapter implements IPlatformAdapter {
 
   public async applyToJob(job: IJobQueueItem, context: IPlatformExecutionContext): Promise<IApplicationResult> {
     const { page, careerBrain, portToSend, onLiveActivity } = context;
+    const puppeteerPage = page.puppeteerPage;
+    if (!puppeteerPage) {
+      return { status: 'failed', reason: 'Browser page instance unavailable' };
+    }
+
+    // Auto-accept any browser dialogs (e.g. "Leave site? Changes you made may not be saved")
+    const dialogHandler = async (dialog: any) => {
+      try {
+        logger.info(`[IndeedAdapter] Auto-accepting dialog: ${dialog.message()}`);
+        await dialog.accept();
+      } catch {}
+    };
+    puppeteerPage.on('dialog', dialogHandler);
+
+    let popupPage: any = null;
 
     try {
-      const puppeteerPage = page.puppeteerPage;
-      if (!puppeteerPage) {
-        return { status: 'failed', reason: 'Browser page instance unavailable' };
-      }
-
       logger.info(`[IndeedAdapter] Navigating to Indeed job: ${job.title} (${job.url})`);
+
+      // Disable beforeunload on current page to prevent navigation hangs
+      await puppeteerPage
+        .evaluate(() => {
+          window.onbeforeunload = null;
+        })
+        .catch(() => {});
 
       // 1. Navigate to job URL if not already there
       const currentUrl = puppeteerPage.url().toLowerCase();
@@ -171,9 +203,37 @@ export class IndeedAdapter implements IPlatformAdapter {
         await new Promise(r => setTimeout(r, 3000));
       }
 
-      // 2. Check for Cloudflare / Captcha Challenge
+      // Disable beforeunload again after page loads
+      await puppeteerPage
+        .evaluate(() => {
+          window.onbeforeunload = null;
+        })
+        .catch(() => {});
+
+      // 2. Check for Cloudflare / Captcha Challenge (only visible challenges)
       const hasCaptcha = await puppeteerPage.evaluate((selectors: typeof INDEED_SELECTORS) => {
-        return selectors.CAPTCHA_CONTAINERS.some(sel => !!document.querySelector(sel));
+        const title = (document.title || '').toLowerCase();
+        if (
+          title.includes('just a moment') ||
+          title.includes('attention required') ||
+          title.includes('security check')
+        ) {
+          return true;
+        }
+        for (const sel of selectors.CAPTCHA_CONTAINERS) {
+          const el = document.querySelector(sel) as HTMLElement | null;
+          if (el) {
+            const style = window.getComputedStyle(el);
+            if (
+              style.display !== 'none' &&
+              style.visibility !== 'hidden' &&
+              (el.offsetWidth > 0 || el.offsetHeight > 0)
+            ) {
+              return true;
+            }
+          }
+        }
+        return false;
       }, INDEED_SELECTORS);
 
       if (hasCaptcha) {
@@ -251,15 +311,35 @@ export class IndeedAdapter implements IPlatformAdapter {
         }
       }, INDEED_SELECTORS);
 
-      await new Promise(r => setTimeout(r, 3000));
+      await new Promise(r => setTimeout(r, 3500));
 
-      // 6. Multi-Step Modal Flow (up to 8 steps)
-      const maxSteps = 8;
+      // Check if a popup page was opened for smartapply
+      try {
+        const browser = puppeteerPage.browser();
+        const pages = await browser.pages();
+        for (const p of pages) {
+          if (p !== puppeteerPage && p.url().toLowerCase().includes('smartapply')) {
+            popupPage = p;
+            popupPage.on('dialog', dialogHandler);
+            await popupPage
+              .evaluate(() => {
+                window.onbeforeunload = null;
+              })
+              .catch(() => {});
+            break;
+          }
+        }
+      } catch {}
+
+      const activePage = popupPage || puppeteerPage;
+
+      // 6. Multi-Step Modal / SmartApply Flow (up to 10 steps)
+      const maxSteps = 10;
       for (let step = 1; step <= maxSteps; step++) {
         logger.info(`[IndeedAdapter] Handling application step ${step}...`);
 
         // Check if application is already submitted
-        const isDone = await puppeteerPage.evaluate((selectors: typeof INDEED_SELECTORS) => {
+        const isDone = await activePage.evaluate((selectors: typeof INDEED_SELECTORS) => {
           const bodyText = (document.body.innerText || '').toLowerCase();
           return selectors.SUCCESS_INDICATORS.some(ind => bodyText.includes(ind));
         }, INDEED_SELECTORS);
@@ -270,14 +350,25 @@ export class IndeedAdapter implements IPlatformAdapter {
         }
 
         // Fill any visible questions/inputs on this step
-        await this.fillIndeedStepFields(puppeteerPage, careerBrain);
+        await this.fillIndeedStepFields(activePage, careerBrain);
 
         // Check for Submit button
-        const submitClicked = await puppeteerPage.evaluate((selectors: typeof INDEED_SELECTORS) => {
-          for (const sel of selectors.SUBMIT_BUTTON) {
+        const submitClicked = await activePage.evaluate((selectors: typeof INDEED_SELECTORS) => {
+          // 1. Check known submit selectors
+          for (const sel of selectors.SUBMIT_BUTTON_SELECTORS) {
             const btn = document.querySelector(sel) as HTMLElement | null;
             if (btn && btn.offsetParent !== null) {
               btn.click();
+              return true;
+            }
+          }
+          // 2. Check all visible buttons by text
+          const buttons = Array.from(document.querySelectorAll('button, [role="button"]')) as HTMLElement[];
+          for (const b of buttons) {
+            if (b.offsetParent === null) continue;
+            const t = (b.textContent || '').trim().toLowerCase();
+            if (selectors.SUBMIT_BUTTON_TEXTS.some(txt => t === txt || t.includes(txt))) {
+              b.click();
               return true;
             }
           }
@@ -291,11 +382,22 @@ export class IndeedAdapter implements IPlatformAdapter {
         }
 
         // Otherwise click Continue / Next
-        const continueClicked = await puppeteerPage.evaluate((selectors: typeof INDEED_SELECTORS) => {
-          for (const sel of selectors.FORWARD_BUTTONS) {
+        const continueClicked = await activePage.evaluate((selectors: typeof INDEED_SELECTORS) => {
+          // 1. Check known forward selectors
+          for (const sel of selectors.FORWARD_BUTTON_SELECTORS) {
             const btn = document.querySelector(sel) as HTMLElement | null;
             if (btn && btn.offsetParent !== null) {
               btn.click();
+              return true;
+            }
+          }
+          // 2. Check all visible buttons by text
+          const buttons = Array.from(document.querySelectorAll('button, [role="button"]')) as HTMLElement[];
+          for (const b of buttons) {
+            if (b.offsetParent === null) continue;
+            const t = (b.textContent || '').trim().toLowerCase();
+            if (selectors.FORWARD_BUTTON_TEXTS.some(txt => t === txt || t.includes(txt))) {
+              b.click();
               return true;
             }
           }
@@ -303,6 +405,16 @@ export class IndeedAdapter implements IPlatformAdapter {
         }, INDEED_SELECTORS);
 
         if (!continueClicked) {
+          // Check once more if success indicator appeared after submitting
+          const doneCheck = await activePage.evaluate((selectors: typeof INDEED_SELECTORS) => {
+            const bodyText = (document.body.innerText || '').toLowerCase();
+            return selectors.SUCCESS_INDICATORS.some(ind => bodyText.includes(ind));
+          }, INDEED_SELECTORS);
+
+          if (doneCheck) {
+            return { status: 'applied', creditsUsed: 1 };
+          }
+
           logger.info('[IndeedAdapter] No further navigation button found. Step loop finished.');
           break;
         }
@@ -314,20 +426,47 @@ export class IndeedAdapter implements IPlatformAdapter {
     } catch (err: any) {
       logger.error('[IndeedAdapter] Error applying to Indeed job:', err);
       return { status: 'failed', reason: err?.message || 'Application error' };
+    } finally {
+      // Neutralize beforeunload and clean up listeners
+      await puppeteerPage
+        .evaluate(() => {
+          window.onbeforeunload = null;
+        })
+        .catch(() => {});
+      puppeteerPage.off('dialog', dialogHandler);
+
+      if (popupPage) {
+        try {
+          await popupPage
+            .evaluate(() => {
+              window.onbeforeunload = null;
+            })
+            .catch(() => {});
+          popupPage.off('dialog', dialogHandler);
+          await popupPage.close();
+        } catch {}
+      }
     }
   }
 
-  private async fillIndeedStepFields(puppeteerPage: any, careerBrain: any): Promise<void> {
+  private async fillIndeedStepFields(pageOrFrame: any, careerBrain: any): Promise<void> {
     try {
-      const fields = await puppeteerPage.evaluate(() => {
+      const fields = await pageOrFrame.evaluate(() => {
         const inputs = Array.from(document.querySelectorAll('input, select, textarea'));
         return inputs
-          .filter((el: any) => el.offsetParent !== null)
+          .filter((el: any) => el.offsetParent !== null && !el.disabled)
           .map((el, idx) => {
-            const labelEl = el.closest('label') || el.parentElement?.querySelector('label');
+            const labelEl =
+              el.closest('label') ||
+              el.parentElement?.querySelector('label') ||
+              (el.id ? document.querySelector(`label[for="${el.id}"]`) : null);
             const placeholder = el.getAttribute('placeholder') || '';
             const name = el.getAttribute('name') || '';
-            const labelText = (labelEl?.textContent || placeholder || name || '').trim();
+            const ariaLabel = el.getAttribute('aria-label') || '';
+            const fieldset = el.closest('fieldset');
+            const legend = fieldset ? fieldset.querySelector('legend')?.textContent : '';
+
+            const labelText = (legend || labelEl?.textContent || ariaLabel || placeholder || name || '').trim();
 
             const tagName = el.tagName.toLowerCase();
             let fieldType = 'text';
@@ -358,10 +497,10 @@ export class IndeedAdapter implements IPlatformAdapter {
         if (!f.labelText) continue;
         const answer = resolveIndeedQuestion(f.labelText, f.fieldType as any, f.options, careerBrain);
 
-        await puppeteerPage.evaluate(
+        await pageOrFrame.evaluate(
           (idx: number, val: string, fType: string) => {
             const visibleInputs = Array.from(document.querySelectorAll('input, select, textarea')).filter(
-              (el: any) => el.offsetParent !== null,
+              (el: any) => el.offsetParent !== null && !el.disabled,
             );
             const el = visibleInputs[idx] as any;
             if (!el) return;
@@ -374,10 +513,32 @@ export class IndeedAdapter implements IPlatformAdapter {
                   break;
                 }
               }
-            } else if (fType === 'radio' || fType === 'checkbox') {
-              el.checked = true;
-              el.dispatchEvent(new Event('change', { bubbles: true }));
+            } else if (fType === 'radio') {
+              // Only check radio button if value matches or if not already checked
+              const rText = (
+                el.closest('label')?.textContent ||
+                el.parentElement?.textContent ||
+                el.value ||
+                ''
+              ).toLowerCase();
+              const valLo = val.toLowerCase();
+              if (valLo.startsWith('y') && (rText.includes('yes') || el.value.toLowerCase() === 'yes')) {
+                el.checked = true;
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+                el.click();
+              } else if (valLo.startsWith('n') && (rText.includes('no') || el.value.toLowerCase() === 'no')) {
+                el.checked = true;
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+                el.click();
+              }
+            } else if (fType === 'checkbox') {
+              if (!el.checked && (val.toLowerCase().startsWith('y') || val.toLowerCase() === 'true')) {
+                el.checked = true;
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+                el.click();
+              }
             } else {
+              // Text or number - don't overwrite if user already has a valid value
               if (!el.value) {
                 el.value = val;
                 el.dispatchEvent(new Event('input', { bubbles: true }));
@@ -390,7 +551,7 @@ export class IndeedAdapter implements IPlatformAdapter {
           f.fieldType,
         );
 
-        await new Promise(r => setTimeout(r, 200));
+        await new Promise(r => setTimeout(r, 150));
       }
     } catch (err) {
       logger.warning('[IndeedAdapter] Error filling step fields:', err);
