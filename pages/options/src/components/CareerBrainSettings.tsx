@@ -12,6 +12,8 @@ import {
   DEFAULT_GOLDEN_ANSWERS,
   DEFAULT_LINKEDIN_CONFIG,
   GOLDEN_ANSWER_CATEGORIES,
+  sortGoldenAnswersByPriority,
+  isSocialMediaOrUrlQuestion,
 } from '@extension/storage';
 import {
   FiUser,
@@ -65,10 +67,15 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
       if (!brainData.goldenAnswers || brainData.goldenAnswers.length === 0) {
         brainData.goldenAnswers = DEFAULT_GOLDEN_ANSWERS;
       }
+      brainData.goldenAnswers = sortGoldenAnswersByPriority(
+        brainData.goldenAnswers.filter(ga => !isSocialMediaOrUrlQuestion(ga.question)),
+      );
       if (!brainData.resumeText) {
         brainData.resumeText = DEFAULT_CAREER_BRAIN.resumeText;
       }
       setCareerBrain(brainData);
+      // Auto-persist cleaned & sorted golden answers so storage is immediately purged of Facebook/X
+      saveCareerBrainData(brainData).catch(() => {});
       // Live-Mode is temporarily hardcode-disabled / locked for safety verification
       setConfig({ ...configData, dryRun: true });
     });
@@ -77,6 +84,11 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
     const handleStorageChange = (changes: { [key: string]: chrome.storage.StorageChange }, areaName: string) => {
       if (areaName === 'local' && changes['linkedin_career_brain']?.newValue) {
         const newData = changes['linkedin_career_brain'].newValue as ICareerBrain;
+        if (newData.goldenAnswers) {
+          newData.goldenAnswers = sortGoldenAnswersByPriority(
+            newData.goldenAnswers.filter(ga => !isSocialMediaOrUrlQuestion(ga.question)),
+          );
+        }
         setCareerBrain(newData);
       }
     };
@@ -149,13 +161,6 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
     }
   };
 
-  const handleUpdateGoldenCategory = (id: string, newCategory: string) => {
-    setCareerBrain(prev => ({
-      ...prev,
-      goldenAnswers: prev.goldenAnswers.map(ga => (ga.id === id ? { ...ga, category: newCategory } : ga)),
-    }));
-  };
-
   const handleAddGoldenAnswerForCategory = (categoryToUse?: string) => {
     const newId = `custom_${Date.now()}`;
     const targetCategory =
@@ -191,9 +196,10 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
             c => !DEFAULT_GOLDEN_ANSWERS.some(d => d.question.toLowerCase() === c.question.toLowerCase()),
           ),
         ];
+        const cleanMerged = sortGoldenAnswersByPriority(merged.filter(ga => !isSocialMediaOrUrlQuestion(ga.question)));
         return {
           ...prev,
-          goldenAnswers: merged,
+          goldenAnswers: cleanMerged,
         };
       });
     }
@@ -207,10 +213,9 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
   };
 
   const getCategoryCount = (category: string) => {
-    if (category === 'All') return careerBrain.goldenAnswers.length;
-    return careerBrain.goldenAnswers.filter(
-      ga => (ga.category || '').toLowerCase().trim() === category.toLowerCase().trim(),
-    ).length;
+    const valid = careerBrain.goldenAnswers.filter(ga => !isSocialMediaOrUrlQuestion(ga.question));
+    if (category === 'All') return valid.length;
+    return valid.filter(ga => (ga.category || '').toLowerCase().trim() === category.toLowerCase().trim()).length;
   };
 
   const getCategoryBadgeClass = (category?: string) => {
@@ -239,27 +244,33 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
     return 'border-gray-300 bg-gray-50 text-gray-800 dark:border-slate-750 dark:bg-slate-800 dark:text-gray-300';
   };
 
-  const filteredGoldenAnswers = careerBrain.goldenAnswers.filter(item => {
-    // Category filter
-    if (selectedCategoryTab !== 'All') {
-      const itemCat = (item.category || '').toLowerCase().trim();
-      const tabCat = selectedCategoryTab.toLowerCase().trim();
-      if (itemCat !== tabCat && !itemCat.includes(tabCat) && !tabCat.includes(itemCat)) {
+  const filteredGoldenAnswers = sortGoldenAnswersByPriority(
+    careerBrain.goldenAnswers.filter(item => {
+      // Always exclude social media handles / URLs from screening questions
+      if (isSocialMediaOrUrlQuestion(item.question)) {
         return false;
       }
-    }
-    // Search query filter
-    if (goldenSearchQuery.trim()) {
-      const qLower = goldenSearchQuery.toLowerCase().trim();
-      const questionMatch = (item.question || '').toLowerCase().includes(qLower);
-      const answerMatch = (item.answer || '').toLowerCase().includes(qLower);
-      const categoryMatch = (item.category || '').toLowerCase().includes(qLower);
-      if (!questionMatch && !answerMatch && !categoryMatch) {
-        return false;
+      // Category filter
+      if (selectedCategoryTab !== 'All') {
+        const itemCat = (item.category || '').toLowerCase().trim();
+        const tabCat = selectedCategoryTab.toLowerCase().trim();
+        if (itemCat !== tabCat && !itemCat.includes(tabCat) && !tabCat.includes(itemCat)) {
+          return false;
+        }
       }
-    }
-    return true;
-  });
+      // Search query filter
+      if (goldenSearchQuery.trim()) {
+        const qLower = goldenSearchQuery.toLowerCase().trim();
+        const questionMatch = (item.question || '').toLowerCase().includes(qLower);
+        const answerMatch = (item.answer || '').toLowerCase().includes(qLower);
+        const categoryMatch = (item.category || '').toLowerCase().includes(qLower);
+        if (!questionMatch && !answerMatch && !categoryMatch) {
+          return false;
+        }
+      }
+      return true;
+    }),
+  );
 
   // Compute filtered suggestions based on typed input
   const query = newSkill.trim().toLowerCase();
@@ -1156,7 +1167,7 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
               </button>
             </div>
           ) : (
-            filteredGoldenAnswers.map(item => {
+            filteredGoldenAnswers.map((item, index) => {
               const originalIndex = careerBrain.goldenAnswers.findIndex(ga => ga.id === item.id);
               const hasQError = validationErrors[`goldenAnswers.${originalIndex}.question`];
               const hasAError = validationErrors[`goldenAnswers.${originalIndex}.answer`];
@@ -1173,29 +1184,28 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
                   } p-3.5 transition-all`}>
                   <div className="flex items-start gap-3">
                     <div className="flex-1 space-y-2.5">
-                      {/* Top bar: Category Selector & Tag */}
+                      {/* Top bar: Priority Rank & Category Pill */}
                       <div className="flex flex-wrap items-center justify-between gap-2">
                         <div className="flex items-center gap-2">
-                          <label className="text-[11px] font-semibold text-gray-500 dark:text-gray-400">
-                            Category:
-                          </label>
-                          <select
-                            value={item.category || 'Eligibility / Legal'}
-                            onChange={e => handleUpdateGoldenCategory(item.id, e.target.value)}
-                            className={`rounded-md border px-2 py-0.5 text-[11px] font-medium outline-none ${getCategoryBadgeClass(
-                              item.category,
-                            )}`}>
-                            {GOLDEN_ANSWER_CATEGORIES.map(c => (
-                              <option key={c} value={c}>
-                                {c}
-                              </option>
-                            ))}
-                            <option value="Custom Rule">Custom Rule</option>
-                          </select>
+                          <span className="rounded-md border border-amber-300 bg-amber-50 px-2 py-0.5 text-[11px] font-bold text-amber-800 dark:border-amber-800 dark:bg-amber-950/60 dark:text-amber-300">
+                            Priority #{index + 1}
+                          </span>
+                          {item.category && (
+                            <span
+                              className={`rounded-md border px-2 py-0.5 text-[11px] font-medium ${getCategoryBadgeClass(
+                                item.category,
+                              )}`}>
+                              {item.category}
+                            </span>
+                          )}
                         </div>
-                        {item.isDefault && (
+                        {item.isDefault ? (
                           <span className="rounded bg-gray-200/60 px-1.5 py-0.5 text-[10px] font-medium text-gray-600 dark:bg-slate-700 dark:text-gray-300">
                             Standard Recommended
+                          </span>
+                        ) : (
+                          <span className="rounded bg-indigo-100 px-1.5 py-0.5 text-[10px] font-medium text-indigo-700 dark:bg-indigo-900/50 dark:text-indigo-300">
+                            Custom Added
                           </span>
                         )}
                       </div>

@@ -40,6 +40,119 @@ export function isGenericWorkExperienceDateField(question: string): boolean {
 }
 
 /**
+ * Detects social media, platform profile, or URL screening questions that should NOT be stored as golden answers.
+ * e.g., "Facebook", "X (formerly Twitter)", "Twitter", "Instagram", "TikTok", etc.
+ */
+export function isSocialMediaOrUrlQuestion(question: string): boolean {
+  if (!question || typeof question !== 'string') return false;
+  const q = question.trim().toLowerCase();
+  return (
+    /^(?:facebook|x\s*\(formerly\s*twitter\)|twitter|instagram|tiktok|social\s*media|social\s*profile|linkedin\s*profile|github\s*profile|portfolio\s*url)$/i.test(
+      q,
+    ) ||
+    /^(?:enter|your|provide|link\s*to)?\s*(?:facebook|twitter|instagram|tiktok)\s*(?:profile|url|link|handle)?$/i.test(
+      q,
+    ) ||
+    q === 'x' ||
+    q === 'facebook' ||
+    q === 'twitter'
+  );
+}
+
+/**
+ * Priority order rank for sorting golden answers in real-world application sequence:
+ * 1. Work Authorization & Legal Eligibility (Gating)
+ * 2. Location & Relocation
+ * 3. Notice Period & Immediate Availability
+ * 4. Compensation & CTC
+ * 5. Experience & Core Skills
+ * 6. Recruiter Yes/No Screening & Compliance
+ * 7. Schedule, Shifts & Timezone
+ * 8. Diversity & Self-Identification
+ * 9. Custom Rules
+ */
+export function getGoldenAnswerPriorityWeight(item: IGoldenAnswer): number {
+  const q = (item.question || '').toLowerCase();
+  const id = (item.id || '').toLowerCase();
+  const cat = (item.category || '').toLowerCase();
+
+  // 1. Work Authorization & Sponsorship & Legal Eligibility (Top Gatekeepers)
+  if (
+    id.includes('work_auth') ||
+    q.includes('authorized to work') ||
+    q.includes('legally authorized') ||
+    q.includes('work authorization')
+  )
+    return 10;
+  if (id.includes('visa') || q.includes('sponsorship') || q.includes('require visa')) return 11;
+  if (id.includes('age') || q.includes('18 years') || q.includes('18 or older')) return 12;
+  if (id.includes('security_clearance') || q.includes('security clearance')) return 13;
+  if (id.includes('non_compete') || q.includes('non-compete')) return 14;
+  if (id.includes('felony') || q.includes('felony') || q.includes('criminal')) return 15;
+
+  // 2. Location & Relocation
+  if (id.includes('location') || q.includes('city of residence') || q.includes('current location')) return 20;
+  if (id.includes('relocation') || q.includes('relocate')) return 21;
+  if (id.includes('work_mode') || q.includes('remote') || q.includes('hybrid') || q.includes('office')) return 22;
+  if (id.includes('commute') || q.includes('commute')) return 23;
+
+  // 3. Notice Period & Availability to Start
+  if (id.includes('notice_period') || q.includes('notice period') || q.includes('when can you join')) return 30;
+  if (id.includes('start_immediately') || q.includes('start immediately')) return 31;
+
+  // 4. Compensation / CTC
+  if (id.includes('current_ctc') || q.includes('current ctc') || q.includes('current salary')) return 40;
+  if (id.includes('expected_ctc') || q.includes('expected ctc') || q.includes('expected salary')) return 41;
+  if (id.includes('salary_range') || q.includes('salary range')) return 42;
+
+  // 5. Total Experience & Core Skills
+  if (id.includes('experience_years') || q.includes('total years of') || q.includes('overall experience')) return 50;
+  if (
+    id.includes('highest_education') ||
+    q.includes('highest level of completed education') ||
+    q.includes('education level')
+  )
+    return 51;
+  if (id.includes('react') || q.includes('react')) return 52;
+  if (id.includes('node') || q.includes('node')) return 53;
+  if (id.includes('sql') || q.includes('sql')) return 54;
+  if (id.includes('production_llm') || q.includes('llm') || q.includes('ai')) return 55;
+
+  // 6. Recruiter Yes/No Screening
+  if (id.includes('driver_license') || q.includes('driver')) return 60;
+  if (id.includes('background_check') || q.includes('background')) return 61;
+  if (id.includes('drug_test') || q.includes('drug')) return 62;
+  if (id.includes('currently_employed') || q.includes('currently employed')) return 63;
+  if (id.includes('former_employee') || q.includes('previously worked')) return 64;
+
+  // 7. Shifts & Schedules
+  if (id.includes('preferred_shift') || q.includes('preferred shift')) return 70;
+  if (id.includes('shift_flexibility') || q.includes('weekends') || q.includes('on-call')) return 71;
+  if (id.includes('timezone_overlap') || q.includes('timezone') || q.includes('us hours')) return 72;
+
+  // 8. Diversity & Self-Identification
+  if (id.includes('gender') || q.includes('gender')) return 80;
+  if (id.includes('date_of_birth') || q.includes('date of birth') || q.includes('dob')) return 81;
+  if (id.includes('veteran') || q.includes('veteran')) return 82;
+  if (id.includes('disability') || q.includes('disability')) return 83;
+
+  // Fallbacks by category
+  if (cat.includes('eligibility') || cat.includes('legal')) return 16;
+  if (cat.includes('location')) return 24;
+  if (cat.includes('availability')) return 32;
+  if (cat.includes('compensation')) return 43;
+  if (cat.includes('experience') || cat.includes('education')) return 56;
+  if (cat.includes('screening')) return 65;
+  if (cat.includes('diversity')) return 84;
+
+  return 99;
+}
+
+export function sortGoldenAnswersByPriority(items: IGoldenAnswer[]): IGoldenAnswer[] {
+  return [...items].sort((a, b) => getGoldenAnswerPriorityWeight(a) - getGoldenAnswerPriorityWeight(b));
+}
+
+/**
  * Cleans a location string to extract a clean city / geographic location.
  * Strips out "or Remote", "(Remote)", "Remote /", "Hybrid", etc.
  * E.g., "Bengaluru, India or Remote" -> "Bengaluru, India".
@@ -746,9 +859,14 @@ export async function saveCareerBrainData(data: unknown): Promise<SaveCareerBrai
       };
     }
 
-    // 2. Add timestamp
+    // 2. Add timestamp & enforce clean priority sorting + filter social media questions
+    const cleanGoldenAnswers = sortGoldenAnswersByPriority(
+      (parseResult.data.goldenAnswers || []).filter(ga => !isSocialMediaOrUrlQuestion(ga.question)),
+    );
+
     const validatedData: ICareerBrain = {
       ...parseResult.data,
+      goldenAnswers: cleanGoldenAnswers,
       updatedAt: Date.now(),
     };
 
@@ -823,10 +941,12 @@ export async function getCareerBrainData(): Promise<ICareerBrain> {
       data = merged;
     }
 
-    // Seamless auto-migration: Purge any stale generic work-experience date fields from goldenAnswers
+    // Seamless auto-migration: Purge any stale generic work-experience date fields and social media (Facebook, X, etc.) from goldenAnswers
     let purgedStaleGolden = false;
     if (Array.isArray(data.goldenAnswers) && data.goldenAnswers.length > 0) {
-      const filtered = data.goldenAnswers.filter(ga => !isGenericWorkExperienceDateField(ga.question));
+      const filtered = data.goldenAnswers.filter(
+        ga => !isGenericWorkExperienceDateField(ga.question) && !isSocialMediaOrUrlQuestion(ga.question),
+      );
       if (filtered.length !== data.goldenAnswers.length) {
         data.goldenAnswers = filtered;
         purgedStaleGolden = true;
@@ -878,9 +998,12 @@ export async function getCareerBrainData(): Promise<ICareerBrain> {
       if (missingDefaults.length > 0) {
         data.goldenAnswers = [...(data.goldenAnswers || []), ...missingDefaults];
       }
+      data.goldenAnswers = sortGoldenAnswersByPriority(data.goldenAnswers);
       storage
         .set(data)
         .catch(err => console.error('[CareerBrainStorage] Failed to save merged defaults/sanitized data:', err));
+    } else if (Array.isArray(data.goldenAnswers) && data.goldenAnswers.length > 0) {
+      data.goldenAnswers = sortGoldenAnswersByPriority(data.goldenAnswers);
     }
 
     return data;
@@ -943,8 +1066,8 @@ export const careerBrainStore: CareerBrainStorage = {
   },
 
   async saveGoldenAnswer(question: string, answer: string, category?: string): Promise<void> {
-    // Never persist ambiguous relative work-experience date fields as generic golden answers
-    if (isGenericWorkExperienceDateField(question)) {
+    // Never persist ambiguous relative work-experience date fields or social media questions as generic golden answers
+    if (isGenericWorkExperienceDateField(question) || isSocialMediaOrUrlQuestion(question)) {
       return;
     }
 
@@ -969,6 +1092,7 @@ export const careerBrainStore: CareerBrainStorage = {
         category: category || 'Screening',
       });
     }
+    updatedGolden = sortGoldenAnswersByPriority(updatedGolden);
     await this.updateCareerBrain({ goldenAnswers: updatedGolden });
   },
 

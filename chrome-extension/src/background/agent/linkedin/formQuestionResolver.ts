@@ -20,6 +20,7 @@ import {
   type IWorkExperienceItem,
   isGenericWorkExperienceDateField,
   cleanLocationForCityField,
+  isSocialMediaOrUrlQuestion,
 } from '@extension/storage';
 import { isValidSkillName } from '@extension/shared';
 import { createLogger } from '../../log';
@@ -2292,7 +2293,7 @@ OUTPUT STRICTLY VALID JSON ONLY:
         }
 
         // Auto-save to goldenAnswers for future encounters
-        if (!isGenericWorkExperienceDateField(cleanLabel)) {
+        if (!isGenericWorkExperienceDateField(cleanLabel) && !isSocialMediaOrUrlQuestion(cleanLabel)) {
           await careerBrainStore.saveGoldenAnswer(cleanLabel, ans, 'Screening').catch(() => {});
           if (!careerBrain.goldenAnswers) careerBrain.goldenAnswers = [];
           careerBrain.goldenAnswers.push({
@@ -2597,7 +2598,7 @@ export async function resolveModalFieldWithAudit(
         }
 
         // Auto-save to goldenAnswers so future encounters of this question resolve immediately in Step 1
-        if (!isGenericWorkExperienceDateField(label)) {
+        if (!isGenericWorkExperienceDateField(label) && !isSocialMediaOrUrlQuestion(label)) {
           await careerBrainStore.saveGoldenAnswer(label, subjectiveMatch.answer, 'Screening').catch(() => {});
         }
 
@@ -2709,7 +2710,7 @@ export async function resolveModalFieldWithAudit(
       );
 
       // Auto-save to goldenAnswers
-      if (!isGenericWorkExperienceDateField(label)) {
+      if (!isGenericWorkExperienceDateField(label) && !isSocialMediaOrUrlQuestion(label)) {
         await careerBrainStore.saveGoldenAnswer(label, userAnswer, 'Screening');
       }
 
