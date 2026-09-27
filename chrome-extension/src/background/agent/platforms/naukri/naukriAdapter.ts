@@ -39,7 +39,7 @@ export class NaukriAdapter implements IPlatformAdapter {
     // Sort by relevance/freshness
     params.set('nignbevent', 'auto_apply');
 
-    return `https://www.naukri.com/jobs?${params.toString()}`;
+    return `https://www.naukri.com/jobs-in-india?${params.toString()}`;
   }
 
   public async validateSession(page: any): Promise<IPlatformSession> {
