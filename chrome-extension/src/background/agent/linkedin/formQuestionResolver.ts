@@ -2249,6 +2249,12 @@ DECISION RULES:
    - For relocation: "${careerBrain.willingToRelocate || 'Yes'}".
    - For shift: "${careerBrain.preferredShift || 'Day / Flexible'}".
    - For previous employment at this company: "No". For currently employed: "Yes".
+8. CONDITIONAL / FOLLOW-UP FIELDS ("If yes...", "If so...", "If you answered yes..."):
+   - If this field asks for details only applicable if the applicant answered "Yes" to a previous question (e.g. "If yes, approximate date(s)", "If yes, please explain", "If previous employee, state dates/manager") and the candidate answered "No" (e.g. never worked or interviewed there before): RETURN AN EMPTY STRING ("") OR "N/A" IF STRICTLY REQUIRED. NEVER INVENT DATES, ROLES, OR FALSE HISTORY FOR CONDITIONAL FIELDS!
+9. APPLICATION SOURCE / REFERRAL:
+   - If asked how you heard or learned about this job (e.g. "How did you learn about this job opportunity?", "Where did you hear about us?"): Pick the application platform (e.g. "Indeed" when on Indeed, "LinkedIn" when on LinkedIn) or "Job Board" / "Company Website".
+10. TIMEZONE / LOCATION CHECKBOXES (EST, CST, MST, PST, etc.):
+   - If asked "Where are you located?" or for working timezone, and options are US timezones (EST, CST, MST, PST), pick "EST" (Eastern Standard Time) as the default qualifying US timezone unless candidate specifies otherwise, ensuring a valid option is selected to satisfy required fields.
 
 OUTPUT STRICTLY VALID JSON ONLY:
 {

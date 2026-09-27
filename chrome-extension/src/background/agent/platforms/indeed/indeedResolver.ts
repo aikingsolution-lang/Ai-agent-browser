@@ -50,6 +50,39 @@ function computeInitialAnswer(
     return { value: 'I consent', confidence: 0.99, source: 'profile' };
   }
 
+  // 0.1 Conditional Follow-Up Fields (e.g. "If yes, approximate date(s):", "If yes, please explain", "If previous employee...")
+  const isConditionalIfYes =
+    /^(?:if\s+(?:yes|so|applicable|checked|other)|if\s+you\s+(?:answered\s+yes|are|have|were))\b/i.test(q) ||
+    /\bif\s+yes\b/i.test(q);
+  if (isConditionalIfYes) {
+    // If the applicant answered "No" to previous interview/employment questions, this MUST remain blank!
+    return { value: '', confidence: 0.99, source: 'profile' };
+  }
+
+  // 0.2 Job Source / "How did you learn about this job opportunity?" / Referral Source
+  if (
+    q.includes('how did you learn') ||
+    q.includes('how did you hear') ||
+    q.includes('where did you hear') ||
+    q.includes('where did you find') ||
+    q.includes('how did you find out') ||
+    q.includes('source of application') ||
+    q.includes('referral source') ||
+    q.includes('hear about this opportunity') ||
+    q.includes('learn about this job') ||
+    q.includes('hear about this role') ||
+    q.includes('hear about this job')
+  ) {
+    if (options.length > 0) {
+      const indeedOpt = options.find(o => o.toLowerCase().includes('indeed'));
+      if (indeedOpt) return { value: indeedOpt, confidence: 0.99, source: 'profile' };
+      const jobBoardOpt = options.find(o => /job\s*board|online|internet|website/i.test(o));
+      if (jobBoardOpt) return { value: jobBoardOpt, confidence: 0.95, source: 'profile' };
+      return { value: options[0], confidence: 0.95, source: 'profile' };
+    }
+    return { value: 'Indeed', confidence: 0.99, source: 'profile' };
+  }
+
   // 1. Work Authorization & Sponsorship
   if (q.includes('sponsorship') || q.includes('require sponsor') || q.includes('visa sponsor')) {
     if (options.length > 0) {
@@ -272,7 +305,7 @@ function computeInitialAnswer(
           const oLo = o.toLowerCase();
           return oLo.includes('est') || oLo.includes('eastern');
         });
-        return { value: estOpt || options[0], confidence: 0.9, source: 'profile' };
+        return { value: estOpt || options[0], confidence: 0.98, source: 'profile' };
       }
 
       return { value: options[0], confidence: 0.4, source: 'profile' };

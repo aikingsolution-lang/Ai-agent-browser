@@ -783,8 +783,18 @@ export class IndeedAdapter implements IPlatformAdapter {
             }
 
             const inputs = Array.from(
-              document.querySelectorAll('input, select, textarea, [role="checkbox"], [role="radio"]'),
+              document.querySelectorAll(
+                'input, select, textarea, [role="checkbox"], [role="radio"], [role="combobox"], button[aria-haspopup="listbox"], button.ia-Dropdown, button[data-testid*="select" i]',
+              ),
             ) as HTMLElement[];
+
+            const customSelectButtons = Array.from(document.querySelectorAll('button')).filter(b => {
+              const txt = (b.textContent || '').trim().toLowerCase();
+              return txt.includes('select an option') || txt.includes('choose an option');
+            });
+            for (const cb of customSelectButtons) {
+              if (!inputs.includes(cb)) inputs.push(cb);
+            }
 
             return inputs
               .filter((el: any) => isElementVisible(el) && !el.disabled)
@@ -798,12 +808,15 @@ export class IndeedAdapter implements IPlatformAdapter {
                 const ariaLabel = el.getAttribute('aria-label') || '';
                 const fieldset = el.closest('fieldset');
                 const legend = fieldset ? fieldset.querySelector('legend')?.textContent : '';
-                const containerText =
-                  el.closest('.ia-BasePage-component, div[class*="field" i], div[class*="question" i]')?.textContent ||
-                  '';
+                const container = el.closest('.ia-BasePage-component, div[class*="field" i], div[class*="question" i]');
+                const containerHeading = container?.querySelector(
+                  'h1, h2, h3, h4, h5, [class*="heading" i], [class*="title" i]',
+                )?.textContent;
+                const containerText = container?.textContent || '';
 
                 const labelText = (
                   legend ||
+                  containerHeading ||
                   labelEl?.textContent ||
                   ariaLabel ||
                   placeholder ||
@@ -814,18 +827,46 @@ export class IndeedAdapter implements IPlatformAdapter {
 
                 const tagName = el.tagName.toLowerCase();
                 const role = el.getAttribute('role');
+                const ariaHasPopup = el.getAttribute('aria-haspopup');
                 let fieldType = 'text';
-                if (tagName === 'select') fieldType = 'select';
-                else if (el.getAttribute('type') === 'radio' || role === 'radio') fieldType = 'radio';
-                else if (el.getAttribute('type') === 'checkbox' || role === 'checkbox') fieldType = 'checkbox';
-                else if (el.getAttribute('type') === 'number') fieldType = 'number';
+
+                if (
+                  tagName === 'select' ||
+                  role === 'combobox' ||
+                  ariaHasPopup === 'listbox' ||
+                  el.classList.contains('ia-Dropdown') ||
+                  (tagName === 'button' && (el.textContent || '').toLowerCase().includes('select an option'))
+                ) {
+                  fieldType = 'select';
+                } else if (el.getAttribute('type') === 'radio' || role === 'radio') {
+                  fieldType = 'radio';
+                } else if (el.getAttribute('type') === 'checkbox' || role === 'checkbox') {
+                  fieldType = 'checkbox';
+                } else if (el.getAttribute('type') === 'number') {
+                  fieldType = 'number';
+                }
 
                 const options: string[] = [];
-                if (tagName === 'select') {
-                  const optEls = Array.from(el.querySelectorAll('option'));
-                  for (const o of optEls) {
-                    const t = (o.textContent || '').trim();
-                    if (t && !t.toLowerCase().includes('select')) options.push(t);
+                if (fieldType === 'select') {
+                  if (tagName === 'select') {
+                    const optEls = Array.from(el.querySelectorAll('option'));
+                    for (const o of optEls) {
+                      const t = (o.textContent || '').trim();
+                      if (t && !t.toLowerCase().includes('select') && !options.includes(t)) options.push(t);
+                    }
+                  } else {
+                    const controlsId = el.getAttribute('aria-controls') || el.getAttribute('aria-owns');
+                    const listbox = controlsId
+                      ? document.getElementById(controlsId)
+                      : container?.querySelector('[role="listbox"], ul, div[class*="menu" i]') ||
+                        document.querySelector('[role="listbox"]');
+                    if (listbox) {
+                      const itemEls = Array.from(listbox.querySelectorAll('[role="option"], li, button'));
+                      for (const item of itemEls) {
+                        const t = (item.textContent || '').trim();
+                        if (t && !t.toLowerCase().includes('select an option') && !options.includes(t)) options.push(t);
+                      }
+                    }
                   }
                 } else if (fieldType === 'radio') {
                   const groupName = el.getAttribute('name');
@@ -833,10 +874,25 @@ export class IndeedAdapter implements IPlatformAdapter {
                     ? Array.from(document.querySelectorAll(`input[name="${groupName}"]`))
                     : fieldset
                       ? Array.from(fieldset.querySelectorAll('input[type="radio"], [role="radio"]'))
-                      : [];
+                      : container
+                        ? Array.from(container.querySelectorAll('input[type="radio"], [role="radio"]'))
+                        : [];
                   for (const sib of siblings) {
                     const sibText = (sib.closest('label')?.textContent || (sib as any).value || '').trim();
-                    if (sibText) options.push(sibText);
+                    if (sibText && !options.includes(sibText)) options.push(sibText);
+                  }
+                } else if (fieldType === 'checkbox') {
+                  const groupName = el.getAttribute('name');
+                  const siblings = groupName
+                    ? Array.from(document.querySelectorAll(`input[name="${groupName}"]`))
+                    : fieldset
+                      ? Array.from(fieldset.querySelectorAll('input[type="checkbox"], [role="checkbox"]'))
+                      : container
+                        ? Array.from(container.querySelectorAll('input[type="checkbox"], [role="checkbox"]'))
+                        : [];
+                  for (const sib of siblings) {
+                    const sibText = (sib.closest('label')?.textContent || (sib as any).value || '').trim();
+                    if (sibText && !options.includes(sibText)) options.push(sibText);
                   }
                 }
 
@@ -863,6 +919,17 @@ export class IndeedAdapter implements IPlatformAdapter {
           // If the question is outside simple static contact/consent fields, or presents multiple-choice options,
           // ALWAYS ask the autonomous LLM to make the optimal, qualifying determination!
           const labelLo = f.labelText.toLowerCase();
+
+          // Conditional "If yes..." follow-up fields:
+          const isConditionalIfYes =
+            /^(?:if\s+(?:yes|so|applicable|checked|other)|if\s+you\s+(?:answered\s+yes|are|have|were))\b/i.test(
+              labelLo,
+            ) || /\bif\s+yes\b/i.test(labelLo);
+          if (isConditionalIfYes) {
+            // Never let LLM or rules fill invented dates/text for conditional follow-ups!
+            answer = { value: '', confidence: 0.99, source: 'profile' };
+          }
+
           const isBasicIdentityField =
             f.fieldType === 'text' &&
             (labelLo === 'first name' ||
@@ -884,7 +951,9 @@ export class IndeedAdapter implements IPlatformAdapter {
               labelLo.includes('terms'));
 
           const shouldUseLLM =
-            scopedLLM && ((!isBasicIdentityField && !isDirectConsentField) || answer.confidence < 0.9);
+            scopedLLM &&
+            !isConditionalIfYes &&
+            ((!isBasicIdentityField && !isDirectConsentField) || answer.confidence < 0.9);
 
           if (shouldUseLLM) {
             try {
@@ -943,33 +1012,91 @@ export class IndeedAdapter implements IPlatformAdapter {
                   input.dispatchEvent(new Event('blur', { bubbles: true }));
                 }
 
-                const visibleInputs = (
-                  Array.from(
-                    document.querySelectorAll('input, select, textarea, [role="checkbox"], [role="radio"]'),
-                  ) as HTMLElement[]
-                ).filter((el: any) => isElementVisible(el) && !el.disabled);
+                const inputs = Array.from(
+                  document.querySelectorAll(
+                    'input, select, textarea, [role="checkbox"], [role="radio"], [role="combobox"], button[aria-haspopup="listbox"], button.ia-Dropdown, button[data-testid*="select" i]',
+                  ),
+                ) as HTMLElement[];
+
+                const customSelectButtons = Array.from(document.querySelectorAll('button')).filter(b => {
+                  const txt = (b.textContent || '').trim().toLowerCase();
+                  return txt.includes('select an option') || txt.includes('choose an option');
+                });
+                for (const cb of customSelectButtons) {
+                  if (!inputs.includes(cb)) inputs.push(cb);
+                }
+
+                const visibleInputs = inputs.filter((el: any) => isElementVisible(el) && !el.disabled);
                 const el = visibleInputs[idx] as any;
                 if (!el) return;
 
                 if (fType === 'select') {
-                  el.focus();
-                  let matched = false;
-                  for (let i = 0; i < el.options.length; i++) {
-                    if (
-                      el.options[i].text.toLowerCase().includes(val.toLowerCase()) ||
-                      el.options[i].value.toLowerCase().includes(val.toLowerCase())
-                    ) {
-                      el.selectedIndex = i;
-                      el.dispatchEvent(new Event('change', { bubbles: true }));
-                      matched = true;
-                      break;
+                  if (el.tagName.toLowerCase() === 'select') {
+                    el.focus();
+                    let matched = false;
+                    for (let i = 0; i < el.options.length; i++) {
+                      if (
+                        el.options[i].text.toLowerCase().includes(val.toLowerCase()) ||
+                        el.options[i].value.toLowerCase().includes(val.toLowerCase())
+                      ) {
+                        el.selectedIndex = i;
+                        el.dispatchEvent(new Event('change', { bubbles: true }));
+                        matched = true;
+                        break;
+                      }
                     }
+                    if (!matched && el.options.length > 1 && el.selectedIndex <= 0) {
+                      el.selectedIndex = 1;
+                      el.dispatchEvent(new Event('change', { bubbles: true }));
+                    }
+                    el.dispatchEvent(new Event('blur', { bubbles: true }));
+                  } else {
+                    // Custom Combobox / Listbox trigger button (e.g. Indeed's "Select an option" custom dropdown)
+                    el.focus();
+                    el.click();
+
+                    setTimeout(() => {
+                      // 1. Check if a search input appeared inside the dropdown (e.g. "Search to select an option")
+                      const searchInput = (document.querySelector(
+                        'input[placeholder*="search" i], input[placeholder*="select an option" i], input[role="searchbox"]',
+                      ) ||
+                        el
+                          .closest('.ia-BasePage-component, div[class*="field" i]')
+                          ?.querySelector('input[type="text"]')) as HTMLInputElement;
+
+                      if (searchInput && isElementVisible(searchInput)) {
+                        setReactInputValue(searchInput, val || 'Indeed');
+                      }
+
+                      // 2. Select matching item from popup listbox / menu
+                      const listbox = document.querySelector(
+                        '[role="listbox"], ul[class*="list" i], div[class*="menu" i]',
+                      );
+                      const optionItems = Array.from(
+                        (listbox || document).querySelectorAll('[role="option"], li, button[class*="item" i]'),
+                      ) as HTMLElement[];
+
+                      const valLo = (val || 'Indeed').toLowerCase().trim();
+                      let matchedItem = optionItems.find(item => {
+                        const itemTxt = (item.textContent || '').toLowerCase().trim();
+                        return itemTxt === valLo || itemTxt.includes(valLo) || valLo.includes(itemTxt);
+                      });
+
+                      if (!matchedItem && optionItems.length > 0) {
+                        matchedItem =
+                          optionItems.find(
+                            item => !(item.textContent || '').toLowerCase().includes('select an option'),
+                          ) || optionItems[0];
+                      }
+
+                      if (matchedItem) {
+                        matchedItem.focus();
+                        matchedItem.click();
+                        matchedItem.dispatchEvent(new Event('mousedown', { bubbles: true }));
+                        matchedItem.dispatchEvent(new Event('mouseup', { bubbles: true }));
+                      }
+                    }, 150);
                   }
-                  if (!matched && el.options.length > 1 && el.selectedIndex <= 0) {
-                    el.selectedIndex = 1;
-                    el.dispatchEvent(new Event('change', { bubbles: true }));
-                  }
-                  el.dispatchEvent(new Event('blur', { bubbles: true }));
                 } else if (fType === 'radio') {
                   const rText = (
                     el.closest('label')?.textContent ||
@@ -1003,8 +1130,19 @@ export class IndeedAdapter implements IPlatformAdapter {
                   }
                 } else if (fType === 'checkbox') {
                   const isChecked = el.checked === true || el.getAttribute('aria-checked') === 'true';
-                  const valLo = (val || '').toLowerCase();
-                  const shouldCheck =
+                  const valLo = (val || '').toLowerCase().trim();
+                  const boxText = (
+                    el.closest('label')?.textContent ||
+                    el.parentElement?.textContent ||
+                    el.getAttribute('aria-label') ||
+                    el.value ||
+                    ''
+                  )
+                    .toLowerCase()
+                    .trim();
+
+                  // 1. Direct consent / agreement checkbox
+                  const isConsentCheck =
                     valLo.startsWith('y') ||
                     valLo === 'true' ||
                     valLo.includes('consent') ||
@@ -1013,6 +1151,20 @@ export class IndeedAdapter implements IPlatformAdapter {
                     valLo.includes('acknowledge') ||
                     valLo.includes('policy') ||
                     valLo.includes('terms');
+
+                  // 2. Option checkbox (e.g. timezone "EST", location, skill)
+                  const isOptionMatch =
+                    Boolean(valLo) &&
+                    Boolean(boxText) &&
+                    (boxText === valLo ||
+                      valLo
+                        .split(',')
+                        .map(s => s.trim())
+                        .includes(boxText) ||
+                      boxText.includes(valLo) ||
+                      valLo.includes(boxText));
+
+                  const shouldCheck = isConsentCheck || isOptionMatch;
 
                   if (!isChecked && shouldCheck) {
                     el.focus();
@@ -1023,14 +1175,22 @@ export class IndeedAdapter implements IPlatformAdapter {
                       el.setAttribute('aria-checked', 'true');
                       el.dispatchEvent(new Event('input', { bubbles: true }));
                       el.dispatchEvent(new Event('change', { bubbles: true }));
-                      el.closest('label')?.click();
                     }
+                    el.closest('label')?.click();
                   }
                 } else {
-                  // Only fill if empty or if invalid placeholder/default like "Yes"/"No"
+                  // For text / textarea: if value is explicitly empty (e.g. conditional "If yes" field when user answered No),
+                  // leave blank and clear any previously hallucinated placeholder!
+                  if (val === '') {
+                    const cur = (el.value || '').trim().toLowerCase();
+                    if (cur.startsWith('approx') || cur === 'yes' || cur === 'no') {
+                      setReactInputValue(el, '');
+                    }
+                    return;
+                  }
                   const curVal = (el.value || '').trim().toLowerCase();
                   if (!curVal || curVal === 'yes' || curVal === 'no') {
-                    setReactInputValue(el, val || '1');
+                    setReactInputValue(el, val || '');
                   }
                 }
               },
@@ -1055,6 +1215,7 @@ export class IndeedAdapter implements IPlatformAdapter {
               return rect.width > 0 && rect.height > 0;
             }
 
+            // 1. Radio safety pass
             const radios = (
               Array.from(document.querySelectorAll('input[type="radio"], [role="radio"]')) as HTMLElement[]
             ).filter(el => isElementVisible(el) && !(el as any).disabled);
@@ -1086,6 +1247,61 @@ export class IndeedAdapter implements IPlatformAdapter {
                   preferred.dispatchEvent(new Event('change', { bubbles: true }));
                   preferred.closest('label')?.click();
                 } catch {}
+              }
+            }
+
+            // 2. Checkbox safety pass: ensure required checkbox groups have at least one selection (e.g. timezone EST, CST...)
+            const checkboxes = (
+              Array.from(document.querySelectorAll('input[type="checkbox"], [role="checkbox"]')) as HTMLElement[]
+            ).filter(el => isElementVisible(el) && !(el as any).disabled);
+
+            const checkboxGroups = new Map<string, HTMLElement[]>();
+            checkboxes.forEach((cb, idx) => {
+              const container =
+                cb.closest('fieldset, .ia-BasePage-component, div[class*="field" i], div[class*="question" i]') ||
+                cb.parentElement;
+              const groupKey = container?.id || cb.getAttribute('name') || `cb_group_${Math.floor(idx / 4)}`;
+              if (!checkboxGroups.has(groupKey)) checkboxGroups.set(groupKey, []);
+              checkboxGroups.get(groupKey)!.push(cb);
+            });
+
+            for (const [_, groupCbs] of checkboxGroups) {
+              const anyChecked = groupCbs.some(
+                c => (c as HTMLInputElement).checked || c.getAttribute('aria-checked') === 'true',
+              );
+              if (!anyChecked && groupCbs.length > 0) {
+                const container = groupCbs[0].closest(
+                  'fieldset, .ia-BasePage-component, div[class*="field" i], div[class*="question" i]',
+                );
+                const containerText = (container?.textContent || '').toLowerCase();
+                const isRequired =
+                  containerText.includes('*') ||
+                  containerText.includes('required') ||
+                  containerText.includes('choose an option');
+
+                if (isRequired) {
+                  const preferred =
+                    groupCbs.find(c => {
+                      const txt = (c.closest('label')?.textContent || (c as any).value || '').toLowerCase();
+                      return (
+                        txt.includes('est') ||
+                        txt.includes('eastern') ||
+                        txt.startsWith('yes') ||
+                        txt.includes('consent') ||
+                        txt.includes('agree')
+                      );
+                    }) || groupCbs[0];
+
+                  try {
+                    preferred.focus();
+                    preferred.click();
+                    (preferred as HTMLInputElement).checked = true;
+                    preferred.setAttribute('aria-checked', 'true');
+                    preferred.dispatchEvent(new Event('input', { bubbles: true }));
+                    preferred.dispatchEvent(new Event('change', { bubbles: true }));
+                    preferred.closest('label')?.click();
+                  } catch {}
+                }
               }
             }
           },
@@ -1139,11 +1355,21 @@ export class IndeedAdapter implements IPlatformAdapter {
 
             if (!errorContainers.length) return { hasErrors: false, fieldsToFix: [] };
 
-            const allInputs = (
-              Array.from(
-                document.querySelectorAll('input, select, textarea, [role="checkbox"], [role="radio"]'),
-              ) as HTMLElement[]
-            ).filter(el => isElementVisible(el) && !(el as any).disabled);
+            const inputs = Array.from(
+              document.querySelectorAll(
+                'input, select, textarea, [role="checkbox"], [role="radio"], [role="combobox"], button[aria-haspopup="listbox"], button.ia-Dropdown, button[data-testid*="select" i]',
+              ),
+            ) as HTMLElement[];
+
+            const customSelectButtons = Array.from(document.querySelectorAll('button')).filter(b => {
+              const txt = (b.textContent || '').trim().toLowerCase();
+              return txt.includes('select an option') || txt.includes('choose an option');
+            });
+            for (const cb of customSelectButtons) {
+              if (!inputs.includes(cb)) inputs.push(cb);
+            }
+
+            const allInputs = inputs.filter(el => isElementVisible(el) && !(el as any).disabled);
 
             const handledRadioGroups = new Set<string>();
             const fieldsToFix: Array<{
@@ -1155,12 +1381,19 @@ export class IndeedAdapter implements IPlatformAdapter {
             }> = [];
 
             allInputs.forEach((el, idx) => {
+              const tagName = el.tagName.toLowerCase();
+              const role = el.getAttribute('role');
+              const ariaHasPopup = el.getAttribute('aria-haspopup');
               const fType =
-                el.getAttribute('type') === 'checkbox' || el.getAttribute('role') === 'checkbox'
+                el.getAttribute('type') === 'checkbox' || role === 'checkbox'
                   ? 'checkbox'
-                  : el.getAttribute('type') === 'radio' || el.getAttribute('role') === 'radio'
+                  : el.getAttribute('type') === 'radio' || role === 'radio'
                     ? 'radio'
-                    : el.tagName.toLowerCase() === 'select'
+                    : tagName === 'select' ||
+                        role === 'combobox' ||
+                        ariaHasPopup === 'listbox' ||
+                        el.classList.contains('ia-Dropdown') ||
+                        (tagName === 'button' && (el.textContent || '').toLowerCase().includes('select an option'))
                       ? 'select'
                       : 'text';
 
@@ -1171,6 +1404,7 @@ export class IndeedAdapter implements IPlatformAdapter {
               const container =
                 el.closest('fieldset, .ia-BasePage-component, div[class*="field" i], div[class*="question" i]') ||
                 el.parentElement;
+              const fieldset = el.closest('fieldset');
               const hasNearbyError = container ? errorContainers.some(err => container.contains(err)) : false;
 
               let isUncheckedRadioGroup = false;
@@ -1202,7 +1436,7 @@ export class IndeedAdapter implements IPlatformAdapter {
                   .filter(Boolean);
               }
 
-              if (isInvalid || isUncheckedCheckbox || hasNearbyError || isUncheckedRadioGroup) {
+              if (isInvalid || (isUncheckedCheckbox && hasNearbyError) || hasNearbyError || isUncheckedRadioGroup) {
                 let label = '';
                 if (fType === 'radio') {
                   const groupLegend = container?.querySelector(
@@ -1233,9 +1467,36 @@ export class IndeedAdapter implements IPlatformAdapter {
                 if (fType === 'radio') {
                   options = siblingOptions;
                 } else if (fType === 'select') {
-                  options = Array.from((el as HTMLSelectElement).querySelectorAll('option'))
-                    .map(o => (o.textContent || '').trim())
-                    .filter(t => t && !t.toLowerCase().includes('select'));
+                  if (tagName === 'select') {
+                    options = Array.from((el as HTMLSelectElement).querySelectorAll('option'))
+                      .map(o => (o.textContent || '').trim())
+                      .filter(t => t && !t.toLowerCase().includes('select'));
+                  } else {
+                    const listbox = document.querySelector(
+                      '[role="listbox"], ul[class*="list" i], div[class*="menu" i]',
+                    );
+                    if (listbox) {
+                      options = Array.from(listbox.querySelectorAll('[role="option"], li, button'))
+                        .map(i => (i.textContent || '').trim())
+                        .filter(t => t && !t.toLowerCase().includes('select an option'));
+                    }
+                  }
+                } else if (fType === 'checkbox') {
+                  const groupName = el.getAttribute('name');
+                  const siblings = groupName
+                    ? (Array.from(document.querySelectorAll(`input[name="${groupName}"]`)) as HTMLElement[])
+                    : fieldset
+                      ? (Array.from(
+                          fieldset.querySelectorAll('input[type="checkbox"], [role="checkbox"]'),
+                        ) as HTMLElement[])
+                      : container
+                        ? (Array.from(
+                            container.querySelectorAll('input[type="checkbox"], [role="checkbox"]'),
+                          ) as HTMLElement[])
+                        : [];
+                  options = siblings
+                    .map(s => (s.closest('label')?.textContent || (s as any).value || '').trim())
+                    .filter(Boolean);
                 }
 
                 fieldsToFix.push({
@@ -1264,32 +1525,72 @@ export class IndeedAdapter implements IPlatformAdapter {
 
       const frameId = hit.frameId;
       for (const fix of hit.result.fieldsToFix) {
-        // If it's a checkbox (e.g. "I consent"), ALWAYS tick it!
+        // If it's a checkbox (e.g. timezone EST, CST, or "I consent"), solve and tick the matching option!
         if (fix.type === 'checkbox') {
-          logger.info(`[IndeedAdapter] Auto-healing checkbox: Ticking "${fix.label || 'Consent'}"`);
+          let targetAnswer = 'EST';
+          if (fix.options && fix.options.length > 0) {
+            const isTz = fix.options.some(o => /est|cst|mst|pst/i.test(o));
+            if (isTz) {
+              targetAnswer = fix.options.find(o => /est|eastern/i.test(o)) || fix.options[0];
+            } else {
+              targetAnswer = fix.options[0];
+            }
+          }
+          logger.info(`[IndeedAdapter] Auto-healing checkbox: Ticking "${fix.label || 'Checkbox'}" (${targetAnswer})`);
           await chrome.scripting
             .executeScript({
               target: { tabId, frameIds: [frameId] },
-              func: (idx: number) => {
-                const inputs = (
-                  Array.from(
-                    document.querySelectorAll('input, select, textarea, [role="checkbox"], [role="radio"]'),
-                  ) as HTMLElement[]
-                ).filter(el => !(el as any).disabled);
-                const el = inputs[idx] as any;
-                if (el) {
-                  el.focus();
-                  el.click();
-                  if (!el.checked && el.getAttribute('aria-checked') !== 'true') {
-                    el.checked = true;
-                    el.setAttribute('aria-checked', 'true');
-                    el.dispatchEvent(new Event('input', { bubbles: true }));
-                    el.dispatchEvent(new Event('change', { bubbles: true }));
-                    el.closest('label')?.click();
-                  }
+              func: (idx: number, optVal: string) => {
+                function isElementVisible(el: HTMLElement): boolean {
+                  if (!el) return false;
+                  const style = window.getComputedStyle(el);
+                  if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+                  const rect = el.getBoundingClientRect();
+                  return rect.width > 0 && rect.height > 0;
                 }
+
+                const inputs = Array.from(
+                  document.querySelectorAll(
+                    'input, select, textarea, [role="checkbox"], [role="radio"], [role="combobox"], button[aria-haspopup="listbox"], button.ia-Dropdown, button[data-testid*="select" i]',
+                  ),
+                ) as HTMLElement[];
+                const customSelectButtons = Array.from(document.querySelectorAll('button')).filter(b => {
+                  const txt = (b.textContent || '').trim().toLowerCase();
+                  return txt.includes('select an option') || txt.includes('choose an option');
+                });
+                for (const cb of customSelectButtons) {
+                  if (!inputs.includes(cb)) inputs.push(cb);
+                }
+                const visibleInputs = inputs.filter(el => isElementVisible(el) && !(el as any).disabled);
+                const el = visibleInputs[idx] as any;
+                if (!el) return;
+
+                const container =
+                  el.closest('fieldset, .ia-BasePage-component, div[class*="field" i], div[class*="question" i]') ||
+                  el.parentElement;
+                const cbs = container
+                  ? (Array.from(
+                      container.querySelectorAll('input[type="checkbox"], [role="checkbox"]'),
+                    ) as HTMLElement[])
+                  : [el];
+                const optLo = (optVal || '').toLowerCase();
+                const matchedCb =
+                  cbs.find(c => {
+                    const t = (c.closest('label')?.textContent || (c as any).value || '').toLowerCase();
+                    return t.includes(optLo) || optLo.includes(t);
+                  }) || el;
+
+                matchedCb.focus();
+                matchedCb.click();
+                if (!(matchedCb as any).checked && matchedCb.getAttribute('aria-checked') !== 'true') {
+                  (matchedCb as any).checked = true;
+                  matchedCb.setAttribute('aria-checked', 'true');
+                  matchedCb.dispatchEvent(new Event('input', { bubbles: true }));
+                  matchedCb.dispatchEvent(new Event('change', { bubbles: true }));
+                }
+                matchedCb.closest('label')?.click();
               },
-              args: [fix.index],
+              args: [fix.index, targetAnswer],
             })
             .catch(() => {});
           continue;
@@ -1331,12 +1632,28 @@ export class IndeedAdapter implements IPlatformAdapter {
           .executeScript({
             target: { tabId, frameIds: [frameId] },
             func: (idx: number, val: string, fType: string) => {
-              const inputs = (
-                Array.from(
-                  document.querySelectorAll('input, select, textarea, [role="checkbox"], [role="radio"]'),
-                ) as HTMLElement[]
-              ).filter(el => !(el as any).disabled);
-              const el = inputs[idx] as any;
+              function isElementVisible(el: HTMLElement): boolean {
+                if (!el) return false;
+                const style = window.getComputedStyle(el);
+                if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+                const rect = el.getBoundingClientRect();
+                return rect.width > 0 && rect.height > 0;
+              }
+
+              const inputs = Array.from(
+                document.querySelectorAll(
+                  'input, select, textarea, [role="checkbox"], [role="radio"], [role="combobox"], button[aria-haspopup="listbox"], button.ia-Dropdown, button[data-testid*="select" i]',
+                ),
+              ) as HTMLElement[];
+              const customSelectButtons = Array.from(document.querySelectorAll('button')).filter(b => {
+                const txt = (b.textContent || '').trim().toLowerCase();
+                return txt.includes('select an option') || txt.includes('choose an option');
+              });
+              for (const cb of customSelectButtons) {
+                if (!inputs.includes(cb)) inputs.push(cb);
+              }
+              const visibleInputs = inputs.filter(el => isElementVisible(el) && !(el as any).disabled);
+              const el = visibleInputs[idx] as any;
               if (!el) return;
 
               if (fType === 'radio') {
@@ -1370,19 +1687,38 @@ export class IndeedAdapter implements IPlatformAdapter {
                   (matched as any).closest('label')?.click();
                 }
               } else if (fType === 'select') {
-                el.focus();
-                for (let i = 0; i < el.options.length; i++) {
-                  if (el.options[i].text.toLowerCase().includes(val.toLowerCase())) {
-                    el.selectedIndex = i;
-                    el.dispatchEvent(new Event('change', { bubbles: true }));
-                    break;
+                if (el.tagName.toLowerCase() === 'select') {
+                  el.focus();
+                  for (let i = 0; i < el.options.length; i++) {
+                    if (el.options[i].text.toLowerCase().includes(val.toLowerCase())) {
+                      el.selectedIndex = i;
+                      el.dispatchEvent(new Event('change', { bubbles: true }));
+                      break;
+                    }
                   }
+                  if (el.selectedIndex <= 0 && el.options.length > 1) {
+                    el.selectedIndex = 1;
+                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                  }
+                  el.dispatchEvent(new Event('blur', { bubbles: true }));
+                } else {
+                  el.focus();
+                  el.click();
+                  setTimeout(() => {
+                    const listbox = document.querySelector(
+                      '[role="listbox"], ul[class*="list" i], div[class*="menu" i]',
+                    );
+                    const items = Array.from(
+                      (listbox || document).querySelectorAll('[role="option"], li, button[class*="item" i]'),
+                    ) as HTMLElement[];
+                    const valLo = (val || 'Indeed').toLowerCase();
+                    const target = items.find(it => (it.textContent || '').toLowerCase().includes(valLo)) || items[0];
+                    if (target) {
+                      target.focus();
+                      target.click();
+                    }
+                  }, 150);
                 }
-                if (el.selectedIndex <= 0 && el.options.length > 1) {
-                  el.selectedIndex = 1;
-                  el.dispatchEvent(new Event('change', { bubbles: true }));
-                }
-                el.dispatchEvent(new Event('blur', { bubbles: true }));
               } else {
                 el.focus();
                 const nativeSetter = Object.getOwnPropertyDescriptor(
