@@ -1536,7 +1536,16 @@ export class DedicatedJobRunner {
     this.isRunning = true;
     this.abortController = new AbortController();
 
-    const BATCH_CAP = Math.min(options.maxJobs || 10, 10);
+    const initialQuota = await DailyQuotaManager.canApplyToday();
+    if (!initialQuota.allowed) {
+      const quotaMsg = `🛑 Daily application quota already completed (${initialQuota.currentCount}/${initialQuota.maxQuota} today). Auto Apply is complete for today.`;
+      this.notifyStatus(portToSend, quotaMsg, 'fail');
+      return { status: 'stopped', message: quotaMsg, stats };
+    }
+
+    const targetToApply = options.maxJobs ? Math.min(options.maxJobs, initialQuota.remaining) : initialQuota.remaining;
+    const sessionStartTime = Date.now();
+    const MAX_SESSION_DURATION_MS = 60 * 60 * 1000; // 60 minutes session max duration
     const runId = `auto_loop_${Date.now()}`;
     this.activeRunId = runId;
     this.activePort = portToSend || null;
@@ -1750,612 +1759,670 @@ export class DedicatedJobRunner {
         }
       }
 
-      // 5. Read Left-Hand Job List Pane across prioritized locations (until BATCH_CAP is satisfied)
-      const queue: Array<{ jobId: string; title: string; company: string; url: string }> = [];
+      // 5. Continuous Search & Apply across prioritized locations and search pages until Daily Limit is reached
       const seenJobIds = new Set<string>();
+      const maxPagesPerLocation = 10;
       let totalLinkedInScanned = 0;
 
-      for (let locIdx = 0; locIdx < prioritizedLocations.length; locIdx++) {
-        if (queue.length >= BATCH_CAP || !this.isRunning) break;
+      this.notifyStatus(
+        portToSend,
+        `🚀 Starting continuous LinkedIn Auto Apply session! Goal: Complete daily application limit (${stats.applied + targetToApply} total, need ${targetToApply} today). Safe pacing across 30–60 minutes.`,
+        'ok',
+      );
+
+      locationLoop: for (let locIdx = 0; locIdx < prioritizedLocations.length; locIdx++) {
+        if (
+          !this.isRunning ||
+          stats.applied >= targetToApply ||
+          Date.now() - sessionStartTime >= MAX_SESSION_DURATION_MS
+        )
+          break;
 
         const currentLoc = prioritizedLocations[locIdx];
         const locRank = locIdx + 1;
 
-        if (locIdx > 0) {
-          const nextSearchUrl = linkedinAdapter.buildSearchUrl(role, currentLoc, candidateNameSources);
+        pageLoop: for (let searchPageIndex = 0; searchPageIndex < maxPagesPerLocation; searchPageIndex++) {
+          if (
+            !this.isRunning ||
+            stats.applied >= targetToApply ||
+            Date.now() - sessionStartTime >= MAX_SESSION_DURATION_MS
+          )
+            break;
+
+          // Daily Quota check before each search page
+          const quota = await DailyQuotaManager.canApplyToday();
+          if (!quota.allowed) {
+            this.notifyStatus(
+              portToSend,
+              `🎉 Daily application quota reached (${quota.currentCount}/${quota.maxQuota} today)! Auto Apply completed.`,
+              'ok',
+            );
+            break locationLoop;
+          }
+
+          // Hard credit budget check (minimum 5 credits to ensure balance for form-filling LLM calls)
+          const balanceRes = await backendApiClient.getCreditsBalance().catch(() => null);
+          if (balanceRes?.data?.remainingCredits !== undefined && balanceRes.data.remainingCredits < 5) {
+            const creditMsg = `🛑 Insufficient credit budget (${balanceRes.data.remainingCredits} remaining, minimum 5 required). Halting run.`;
+            this.notifyStatus(portToSend, creditMsg, 'fail');
+            break locationLoop;
+          }
+
+          const startOffset = searchPageIndex * 25;
+          const searchUrl = linkedinAdapter.buildSearchUrl(role, currentLoc, candidateNameSources, startOffset);
+          const elapsedMins = Math.floor((Date.now() - sessionStartTime) / 60000);
+
           this.notifyStatus(
             portToSend,
-            `📍 [LinkedIn] Location #${locRank - 1} yielded ${queue.length}/${BATCH_CAP} jobs. Checking Location #${locRank}: "${currentLoc}"...`,
+            `📄 [LinkedIn] [Location #${locRank}: ${currentLoc}] Loading page ${searchPageIndex + 1} (start=${startOffset}) | Progress: ${stats.applied}/${targetToApply} applied (${elapsedMins}m elapsed)...`,
             'info',
           );
+
           try {
             if (currentPage.puppeteerPage) {
-              await currentPage.puppeteerPage.goto(nextSearchUrl, { waitUntil: 'domcontentloaded', timeout: 35000 });
+              await currentPage.puppeteerPage.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 35000 });
             } else if ((currentPage as any).navigateTo) {
-              await (currentPage as any).navigateTo(nextSearchUrl);
+              await (currentPage as any).navigateTo(searchUrl);
             }
           } catch {}
+
           const sleepAborted = await this.interruptibleSleep(3500);
-          if (sleepAborted || !this.isRunning) break;
-        }
+          if (sleepAborted || !this.isRunning) break locationLoop;
 
-        let jobCards: Array<{ jobId: string; title: string; company: string; url: string }> = [];
-        let readAttempts = 0;
-        while (readAttempts < 3 && jobCards.length === 0) {
-          readAttempts++;
-          if (!this.isRunning) break;
-          this.notifyStatus(
-            portToSend,
-            `🔍 Scanning LinkedIn job search results for "${currentLoc}" (attempt ${readAttempts}/3)...`,
-            'info',
-          );
-          jobCards = await currentPage.readJobListFromSearchPane(readAttempts);
-          if (jobCards.length === 0 && readAttempts < 3) {
-            const sleepAborted = await this.interruptibleSleep(2000);
-            if (sleepAborted || !this.isRunning) break;
+          let jobCards: Array<{ jobId: string; title: string; company: string; url: string }> = [];
+          let readAttempts = 0;
+          while (readAttempts < 3 && jobCards.length === 0) {
+            readAttempts++;
+            if (!this.isRunning) break;
+            this.notifyStatus(
+              portToSend,
+              `🔍 Scanning LinkedIn job search results for "${currentLoc}" (page ${searchPageIndex + 1}, attempt ${readAttempts}/3)...`,
+              'info',
+            );
+            jobCards = await currentPage.readJobListFromSearchPane(readAttempts);
+            if (jobCards.length === 0 && readAttempts < 3) {
+              const retrySleep = await this.interruptibleSleep(2000);
+              if (retrySleep || !this.isRunning) break;
+            }
           }
-        }
 
-        totalLinkedInScanned += jobCards.length;
+          totalLinkedInScanned += jobCards.length;
+          stats.totalFound = totalLinkedInScanned;
 
-        for (const card of jobCards) {
-          if (seenJobIds.has(card.jobId)) continue;
-          seenJobIds.add(card.jobId);
-
-          const proc = await processedJobsStore.isJobProcessed(card.jobId);
-          if (proc.isProcessed && proc.status === 'applied') {
-            stats.skipped++;
-            this.notifyActivity(portToSend, onLiveActivity, {
-              jobId: card.jobId,
-              url: card.url,
-              title: card.title,
-              company: card.company,
-              status: 'skipped',
-              reason: 'Already applied previously',
-              creditsUsed: 0,
-            });
-            continue;
+          const unseenCards = jobCards.filter(card => !seenJobIds.has(card.jobId));
+          if (unseenCards.length === 0) {
+            logger.info(
+              `[DedicatedJobRunner] No new job cards on page ${searchPageIndex + 1} for ${currentLoc}. Advancing...`,
+            );
+            if (jobCards.length === 0) {
+              break pageLoop; // No jobs rendered at all on this page, move to next location
+            }
+            continue pageLoop;
           }
-          queue.push(card);
-          if (queue.length >= BATCH_CAP) break;
-        }
 
-        if (queue.length >= BATCH_CAP) {
-          this.notifyStatus(
-            portToSend,
-            `🎯 [LinkedIn] Batch cap of ${BATCH_CAP} jobs reached with Location #${locRank} (${currentLoc}). Stopping location search.`,
-            'ok',
-          );
-          break;
-        }
-      }
+          for (const job of unseenCards) {
+            if (
+              !this.isRunning ||
+              stats.applied >= targetToApply ||
+              Date.now() - sessionStartTime >= MAX_SESSION_DURATION_MS
+            )
+              break locationLoop;
 
-      stats.totalFound = totalLinkedInScanned;
+            seenJobIds.add(job.jobId);
+            const jobRunId = `${runId}_${job.jobId}`;
+            this.activeJobId = job.jobId;
 
-      if (queue.length === 0) {
-        const noJobsMsg =
-          'No jobs found across target locations. Please check your role/location criteria or search filters.';
-        this.notifyStatus(portToSend, `⚠️ ${noJobsMsg}`, 'fail');
-        this.cleanupRun();
-        return { status: 'error', message: noJobsMsg, stats };
-      }
+            const proc = await processedJobsStore.isJobProcessed(job.jobId);
+            if (proc.isProcessed && proc.status === 'applied') {
+              stats.skipped++;
+              this.notifyActivity(portToSend, onLiveActivity, {
+                jobId: job.jobId,
+                url: job.url,
+                title: job.title,
+                company: job.company,
+                status: 'skipped',
+                reason: 'Already applied previously',
+                creditsUsed: 0,
+              });
+              continue;
+            }
 
-      this.notifyStatus(
-        portToSend,
-        `🎯 Queued ${queue.length} eligible jobs for this run (capped at max ${BATCH_CAP}).`,
-        'info',
-      );
+            const safeTitle = cleanLinkedInJobTitle(job.title) || 'Loading title...';
+            const safeCompany = job.company || 'Unknown Company';
 
-      // 6. Loop Through Each Job in Queue
-      for (let i = 0; i < queue.length; i++) {
-        if (!this.isRunning) {
-          logger.info('[DedicatedJobRunner] Autonomous loop halted (user stopped).');
-          break;
-        }
+            // 4a-0. Instant 0-Credit Blacklist & Negative Keyword Check on Search Card
+            const earlyBlacklist = checkBlacklistAndNegativeKeywords(
+              safeTitle,
+              safeCompany,
+              undefined,
+              config.negativeKeywords,
+              config.blacklistedCompanies,
+              role,
+            );
+            if (earlyBlacklist.blacklisted) {
+              this.notifyStatus(portToSend, `🚫 Skipped "${safeTitle}": ${earlyBlacklist.reason}.`, 'info');
+              stats.skipped++;
+              await processedJobsStore.recordJob({
+                jobId: job.jobId,
+                url: job.url,
+                title: safeTitle,
+                company: safeCompany,
+                status: 'skipped',
+                reason: `Blacklisted: ${earlyBlacklist.reason}`,
+                creditsUsed: 0,
+              });
+              this.notifyActivity(portToSend, onLiveActivity, {
+                jobId: job.jobId,
+                url: job.url,
+                title: safeTitle,
+                company: safeCompany,
+                status: 'skipped',
+                reason: earlyBlacklist.reason || 'Blacklisted',
+                creditsUsed: 0,
+              });
+              const skipWait = await this.interruptibleSleep(4000 + Math.floor(Math.random() * 2000));
+              if (skipWait || !this.isRunning) break locationLoop;
+              continue;
+            }
 
-        const job = queue[i];
-        const jobRunId = `${runId}_${job.jobId}`;
-        this.activeJobId = job.jobId;
-
-        // Daily Quota check
-        const quota = await DailyQuotaManager.canApplyToday();
-        if (!quota.allowed) {
-          const quotaMsg = `🛑 Daily application quota reached (${quota.currentCount} today). Stopping run.`;
-          this.notifyStatus(portToSend, quotaMsg, 'fail');
-          break;
-        }
-
-        // Hard credit budget check (minimum 5 credits to ensure balance for form-filling LLM calls)
-        const balanceRes = await backendApiClient.getCreditsBalance().catch(() => null);
-        if (balanceRes?.data?.remainingCredits !== undefined && balanceRes.data.remainingCredits < 5) {
-          const creditMsg = `🛑 Insufficient credit budget (${balanceRes.data.remainingCredits} remaining, minimum 5 required). Halting run.`;
-          this.notifyStatus(portToSend, creditMsg, 'fail');
-          break;
-        }
-
-        const safeTitle = cleanLinkedInJobTitle(job.title) || 'Loading title...';
-        const safeCompany = job.company || 'Unknown Company';
-
-        // 4a-0. Instant 0-Credit Blacklist & Negative Keyword Check on Search Card
-        const earlyBlacklist = checkBlacklistAndNegativeKeywords(
-          safeTitle,
-          safeCompany,
-          undefined,
-          config.negativeKeywords,
-          config.blacklistedCompanies,
-          role,
-        );
-        if (earlyBlacklist.blacklisted) {
-          this.notifyStatus(portToSend, `🚫 Skipped "${safeTitle}": ${earlyBlacklist.reason}.`, 'info');
-          stats.skipped++;
-          await processedJobsStore.recordJob({
-            jobId: job.jobId,
-            url: job.url,
-            title: safeTitle,
-            company: safeCompany,
-            status: 'skipped',
-            reason: `Blacklisted: ${earlyBlacklist.reason}`,
-            creditsUsed: 0,
-          });
-          this.notifyActivity(portToSend, onLiveActivity, {
-            jobId: job.jobId,
-            url: job.url,
-            title: safeTitle,
-            company: safeCompany,
-            status: 'skipped',
-            reason: earlyBlacklist.reason || 'Blacklisted',
-            creditsUsed: 0,
-          });
-          continue;
-        }
-
-        this.notifyStatus(
-          portToSend,
-          `💼 Checking job ${i + 1} of ${queue.length}: "${safeTitle}" (${safeCompany})`,
-          'info',
-        );
-
-        this.notifyActivity(portToSend, onLiveActivity, {
-          jobId: job.jobId,
-          url: job.url,
-          title: safeTitle,
-          company: safeCompany,
-          status: 'running',
-          reason: 'Loading details in split-pane...',
-          creditsUsed: 0,
-        });
-
-        // 4a. Click Job in Left Pane to Load Details in Right Pane
-        const clicked = await currentPage.clickJobInSearchList(job.jobId);
-        if (!clicked) {
-          logger.warning(
-            `[DedicatedJobRunner] Could not click job card for ${job.jobId}. Retrying via direct anchor...`,
-          );
-        }
-
-        // Wait 2.5s for split pane details to render
-        const waitAborted = await this.interruptibleSleep(2500);
-        if (waitAborted || !this.isRunning) break;
-
-        // 4b. Pure DOM Top-Card Extraction + Max-2 Retry Guard
-        let topCard = await currentPage.extractJobTopCardContext(5000);
-        let retryCount = 0;
-        while (
-          (!topCard.title || !topCard.company) &&
-          !topCard.isClosed &&
-          !topCard.isAlreadyApplied &&
-          !topCard.isLoginWall &&
-          retryCount < 2
-        ) {
-          retryCount++;
-          this.notifyStatus(portToSend, `Checking job details for ${job.jobId} (attempt ${retryCount}/2)...`, 'info');
-          const retrySleepAborted = await this.interruptibleSleep(1500);
-          if (retrySleepAborted || !this.isRunning) break;
-          topCard = await currentPage.extractJobTopCardContext(4000);
-        }
-
-        const displayTitle = topCard.title || job.title;
-        const displayCompany = topCard.company || job.company;
-
-        // Check if details extraction completely failed
-        if (
-          (!topCard.title || !topCard.company) &&
-          !topCard.isClosed &&
-          !topCard.isAlreadyApplied &&
-          !topCard.isLoginWall
-        ) {
-          this.notifyStatus(
-            portToSend,
-            `ℹ️ Skipped "${displayTitle}": Could not load job details from LinkedIn.`,
-            'info',
-          );
-          stats.skipped++;
-          await processedJobsStore.recordJob({
-            jobId: job.jobId,
-            url: job.url,
-            title: displayTitle,
-            company: displayCompany,
-            status: 'skipped',
-            reason: 'Could not load job details from LinkedIn',
-            creditsUsed: 0,
-          });
-          this.notifyActivity(portToSend, onLiveActivity, {
-            jobId: job.jobId,
-            url: job.url,
-            title: displayTitle,
-            company: displayCompany,
-            status: 'skipped',
-            reason: 'Selector timeout',
-            creditsUsed: 0,
-          });
-          continue;
-        }
-
-        // 4b. Pure DOM 0-Credit Skip Checks
-        if (topCard.isClosed) {
-          this.notifyStatus(
-            portToSend,
-            `ℹ️ Skipped "${displayTitle}": This job is closed and no longer accepting applications.`,
-            'info',
-          );
-          stats.skipped++;
-          await processedJobsStore.recordJob({
-            jobId: job.jobId,
-            url: job.url,
-            title: displayTitle,
-            company: displayCompany,
-            status: 'skipped',
-            reason: 'No longer accepting applications',
-            creditsUsed: 0,
-          });
-          this.notifyActivity(portToSend, onLiveActivity, {
-            jobId: job.jobId,
-            url: job.url,
-            title: displayTitle,
-            company: displayCompany,
-            status: 'skipped',
-            reason: 'Closed listing',
-            creditsUsed: 0,
-          });
-          continue;
-        }
-
-        if (topCard.isAlreadyApplied) {
-          this.notifyStatus(
-            portToSend,
-            `ℹ️ Skipped "${displayTitle}": You already applied to this job earlier on LinkedIn.`,
-            'info',
-          );
-          stats.skipped++;
-          await processedJobsStore.recordJob({
-            jobId: job.jobId,
-            url: job.url,
-            title: displayTitle,
-            company: displayCompany,
-            status: 'applied',
-            reason: 'Already applied on LinkedIn',
-            creditsUsed: 0,
-          });
-          this.notifyActivity(portToSend, onLiveActivity, {
-            jobId: job.jobId,
-            url: job.url,
-            title: displayTitle,
-            company: displayCompany,
-            status: 'skipped',
-            reason: 'Already applied on LinkedIn',
-            creditsUsed: 0,
-          });
-          continue;
-        }
-
-        if (!topCard.hasEasyApply) {
-          this.notifyStatus(
-            portToSend,
-            `ℹ️ Skipped "${displayTitle}": Requires applying directly on company website (not Easy Apply).`,
-            'info',
-          );
-          stats.skipped++;
-          await processedJobsStore.recordJob({
-            jobId: job.jobId,
-            url: job.url,
-            title: displayTitle,
-            company: displayCompany,
-            status: 'skipped',
-            reason: 'External application only (no Easy Apply)',
-            creditsUsed: 0,
-          });
-          this.notifyActivity(portToSend, onLiveActivity, {
-            jobId: job.jobId,
-            url: job.url,
-            title: displayTitle,
-            company: displayCompany,
-            status: 'skipped',
-            reason: 'External application only',
-            creditsUsed: 0,
-          });
-          continue;
-        }
-
-        // 4b-1. Post-Load Blacklist & Negative Keyword Check (Includes full split-pane description snippet)
-        const postBlacklist = checkBlacklistAndNegativeKeywords(
-          displayTitle,
-          displayCompany,
-          topCard.descriptionSnippet,
-          config.negativeKeywords,
-          config.blacklistedCompanies,
-          role,
-        );
-        if (postBlacklist.blacklisted) {
-          this.notifyStatus(portToSend, `🚫 Skipped "${displayTitle}": ${postBlacklist.reason}.`, 'info');
-          stats.skipped++;
-          await processedJobsStore.recordJob({
-            jobId: job.jobId,
-            url: job.url,
-            title: displayTitle,
-            company: displayCompany,
-            status: 'skipped',
-            reason: `Blacklisted: ${postBlacklist.reason}`,
-            creditsUsed: 0,
-          });
-          this.notifyActivity(portToSend, onLiveActivity, {
-            jobId: job.jobId,
-            url: job.url,
-            title: displayTitle,
-            company: displayCompany,
-            status: 'skipped',
-            reason: postBlacklist.reason || 'Blacklisted',
-            creditsUsed: 0,
-          });
-          continue;
-        }
-
-        // 4c. Pre-Apply Skill Relevance Check (0 LLM credits)
-        const relevance = checkJobSkillRelevance(displayTitle, topCard.descriptionSnippet, careerBrain, role);
-        if (!relevance.relevant) {
-          this.notifyStatus(
-            portToSend,
-            `ℹ️ Skipped "${displayTitle}": Required skills do not closely match your profile.`,
-            'info',
-          );
-          stats.skipped++;
-          await processedJobsStore.recordJob({
-            jobId: job.jobId,
-            url: job.url,
-            title: displayTitle,
-            company: displayCompany,
-            status: 'skipped',
-            reason: 'Skills do not closely match profile',
-            creditsUsed: 0,
-          });
-          this.notifyActivity(portToSend, onLiveActivity, {
-            jobId: job.jobId,
-            url: job.url,
-            title: displayTitle,
-            company: displayCompany,
-            status: 'skipped',
-            reason: 'Low skill match',
-            creditsUsed: 0,
-          });
-          continue;
-        }
-
-        if (relevance.matchedSkills.length > 0) {
-          logger.info(
-            `[DedicatedJobRunner] Job "${displayTitle}" matched skills: ${relevance.matchedSkills.slice(0, 5).join(', ')}`,
-          );
-        }
-
-        // Tier-2 Deep JD Relevance & Match Score Threshold Check (with Experience Gap Detection)
-        const minScoreThreshold = config.minFitScore || 70;
-        const maxExpGap = config.maxExperienceGapYears ?? 3;
-        const deepMatch = evaluateDeepRelevance(
-          topCard.descriptionSnippet || '',
-          careerBrain,
-          role,
-          minScoreThreshold,
-          maxExpGap,
-          displayTitle,
-        );
-
-        if (deepMatch.recommendation === 'skip') {
-          logger.info(`[DedicatedJobRunner] Deep JD evaluation skipped "${displayTitle}": ${deepMatch.reason}`);
-          this.notifyStatus(portToSend, `ℹ️ Skipped "${displayTitle}": ${deepMatch.reason}`, 'info');
-          stats.skipped++;
-          await processedJobsStore.recordJob({
-            jobId: job.jobId,
-            url: job.url,
-            title: displayTitle,
-            company: displayCompany,
-            location: topCard.location,
-            platform: 'linkedin',
-            fitScore: deepMatch.score,
-            status: 'skipped',
-            reason: deepMatch.reason,
-            creditsUsed: 0,
-          });
-          this.notifyActivity(portToSend, onLiveActivity, {
-            jobId: job.jobId,
-            url: job.url,
-            title: displayTitle,
-            company: displayCompany,
-            status: 'skipped',
-            reason:
-              deepMatch.reason.length > 40 ? `Match ${deepMatch.score}% < ${minScoreThreshold}%` : deepMatch.reason,
-            creditsUsed: 0,
-          });
-          continue;
-        }
-
-        // 4d. Click Easy Apply & Verify Modal Opens
-        this.notifyStatus(portToSend, `🚀 Opening Easy Apply for "${displayTitle}"...`, 'info');
-        let clickRes = await currentPage.clickEasyApplyButton();
-        if (!clickRes.success) {
-          // Retry click once
-          const clickSleepAborted = await this.interruptibleSleep(1200);
-          if (clickSleepAborted || !this.isRunning) break;
-          clickRes = await currentPage.clickEasyApplyButton();
-        }
-
-        // Poll for modal
-        let modalRes = await currentPage.waitForEasyApplyModal(6000, 300);
-        if (!modalRes.opened) {
-          // Retry clicking one more time
-          logger.warning(`[DedicatedJobRunner] Modal did not open on first attempt. Retrying click...`);
-          const modalSleepAborted = await this.interruptibleSleep(1000);
-          if (modalSleepAborted || !this.isRunning) break;
-          await currentPage.clickEasyApplyButton();
-          modalRes = await currentPage.waitForEasyApplyModal(5000, 300);
-        }
-
-        // 4d. Handle Modal Form-Filling & Verified Submission
-        if (modalRes.opened) {
-          stats.modalOpened++;
-          this.notifyStatus(portToSend, `📝 Application form opened: Filling your details...`, 'info');
-          const fillRes = await this.fillAndSubmitModal(
-            currentPage,
-            { ...job, title: displayTitle, company: displayCompany },
-            jobRunId,
-            portToSend,
-            onLiveActivity,
-          );
-
-          if (fillRes.success) {
-            stats.applied++;
-            await DailyQuotaManager.incrementAppliedCount();
-            await queueSafetyStore.setSingleApplyVerified(true);
-            const successMsg = `Applied to "${displayTitle}" at ${displayCompany || 'company'} successfully! 🎉`;
-            this.notifyStatus(portToSend, `✅ ${successMsg}`, 'ok');
-
-            await processedJobsStore.recordJob({
-              jobId: job.jobId,
-              url: job.url,
-              title: displayTitle,
-              company: displayCompany,
-              location: topCard.location,
-              platform: 'linkedin',
-              fitScore: deepMatch.score,
-              status: 'applied',
-              reason: 'Application submitted and verified',
-              creditsUsed: 0,
-            });
-
-            await this.syncJobApplicationToBackend({
-              jobId: job.jobId,
-              jobTitle: displayTitle,
-              company: displayCompany,
-              location: topCard.location,
-              platform: 'linkedin',
-              applicationUrl: job.url,
-              fitScore: deepMatch?.score,
-              status: 'applied',
-              appliedAt: new Date().toISOString(),
-            });
+            this.notifyStatus(
+              portToSend,
+              `💼 Checking job: "${safeTitle}" (${safeCompany}) [Progress: ${stats.applied}/${targetToApply} applied]`,
+              'info',
+            );
 
             this.notifyActivity(portToSend, onLiveActivity, {
               jobId: job.jobId,
               url: job.url,
-              title: displayTitle,
-              company: displayCompany,
-              status: 'applied',
-              reason: 'Application submitted and verified',
+              title: safeTitle,
+              company: safeCompany,
+              status: 'running',
+              reason: 'Loading details in split-pane...',
               creditsUsed: 0,
             });
-            // Verified applied: legitimate LLM variable deductions are retained. 0 flat fee charged.
-          } else {
-            stats.skipped++;
-            const skipReason = fillRes.reason || 'Form filling could not be completed';
-            const friendlySkip = formatFriendlySkipReason(skipReason);
-            this.notifyStatus(portToSend, `ℹ️ Skipped "${displayTitle}": ${friendlySkip}`, 'info');
 
-            // Automatically refund any credits deducted for this job's LLM calls
-            await backendApiClient.refundCredits(jobRunId).catch(err => {
-              const errMsg = String(err?.message || err);
-              if (/no billable usage|run_not_found|already_refunded/i.test(errMsg)) {
-                logger.debug(`[DedicatedJobRunner] No billable usage to refund for ${jobRunId}.`);
+            // 4a. Click Job in Left Pane to Load Details in Right Pane
+            const clicked = await currentPage.clickJobInSearchList(job.jobId);
+            if (!clicked) {
+              logger.warning(
+                `[DedicatedJobRunner] Could not click job card for ${job.jobId}. Retrying via direct anchor...`,
+              );
+            }
+
+            // Wait 2.5s for split pane details to render
+            const waitAborted = await this.interruptibleSleep(2500);
+            if (waitAborted || !this.isRunning) break locationLoop;
+
+            // 4b. Pure DOM Top-Card Extraction + Max-2 Retry Guard
+            let topCard = await currentPage.extractJobTopCardContext(5000);
+            let retryCount = 0;
+            while (
+              (!topCard.title || !topCard.company) &&
+              !topCard.isClosed &&
+              !topCard.isAlreadyApplied &&
+              !topCard.isLoginWall &&
+              retryCount < 2
+            ) {
+              retryCount++;
+              this.notifyStatus(
+                portToSend,
+                `Checking job details for ${job.jobId} (attempt ${retryCount}/2)...`,
+                'info',
+              );
+              const retrySleepAborted = await this.interruptibleSleep(1500);
+              if (retrySleepAborted || !this.isRunning) break;
+              topCard = await currentPage.extractJobTopCardContext(4000);
+            }
+
+            const displayTitle = topCard.title || job.title;
+            const displayCompany = topCard.company || job.company;
+
+            // Check if details extraction completely failed
+            if (
+              (!topCard.title || !topCard.company) &&
+              !topCard.isClosed &&
+              !topCard.isAlreadyApplied &&
+              !topCard.isLoginWall
+            ) {
+              this.notifyStatus(
+                portToSend,
+                `ℹ️ Skipped "${displayTitle}": Could not load job details from LinkedIn.`,
+                'info',
+              );
+              stats.skipped++;
+              await processedJobsStore.recordJob({
+                jobId: job.jobId,
+                url: job.url,
+                title: displayTitle,
+                company: displayCompany,
+                status: 'skipped',
+                reason: 'Could not load job details from LinkedIn',
+                creditsUsed: 0,
+              });
+              this.notifyActivity(portToSend, onLiveActivity, {
+                jobId: job.jobId,
+                url: job.url,
+                title: displayTitle,
+                company: displayCompany,
+                status: 'skipped',
+                reason: 'Selector timeout',
+                creditsUsed: 0,
+              });
+              const skipWait = await this.interruptibleSleep(4000 + Math.floor(Math.random() * 2000));
+              if (skipWait || !this.isRunning) break locationLoop;
+              continue;
+            }
+
+            // 4b. Pure DOM 0-Credit Skip Checks
+            if (topCard.isClosed) {
+              this.notifyStatus(
+                portToSend,
+                `ℹ️ Skipped "${displayTitle}": This job is closed and no longer accepting applications.`,
+                'info',
+              );
+              stats.skipped++;
+              await processedJobsStore.recordJob({
+                jobId: job.jobId,
+                url: job.url,
+                title: displayTitle,
+                company: displayCompany,
+                status: 'skipped',
+                reason: 'No longer accepting applications',
+                creditsUsed: 0,
+              });
+              this.notifyActivity(portToSend, onLiveActivity, {
+                jobId: job.jobId,
+                url: job.url,
+                title: displayTitle,
+                company: displayCompany,
+                status: 'skipped',
+                reason: 'Closed listing',
+                creditsUsed: 0,
+              });
+              const skipWait = await this.interruptibleSleep(4000 + Math.floor(Math.random() * 2000));
+              if (skipWait || !this.isRunning) break locationLoop;
+              continue;
+            }
+
+            if (topCard.isAlreadyApplied) {
+              this.notifyStatus(
+                portToSend,
+                `ℹ️ Skipped "${displayTitle}": You already applied to this job earlier on LinkedIn.`,
+                'info',
+              );
+              stats.skipped++;
+              await processedJobsStore.recordJob({
+                jobId: job.jobId,
+                url: job.url,
+                title: displayTitle,
+                company: displayCompany,
+                status: 'applied',
+                reason: 'Already applied on LinkedIn',
+                creditsUsed: 0,
+              });
+              this.notifyActivity(portToSend, onLiveActivity, {
+                jobId: job.jobId,
+                url: job.url,
+                title: displayTitle,
+                company: displayCompany,
+                status: 'skipped',
+                reason: 'Already applied on LinkedIn',
+                creditsUsed: 0,
+              });
+              const skipWait = await this.interruptibleSleep(4000 + Math.floor(Math.random() * 2000));
+              if (skipWait || !this.isRunning) break locationLoop;
+              continue;
+            }
+
+            if (!topCard.hasEasyApply) {
+              this.notifyStatus(
+                portToSend,
+                `ℹ️ Skipped "${displayTitle}": Requires applying directly on company website (not Easy Apply).`,
+                'info',
+              );
+              stats.skipped++;
+              await processedJobsStore.recordJob({
+                jobId: job.jobId,
+                url: job.url,
+                title: displayTitle,
+                company: displayCompany,
+                status: 'skipped',
+                reason: 'External application only (no Easy Apply)',
+                creditsUsed: 0,
+              });
+              this.notifyActivity(portToSend, onLiveActivity, {
+                jobId: job.jobId,
+                url: job.url,
+                title: displayTitle,
+                company: displayCompany,
+                status: 'skipped',
+                reason: 'External application only',
+                creditsUsed: 0,
+              });
+              const skipWait = await this.interruptibleSleep(4000 + Math.floor(Math.random() * 2000));
+              if (skipWait || !this.isRunning) break locationLoop;
+              continue;
+            }
+
+            // 4b-1. Post-Load Blacklist & Negative Keyword Check (Includes full split-pane description snippet)
+            const postBlacklist = checkBlacklistAndNegativeKeywords(
+              displayTitle,
+              displayCompany,
+              topCard.descriptionSnippet,
+              config.negativeKeywords,
+              config.blacklistedCompanies,
+              role,
+            );
+            if (postBlacklist.blacklisted) {
+              this.notifyStatus(portToSend, `🚫 Skipped "${displayTitle}": ${postBlacklist.reason}.`, 'info');
+              stats.skipped++;
+              await processedJobsStore.recordJob({
+                jobId: job.jobId,
+                url: job.url,
+                title: displayTitle,
+                company: displayCompany,
+                status: 'skipped',
+                reason: `Blacklisted: ${postBlacklist.reason}`,
+                creditsUsed: 0,
+              });
+              this.notifyActivity(portToSend, onLiveActivity, {
+                jobId: job.jobId,
+                url: job.url,
+                title: displayTitle,
+                company: displayCompany,
+                status: 'skipped',
+                reason: postBlacklist.reason || 'Blacklisted',
+                creditsUsed: 0,
+              });
+              const skipWait = await this.interruptibleSleep(4000 + Math.floor(Math.random() * 2000));
+              if (skipWait || !this.isRunning) break locationLoop;
+              continue;
+            }
+
+            // 4c. Pre-Apply Skill Relevance Check (0 LLM credits)
+            const relevance = checkJobSkillRelevance(displayTitle, topCard.descriptionSnippet, careerBrain, role);
+            if (!relevance.relevant) {
+              this.notifyStatus(
+                portToSend,
+                `ℹ️ Skipped "${displayTitle}": Required skills do not closely match your profile.`,
+                'info',
+              );
+              stats.skipped++;
+              await processedJobsStore.recordJob({
+                jobId: job.jobId,
+                url: job.url,
+                title: displayTitle,
+                company: displayCompany,
+                status: 'skipped',
+                reason: 'Skills do not closely match profile',
+                creditsUsed: 0,
+              });
+              this.notifyActivity(portToSend, onLiveActivity, {
+                jobId: job.jobId,
+                url: job.url,
+                title: displayTitle,
+                company: displayCompany,
+                status: 'skipped',
+                reason: 'Low skill match',
+                creditsUsed: 0,
+              });
+              const skipWait = await this.interruptibleSleep(4000 + Math.floor(Math.random() * 2000));
+              if (skipWait || !this.isRunning) break locationLoop;
+              continue;
+            }
+
+            if (relevance.matchedSkills.length > 0) {
+              logger.info(
+                `[DedicatedJobRunner] Job "${displayTitle}" matched skills: ${relevance.matchedSkills.slice(0, 5).join(', ')}`,
+              );
+            }
+
+            // Tier-2 Deep JD Relevance & Match Score Threshold Check (with Experience Gap Detection)
+            const minScoreThreshold = config.minFitScore || 70;
+            const maxExpGap = config.maxExperienceGapYears ?? 3;
+            const deepMatch = evaluateDeepRelevance(
+              topCard.descriptionSnippet || '',
+              careerBrain,
+              role,
+              minScoreThreshold,
+              maxExpGap,
+              displayTitle,
+            );
+
+            if (deepMatch.recommendation === 'skip') {
+              this.notifyStatus(
+                portToSend,
+                `ℹ️ Skipped "${displayTitle}": ${deepMatch.reason || 'Match score below threshold'} (${deepMatch.score}% < ${minScoreThreshold}%).`,
+                'info',
+              );
+              stats.skipped++;
+              await processedJobsStore.recordJob({
+                jobId: job.jobId,
+                url: job.url,
+                title: displayTitle,
+                company: displayCompany,
+                status: 'skipped',
+                reason: deepMatch.reason || `Fit score ${deepMatch.score}% below threshold`,
+                creditsUsed: 0,
+              });
+              this.notifyActivity(portToSend, onLiveActivity, {
+                jobId: job.jobId,
+                url: job.url,
+                title: displayTitle,
+                company: displayCompany,
+                status: 'skipped',
+                reason: deepMatch.reason || 'Low fit score',
+                creditsUsed: 0,
+              });
+              const skipWait = await this.interruptibleSleep(4000 + Math.floor(Math.random() * 2000));
+              if (skipWait || !this.isRunning) break locationLoop;
+              continue;
+            }
+
+            // Click Easy Apply button
+            const clickRes = await currentPage.clickEasyApplyButton();
+            if (!clickRes.success) {
+              this.notifyStatus(portToSend, `⚠️ Could not click Easy Apply for "${displayTitle}".`, 'fail');
+              stats.failed++;
+              await processedJobsStore.recordJob({
+                jobId: job.jobId,
+                url: job.url,
+                title: displayTitle,
+                company: displayCompany,
+                status: 'failed',
+                reason: clickRes.error || 'Could not click Easy Apply button',
+                creditsUsed: 0,
+              });
+              this.notifyActivity(portToSend, onLiveActivity, {
+                jobId: job.jobId,
+                url: job.url,
+                title: displayTitle,
+                company: displayCompany,
+                status: 'modal_failed',
+                reason: clickRes.error || 'Button click failed',
+                creditsUsed: 0,
+              });
+              const skipWait = await this.interruptibleSleep(4000 + Math.floor(Math.random() * 2000));
+              if (skipWait || !this.isRunning) break locationLoop;
+              continue;
+            }
+
+            let modalRes = await currentPage.waitForEasyApplyModal(6000, 300);
+            if (!modalRes.opened) {
+              logger.warning(`[DedicatedJobRunner] Modal did not open on first attempt. Retrying click...`);
+              const modalSleepAborted = await this.interruptibleSleep(1000);
+              if (modalSleepAborted || !this.isRunning) break locationLoop;
+              await currentPage.clickEasyApplyButton();
+              modalRes = await currentPage.waitForEasyApplyModal(5000, 300);
+            }
+
+            // 4d. Handle Modal Form-Filling & Verified Submission
+            if (modalRes.opened) {
+              stats.modalOpened++;
+              this.notifyStatus(portToSend, `📝 Application form opened: Filling your details...`, 'info');
+              const fillRes = await this.fillAndSubmitModal(
+                currentPage,
+                { ...job, title: displayTitle, company: displayCompany },
+                jobRunId,
+                portToSend,
+                onLiveActivity,
+              );
+
+              if (fillRes.success) {
+                stats.applied++;
+                await DailyQuotaManager.incrementAppliedCount();
+                await queueSafetyStore.setSingleApplyVerified(true);
+                const successMsg = `Applied to "${displayTitle}" at ${displayCompany || 'company'} successfully! 🎉 [Daily Progress: ${stats.applied}/${targetToApply}]`;
+                this.notifyStatus(portToSend, `✅ ${successMsg}`, 'ok');
+
+                await processedJobsStore.recordJob({
+                  jobId: job.jobId,
+                  url: job.url,
+                  title: displayTitle,
+                  company: displayCompany,
+                  location: topCard.location,
+                  platform: 'linkedin',
+                  fitScore: deepMatch.score,
+                  status: 'applied',
+                  reason: 'Application submitted and verified',
+                  creditsUsed: 0,
+                });
+
+                await this.syncJobApplicationToBackend({
+                  jobId: job.jobId,
+                  jobTitle: displayTitle,
+                  company: displayCompany,
+                  location: topCard.location,
+                  platform: 'linkedin',
+                  applicationUrl: job.url,
+                  fitScore: deepMatch?.score,
+                  status: 'applied',
+                  appliedAt: new Date().toISOString(),
+                });
+
+                this.notifyActivity(portToSend, onLiveActivity, {
+                  jobId: job.jobId,
+                  url: job.url,
+                  title: displayTitle,
+                  company: displayCompany,
+                  status: 'applied',
+                  reason: 'Application submitted and verified',
+                  creditsUsed: 0,
+                });
+
+                if (stats.applied >= targetToApply) {
+                  this.notifyStatus(
+                    portToSend,
+                    `🎉 Daily Application Limit reached (${stats.applied}/${targetToApply})!`,
+                    'ok',
+                  );
+                  break locationLoop;
+                }
+
+                // Human pacing delay between submitted applications (60 to 90 seconds)
+                const pacingMs = 60_000 + Math.floor(Math.random() * 30_000);
+                const pacingSec = Math.round(pacingMs / 1000);
+                const currentElapsedMins = Math.floor((Date.now() - sessionStartTime) / 60000);
+                this.notifyStatus(
+                  portToSend,
+                  `⏱️ [Session: ${currentElapsedMins}m / max 60m | Daily Quota: ${stats.applied}/${targetToApply} applied] Human pacing delay: resting ${pacingSec}s before next application to protect your account...`,
+                  'info',
+                );
+                const pacingAborted = await this.interruptibleSleep(pacingMs);
+                if (pacingAborted || !this.isRunning) break locationLoop;
               } else {
-                logger.info(`[DedicatedJobRunner] Refund note for ${jobRunId}: ${errMsg}`);
+                stats.skipped++;
+                const skipReason = fillRes.reason || 'Form filling could not be completed';
+                const friendlySkip = formatFriendlySkipReason(skipReason);
+                this.notifyStatus(portToSend, `ℹ️ Skipped "${displayTitle}": ${friendlySkip}`, 'info');
+
+                await backendApiClient.refundCredits(jobRunId).catch(err => {
+                  const errMsg = String(err?.message || err);
+                  if (/no billable usage|run_not_found|already_refunded/i.test(errMsg)) {
+                    logger.debug(`[DedicatedJobRunner] No billable usage to refund for ${jobRunId}.`);
+                  } else {
+                    logger.info(`[DedicatedJobRunner] Refund note for ${jobRunId}: ${errMsg}`);
+                  }
+                });
+
+                await currentPage.dismissEasyApplyModal(5000).catch(() => {});
+
+                await processedJobsStore.recordJob({
+                  jobId: job.jobId,
+                  url: job.url,
+                  title: displayTitle,
+                  company: displayCompany,
+                  location: topCard.location,
+                  platform: 'linkedin',
+                  fitScore: deepMatch.score,
+                  status: 'skipped',
+                  reason: skipReason,
+                  creditsUsed: 0,
+                });
+
+                this.notifyActivity(portToSend, onLiveActivity, {
+                  jobId: job.jobId,
+                  url: job.url,
+                  title: displayTitle,
+                  company: displayCompany,
+                  status: 'skipped',
+                  reason: skipReason,
+                  creditsUsed: 0,
+                });
+
+                const skipWait = await this.interruptibleSleep(4000 + Math.floor(Math.random() * 2000));
+                if (skipWait || !this.isRunning) break locationLoop;
               }
-            });
+            } else {
+              stats.failed++;
+              const failReason = modalRes.error || clickRes.error || 'Easy Apply modal failed to open within timeout';
+              this.notifyStatus(portToSend, `⚠️ Could not open Easy Apply for "${displayTitle}".`, 'fail');
 
-            await currentPage.dismissEasyApplyModal(5000).catch(() => {});
+              await backendApiClient.refundCredits(jobRunId).catch(() => {});
+              await currentPage.dismissEasyApplyModal(3000).catch(() => {});
 
-            await processedJobsStore.recordJob({
-              jobId: job.jobId,
-              url: job.url,
-              title: displayTitle,
-              company: displayCompany,
-              location: topCard.location,
-              platform: 'linkedin',
-              fitScore: deepMatch.score,
-              status: 'skipped',
-              reason: skipReason,
-              creditsUsed: 0,
-            });
+              await processedJobsStore.recordJob({
+                jobId: job.jobId,
+                url: job.url,
+                title: displayTitle,
+                company: displayCompany,
+                location: topCard.location,
+                platform: 'linkedin',
+                fitScore: deepMatch.score,
+                status: 'failed',
+                reason: failReason,
+                creditsUsed: 0,
+              });
 
-            this.notifyActivity(portToSend, onLiveActivity, {
-              jobId: job.jobId,
-              url: job.url,
-              title: displayTitle,
-              company: displayCompany,
-              status: 'skipped',
-              reason: skipReason,
-              creditsUsed: 0,
-            });
-          }
-        } else {
-          stats.failed++;
-          const failReason = modalRes.error || clickRes.error || 'Easy Apply modal failed to open within timeout';
-          this.notifyStatus(portToSend, `⚠️ Could not open Easy Apply for "${displayTitle}".`, 'fail');
+              this.notifyActivity(portToSend, onLiveActivity, {
+                jobId: job.jobId,
+                url: job.url,
+                title: displayTitle,
+                company: displayCompany,
+                status: 'modal_failed',
+                reason: failReason,
+                creditsUsed: 0,
+              });
 
-          await backendApiClient.refundCredits(jobRunId).catch(() => {});
-          await currentPage.dismissEasyApplyModal(3000).catch(() => {});
-
-          await processedJobsStore.recordJob({
-            jobId: job.jobId,
-            url: job.url,
-            title: displayTitle,
-            company: displayCompany,
-            location: topCard.location,
-            platform: 'linkedin',
-            fitScore: deepMatch.score,
-            status: 'failed',
-            reason: failReason,
-            creditsUsed: 0,
-          });
-
-          this.notifyActivity(portToSend, onLiveActivity, {
-            jobId: job.jobId,
-            url: job.url,
-            title: displayTitle,
-            company: displayCompany,
-            status: 'modal_failed',
-            reason: failReason,
-            creditsUsed: 0,
-          });
-        }
-
-        // 4e. Anti-Ban Pacing Delay (5s - 10s) between jobs
-        if (i < queue.length - 1 && this.isRunning) {
-          const minDelay = 5_000;
-          const maxDelay = 10_000;
-          const delayTime = Math.floor(Math.random() * (maxDelay - minDelay + 1)) + minDelay;
-          const delaySec = Math.round(delayTime / 1000);
-
-          this.notifyStatus(
-            portToSend,
-            `☕ Quick safety pause: Waiting ${delaySec}s before opening the next job...`,
-            'info',
-          );
-          const aborted = await this.interruptibleSleep(delayTime);
-          if (aborted || !this.isRunning) {
-            logger.info('[DedicatedJobRunner] Pacing delay aborted by user.');
-            break;
+              const skipWait = await this.interruptibleSleep(4000 + Math.floor(Math.random() * 2000));
+              if (skipWait || !this.isRunning) break locationLoop;
+            }
           }
         }
       }
 
       // 6. Final Summary
-      const summaryMsg = `🏁 Auto Apply finished! Submitted ${stats.applied} application${stats.applied === 1 ? '' : 's'} (${stats.skipped} skipped).`;
+      const sessionDurationMins = Math.round((Date.now() - sessionStartTime) / 60000);
+      let summaryMsg = '';
+      if (stats.applied >= targetToApply) {
+        summaryMsg = `🎉 Daily Application Limit achieved! Applied to ${stats.applied}/${targetToApply} jobs in ${sessionDurationMins} minutes (${stats.skipped} skipped).`;
+      } else if (Date.now() - sessionStartTime >= MAX_SESSION_DURATION_MS) {
+        summaryMsg = `⏱️ Maximum session duration of 60 minutes reached. Applied to ${stats.applied}/${targetToApply} jobs (${stats.skipped} skipped). Safe pacing completed.`;
+      } else if (!this.isRunning) {
+        summaryMsg = `🛑 Auto Apply stopped by user. Applied to ${stats.applied} jobs (${stats.skipped} skipped) in ${sessionDurationMins} minutes.`;
+      } else {
+        summaryMsg = `🏁 Auto Apply finished! Submitted ${stats.applied}/${targetToApply} applications (${stats.skipped} skipped) in ${sessionDurationMins} minutes.`;
+      }
       this.notifyStatus(portToSend, summaryMsg, 'ok');
 
       if (portToSend) {
@@ -2411,7 +2478,17 @@ export class DedicatedJobRunner {
     stats: typeof stats;
   }> {
     const { portToSend, onLiveActivity } = options;
-    const BATCH_CAP = Math.min(options.maxJobs || 10, 10);
+    const initialQuota = await DailyQuotaManager.canApplyToday();
+    if (!initialQuota.allowed) {
+      const quotaMsg = `🛑 Daily application quota already reached (${initialQuota.currentCount}/${initialQuota.maxQuota} today). Auto Apply is complete for today.`;
+      this.notifyStatus(portToSend, quotaMsg, 'fail');
+      this.cleanupRun();
+      return { status: 'stopped', message: quotaMsg, stats };
+    }
+
+    const targetToApply = options.maxJobs ? Math.min(options.maxJobs, initialQuota.remaining) : initialQuota.remaining;
+    const sessionStartTime = Date.now();
+    const MAX_SESSION_DURATION_MS = 60 * 60 * 1000;
 
     const targetLocations: string[] = (Array.isArray(location) ? location : [location])
       .map(l => (l || '').trim())
@@ -2530,270 +2607,326 @@ export class DedicatedJobRunner {
       }
     }
 
-    // Scan jobs with retry & auto-scroll to ensure DOM hydration
-    let jobs: IJobQueueItem[] = [];
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      this.notifyStatus(
-        portToSend,
-        `🔍 [Naukri.com] Scanning search results for "${role}" (attempt ${attempt}/3)...`,
-        'info',
-      );
-      await currentPage.puppeteerPage?.evaluate(() => window.scrollBy(0, 500)).catch(() => {});
-      const scanWait = await this.interruptibleSleep(1500);
-      if (scanWait || !this.isRunning) break;
-      jobs = await naukriAdapter.extractJobCards(currentPage);
-      if (jobs.length > 0) break;
-      const retryWait = await this.interruptibleSleep(2000);
-      if (retryWait || !this.isRunning) break;
-    }
-    stats.totalFound = jobs.length;
+    // Continuous pagination and application across locations and search pages
+    const seenJobIds = new Set<string>();
+    const maxPagesPerLocation = 10;
+    const config = await linkedInConfigStore.getConfig();
 
-    if (jobs.length === 0) {
-      const noJobsMsg = `No job listings found on Naukri for role "${role}".`;
-      this.notifyStatus(portToSend, `ℹ️ ${noJobsMsg}`, 'info');
-      this.cleanupRun();
-      return { status: 'success', message: noJobsMsg, stats };
-    }
-
-    // Deduplicate against processedJobsStore
-    const eligibleJobs: typeof jobs = [];
-    for (const job of jobs) {
-      const proc = await processedJobsStore.isJobProcessed(job.jobId);
-      if (proc.isProcessed && proc.status === 'applied') {
-        stats.skipped++;
-        this.notifyActivity(portToSend, onLiveActivity, {
-          jobId: job.jobId,
-          url: job.url,
-          title: job.title,
-          company: job.company,
-          status: 'skipped',
-          reason: 'Already applied previously',
-          creditsUsed: 0,
-        });
-        continue;
-      }
-      eligibleJobs.push(job);
-    }
-
-    // Prioritize direct Quick Apply jobs first
-    const sortedJobs = [...eligibleJobs].sort((a, b) => (b.isQuickApply ? 1 : 0) - (a.isQuickApply ? 1 : 0));
-    const queue = sortedJobs.slice(0, BATCH_CAP);
     this.notifyStatus(
       portToSend,
-      `🎯 Queued ${queue.length} eligible Naukri jobs for this run (capped at max ${BATCH_CAP}).`,
-      'info',
+      `🚀 Starting continuous Naukri Auto Apply session! Goal: Complete daily application limit (${stats.applied + targetToApply} total, need ${targetToApply} today). Safe pacing across 30–60 minutes.`,
+      'ok',
     );
 
-    // Execution loop
-    const config = await linkedInConfigStore.getConfig();
-    for (let i = 0; i < queue.length; i++) {
-      if (!this.isRunning) break;
-
-      const job = queue[i];
-      const jobRunId = `${runId}_${job.jobId}`;
-      this.activeJobId = job.jobId;
-
-      // Quota check
-      const quota = await DailyQuotaManager.canApplyToday();
-      if (!quota.allowed) {
-        const quotaMsg = `🛑 Daily application quota reached (${quota.currentCount} today). Stopping run.`;
-        this.notifyStatus(portToSend, quotaMsg, 'fail');
+    locationLoop: for (let locIdx = 0; locIdx < targetLocations.length; locIdx++) {
+      if (!this.isRunning || stats.applied >= targetToApply || Date.now() - sessionStartTime >= MAX_SESSION_DURATION_MS)
         break;
-      }
 
-      // Hard credit budget check
-      const balanceRes = await backendApiClient.getCreditsBalance().catch(() => null);
-      if (balanceRes?.data?.remainingCredits !== undefined && balanceRes.data.remainingCredits < 1) {
-        const creditMsg = `🛑 Insufficient credits (${balanceRes.data.remainingCredits} remaining). Halting run.`;
-        this.notifyStatus(portToSend, creditMsg, 'fail');
-        break;
-      }
+      const currentLoc = targetLocations[locIdx];
+      const locRank = locIdx + 1;
 
-      // 1. Blacklist & Negative Keyword Check
-      const blacklist = checkBlacklistAndNegativeKeywords(
-        job.title,
-        job.company,
-        undefined,
-        config.negativeKeywords,
-        config.blacklistedCompanies,
-        role,
-      );
-      if (blacklist.blacklisted) {
-        this.notifyStatus(portToSend, `🚫 [Naukri] Skipped "${job.title}": ${blacklist.reason}.`, 'info');
-        stats.skipped++;
-        await processedJobsStore.recordJob({
-          jobId: job.jobId,
-          url: job.url,
-          title: job.title,
-          company: job.company,
-          status: 'skipped',
-          reason: `Blacklisted: ${blacklist.reason}`,
-          creditsUsed: 0,
-        });
-        continue;
-      }
+      pageLoop: for (let pageNo = 1; pageNo <= maxPagesPerLocation; pageNo++) {
+        if (
+          !this.isRunning ||
+          stats.applied >= targetToApply ||
+          Date.now() - sessionStartTime >= MAX_SESSION_DURATION_MS
+        )
+          break;
 
-      // Relevance check
-      const relevance = checkJobSkillRelevance(job.title, job.descriptionSnippet, careerBrain, role);
-      logger.info(
-        `[Naukri Match Audit] "${job.title}": Score=${relevance.score}% (Threshold=${relevance.threshold}%, Relevant=${relevance.relevant}). Matched: [${relevance.matchedSkills.join(', ')}]. Candidate skills count: ${relevance.totalCandidateSkills}. Target role: "${role}"`,
-      );
-
-      if (!relevance.relevant) {
-        this.notifyStatus(
-          portToSend,
-          `ℹ️ Skipped "${job.title}": Match score ${relevance.score}% < threshold ${relevance.threshold}%. (${relevance.reason || 'Skills do not match profile'})`,
-          'info',
-        );
-        stats.skipped++;
-        await processedJobsStore.recordJob({
-          jobId: job.jobId,
-          url: job.url,
-          title: job.title,
-          company: job.company,
-          status: 'skipped',
-          reason: `Match score ${relevance.score}% < ${relevance.threshold}%: ${relevance.reason || 'Skills do not closely match profile'}`,
-          creditsUsed: 0,
-        });
-        this.notifyActivity(portToSend, onLiveActivity, {
-          jobId: job.jobId,
-          url: job.url,
-          title: job.title,
-          company: job.company,
-          status: 'skipped',
-          reason: 'Low skill match',
-          creditsUsed: 0,
-        });
-        continue;
-      }
-
-      this.notifyStatus(
-        portToSend,
-        `💼 [Naukri] Applying to job ${i + 1} of ${queue.length}: "${job.title}" (${job.company})`,
-        'info',
-      );
-
-      this.notifyActivity(portToSend, onLiveActivity, {
-        jobId: job.jobId,
-        url: job.url,
-        title: job.title,
-        company: job.company,
-        status: 'running',
-        reason: 'Applying on Naukri...',
-        creditsUsed: 0,
-      });
-
-      const scopedLLM = await getJobScopedLLM(jobRunId);
-      const applyResult = await naukriAdapter.applyToJob(job, {
-        page: currentPage,
-        browserContext: this.browserContext!,
-        careerBrain,
-        portToSend,
-        onLiveActivity,
-        signal: this.abortController?.signal,
-        runId: jobRunId,
-        scopedLLM,
-      });
-
-      if (applyResult.status === 'applied') {
-        stats.applied++;
-        await DailyQuotaManager.incrementAppliedCount();
-        await processedJobsStore.recordJob({
-          jobId: job.jobId,
-          url: job.url,
-          title: job.title,
-          company: job.company,
-          status: 'applied',
-          creditsUsed: 1,
-        });
-
-        await this.syncJobApplicationToBackend({
-          jobId: job.jobId,
-          jobTitle: job.title,
-          company: job.company,
-          platform: 'naukri',
-          applicationUrl: job.url,
-          status: 'applied',
-          appliedAt: new Date().toISOString(),
-        });
-
-        this.notifyStatus(portToSend, `✅ Successfully applied to "${job.title}" at ${job.company}!`, 'ok');
-
-        this.notifyActivity(portToSend, onLiveActivity, {
-          jobId: job.jobId,
-          url: job.url,
-          title: job.title,
-          company: job.company,
-          status: 'applied',
-          creditsUsed: 1,
-        });
-      } else if (applyResult.status === 'skipped') {
-        stats.skipped++;
-        await processedJobsStore.recordJob({
-          jobId: job.jobId,
-          url: job.url,
-          title: job.title,
-          company: job.company,
-          status: 'skipped',
-          reason: applyResult.reason || 'Skipped',
-          creditsUsed: 0,
-        });
-        this.notifyStatus(portToSend, `ℹ️ Skipped "${job.title}": ${applyResult.reason || 'Skipped'}`, 'info');
-        this.notifyActivity(portToSend, onLiveActivity, {
-          jobId: job.jobId,
-          url: job.url,
-          title: job.title,
-          company: job.company,
-          status: 'skipped',
-          reason: applyResult.reason,
-          creditsUsed: 0,
-        });
-      } else {
-        stats.failed++;
-        await processedJobsStore.recordJob({
-          jobId: job.jobId,
-          url: job.url,
-          title: job.title,
-          company: job.company,
-          status: 'failed',
-          reason: applyResult.reason || 'Failed',
-          creditsUsed: 0,
-        });
-        this.notifyStatus(
-          portToSend,
-          `❌ Failed application for "${job.title}": ${applyResult.reason || 'Failed'}`,
-          'fail',
-        );
-        this.notifyActivity(portToSend, onLiveActivity, {
-          jobId: job.jobId,
-          url: job.url,
-          title: job.title,
-          company: job.company,
-          status: 'failed',
-          reason: applyResult.reason,
-          creditsUsed: 0,
-        });
-      }
-
-      // Anti-bot pacing delay (5-8s) between Naukri jobs only when applied!
-      if (i < queue.length - 1 && this.isRunning) {
-        if (applyResult.status === 'applied') {
-          const delayMs = 5000 + Math.floor(Math.random() * 3000);
+        const quota = await DailyQuotaManager.canApplyToday();
+        if (!quota.allowed) {
           this.notifyStatus(
             portToSend,
-            `⏳ Pacing delay: waiting ${(delayMs / 1000).toFixed(0)}s before next job...`,
+            `🎉 Daily application quota reached (${quota.currentCount}/${quota.maxQuota} today)! Auto Apply completed.`,
+            'ok',
+          );
+          break locationLoop;
+        }
+
+        const balanceRes = await backendApiClient.getCreditsBalance().catch(() => null);
+        if (balanceRes?.data?.remainingCredits !== undefined && balanceRes.data.remainingCredits < 1) {
+          this.notifyStatus(
+            portToSend,
+            `🛑 Insufficient credits (${balanceRes.data.remainingCredits} remaining). Halting run.`,
+            'fail',
+          );
+          break locationLoop;
+        }
+
+        const pageSearchUrl = naukriAdapter.buildSearchUrl(cleanRole, currentLoc, candidateNameSources, pageNo);
+        const elapsedMins = Math.floor((Date.now() - sessionStartTime) / 60000);
+        this.notifyStatus(
+          portToSend,
+          `📄 [Naukri] [Location #${locRank}: ${currentLoc}] Loading page ${pageNo} | Progress: ${stats.applied}/${targetToApply} applied (${elapsedMins}m elapsed)...`,
+          'info',
+        );
+
+        try {
+          if (currentPage.puppeteerPage) {
+            await currentPage.puppeteerPage.goto(pageSearchUrl, { waitUntil: 'domcontentloaded', timeout: 35000 });
+          } else if ((currentPage as any).navigateTo) {
+            await (currentPage as any).navigateTo(pageSearchUrl);
+          }
+        } catch {}
+
+        const navWait = await this.interruptibleSleep(3500);
+        if (navWait || !this.isRunning) break locationLoop;
+
+        let jobs: IJobQueueItem[] = [];
+        for (let attempt = 1; attempt <= 3; attempt++) {
+          await currentPage.puppeteerPage?.evaluate(() => window.scrollBy(0, 500)).catch(() => {});
+          const scanWait = await this.interruptibleSleep(1500);
+          if (scanWait || !this.isRunning) break;
+          jobs = await naukriAdapter.extractJobCards(currentPage);
+          if (jobs.length > 0) break;
+          const retryWait = await this.interruptibleSleep(2000);
+          if (retryWait || !this.isRunning) break;
+        }
+
+        stats.totalFound += jobs.length;
+
+        const unseenJobs = jobs.filter(j => !seenJobIds.has(j.jobId));
+        if (unseenJobs.length === 0) {
+          if (jobs.length === 0) break pageLoop;
+          continue pageLoop;
+        }
+
+        // Sort quick apply first
+        const sortedJobs = [...unseenJobs].sort((a, b) => (b.isQuickApply ? 1 : 0) - (a.isQuickApply ? 1 : 0));
+
+        for (const job of sortedJobs) {
+          if (
+            !this.isRunning ||
+            stats.applied >= targetToApply ||
+            Date.now() - sessionStartTime >= MAX_SESSION_DURATION_MS
+          )
+            break locationLoop;
+
+          seenJobIds.add(job.jobId);
+          const jobRunId = `${runId}_${job.jobId}`;
+          this.activeJobId = job.jobId;
+
+          const proc = await processedJobsStore.isJobProcessed(job.jobId);
+          if (proc.isProcessed && proc.status === 'applied') {
+            stats.skipped++;
+            this.notifyActivity(portToSend, onLiveActivity, {
+              jobId: job.jobId,
+              url: job.url,
+              title: job.title,
+              company: job.company,
+              status: 'skipped',
+              reason: 'Already applied previously',
+              creditsUsed: 0,
+            });
+            continue;
+          }
+
+          // Blacklist & negative keyword check
+          const blacklist = checkBlacklistAndNegativeKeywords(
+            job.title,
+            job.company,
+            undefined,
+            config.negativeKeywords,
+            config.blacklistedCompanies,
+            role,
+          );
+          if (blacklist.blacklisted) {
+            this.notifyStatus(portToSend, `🚫 [Naukri] Skipped "${job.title}": ${blacklist.reason}.`, 'info');
+            stats.skipped++;
+            await processedJobsStore.recordJob({
+              jobId: job.jobId,
+              url: job.url,
+              title: job.title,
+              company: job.company,
+              status: 'skipped',
+              reason: `Blacklisted: ${blacklist.reason}`,
+              creditsUsed: 0,
+            });
+            const skipWait = await this.interruptibleSleep(4000 + Math.floor(Math.random() * 2000));
+            if (skipWait || !this.isRunning) break locationLoop;
+            continue;
+          }
+
+          // Relevance check
+          const relevance = checkJobSkillRelevance(job.title, job.descriptionSnippet, careerBrain, role);
+          if (!relevance.relevant) {
+            this.notifyStatus(
+              portToSend,
+              `ℹ️ Skipped "${job.title}": Match score ${relevance.score}% < threshold ${relevance.threshold}%. (${relevance.reason || 'Skills do not match profile'})`,
+              'info',
+            );
+            stats.skipped++;
+            await processedJobsStore.recordJob({
+              jobId: job.jobId,
+              url: job.url,
+              title: job.title,
+              company: job.company,
+              status: 'skipped',
+              reason: `Match score ${relevance.score}% < ${relevance.threshold}%: ${relevance.reason || 'Skills do not closely match profile'}`,
+              creditsUsed: 0,
+            });
+            const skipWait = await this.interruptibleSleep(4000 + Math.floor(Math.random() * 2000));
+            if (skipWait || !this.isRunning) break locationLoop;
+            continue;
+          }
+
+          this.notifyStatus(
+            portToSend,
+            `💼 [Naukri.com] Applying to: "${job.title}" (${job.company}) [Progress: ${stats.applied}/${targetToApply} applied]`,
             'info',
           );
-          const aborted = await this.interruptibleSleep(delayMs);
-          if (aborted) break;
-        } else {
-          // If skipped, quick 1.5s delay to avoid hammer without 20s freeze
-          await this.interruptibleSleep(1500);
+
+          this.notifyActivity(portToSend, onLiveActivity, {
+            jobId: job.jobId,
+            url: job.url,
+            title: job.title,
+            company: job.company,
+            status: 'running',
+            reason: 'Applying on Naukri...',
+            creditsUsed: 0,
+          });
+
+          // Pre-apply delay (1.5s - 3s)
+          const preApplyDelay = 1500 + Math.floor(Math.random() * 1500);
+          const preAborted = await this.interruptibleSleep(preApplyDelay);
+          if (preAborted || !this.isRunning) break locationLoop;
+
+          const scopedLLM = await getJobScopedLLM(jobRunId);
+          const applyResult = await naukriAdapter.applyToJob(job, {
+            page: currentPage,
+            browserContext: this.browserContext!,
+            careerBrain,
+            portToSend,
+            onLiveActivity,
+            signal: this.abortController?.signal,
+            runId: jobRunId,
+            scopedLLM,
+          });
+
+          if (!this.isRunning || this.abortController?.signal?.aborted) break locationLoop;
+
+          if (applyResult.status === 'applied') {
+            stats.applied++;
+            await DailyQuotaManager.incrementAppliedCount();
+            await processedJobsStore.recordJob({
+              jobId: job.jobId,
+              url: job.url,
+              title: job.title,
+              company: job.company,
+              status: 'applied',
+              creditsUsed: 1,
+            });
+
+            await this.syncJobApplicationToBackend({
+              jobId: job.jobId,
+              jobTitle: job.title,
+              company: job.company,
+              platform: 'naukri',
+              applicationUrl: job.url,
+              status: 'applied',
+              appliedAt: new Date().toISOString(),
+            });
+
+            this.notifyStatus(
+              portToSend,
+              `✅ Successfully applied to "${job.title}" at ${job.company}! [Daily Progress: ${stats.applied}/${targetToApply}]`,
+              'ok',
+            );
+
+            this.notifyActivity(portToSend, onLiveActivity, {
+              jobId: job.jobId,
+              url: job.url,
+              title: job.title,
+              company: job.company,
+              status: 'applied',
+              creditsUsed: 1,
+            });
+
+            if (stats.applied >= targetToApply) {
+              this.notifyStatus(
+                portToSend,
+                `🎉 Daily Application Limit reached (${stats.applied}/${targetToApply})!`,
+                'ok',
+              );
+              break locationLoop;
+            }
+
+            // Human pacing delay: 60 to 90 seconds
+            const pacingMs = 60_000 + Math.floor(Math.random() * 30_000);
+            const pacingSec = Math.round(pacingMs / 1000);
+            const currentElapsedMins = Math.floor((Date.now() - sessionStartTime) / 60000);
+            this.notifyStatus(
+              portToSend,
+              `⏱️ [Session: ${currentElapsedMins}m / max 60m | Daily Quota: ${stats.applied}/${targetToApply} applied] Human pacing delay: resting ${pacingSec}s before next application to protect your account...`,
+              'info',
+            );
+            const pacingAborted = await this.interruptibleSleep(pacingMs);
+            if (pacingAborted || !this.isRunning) break locationLoop;
+          } else if (applyResult.status === 'skipped') {
+            stats.skipped++;
+            await processedJobsStore.recordJob({
+              jobId: job.jobId,
+              url: job.url,
+              title: job.title,
+              company: job.company,
+              status: 'skipped',
+              reason: applyResult.reason || 'Skipped',
+              creditsUsed: 0,
+            });
+            this.notifyStatus(portToSend, `ℹ️ Skipped "${job.title}": ${applyResult.reason || 'Skipped'}`, 'info');
+            this.notifyActivity(portToSend, onLiveActivity, {
+              jobId: job.jobId,
+              url: job.url,
+              title: job.title,
+              company: job.company,
+              status: 'skipped',
+              reason: applyResult.reason,
+              creditsUsed: 0,
+            });
+            const skipWait = await this.interruptibleSleep(4000 + Math.floor(Math.random() * 2000));
+            if (skipWait || !this.isRunning) break locationLoop;
+          } else {
+            stats.failed++;
+            await processedJobsStore.recordJob({
+              jobId: job.jobId,
+              url: job.url,
+              title: job.title,
+              company: job.company,
+              status: 'failed',
+              reason: applyResult.reason || 'Failed',
+              creditsUsed: 0,
+            });
+            this.notifyStatus(
+              portToSend,
+              `❌ Failed application for "${job.title}": ${applyResult.reason || 'Failed'}`,
+              'fail',
+            );
+            this.notifyActivity(portToSend, onLiveActivity, {
+              jobId: job.jobId,
+              url: job.url,
+              title: job.title,
+              company: job.company,
+              status: 'failed',
+              reason: applyResult.reason,
+              creditsUsed: 0,
+            });
+            const skipWait = await this.interruptibleSleep(4000 + Math.floor(Math.random() * 2000));
+            if (skipWait || !this.isRunning) break locationLoop;
+          }
         }
       }
     }
-
-    const summaryMsg = `Naukri Apply complete: ${stats.applied} applied, ${stats.skipped} skipped, ${stats.failed} failed.`;
+    const sessionDurationMins = Math.round((Date.now() - sessionStartTime) / 60000);
+    let summaryMsg = '';
+    if (stats.applied >= targetToApply) {
+      summaryMsg = `🎉 Daily Application Limit achieved! Applied to ${stats.applied}/${targetToApply} jobs on Naukri in ${sessionDurationMins} minutes (${stats.skipped} skipped).`;
+    } else if (Date.now() - sessionStartTime >= MAX_SESSION_DURATION_MS) {
+      summaryMsg = `⏱️ Maximum session duration of 60 minutes reached. Applied to ${stats.applied}/${targetToApply} jobs on Naukri (${stats.skipped} skipped).`;
+    } else if (!this.isRunning) {
+      summaryMsg = `🛑 Auto Apply stopped by user. Applied to ${stats.applied} jobs on Naukri in ${sessionDurationMins} minutes.`;
+    } else {
+      summaryMsg = `🏁 Naukri Apply finished! Submitted ${stats.applied}/${targetToApply} applications (${stats.skipped} skipped) in ${sessionDurationMins} minutes.`;
+    }
     this.notifyStatus(portToSend, `🏁 ${summaryMsg}`, 'ok');
 
     if (portToSend) {
@@ -2826,7 +2959,18 @@ export class DedicatedJobRunner {
     stats: typeof stats;
   }> {
     const { portToSend, onLiveActivity } = options;
-    const BATCH_CAP = Math.min(options.maxJobs || 20, 25);
+    const initialQuota = await DailyQuotaManager.canApplyToday();
+    if (!initialQuota.allowed) {
+      const quotaMsg = `🛑 Daily application quota already reached (${initialQuota.currentCount}/${initialQuota.maxQuota} today). Auto Apply is complete for today.`;
+      this.notifyStatus(portToSend, quotaMsg, 'fail');
+      this.cleanupRun();
+      return { status: 'stopped', message: quotaMsg, stats };
+    }
+
+    const targetToApply = options.maxJobs ? Math.min(options.maxJobs, initialQuota.remaining) : initialQuota.remaining;
+    const BATCH_CAP = targetToApply;
+    const sessionStartTime = Date.now();
+    const MAX_SESSION_DURATION_MS = 60 * 60 * 1000;
 
     // 0. Safety Pause Check: Check if Indeed is already paused for the day
     const pauseCheck = await queueSafetyStore.getPlatformPause('indeed');
@@ -3530,21 +3674,44 @@ export class DedicatedJobRunner {
         });
       }
 
-      // Human-like anti-bot pacing delay (5-12s randomized) between Indeed applications
-      if (i < queue.length - 1 && this.isRunning) {
-        const delayMs = indeedAdapter.pacing.getJobToJobDelay();
-        const delaySec = (delayMs / 1000).toFixed(0);
+      // Human-like anti-bot pacing delay (60-90s when applied, 4-6s when skipped) between Indeed applications
+      if (applyResult.status === 'applied') {
+        if (stats.applied >= targetToApply) {
+          this.notifyStatus(
+            portToSend,
+            `🎉 Daily Application Limit reached (${stats.applied}/${targetToApply})!`,
+            'ok',
+          );
+          break;
+        }
+        const pacingMs = 60_000 + Math.floor(Math.random() * 30_000);
+        const pacingSec = Math.round(pacingMs / 1000);
+        const currentElapsedMins = Math.floor((Date.now() - sessionStartTime) / 60000);
         this.notifyStatus(
           portToSend,
-          `⏳ Quick safety pause: Waiting ${delaySec}s before opening the next job...`,
+          `⏱️ [Session: ${currentElapsedMins}m / max 60m | Daily Quota: ${stats.applied}/${targetToApply} applied] Human pacing delay: resting ${pacingSec}s before next application to protect your account...`,
           'info',
         );
-        const aborted = await this.interruptibleSleep(delayMs);
-        if (aborted) break;
+        const aborted = await this.interruptibleSleep(pacingMs);
+        if (aborted || !this.isRunning) break;
+      } else if (i < queue.length - 1 && this.isRunning) {
+        const skipDelay = 4_000 + Math.floor(Math.random() * 2_000);
+        const aborted = await this.interruptibleSleep(skipDelay);
+        if (aborted || !this.isRunning) break;
       }
     }
 
-    const summaryMsg = `Indeed Apply complete: ${stats.applied} applied, ${stats.skipped} skipped, ${stats.failed} failed.`;
+    const sessionDurationMins = Math.round((Date.now() - sessionStartTime) / 60000);
+    let summaryMsg = '';
+    if (stats.applied >= targetToApply) {
+      summaryMsg = `🎉 Daily Application Limit achieved! Applied to ${stats.applied}/${targetToApply} jobs on Indeed in ${sessionDurationMins} minutes (${stats.skipped} skipped).`;
+    } else if (Date.now() - sessionStartTime >= MAX_SESSION_DURATION_MS) {
+      summaryMsg = `⏱️ Maximum session duration of 60 minutes reached. Applied to ${stats.applied}/${targetToApply} jobs on Indeed (${stats.skipped} skipped).`;
+    } else if (!this.isRunning) {
+      summaryMsg = `🛑 Auto Apply stopped by user. Applied to ${stats.applied} jobs on Indeed in ${sessionDurationMins} minutes.`;
+    } else {
+      summaryMsg = `🏁 Indeed Apply finished! Submitted ${stats.applied}/${targetToApply} applications (${stats.skipped} skipped) in ${sessionDurationMins} minutes.`;
+    }
     this.notifyStatus(portToSend, `🏁 ${summaryMsg}`, 'ok');
 
     if (portToSend) {

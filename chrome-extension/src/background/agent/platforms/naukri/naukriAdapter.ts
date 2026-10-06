@@ -31,6 +31,7 @@ export class NaukriAdapter implements IPlatformAdapter {
     role: string,
     location: string,
     candidateName?: string | (string | undefined | null)[],
+    page?: number,
   ): string {
     const cleanRole = sanitizeRoleSearchQuery(role, candidateName, 'Software Engineer');
     // Normalize city for Naukri (e.g. "Bengaluru, India" -> "Bengaluru")
@@ -63,6 +64,9 @@ export class NaukriAdapter implements IPlatformAdapter {
     params.set('k', cleanRole);
     if (hasSpecificCity) {
       params.set('l', cleanLoc);
+    }
+    if (page && page > 1) {
+      params.set('pageNo', String(page));
     }
     // Sort by relevance/freshness
     params.set('nignbevent', 'auto_apply');
