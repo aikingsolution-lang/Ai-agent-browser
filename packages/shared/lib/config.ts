@@ -18,7 +18,7 @@ const getEnvBackendUrl = (): string => {
     }
   } catch {}
 
-  return 'http://localhost:5000';
+  return 'https://nanobrowser-backend-336340854879.asia-south1.run.app';
 };
 
 export const BACKEND_BASE_URL: string = getEnvBackendUrl();
