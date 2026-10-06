@@ -1,0 +1,11 @@
+node_modules
+.git
+.github
+dist
+dist-zip
+.turbo
+*.log
+.env
+backend/.env
+chrome-extension
+packages

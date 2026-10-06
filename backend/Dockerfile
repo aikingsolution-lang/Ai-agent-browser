@@ -1,25 +1,20 @@
 FROM node:22-alpine AS builder
 
 WORKDIR /app
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-COPY backend/package.json ./backend/
-RUN npm install -g pnpm && pnpm install --frozen-lockfile
+COPY package.json ./
+RUN npm install
 
-COPY backend ./backend
-RUN pnpm -F @nanobrowser/backend build
+COPY . ./
+RUN npm run build
 
 FROM node:22-alpine AS runner
 WORKDIR /app
 ENV NODE_ENV=production
-ENV PORT=5000
-RUN npm install -g pnpm
 
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-COPY backend/package.json ./backend/
-RUN pnpm install --prod --frozen-lockfile
+COPY package.json ./
+RUN npm install --omit=dev
 
-COPY --from=builder /app/backend/dist ./backend/dist
+COPY --from=builder /app/dist ./dist
 
-EXPOSE 5000
-CMD ["node", "backend/dist/server.js"]
-
+EXPOSE 8080
+CMD ["node", "dist/server.js"]
