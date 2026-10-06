@@ -46,7 +46,7 @@ const getEnvGoogleClientId = (): string => {
     }
   } catch {}
 
-  return '';
+  return '336340854879-i6hj15oe17se379u6k377slo7pvbvh3v.apps.googleusercontent.com';
 };
 
 export const GOOGLE_CLIENT_ID: string = getEnvGoogleClientId();
