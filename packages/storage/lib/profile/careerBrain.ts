@@ -387,6 +387,14 @@ export function sanitizeRoleSearchQuery(
   return safeFallback;
 }
 
+export function cleanSkillKey(skill: string | undefined | null): string {
+  if (!skill || typeof skill !== 'string') return '';
+  return skill
+    .trim()
+    .replace(/^[.,;:!?'"()[\]{}<>/\\|`~*#&^%$@+=]+|[.,;:!?'"()[\]{}<>/\\|`~*#&^%$@+=]+$/g, '')
+    .trim();
+}
+
 /**
  * Sanitizes and purges fabricated/hallucinated skillExperience entries from storage.
  * Detects uniform defaults (e.g. 4+ skills with "5 years" for an intern) or skills
@@ -455,10 +463,7 @@ export function sanitizeStoredSkillExperience(
     if (!skill || typeof claimedYears !== 'number' || isNaN(claimedYears) || claimedYears <= 0) {
       continue;
     }
-    const clean = skill
-      .trim()
-      .replace(/^[.,;:!?'"()[\]{}<>/\\|`~*#&^%$@+=]+|[.,;:!?'"()[\]{}<>/\\|`~*#&^%$@+=]+$/g, '')
-      .trim();
+    const clean = cleanSkillKey(skill);
     if (!clean || clean.length > 35) continue;
 
     // Check if resume text explicitly states duration
@@ -494,17 +499,16 @@ export function sanitizeStoredSkillExperience(
       }
     }
 
+    const effectiveMaxTenure = Math.max(1, maxVerifiableTenure);
+
     if (skillRoleTenure !== null) {
-      if (maxVerifiableTenure === 0) {
-        continue;
-      }
-      const verifiedYears = Math.min(claimedYears, Math.max(1, skillRoleTenure), Math.max(1, maxVerifiableTenure));
+      const verifiedYears = Math.min(claimedYears, Math.max(1, skillRoleTenure), effectiveMaxTenure);
       cleanExp[clean] = verifiedYears;
     } else {
-      if (isFabricatedValue || claimedYears > maxVerifiableTenure) {
+      if (isFabricatedValue || claimedYears > effectiveMaxTenure) {
         continue;
       }
-      if (maxVerifiableTenure > 0 && claimedYears <= maxVerifiableTenure) {
+      if (claimedYears <= effectiveMaxTenure) {
         cleanExp[clean] = claimedYears;
       }
     }
@@ -933,7 +937,22 @@ Tools: Git, GitHub, Docker, Postman, VS Code`,
   linkedinUrl: 'https://linkedin.com',
   goldenAnswers: DEFAULT_GOLDEN_ANSWERS,
   customAnswers: {},
-  skillExperience: {},
+  skillExperience: {
+    'React.js': 1,
+    'Redux Toolkit': 1,
+    'Node.js': 1,
+    'Express.js': 1,
+    MongoDB: 1,
+    'REST APIs': 1,
+    JavaScript: 1,
+    TypeScript: 1,
+    'Tailwind CSS': 1,
+    HTML5: 1,
+    CSS3: 1,
+    Python: 1,
+    Git: 1,
+    Docker: 1,
+  },
   predefinedRoles: [
     'Frontend Developer',
     'React Developer',
@@ -946,7 +965,22 @@ Tools: Git, GitHub, Docker, Postman, VS Code`,
   jobTypes: ['Full-time', 'Internship'],
   resumes: [],
   activeResumeId: undefined,
-  autoExtractedSkills: [],
+  autoExtractedSkills: [
+    'React.js',
+    'Redux Toolkit',
+    'Node.js',
+    'Express.js',
+    'MongoDB',
+    'REST APIs',
+    'JavaScript',
+    'TypeScript',
+    'Tailwind CSS',
+    'HTML5',
+    'CSS3',
+    'Python',
+    'Git',
+    'Docker',
+  ],
   gender: 'Male',
   dateOfBirth: '2000-01-01',
   highestEducation: "Bachelor's Degree",
@@ -1015,11 +1049,29 @@ export async function saveCareerBrainData(data: unknown): Promise<SaveCareerBrai
       finalPreferredLocations = [finalPreferredLocation];
     }
 
+    // Enforce auto-seeding of any primary skills into skillExperience with candidate tenure
+    const candidateTenure = Math.max(1, Math.min(parseResult.data.yearsOfExperience || 1, 99));
+    const mergedSkillExp = { ...(parseResult.data.skillExperience || {}) };
+    let hasNewSkillExp = false;
+    if (Array.isArray(parseResult.data.skills)) {
+      for (const rawS of parseResult.data.skills) {
+        const cleanS = cleanSkillKey(rawS);
+        if (cleanS && cleanS.length <= 35 && (!mergedSkillExp[cleanS] || mergedSkillExp[cleanS] <= 0)) {
+          mergedSkillExp[cleanS] = candidateTenure;
+          hasNewSkillExp = true;
+        }
+      }
+    }
+
     const validatedData: ICareerBrain = {
       ...parseResult.data,
       preferredLocation: finalPreferredLocation,
       preferredLocations: finalPreferredLocations,
       goldenAnswers: cleanGoldenAnswers,
+      skillExperience: mergedSkillExp,
+      autoExtractedSkills: hasNewSkillExp
+        ? Array.from(new Set([...(parseResult.data.autoExtractedSkills || []), ...Object.keys(mergedSkillExp)]))
+        : parseResult.data.autoExtractedSkills,
       updatedAt: Date.now(),
     };
 
@@ -1198,6 +1250,28 @@ export async function getCareerBrainData(): Promise<ICareerBrain> {
       migratedResumes = true;
     }
 
+    // Seamless auto-migration: Seed missing primary skills into skillExperience
+    let migratedSkillExp = false;
+    if (Array.isArray(data.skills) && data.skills.length > 0) {
+      const candidateTenure = Math.max(1, Math.min(data.yearsOfExperience || 1, 99));
+      const currentExp = { ...(data.skillExperience || {}) };
+      for (const rawS of data.skills) {
+        const cleanS = cleanSkillKey(rawS);
+        if (cleanS && cleanS.length <= 35 && (!currentExp[cleanS] || currentExp[cleanS] <= 0)) {
+          currentExp[cleanS] = candidateTenure;
+          migratedSkillExp = true;
+        }
+      }
+      if (migratedSkillExp) {
+        data.skillExperience = currentExp;
+        const autoSet = new Set(data.autoExtractedSkills || []);
+        for (const s of Object.keys(currentExp)) {
+          autoSet.add(s);
+        }
+        data.autoExtractedSkills = Array.from(autoSet);
+      }
+    }
+
     // Seamless auto-migration: Ensure all default golden answers exist even for existing users
     const existingIds = new Set((data.goldenAnswers || []).map(ga => ga.id));
     const existingQuestions = new Set((data.goldenAnswers || []).map(ga => ga.question.toLowerCase().trim()));
@@ -1209,6 +1283,7 @@ export async function getCareerBrainData(): Promise<ICareerBrain> {
       cleanedGoldenAnswers ||
       purgedStaleGolden ||
       sanitizedSkillExp ||
+      migratedSkillExp ||
       cleanedLocation ||
       migratedResumes
     ) {

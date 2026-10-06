@@ -208,6 +208,21 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
             data.skills = cleanedSkills;
             modified = true;
           }
+          // Seed any missing skills from Primary Skills into skillExperience
+          const candidateTenure = Math.max(1, Math.min(data.yearsOfExperience || 1, 99));
+          const currentExp = { ...(data.skillExperience || {}) };
+          let expChanged = false;
+          for (const s of cleanedSkills) {
+            if (!currentExp[s] || currentExp[s] <= 0) {
+              currentExp[s] = candidateTenure;
+              expChanged = true;
+            }
+          }
+          if (expChanged) {
+            data.skillExperience = currentExp;
+            data.autoExtractedSkills = Array.from(new Set([...(data.autoExtractedSkills || []), ...cleanedSkills]));
+            modified = true;
+          }
         }
         if (data.goldenAnswers && data.goldenAnswers.length > 0) {
           const cleanedGolden = data.goldenAnswers.filter(ga => !isGenericWorkExperienceDateField(ga.question));
@@ -420,6 +435,15 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
             : [];
           const finalSkills = Array.from(new Set([...validParsedSkills, ...autoExtractedSkillNames]));
 
+          // Auto-seed ALL Primary Skills into cleanSkillExp with candidate verifiable tenure
+          const candidateTenure = Math.max(1, Math.min(extractedYoe || profile.yearsOfExperience || 1, 99));
+          for (const skill of finalSkills) {
+            if (!cleanSkillExp[skill] || cleanSkillExp[skill] <= 0) {
+              cleanSkillExp[skill] = candidateTenure;
+            }
+          }
+          const allAutoExtractedSkills = Array.from(new Set([...autoExtractedSkillNames, ...finalSkills]));
+
           // 5. Candidate Background Narrative: Exclusively from new resume
           const finalBackgroundNarrative = extractedNarrative || parsed.backgroundNarrative || '';
 
@@ -501,7 +525,7 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
             resumes: currentResumes,
             activeResumeId: currentResumes.find(r => r.isDefault)?.id || newResumeItem.id,
             skillExperience: cleanSkillExp,
-            autoExtractedSkills: autoExtractedSkillNames,
+            autoExtractedSkills: allAutoExtractedSkills,
             updatedAt: Date.now(),
           };
 

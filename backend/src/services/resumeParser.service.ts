@@ -97,15 +97,12 @@ RULES:
    - Calculate total integer years of professional software/work experience (e.g. 0, 1, 3, 5) strictly based on verifiable employment history dates.
    - DO NOT count college or university degree duration (e.g. a 2020–2024 B.Tech is education, NOT 4 years of work experience).
    - If the candidate is a fresher or intern with under 1 year of work history, yearsOfExperience MUST be 0 (or 1 if at least 1 full year).
-3. SKILLS WITH YEARS (skillExperience):
-   - Years of experience for a skill may ONLY be set if:
-     a) The resume explicitly states a duration for that skill (e.g. "React (3 years)", "4+ yrs Python experience"), OR
-     b) It can be factually computed from actual date ranges in the work history where that skill was actively used (e.g. Job from 2022 to 2024 using React = 2 years).
-   - ABSOLUTE PROHIBITIONS:
-     * NEVER apply a generic constant or default (e.g. NEVER assign "5" or "3" across skills).
-     * NEVER calculate skill years based on degree dates or college timeline.
-     * NEVER count skill mention frequency or project count as years.
-   - OMISSION RULE: If a skill is listed (e.g. under "Technical Skills" or "Projects") but NO duration is explicitly stated and it was NOT part of a dated professional employment role, OMIT it from skillExperience completely! Do NOT guess or invent a number.
+3. SKILLS & SKILL EXPERIENCE (skillExperience):
+   - For every primary skill identified in "skills", include it in "skillExperience" with its estimated or verified years of experience.
+   - If the resume explicitly states a duration for that skill (e.g. "React (3 years)", "4+ yrs Python experience"), use that duration.
+   - If the skill was used in a dated work experience role, compute the years from that role's date range.
+   - For other skills listed on the resume without explicit duration, set years to candidate's verifiable yearsOfExperience (minimum 1 year, e.g. fresher/intern = 1 year of project/academic experience).
+   - NEVER assign random inflated numbers (e.g. NEVER assign 5+ years for a 1-year junior). Cap all skills at verifiable yearsOfExperience (minimum 1).
    - CONCRETE TECHNICAL TOOLS ONLY: Extract specific technologies, frameworks, libraries, databases, and languages (e.g. TypeScript, React, Python, PostgreSQL, Docker, AWS).
    - REJECT GENERIC TERMS & STOPWORDS: Never extract generic buzzwords or grammatical words (e.g. "ai", "ml", "ui", "ux", "and", "the", "developer", "engineering", "programming", "software", "tech", "skills").
    - LENGTH RULE: Reject any skill name under 3 characters unless it is a standard short programming language ("Go", "R", "C#", "C").
@@ -297,6 +294,19 @@ ${truncatedText}`;
           rawText,
           parsed.yearsOfExperience,
         );
+      } else {
+        parsed.skillExperience = {};
+      }
+
+      // 3b. Auto-seed ALL extracted Primary Skills into skillExperience
+      const candidateTenure = Math.max(1, Math.min(parsed.yearsOfExperience || 1, 99));
+      if (Array.isArray(parsed.skills)) {
+        for (const skill of parsed.skills) {
+          const clean = cleanSkillName(skill);
+          if (isValidSkillName(clean) && (!parsed.skillExperience[clean] || parsed.skillExperience[clean] <= 0)) {
+            parsed.skillExperience[clean] = candidateTenure;
+          }
+        }
       }
 
       // 4. Sanitize currentLocation and preferredLocation (strip any 'or Remote' / 'Remote /' suffixes)
@@ -468,6 +478,8 @@ ${truncatedText}`;
         );
       if (yrsMatch && yrsMatch[1]) {
         skillExperience[skill] = Math.round(parseFloat(yrsMatch[1]));
+      } else {
+        skillExperience[skill] = 2;
       }
     }
 

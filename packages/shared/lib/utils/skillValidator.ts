@@ -304,22 +304,19 @@ export function validateAndSanitizeSkillExperience(
       }
     }
 
+    const effectiveMaxTenure = Math.max(1, maxVerifiableTenure);
+
     if (skillRoleTenure !== null) {
       // Skill was used in dated employment. Cap at verifiable tenure and role duration.
-      if (maxVerifiableTenure === 0) {
-        // Intern or fresher with < 1 year in current year; omit so user can manually set
-        continue;
-      }
-      const verifiedYears = Math.min(claimedYears, Math.max(1, skillRoleTenure), Math.max(1, maxVerifiableTenure));
+      const verifiedYears = Math.min(claimedYears, Math.max(1, skillRoleTenure), effectiveMaxTenure);
       cleanExp[clean] = verifiedYears;
     } else {
       // Skill was NOT in dated employment and has no explicit text duration.
-      // If claimed years is a fabricated value, or exceeds maxVerifiableTenure, omit it.
-      if (isFabricatedValue || claimedYears > maxVerifiableTenure) {
+      // If claimed years is a fabricated value, or exceeds effectiveMaxTenure, omit it.
+      if (isFabricatedValue || claimedYears > effectiveMaxTenure) {
         continue;
       }
-      // If candidate has overall experience and this wasn't flagged as fabricated
-      if (maxVerifiableTenure > 0 && claimedYears <= maxVerifiableTenure) {
+      if (claimedYears <= effectiveMaxTenure) {
         cleanExp[clean] = claimedYears;
       }
     }
