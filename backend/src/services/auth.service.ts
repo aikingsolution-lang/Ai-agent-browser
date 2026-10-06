@@ -265,7 +265,12 @@ export class AuthService {
   }
 
   public static async loginWithGoogle(input: GoogleAuthInput): Promise<AuthResult> {
-    if (!env.GOOGLE_CLIENT_ID) {
+    const googleClientId =
+      env.GOOGLE_CLIENT_ID?.trim() ||
+      process.env.GOOGLE_CLIENT_ID?.trim() ||
+      '336340854879-i6hj15oe17se379u6k377slo7pvbvh3v.apps.googleusercontent.com';
+
+    if (!googleClientId) {
       throw new AppError('Google authentication is not configured on this server', 500, 'GOOGLE_AUTH_NOT_CONFIGURED');
     }
 
@@ -273,12 +278,12 @@ export class AuthService {
       throw new AppError('Google ID token is required', 400, 'GOOGLE_TOKEN_REQUIRED');
     }
 
-    const client = new OAuth2Client(env.GOOGLE_CLIENT_ID);
+    const client = new OAuth2Client(googleClientId);
     let payload;
     try {
       const ticket = await client.verifyIdToken({
         idToken: input.idToken,
-        audience: env.GOOGLE_CLIENT_ID,
+        audience: googleClientId,
       });
       payload = ticket.getPayload();
     } catch {

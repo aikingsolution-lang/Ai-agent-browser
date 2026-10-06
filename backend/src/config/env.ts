@@ -30,7 +30,16 @@ const envSchema = z
     AWS_BEDROCK_REGION: z.string().default('us-east-1'),
     OPENAI_API_KEY: z.string().optional(),
     LLM_DEFAULT_MODEL: z.string().default('anthropic.claude-3-5-sonnet-20240620-v1:0'),
-    GOOGLE_CLIENT_ID: z.string().default(process.env.GOOGLE_CLIENT_ID || ''),
+    GOOGLE_CLIENT_ID: z
+      .string()
+      .optional()
+      .transform(
+        val =>
+          (val && val.trim()) ||
+          process.env.GOOGLE_CLIENT_ID?.trim() ||
+          '336340854879-i6hj15oe17se379u6k377slo7pvbvh3v.apps.googleusercontent.com',
+      )
+      .default('336340854879-i6hj15oe17se379u6k377slo7pvbvh3v.apps.googleusercontent.com'),
   })
   .refine(
     data => {
