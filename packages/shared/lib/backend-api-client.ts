@@ -211,12 +211,12 @@ export class BackendApiClient {
     return res;
   }
 
-  public async loginWithGoogle(token: string) {
+  public async loginWithGoogle(payload: { idToken: string; nonce: string }) {
     const res = await this.request<{ user: any; token: string; refreshToken?: string; subscription?: any }>(
       '/auth/google',
       {
         method: 'POST',
-        body: JSON.stringify({ token }),
+        body: JSON.stringify(payload),
       },
     );
     if (res.data?.token) {

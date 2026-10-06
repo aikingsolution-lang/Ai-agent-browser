@@ -71,7 +71,7 @@ export class AuthController {
 
   public static async google(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
-      const result = await AuthService.loginWithGoogle(req.body.token);
+      const result = await AuthService.loginWithGoogle(req.body);
       sendSuccess(
         res,
         {

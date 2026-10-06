@@ -8,9 +8,10 @@ import { Subscription, type ISubscription } from '../models/subscription.model.j
 import { UserCreditBalance } from '../models/userCreditBalance.model.js';
 import { CreditLedger } from '../models/creditLedger.model.js';
 import { TrialService } from './trial.service.js';
+import { OAuth2Client } from 'google-auth-library';
 import { env } from '../config/env.js';
 import { AppError } from '../middleware/errorHandler.js';
-import type { RegisterInput, LoginInput } from '../schemas/auth.schema.js';
+import type { RegisterInput, LoginInput, GoogleAuthInput } from '../schemas/auth.schema.js';
 
 export interface JwtTokenPayload {
   sub: string;
@@ -263,34 +264,55 @@ export class AuthService {
     return User.findById(userId);
   }
 
-  public static async loginWithGoogle(googleToken: string): Promise<AuthResult> {
-    if (!googleToken) {
-      throw new AppError('Google access token is required', 400, 'GOOGLE_TOKEN_REQUIRED');
+  public static async loginWithGoogle(input: GoogleAuthInput): Promise<AuthResult> {
+    if (!env.GOOGLE_CLIENT_ID) {
+      throw new AppError('Google authentication is not configured on this server', 500, 'GOOGLE_AUTH_NOT_CONFIGURED');
     }
 
-    let googleUser: { sub: string; email: string; name?: string; picture?: string };
+    if (!input?.idToken) {
+      throw new AppError('Google ID token is required', 400, 'GOOGLE_TOKEN_REQUIRED');
+    }
+
+    const client = new OAuth2Client(env.GOOGLE_CLIENT_ID);
+    let payload;
     try {
-      const response = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
-        headers: {
-          Authorization: `Bearer ${googleToken}`,
-        },
+      const ticket = await client.verifyIdToken({
+        idToken: input.idToken,
+        audience: env.GOOGLE_CLIENT_ID,
       });
-
-      if (!response.ok) {
-        throw new Error('Google token verification failed');
-      }
-
-      googleUser = (await response.json()) as any;
+      payload = ticket.getPayload();
     } catch {
-      throw new AppError('Invalid or expired Google access token', 401, 'INVALID_GOOGLE_TOKEN');
+      throw new AppError('Invalid or expired Google token', 401, 'INVALID_GOOGLE_TOKEN');
     }
 
-    if (!googleUser || !googleUser.email) {
+    if (!payload || !payload.sub) {
+      throw new AppError('Invalid Google token payload', 401, 'INVALID_GOOGLE_TOKEN');
+    }
+
+    if (!payload.email) {
       throw new AppError('Google account does not provide an email address', 400, 'GOOGLE_EMAIL_MISSING');
     }
 
-    const normalizedEmail = googleUser.email.trim().toLowerCase();
-    let user = await User.findOne({ email: normalizedEmail });
+    if (!payload.email_verified) {
+      throw new AppError('Google email is not verified', 401, 'EMAIL_NOT_VERIFIED');
+    }
+
+    if (!payload.nonce || payload.nonce !== input.nonce) {
+      throw new AppError('Google authentication nonce mismatch', 401, 'NONCE_MISMATCH');
+    }
+
+    const googleSub = payload.sub;
+    const normalizedEmail = payload.email.trim().toLowerCase();
+    const name = payload.name?.trim();
+    const picture = payload.picture;
+
+    // Upsert user by Google "sub" (store googleId, email, name, picture)
+    let user = await User.findOne({ googleId: googleSub });
+
+    if (!user) {
+      // Check if user with this email already exists
+      user = await User.findOne({ email: normalizedEmail });
+    }
 
     if (user) {
       if (user.status !== 'active') {
@@ -302,8 +324,16 @@ export class AuthService {
         user.googleLinked = true;
         updated = true;
       }
-      if (!user.googleId && googleUser.sub) {
-        user.googleId = googleUser.sub;
+      if (user.googleId !== googleSub) {
+        user.googleId = googleSub;
+        updated = true;
+      }
+      if (picture && user.picture !== picture) {
+        user.picture = picture;
+        updated = true;
+      }
+      if (name && (!user.name || user.name === 'Google User')) {
+        user.name = name;
         updated = true;
       }
       if (updated) {
@@ -324,12 +354,13 @@ export class AuthService {
         subscription: subscription ?? undefined,
       };
     } else {
-      const userName = googleUser.name?.trim() || normalizedEmail.split('@')[0];
+      const userName = name && name.length >= 2 ? name : normalizedEmail.split('@')[0];
       user = await User.create({
         name: userName.length >= 2 ? userName : 'Google User',
         email: normalizedEmail,
         googleLinked: true,
-        googleId: googleUser.sub,
+        googleId: googleSub,
+        picture: picture ?? undefined,
         role: 'user',
         status: 'active',
       });

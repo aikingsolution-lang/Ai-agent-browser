@@ -24,3 +24,29 @@ const getEnvBackendUrl = (): string => {
 export const BACKEND_BASE_URL: string = getEnvBackendUrl();
 export const BACKEND_API_URL: string = `${BACKEND_BASE_URL}/api/v1`;
 export const BACKEND_LLM_URL: string = `${BACKEND_BASE_URL}/api/v1/llm`;
+
+const getEnvGoogleClientId = (): string => {
+  try {
+    const proc = (globalThis as any)?.process;
+    if (proc?.env?.VITE_GOOGLE_CLIENT_ID) {
+      return String(proc.env.VITE_GOOGLE_CLIENT_ID).trim();
+    }
+    if (proc?.env?.GOOGLE_CLIENT_ID) {
+      return String(proc.env.GOOGLE_CLIENT_ID).trim();
+    }
+  } catch {}
+
+  try {
+    const meta = (globalThis as any)?.import?.meta;
+    if (meta?.env?.VITE_GOOGLE_CLIENT_ID) {
+      return String(meta.env.VITE_GOOGLE_CLIENT_ID).trim();
+    }
+    if (meta?.env?.GOOGLE_CLIENT_ID) {
+      return String(meta.env.GOOGLE_CLIENT_ID).trim();
+    }
+  } catch {}
+
+  return '';
+};
+
+export const GOOGLE_CLIENT_ID: string = getEnvGoogleClientId();

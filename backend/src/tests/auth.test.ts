@@ -7,6 +7,7 @@ import { User } from '../models/user.model.js';
 import { RefreshToken } from '../models/refreshToken.model.js';
 import { env } from '../config/env.js';
 
+import { OAuth2Client } from 'google-auth-library';
 import { setupTestDatabase, type TestDbInstance } from './setupTestDb.js';
 
 const app = createApp();
@@ -15,10 +16,12 @@ let testDb: TestDbInstance;
 describe('Auth System Integration & Unit Tests', () => {
   beforeAll(async () => {
     testDb = await setupTestDatabase();
-  });
+  }, 240000);
 
   afterAll(async () => {
-    await testDb.stop();
+    if (testDb) {
+      await testDb.stop();
+    }
   });
 
   beforeEach(async () => {
@@ -384,26 +387,25 @@ describe('Auth System Integration & Unit Tests', () => {
   });
 
   it('23. Google sign-in registers new user and auto-provisions free trial', async () => {
-    const fetchSpy = vi.spyOn(global, 'fetch').mockImplementation(async (url: any) => {
-      if (url.toString().includes('oauth2/v3/userinfo')) {
-        return {
-          ok: true,
-          json: async () => ({
-            sub: 'google-sub-12345',
-            email: 'googleuser@test.com',
-            name: 'Google User',
-            picture: 'https://example.com/photo.jpg',
-          }),
-        } as any;
-      }
-      return { ok: false } as any;
-    });
+    (env as any).GOOGLE_CLIENT_ID = 'test-google-client-id.apps.googleusercontent.com';
+
+    const verifySpy = vi.spyOn(OAuth2Client.prototype, 'verifyIdToken').mockResolvedValue({
+      getPayload: () => ({
+        sub: 'google-sub-12345',
+        email: 'googleuser@test.com',
+        email_verified: true,
+        name: 'Google User',
+        picture: 'https://example.com/photo.jpg',
+        nonce: 'valid-nonce-123',
+      }),
+    } as any);
 
     const res = await request(app).post('/api/v1/auth/google').send({
-      token: 'valid-google-access-token-123',
+      idToken: 'valid-google-id-token-123',
+      nonce: 'valid-nonce-123',
     });
 
-    fetchSpy.mockRestore();
+    verifySpy.mockRestore();
 
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
@@ -418,35 +420,36 @@ describe('Auth System Integration & Unit Tests', () => {
     const dbUser = await User.findOne({ email: 'googleuser@test.com' });
     expect(dbUser).not.toBeNull();
     expect(dbUser?.googleId).toBe('google-sub-12345');
+    expect(dbUser?.picture).toBe('https://example.com/photo.jpg');
     expect(dbUser?.passwordHash).toBeUndefined();
   });
 
   it('24. Google sign-in with existing user links account and returns tokens', async () => {
+    (env as any).GOOGLE_CLIENT_ID = 'test-google-client-id.apps.googleusercontent.com';
+
     await request(app).post('/api/v1/auth/register').send({
       name: 'Existing Account',
       email: 'existinggoogle@test.com',
       password: 'Password123!',
     });
 
-    const fetchSpy = vi.spyOn(global, 'fetch').mockImplementation(async (url: any) => {
-      if (url.toString().includes('oauth2/v3/userinfo')) {
-        return {
-          ok: true,
-          json: async () => ({
-            sub: 'google-sub-99999',
-            email: 'existinggoogle@test.com',
-            name: 'Existing Google',
-          }),
-        } as any;
-      }
-      return { ok: false } as any;
-    });
+    const verifySpy = vi.spyOn(OAuth2Client.prototype, 'verifyIdToken').mockResolvedValue({
+      getPayload: () => ({
+        sub: 'google-sub-99999',
+        email: 'existinggoogle@test.com',
+        email_verified: true,
+        name: 'Existing Google',
+        picture: 'https://example.com/existing.jpg',
+        nonce: 'existing-nonce-999',
+      }),
+    } as any);
 
     const res = await request(app).post('/api/v1/auth/google').send({
-      token: 'valid-google-token-existing',
+      idToken: 'valid-google-token-existing',
+      nonce: 'existing-nonce-999',
     });
 
-    fetchSpy.mockRestore();
+    verifySpy.mockRestore();
 
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
@@ -456,21 +459,68 @@ describe('Auth System Integration & Unit Tests', () => {
     const dbUser = await User.findOne({ email: 'existinggoogle@test.com' });
     expect(dbUser?.googleLinked).toBe(true);
     expect(dbUser?.googleId).toBe('google-sub-99999');
+    expect(dbUser?.picture).toBe('https://example.com/existing.jpg');
   });
 
-  it('25. Google sign-in fails with invalid token and returns 401', async () => {
-    const fetchSpy = vi.spyOn(global, 'fetch').mockImplementation(async () => {
-      return {
-        ok: false,
-        status: 401,
-      } as any;
-    });
+  it('25. Google sign-in rejects unverified email address with 401', async () => {
+    (env as any).GOOGLE_CLIENT_ID = 'test-google-client-id.apps.googleusercontent.com';
+
+    const verifySpy = vi.spyOn(OAuth2Client.prototype, 'verifyIdToken').mockResolvedValue({
+      getPayload: () => ({
+        sub: 'google-sub-unverified',
+        email: 'unverified@test.com',
+        email_verified: false,
+        name: 'Unverified User',
+        nonce: 'unverified-nonce',
+      }),
+    } as any);
 
     const res = await request(app).post('/api/v1/auth/google').send({
-      token: 'invalid-token',
+      idToken: 'valid-id-token-unverified',
+      nonce: 'unverified-nonce',
     });
 
-    fetchSpy.mockRestore();
+    verifySpy.mockRestore();
+
+    expect(res.status).toBe(401);
+    expect(res.body.error.code).toBe('EMAIL_NOT_VERIFIED');
+  });
+
+  it('26. Google sign-in rejects nonce mismatch with 401', async () => {
+    (env as any).GOOGLE_CLIENT_ID = 'test-google-client-id.apps.googleusercontent.com';
+
+    const verifySpy = vi.spyOn(OAuth2Client.prototype, 'verifyIdToken').mockResolvedValue({
+      getPayload: () => ({
+        sub: 'google-sub-nonce-mismatch',
+        email: 'noncemismatch@test.com',
+        email_verified: true,
+        name: 'Nonce Mismatch User',
+        nonce: 'google-payload-nonce-A',
+      }),
+    } as any);
+
+    const res = await request(app).post('/api/v1/auth/google').send({
+      idToken: 'valid-token-nonce-mismatch',
+      nonce: 'request-body-nonce-B',
+    });
+
+    verifySpy.mockRestore();
+
+    expect(res.status).toBe(401);
+    expect(res.body.error.code).toBe('NONCE_MISMATCH');
+  });
+
+  it('27. Google sign-in fails with invalid token and returns 401', async () => {
+    (env as any).GOOGLE_CLIENT_ID = 'test-google-client-id.apps.googleusercontent.com';
+
+    const verifySpy = vi.spyOn(OAuth2Client.prototype, 'verifyIdToken').mockRejectedValue(new Error('Invalid token'));
+
+    const res = await request(app).post('/api/v1/auth/google').send({
+      idToken: 'invalid-token',
+      nonce: 'any-nonce',
+    });
+
+    verifySpy.mockRestore();
 
     expect(res.status).toBe(401);
     expect(res.body.error.code).toBe('INVALID_GOOGLE_TOKEN');

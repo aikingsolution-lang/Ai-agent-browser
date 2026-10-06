@@ -9,6 +9,7 @@ export interface IUser extends Document {
   passwordHash?: string;
   googleLinked?: boolean;
   googleId?: string;
+  picture?: string;
   role: 'user' | 'admin';
   status: 'active' | 'suspended';
   hasUsedTrial: boolean;
@@ -48,6 +49,11 @@ const userSchema = new Schema<IUser>(
       type: String,
       default: null,
       index: true,
+      sparse: true,
+    },
+    picture: {
+      type: String,
+      default: null,
     },
     role: {
       type: String,

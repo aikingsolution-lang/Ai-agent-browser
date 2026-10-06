@@ -37,7 +37,8 @@ export const logoutSchema = z
 
 export const googleAuthSchema = z
   .object({
-    token: z.string({ required_error: 'Google token is required' }).min(1, 'Google token is required'),
+    idToken: z.string({ required_error: 'ID token is required' }).min(1, 'ID token is required'),
+    nonce: z.string({ required_error: 'Nonce is required' }).min(1, 'Nonce is required'),
   })
   .strict();
 
