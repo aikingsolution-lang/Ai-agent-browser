@@ -95,6 +95,10 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess
         errMsg.includes('closed the window')
       ) {
         setError('Google sign-in was cancelled by user.');
+      } else if (errMsg.includes('Only one web auth flow is allowed') || errMsg.includes('already open')) {
+        setError(
+          'A Google sign-in window is already open. Check your open windows or taskbar, or reload the extension.',
+        );
       } else {
         setError(errMsg);
       }

@@ -73,7 +73,7 @@ const manifest = withOperaSidebar(
       'identity',
     ],
     oauth2: {
-      client_id: 'GOOGLE_CLIENT_ID_PLACEHOLDER.apps.googleusercontent.com',
+      client_id: '336340854879-i6hj15oe17se379u6k377slo7pvbvh3v.apps.googleusercontent.com',
       scopes: ['openid', 'email', 'profile'],
     },
     options_page: 'options/index.html',
