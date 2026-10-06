@@ -2,6 +2,7 @@
   "extends": "@extension/tsconfig/app",
   "compilerOptions": {
     "baseUrl": ".",
+    "ignoreDeprecations": "5.0",
     "paths": {
       "@src/*": ["src/*"],
       "@extension/storage": ["../packages/storage/index.ts"],
@@ -10,5 +11,6 @@
       "@extension/shared": ["../packages/shared/index.ts"]
     }
   },
-  "include": ["src", "utils", "vite.config.mts", "../node_modules/@types"]
+  "include": ["src", "utils", "vite.config.mts", "../node_modules/@types"],
+  "exclude": ["src/**/deprecated/**"]
 }

@@ -20,11 +20,16 @@ import {
   type IWorkExperienceItem,
   isGenericWorkExperienceDateField,
   cleanLocationForCityField,
+  parseLocationParts,
   isSocialMediaOrUrlQuestion,
+  areQuestionsSemanticallyEquivalent,
+  findBestMatchingGoldenAnswer,
 } from '@extension/storage';
 import { isValidSkillName } from '@extension/shared';
 import { createLogger } from '../../log';
 import { userQuestionManager } from './userQuestionManager';
+import { alignValueToOptions, matchQuestionSemantically } from '../intelligence';
+import { getActiveChatModel } from '../activeModelHelper';
 
 const logger = createLogger('FormQuestionResolver');
 
@@ -144,6 +149,12 @@ export function matchesQuestionLoosely(q1: string, q2: string): boolean {
   const t2 = cleanLinkedInText(q2).toLowerCase().trim();
   if (t1 === t2) return true;
   if (t1.includes(t2) || t2.includes(t1)) return true;
+
+  // 1. Semantic equivalence (normalization + curated synonym clusters + token Jaccard)
+  const semantic = areQuestionsSemanticallyEquivalent(q1, q2);
+  if (semantic.matched) {
+    return true;
+  }
 
   const norm1 = normalizeQuestionForMatch(q1);
   const norm2 = normalizeQuestionForMatch(q2);
@@ -1014,6 +1025,33 @@ export function adaptAnswerToFieldFormat(
 }
 
 /**
+ * Generates a tailored 3-paragraph professional cover letter / pitch.
+ */
+export function generateTailoredCoverLetter(
+  careerBrain: ICareerBrain,
+  jobTitle: string = 'Software Engineer',
+  companyName: string = 'your team',
+): string {
+  const name = careerBrain.fullName && careerBrain.fullName !== 'Candidate' ? careerBrain.fullName : 'Candidate';
+  const role = careerBrain.currentTitle || jobTitle;
+  const exp = careerBrain.yearsOfExperience ? `${careerBrain.yearsOfExperience}+ years` : 'a proven track record';
+  const topSkills = (careerBrain.skills || []).slice(0, 5).join(', ') || 'modern software engineering principles';
+  const narrative = careerBrain.backgroundNarrative?.trim() || '';
+  const notice = careerBrain.noticePeriod || 'immediate availability';
+
+  return `Dear Hiring Team at ${companyName},
+
+I am excited to submit my application for the ${jobTitle} position. With ${exp} of professional experience specializing in ${topSkills}, I have developed a strong foundation in building scalable, production-ready systems that solve real-world problems.
+
+${narrative ? narrative + '\n\n' : ''}In my recent work as a ${role}, I have consistently focused on clean architecture, performance optimization, and cross-functional collaboration. I am eager to bring my expertise in ${topSkills} to help ${companyName} deliver impactful features and exceed engineering benchmarks.
+
+Thank you for your time and consideration. With my background and ${notice}, I would welcome the opportunity to discuss how my qualifications align with your team's objectives.
+
+Best regards,
+${name}`;
+}
+
+/**
  * Fast Rule-Based Matcher across profile, goldenAnswers, customAnswers, and skillExperience.
  * Uses loose question matching to prevent trivial re-asking.
  */
@@ -1302,12 +1340,30 @@ export function matchRuleBased(
     };
   }
 
-  // 2. Golden Answers (loose match check with format adaptation)
+  // 2. Golden Answers (semantic cluster matching + format adaptation)
   if (!isGenericWorkExperienceDateField(label)) {
     const goldenAnswers = Array.isArray(careerBrain.goldenAnswers) ? careerBrain.goldenAnswers : [];
-    for (const ga of goldenAnswers) {
-      if (!ga.question || !ga.answer) continue;
-      if (isGenericWorkExperienceDateField(ga.question)) continue;
+    const validGolden = goldenAnswers.filter(
+      ga => ga && ga.question && ga.answer && !isGenericWorkExperienceDateField(ga.question),
+    );
+
+    // First attempt: Smart semantic matching (normalization + curated synonym clusters + token ranking)
+    const bestGolden = findBestMatchingGoldenAnswer(label, validGolden);
+    if (bestGolden.matched && bestGolden.goldenAnswer?.answer) {
+      const adapted = adaptAnswerToFieldFormat(bestGolden.goldenAnswer.answer, field);
+      if (adapted.valid) {
+        return {
+          matched: true,
+          answer: adapted.value,
+          sourceDetail:
+            adapted.sourceNote ||
+            `goldenAnswers (semantic match): "${bestGolden.goldenAnswer.question}" (${bestGolden.reason})`,
+        };
+      }
+    }
+
+    // Fallback attempt: matchesQuestionLoosely
+    for (const ga of validGolden) {
       if (matchesQuestionLoosely(label, ga.question)) {
         const adapted = adaptAnswerToFieldFormat(ga.answer, field);
         if (adapted.valid) {
@@ -1344,6 +1400,68 @@ export function matchRuleBased(
     field.fieldType === 'dropdown' ||
     field.fieldType === 'checkbox' ||
     (field.options && field.options.some(o => /^(yes|no)$/i.test(o.trim())));
+
+  // Phone country code / Country dialing code (dropdown, combobox, or text)
+  const isPhoneCountryCodeQuestion =
+    /country\s*code|phone\s*country|dialing\s*code|country\s*calling\s*code|country\/region\s*code/i.test(labelLower) ||
+    /countrycode/i.test(field.id || '');
+
+  if (isPhoneCountryCodeQuestion) {
+    const phone = careerBrain.phoneNumber || '';
+    let dialingCode = '+91';
+    let countryName = 'India';
+
+    if (phone.startsWith('+1')) {
+      dialingCode = '+1';
+      countryName = 'United States';
+    } else if (phone.startsWith('+44')) {
+      dialingCode = '+44';
+      countryName = 'United Kingdom';
+    } else if (phone.startsWith('+61')) {
+      dialingCode = '+61';
+      countryName = 'Australia';
+    } else if (phone.startsWith('+49')) {
+      dialingCode = '+49';
+      countryName = 'Germany';
+    } else if (phone.startsWith('+971')) {
+      dialingCode = '+971';
+      countryName = 'United Arab Emirates';
+    } else if (phone.startsWith('+65')) {
+      dialingCode = '+65';
+      countryName = 'Singapore';
+    } else if (careerBrain.currentLocation || careerBrain.preferredLocation) {
+      const parts = parseLocationParts(careerBrain.currentLocation || careerBrain.preferredLocation);
+      if (/united states|usa|us/i.test(parts.country)) {
+        dialingCode = '+1';
+        countryName = 'United States';
+      } else if (/united kingdom|uk/i.test(parts.country)) {
+        dialingCode = '+44';
+        countryName = 'United Kingdom';
+      }
+    }
+
+    if (field.options && field.options.length > 0) {
+      const matchedOpt = field.options.find(
+        o =>
+          o.toLowerCase().includes(dialingCode.toLowerCase()) ||
+          o.toLowerCase().includes(countryName.toLowerCase()) ||
+          (countryName === 'United States' && /\b(us|usa)\b/i.test(o)),
+      );
+      if (matchedOpt) {
+        return {
+          matched: true,
+          answer: matchedOpt,
+          sourceDetail: `phone country code: matched "${matchedOpt}" from ${dialingCode}`,
+        };
+      }
+    }
+
+    return {
+      matched: true,
+      answer: field.fieldType === 'number' ? dialingCode.replace('+', '') : `${countryName} (${dialingCode})`,
+      sourceDetail: `phone country code: ${countryName} (${dialingCode})`,
+    };
+  }
 
   const isPhoneQuestion =
     !isBinaryOrSelect &&
@@ -1399,14 +1517,13 @@ export function matchRuleBased(
     return { matched: true, answer: 'Yes', sourceDetail: 'profile standard: remote work willingness' };
   }
 
-  // Compliance / Background Check / Drug Screening
+  // Compliance / Terms / Background Check / Drug Screening / Legal Disclosures / Consent
   if (
-    /background\s*(?:check|investigation|verification)|drug\s*screen(?:ing)?|agree\s*to|consent\s*to|comply\s*with/i.test(
+    /background\s*(?:check|investigation|verification)|drug\s*screen(?:ing)?|agree\s*to|consent\s*to|comply\s*with|certify|acknowledge|terms\s*(?:and|&)\s*conditions|privacy\s*policy|terms\s*of\s*service|accuracy\s*of\s*information|confirm\s*(?:that|the)/i.test(
       labelLower,
-    ) &&
-    /willing|consent|agree|submit|pass|undergo|complete/i.test(labelLower)
+    )
   ) {
-    return { matched: true, answer: 'Yes', sourceDetail: 'standard compliance: agreement / willingness' };
+    return { matched: true, answer: 'Yes', sourceDetail: 'standard compliance: agreement / consent / acknowledgment' };
   }
 
   // Immediate Joiner / Joining Availability
@@ -1419,16 +1536,105 @@ export function matchRuleBased(
     };
   }
 
+  // Cover Letter / Application Pitch / "Why should we hire you?"
+  if (
+    /cover\s*letter|cover\s*note|why\s*(?:should\s*we\s*hire|are\s*you\s*interested|do\s*you\s*want\s*to\s*work)|pitch\s*for|note\s*(?:to|for)\s*(?:the\s*)?hiring\s*manager|tell\s*us\s*why\s*you/i.test(
+      labelLower,
+    )
+  ) {
+    const coverLetterText = generateTailoredCoverLetter(careerBrain);
+    return {
+      matched: true,
+      answer: coverLetterText,
+      sourceDetail: 'AI-Generated Tailored Cover Letter / Pitch',
+    };
+  }
+
+  // Preferred Location (prioritizing Priority 1 > Priority 2 > Priority 3)
+  if (
+    /preferred\s*location|target\s*location|which\s*location|location\s*preference/i.test(labelLower) &&
+    !/comfortable|willing|open\s+to|commute|relocate|able\s+to|hybrid|onsite|are\s+you/i.test(labelLower) &&
+    (careerBrain.preferredLocations?.length || careerBrain.preferredLocation || careerBrain.currentLocation)
+  ) {
+    const list =
+      Array.isArray(careerBrain.preferredLocations) && careerBrain.preferredLocations.length > 0
+        ? careerBrain.preferredLocations
+        : [careerBrain.preferredLocation || careerBrain.currentLocation || ''];
+
+    if (field.options && field.options.length > 0) {
+      for (let pIdx = 0; pIdx < list.length; pIdx++) {
+        const pref = list[pIdx];
+        if (!pref) continue;
+        const prefLo = pref.toLowerCase();
+        const parts = parseLocationParts(pref);
+        const cityLo = parts.city.toLowerCase();
+
+        const matchedOpt = field.options.find(opt => {
+          const optLo = opt.toLowerCase();
+          return (
+            (cityLo && optLo.includes(cityLo)) ||
+            prefLo.includes(optLo) ||
+            optLo.includes(prefLo) ||
+            (optLo.includes('remote') && prefLo.includes('remote'))
+          );
+        });
+
+        if (matchedOpt) {
+          return {
+            matched: true,
+            answer: matchedOpt,
+            sourceDetail: `profile: preferredLocations [Priority ${pIdx + 1}] ("${matchedOpt}")`,
+          };
+        }
+      }
+    }
+
+    const priority1 = list[0] || careerBrain.preferredLocation || careerBrain.currentLocation || '';
+    const cleanCity = cleanLocationForCityField(priority1);
+    const finalAns = cleanCity || priority1;
+    return {
+      matched: true,
+      answer: finalAns,
+      sourceDetail: `profile: preferredLocations [Priority 1] ("${finalAns}")`,
+    };
+  }
+
   // City / Residential Location (must NOT be a willingness or binary question)
   if (
-    /city|location|preferred\s*location/i.test(labelLower) &&
+    /city|location/i.test(labelLower) &&
     !/comfortable|willing|open\s+to|commute|relocate|able\s+to|hybrid|onsite|are\s+you/i.test(labelLower) &&
-    (careerBrain.preferredLocation || careerBrain.currentLocation)
+    (careerBrain.currentLocation || careerBrain.preferredLocation)
   ) {
-    const rawLoc = careerBrain.preferredLocation || careerBrain.currentLocation || '';
+    const rawLoc = careerBrain.currentLocation || careerBrain.preferredLocation || '';
     const cleanCity = cleanLocationForCityField(rawLoc);
     const finalAnswer = cleanCity || rawLoc;
-    return { matched: true, answer: finalAnswer, sourceDetail: `profile: preferredLocation ("${finalAnswer}")` };
+    return { matched: true, answer: finalAnswer, sourceDetail: `profile: location ("${finalAnswer}")` };
+  }
+
+  // State / Province / Region
+  if (
+    /(?:^|\b)(?:state|province|region)(?:\b|$)/i.test(labelLower) &&
+    !/comfortable|willing|open\s+to|commute|relocate/i.test(labelLower) &&
+    (careerBrain.currentLocation || careerBrain.preferredLocation)
+  ) {
+    const rawLoc = careerBrain.currentLocation || careerBrain.preferredLocation || '';
+    const parts = parseLocationParts(rawLoc);
+    if (parts.state) {
+      return { matched: true, answer: parts.state, sourceDetail: `profile: location state ("${parts.state}")` };
+    }
+  }
+
+  // Country
+  if (
+    /(?:^|\b)(?:country|nationality)(?:\b|$)/i.test(labelLower) &&
+    !/comfortable|willing|open\s+to|commute|relocate|authorized|sponsorship/i.test(labelLower) &&
+    (careerBrain.currentLocation || careerBrain.preferredLocation)
+  ) {
+    const rawLoc = careerBrain.currentLocation || careerBrain.preferredLocation || '';
+    const parts = parseLocationParts(rawLoc);
+    if (parts.country) {
+      return { matched: true, answer: parts.country, sourceDetail: `profile: location country ("${parts.country}")` };
+    }
   }
   if (/authorized|legally\s*authorized|eligible\s*to\s*work/i.test(labelLower)) {
     const isAuth = !careerBrain.workAuthorization?.toLowerCase().includes('not authorized');
@@ -2184,18 +2390,68 @@ INSTRUCTIONS:
 export async function solveQuestionAutonomousWithLLM(
   field: FormFieldDescriptor,
   careerBrain: ICareerBrain,
-  llm: BaseChatModel,
+  llm?: BaseChatModel,
 ): Promise<{ success: boolean; answer?: string; reason?: string }> {
   const cleanLabel = cleanLinkedInText(field.label || '');
   if (!cleanLabel) return { success: false, reason: 'Empty field label' };
 
+  let activeLLM = llm;
+  if (!activeLLM) {
+    try {
+      activeLLM = (await getActiveChatModel()) ?? undefined;
+    } catch (err) {
+      logger.warning('[FormQuestionResolver] Failed to get active chat model:', err);
+    }
+  }
+  if (!activeLLM) {
+    return { success: false, reason: 'No active LLM available' };
+  }
+
   const skillsList = (careerBrain.skills || []).join(', ');
-  const resumeExcerpt = (careerBrain.resumeText || '').slice(0, 3500);
+  const resumeExcerpt = (careerBrain.resumeText || '').slice(0, 8000);
   const narrative = careerBrain.backgroundNarrative || '';
   const yoe = careerBrain.yearsOfExperience ?? 1;
   const edu = careerBrain.education || "Bachelor's Degree";
   const workAuth = careerBrain.workAuthorization || 'Legally authorized to work, does not require sponsorship';
   const noticePeriod = careerBrain.noticePeriod || 'Immediate / 15-30 days';
+
+  const skillExpFormatted =
+    careerBrain.skillExperience && Object.keys(careerBrain.skillExperience).length > 0
+      ? Object.entries(careerBrain.skillExperience)
+          .map(([s, y]) => `${s}: ${y} year(s)`)
+          .join('; ')
+      : 'None explicitly calibrated';
+
+  const workExpFormatted = (careerBrain.workExperience || [])
+    .map(w => {
+      const start = [w.startMonth, w.startYear].filter(Boolean).join(' ');
+      const end = w.isCurrent ? 'Present' : [w.endMonth, w.endYear].filter(Boolean).join(' ') || 'Present';
+      const durationStr = start ? `${start} - ${end}` : end;
+      return (
+        `- Role: ${w.title || 'Developer'} at ${w.company || 'Company'} (${durationStr})` +
+        (w.description ? `\n  Description: ${w.description.slice(0, 400)}` : '')
+      );
+    })
+    .join('\n');
+
+  const rawProjects = ((careerBrain as any).projects || []) as Array<{
+    title?: string;
+    description?: string;
+    technologies?: string[] | string;
+  }>;
+  const projectsFormatted = rawProjects
+    .map(
+      p =>
+        `- Project: ${p.title || 'Project'} | Tech: ${
+          Array.isArray(p.technologies) ? p.technologies.join(', ') : p.technologies || 'N/A'
+        }` + (p.description ? `\n  Details: ${p.description.slice(0, 300)}` : ''),
+    )
+    .join('\n');
+
+  const goldenAnswersFormatted = (careerBrain.goldenAnswers || [])
+    .slice(0, 20)
+    .map(ga => `Q: "${ga.question}" -> A: "${ga.answer}"`)
+    .join('\n');
 
   const prompt = `You are an expert autonomous job application AI applying on behalf of a job seeker.
 Your mission is to maximize the candidate's chances of getting the interview and successfully submitting the application.
@@ -2207,34 +2463,58 @@ FIELD TYPE: ${field.fieldType}
 OPTIONS: ${field.options && field.options.length > 0 ? JSON.stringify(field.options) : 'None (free text / number)'}
 HINT / PLACEHOLDER: ${field.hintText || field.placeholder || 'None'}
 
-CANDIDATE BACKGROUND:
+CANDIDATE BACKGROUND (VERIFIED FROM RESUME & PROFILE):
+- Full Name: ${careerBrain.fullName || 'Mubasshir Ali'}
+- Current Job Title: ${careerBrain.workExperience?.[0]?.title || careerBrain.currentTitle || 'Full Stack Developer'}
+- Current Company: ${careerBrain.workExperience?.[0]?.company || 'AI-King Solutions'}
 - Total Experience: ${yoe} years
+- Current Location: ${careerBrain.currentLocation || 'Bengaluru, India'}
+- Country of Residence / Nationality: India
+- Preferred Location(s): ${careerBrain.preferredLocations?.join(', ') || careerBrain.preferredLocation || 'Bengaluru, India'}
 - Gender: ${careerBrain.gender || 'Male'}
-- Date of Birth: ${careerBrain.dateOfBirth || '2000-01-01'} (18+ confirmed)
-- Education: ${edu} (Highest Level: ${careerBrain.highestEducation || "Bachelor's Degree"})
+- Date of Birth: ${careerBrain.dateOfBirth || '2000-01-01'} (18+ confirmed, format: DD/MM/YYYY is 01/01/2000)
+- Highest Education: ${careerBrain.highestEducation || edu}
+- Education Details: ${edu}
 - Work Authorization: ${workAuth}
 - Notice Period: ${noticePeriod}
+- Current Salary / CTC: ${careerBrain.currentCTC || '120000'}
+- Expected Salary / CTC: ${careerBrain.expectedCTC || careerBrain.salaryExpectation || '600000'}
 - Willing to Relocate: ${careerBrain.willingToRelocate || 'Yes'}
 - Preferred Shift: ${careerBrain.preferredShift || 'Day / Flexible'}
 - Valid Driver's License: ${careerBrain.driverLicense || 'Yes'}
 - Veteran Status: ${careerBrain.veteranStatus || 'I am not a protected veteran'}
 - Disability Status: ${careerBrain.disabilityStatus || 'No, I do not have a disability'}
-- Current CTC: ${careerBrain.currentCTC || '₹6,00,000'}
-- Expected CTC: ${careerBrain.expectedCTC || careerBrain.salaryExpectation || '₹10,00,000'}
-- Core Skills: ${skillsList || 'Software Engineering / Full Stack'}
-- Resume Summary:
+- Core Skills List: ${skillsList || 'Software Engineering / Full Stack'}
+- Skill-Specific Calibrated Experience:
+${skillExpFormatted}
+- Detailed Work History:
+${workExpFormatted || 'Software Engineer with full-stack web and backend experience.'}
+- Key Projects:
+${projectsFormatted || 'N/A'}
+- Previously Verified Answers (Golden Answers):
+${goldenAnswersFormatted || 'None'}
+- Full Resume Content:
 ${resumeExcerpt || narrative || 'Full Stack Software Engineer with production web and software development experience.'}
 
 DECISION RULES:
+0. FACTUAL INTEGRITY & NO PLACEHOLDERS:
+   - NEVER output placeholder or template text such as "Your current company name here", "Your answer here", "Insert company", or "N/A" for known profile questions.
+   - For "Current Company", ALWAYS output "${careerBrain.workExperience?.[0]?.company || 'AI-King Solutions'}".
+   - For date questions (e.g. "Date of birth", "Expected last working day"), if the question mentions DD/MM/YYYY or date format, output strictly in DD/MM/YYYY format (e.g. for DOB: "01/01/2000", for last working day: today's date formatted as DD/MM/YYYY). NEVER output whole sentences or work authorization text into date fields!
 1. QUALIFICATION & COMMITMENT (YES/NO or SELECTION):
    - Questions about willingness, commitment, schedule/timezone overlap (e.g. US Eastern/PST overlap), shift flexibility, remote/hybrid work, background checks, drug tests, company policies, or enthusiasm: ALWAYS answer favorably ("Yes", "Agree", or the best qualifying option).
    - If options exist (e.g. ["Select an option", "Yes", "No"]), pick EXACTLY one valid option (e.g. "Yes"). Never pick placeholder options like "Select an option".
 2. VISA / WORK AUTHORIZATION:
    - "Are you legally authorized to work?": "Yes".
    - "Will you now or in the future require visa sponsorship?": Match candidate background (${workAuth.toLowerCase().includes('requires sponsorship') ? '"Yes"' : '"No"'}).
-3. NUMERIC EXPERIENCE:
-   - If asked for years of experience with a specific technology/tool: If clearly in skills/resume, provide reasonable years (<= ${yoe}). If totally unknown or not mentioned, return "0" (or 0-1 if options are ranges).
+3. NUMERIC EXPERIENCE & SKILL ACCURACY:
    - If asked for total professional experience, return "${yoe}".
+   - If asked for years of experience with a SPECIFIC technology, tool, language, or domain (e.g. "MERN Stack", "AI", "DevOps", "Python", "Kubernetes", "AWS"):
+     Examine the Candidate Background, Resume, Work History, and Skill Experience above:
+     a) If the candidate actually has verified experience with this skill in their resume or profile, provide the actual/calibrated years (<= ${yoe}).
+     b) IF THE CANDIDATE DOES NOT HAVE THIS SKILL or it is not mentioned anywhere in their resume/profile:
+        YOU MUST RETURN "0" (for numeric fields) or "0" / lowest bracket / "No" (for options)!
+        CRITICAL: NEVER claim ${yoe} or invent years for a skill the candidate never worked with!
 4. MULTIPLE CHOICE / DROPDOWN:
    - You MUST pick EXACTLY one string from the provided OPTIONS list that best represents the candidate's qualification.
 5. OPEN-ENDED TEXT / PARAGRAPH:
@@ -2255,6 +2535,31 @@ DECISION RULES:
    - If asked how you heard or learned about this job (e.g. "How did you learn about this job opportunity?", "Where did you hear about us?"): Pick the application platform (e.g. "Indeed" when on Indeed, "LinkedIn" when on LinkedIn) or "Job Board" / "Company Website".
 10. TIMEZONE / LOCATION CHECKBOXES (EST, CST, MST, PST, etc.):
    - If asked "Where are you located?" or for working timezone, and options are US timezones (EST, CST, MST, PST), pick "EST" (Eastern Standard Time) as the default qualifying US timezone unless candidate specifies otherwise, ensuring a valid option is selected to satisfy required fields.
+11. SALARY & COMPENSATION NUMERIC EXTRACTION:
+   - For "Current/ Last drawn salary", "Current CTC", "Expected annual salary", or "Expected CTC":
+     If the candidate's profile provides a salary range (e.g. "₹6,00,000 - ₹12,00,000", "6 - 12 LPA"):
+     NEVER output the raw range string or concatenate digits together (NEVER output things like "6000001200000" or "₹6,00,000 - ₹12,00,000")!
+     If the field expects a single number or annual salary, output a SINGLE realistic numeric integer (e.g. for "₹6,00,000 - ₹12,00,000", output the lower bound "600000" or a reasonable figure like "800000").
+     For numeric fields, output STRICTLY DIGITS ONLY without currency symbols (₹, $), commas, or letters (e.g. "600000", NOT "₹6,00,000").
+12. DATE FIELDS (DD/MM/YYYY):
+   - For "Expected last working day *" or "Last working day":
+     Output the candidate's expected last working day in DD/MM/YYYY format (e.g. today's date formatted as DD/MM/YYYY). NEVER put salary numbers, compensation text, or narrative into date fields!
+   - For "Date of birth *" / "DOB":
+     Output candidate's date of birth in DD/MM/YYYY format (e.g. "01/01/2000").
+13. DROPDOWN / SELECT FIELDS:
+   - For "Notice period *" (e.g. options: ["Select an option", "Immediate", "15 days", "30 days", "60 days", "90 days"]):
+     You MUST pick the single option from OPTIONS that best corresponds to candidate's notice period ("${noticePeriod}"). NEVER output "Select an option".
+   - For "Preferred Location *" (e.g. options: ["Select an option", "Bengaluru", "Chennai", "Hyderabad", "Remote"]):
+     You MUST pick candidate's preferred location from OPTIONS ("${careerBrain.preferredLocations?.join(', ') || careerBrain.preferredLocation || 'Bengaluru'}"). NEVER output "Select an option".
+   - For "Country *" or Country / Nationality dropdowns:
+     You MUST pick candidate's country ("India" or "IN" for India) from OPTIONS. NEVER leave blank, and NEVER pick "Select an option".
+   - For Salary / CTC dropdowns (e.g. options: ["Select an option", "₹2,00,000 - ₹4,00,000", "₹4,00,000 - ₹6,00,000", "₹6,00,000 - ₹8,00,000", "₹8,00,000 - ₹10,00,000", "₹10,00,000+"]):
+     You MUST pick the EXACT string from OPTIONS that best matches candidate's CTC ("${careerBrain.expectedCTC || careerBrain.salaryExpectation || '600000'}"). NEVER pick "Select an option" or the lowest salary unless candidate's CTC is in that bracket.
+14. STRICT TRUTHFULNESS & ZERO-INVENTION (NO FALSE ANSWERS):
+   - Every answer MUST be grounded in the Candidate Background, Resume, and Profile provided above.
+   - Do NOT guess or hallucinate unverified qualifications, certifications, or experience.
+   - If a multiple-choice question asks if the candidate has a skill they do NOT have, choose "No" or the lowest option.
+   - If asked for experience in a skill not in the profile or resume, return "0".
 
 OUTPUT STRICTLY VALID JSON ONLY:
 {
@@ -2263,7 +2568,7 @@ OUTPUT STRICTLY VALID JSON ONLY:
 }`;
 
   try {
-    const res = await llm.invoke([
+    const res = await activeLLM.invoke([
       new SystemMessage('You are a professional autonomous job application assistant. Output valid JSON only.'),
       new HumanMessage(prompt),
     ]);
@@ -2351,7 +2656,7 @@ export async function resolveModalFieldWithAudit(
     max: field.max,
   });
 
-  // Helper to fill field with automatic option fallback for dropdown/radio
+  // Helper to fill field with intelligent option alignment for dropdown/radio
   async function fillWithOptionFallback(val: string): Promise<boolean> {
     let success = await page.fillModalFieldDirect(field, val);
     if (
@@ -2360,43 +2665,12 @@ export async function resolveModalFieldWithAudit(
       field.options &&
       field.options.length > 0
     ) {
-      const norm = val.toLowerCase().trim();
-      let mappedOpt: string | undefined;
-
-      // If val is a pure number (e.g. "0", "1", "2"), try numeric options first (e.g. "0", "0 years", "None", "0-1", "Less than 1 year")
-      if (/^\d+$/.test(norm)) {
-        if (norm === '0') {
-          mappedOpt = field.options.find(
-            o => /^(0|0\s*years?|none|less than 1\s*year?|0\s*-\s*1)$/i.test(o.trim()) || o.trim().startsWith('0'),
-          );
-        } else {
-          mappedOpt = field.options.find(o => {
-            const optTrim = o.trim();
-            return optTrim === norm || optTrim.startsWith(norm) || new RegExp(`\\b${norm}\\b`).test(optTrim);
-          });
-        }
-      }
-
-      if (!mappedOpt) {
-        const isAffirmative = /^(yes|true|y|immediate|available|agree|authorized)$/i.test(norm);
-        const isNegative = /^(no|false|n|requires|not)$/i.test(norm);
-        if (isAffirmative) {
-          mappedOpt = field.options.find(o => /^(yes|agree)$/i.test(o.trim()));
-        } else if (isNegative) {
-          mappedOpt = field.options.find(o => /^no$/i.test(o.trim()));
-        }
-      }
-
-      if (!mappedOpt) {
-        mappedOpt = field.options.find(o => {
-          const optLower = o.toLowerCase().trim();
-          return optLower === norm || optLower.includes(norm) || (norm.length > 3 && norm.includes(optLower));
-        });
-      }
-
-      if (mappedOpt) {
-        logger.info(`[FormQuestionResolver] Retrying ${field.fieldType} DOM fill with mapped option "${mappedOpt}"...`);
-        success = await page.fillModalFieldDirect(field, mappedOpt);
+      const aligned = alignValueToOptions(val, field.options, field.label);
+      if (aligned && aligned.matchedOption !== val) {
+        logger.info(
+          `[FormQuestionResolver] Smart-aligning option for "${field.label}": "${val}" -> "${aligned.matchedOption}" (${aligned.reason}, conf: ${aligned.confidence})`,
+        );
+        success = await page.fillModalFieldDirect(field, aligned.matchedOption);
       }
     }
     return success;
@@ -2425,8 +2699,28 @@ export async function resolveModalFieldWithAudit(
       };
     } else {
       logger.warning(
-        `[FormQuestionResolver] DOM fill failed for [MATCHED] answer "${fastMatch.answer}" on "${label}". Falling through to candidate ask_user...`,
+        `[FormQuestionResolver] DOM fill failed for [MATCHED] answer "${fastMatch.answer}" on "${label}". Falling through...`,
       );
+    }
+  }
+
+  // Step 1b: High-Speed Semantic Question Matcher (Golden Answers & Profile Intent, 0 Credits)
+  const semanticIntent = matchQuestionSemantically(label, careerBrain);
+  if (semanticIntent && semanticIntent.confidence >= 0.9 && semanticIntent.matchedAnswer) {
+    logger.info(
+      `[FormQuestionResolver] [MATCHED-SEMANTIC] "${label}": "${semanticIntent.matchedAnswer}" (${semanticIntent.reason})`,
+    );
+    const fillSuccess = await fillWithOptionFallback(semanticIntent.matchedAnswer);
+    if (fillSuccess) {
+      if (onAuditLog) {
+        onAuditLog('MATCHED', label, semanticIntent.matchedAnswer, `${semanticIntent.reason} | DOM fill: SUCCESS`);
+      }
+      return {
+        success: true,
+        category: 'MATCHED',
+        answer: semanticIntent.matchedAnswer,
+        sourceDetail: semanticIntent.reason,
+      };
     }
   }
 

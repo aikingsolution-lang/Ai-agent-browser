@@ -1,9 +1,10 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import request from 'supertest';
 import mongoose from 'mongoose';
 import jwt from 'jsonwebtoken';
 import { createApp } from '../app.js';
 import { User } from '../models/user.model.js';
+import { RefreshToken } from '../models/refreshToken.model.js';
 import { env } from '../config/env.js';
 
 import { setupTestDatabase, type TestDbInstance } from './setupTestDb.js';
@@ -287,5 +288,191 @@ describe('Auth System Integration & Unit Tests', () => {
     expect(balanceRes.status).toBe(200);
     expect(balanceRes.body.data.allocatedCredits).toBe(100);
     expect(balanceRes.body.data.remainingCredits).toBe(100);
+  });
+
+  it('19. Successful refresh returns new access token and rotated refresh token', async () => {
+    const regRes = await request(app).post('/api/v1/auth/register').send({
+      name: 'Refresh User',
+      email: 'refresh@test.com',
+      password: 'Password123!',
+    });
+
+    expect(regRes.status).toBe(201);
+    const originalRefreshToken = regRes.body.data.refreshToken;
+    expect(originalRefreshToken).toBeDefined();
+
+    const refreshRes = await request(app).post('/api/v1/auth/refresh').send({
+      refreshToken: originalRefreshToken,
+    });
+
+    expect(refreshRes.status).toBe(200);
+    expect(refreshRes.body.success).toBe(true);
+    expect(refreshRes.body.data.token).toBeDefined();
+    expect(refreshRes.body.data.refreshToken).toBeDefined();
+    expect(refreshRes.body.data.refreshToken).not.toBe(originalRefreshToken);
+
+    // New access token works
+    const meRes = await request(app)
+      .get('/api/v1/auth/me')
+      .set('Authorization', `Bearer ${refreshRes.body.data.token}`);
+    expect(meRes.status).toBe(200);
+  });
+
+  it('20. Refresh token reuse triggers reuse detection and revokes all tokens for user', async () => {
+    const regRes = await request(app).post('/api/v1/auth/register').send({
+      name: 'Reuse User',
+      email: 'reuse@test.com',
+      password: 'Password123!',
+    });
+
+    const originalRefreshToken = regRes.body.data.refreshToken;
+
+    // First rotation succeeds
+    const firstRefreshRes = await request(app).post('/api/v1/auth/refresh').send({
+      refreshToken: originalRefreshToken,
+    });
+    expect(firstRefreshRes.status).toBe(200);
+    const secondRefreshToken = firstRefreshRes.body.data.refreshToken;
+
+    // Attacker tries to reuse the original (already rotated) refresh token
+    const reuseRes = await request(app).post('/api/v1/auth/refresh').send({
+      refreshToken: originalRefreshToken,
+    });
+    expect(reuseRes.status).toBe(401);
+    expect(reuseRes.body.error.code).toBe('REFRESH_TOKEN_REUSED');
+
+    // Due to reuse detection, the second refresh token is now also invalidated
+    const secondTryRes = await request(app).post('/api/v1/auth/refresh').send({
+      refreshToken: secondRefreshToken,
+    });
+    expect(secondTryRes.status).toBe(401);
+  });
+
+  it('21. Expired refresh token returns 401 TOKEN_EXPIRED', async () => {
+    const expiredRefreshToken = jwt.sign({ sub: new mongoose.Types.ObjectId().toString() }, env.JWT_REFRESH_SECRET, {
+      expiresIn: '-1s',
+    });
+
+    const res = await request(app).post('/api/v1/auth/refresh').send({
+      refreshToken: expiredRefreshToken,
+    });
+
+    expect(res.status).toBe(401);
+    expect(res.body.error.code).toBe('TOKEN_EXPIRED');
+  });
+
+  it('22. Logout revokes the refresh token so it cannot be refreshed', async () => {
+    const regRes = await request(app).post('/api/v1/auth/register').send({
+      name: 'Logout Refresh User',
+      email: 'logoutrefresh@test.com',
+      password: 'Password123!',
+    });
+
+    const refreshToken = regRes.body.data.refreshToken;
+
+    // Call logout passing the refreshToken
+    const logoutRes = await request(app).post('/api/v1/auth/logout').send({
+      refreshToken,
+    });
+    expect(logoutRes.status).toBe(200);
+
+    // Refreshing now should be rejected (revoked token reuse detection or invalid)
+    const refreshRes = await request(app).post('/api/v1/auth/refresh').send({
+      refreshToken,
+    });
+    expect(refreshRes.status).toBe(401);
+  });
+
+  it('23. Google sign-in registers new user and auto-provisions free trial', async () => {
+    const fetchSpy = vi.spyOn(global, 'fetch').mockImplementation(async (url: any) => {
+      if (url.toString().includes('oauth2/v3/userinfo')) {
+        return {
+          ok: true,
+          json: async () => ({
+            sub: 'google-sub-12345',
+            email: 'googleuser@test.com',
+            name: 'Google User',
+            picture: 'https://example.com/photo.jpg',
+          }),
+        } as any;
+      }
+      return { ok: false } as any;
+    });
+
+    const res = await request(app).post('/api/v1/auth/google').send({
+      token: 'valid-google-access-token-123',
+    });
+
+    fetchSpy.mockRestore();
+
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.data.token).toBeDefined();
+    expect(res.body.data.refreshToken).toBeDefined();
+    expect(res.body.data.user.email).toBe('googleuser@test.com');
+    expect(res.body.data.user.googleLinked).toBe(true);
+    expect(res.body.data.subscription).toBeDefined();
+    expect(res.body.data.subscription.planCodeSnapshot).toBe('free-trial');
+    expect(res.body.data.subscription.isTrial).toBe(true);
+
+    const dbUser = await User.findOne({ email: 'googleuser@test.com' });
+    expect(dbUser).not.toBeNull();
+    expect(dbUser?.googleId).toBe('google-sub-12345');
+    expect(dbUser?.passwordHash).toBeUndefined();
+  });
+
+  it('24. Google sign-in with existing user links account and returns tokens', async () => {
+    await request(app).post('/api/v1/auth/register').send({
+      name: 'Existing Account',
+      email: 'existinggoogle@test.com',
+      password: 'Password123!',
+    });
+
+    const fetchSpy = vi.spyOn(global, 'fetch').mockImplementation(async (url: any) => {
+      if (url.toString().includes('oauth2/v3/userinfo')) {
+        return {
+          ok: true,
+          json: async () => ({
+            sub: 'google-sub-99999',
+            email: 'existinggoogle@test.com',
+            name: 'Existing Google',
+          }),
+        } as any;
+      }
+      return { ok: false } as any;
+    });
+
+    const res = await request(app).post('/api/v1/auth/google').send({
+      token: 'valid-google-token-existing',
+    });
+
+    fetchSpy.mockRestore();
+
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.data.token).toBeDefined();
+    expect(res.body.data.user.email).toBe('existinggoogle@test.com');
+
+    const dbUser = await User.findOne({ email: 'existinggoogle@test.com' });
+    expect(dbUser?.googleLinked).toBe(true);
+    expect(dbUser?.googleId).toBe('google-sub-99999');
+  });
+
+  it('25. Google sign-in fails with invalid token and returns 401', async () => {
+    const fetchSpy = vi.spyOn(global, 'fetch').mockImplementation(async () => {
+      return {
+        ok: false,
+        status: 401,
+      } as any;
+    });
+
+    const res = await request(app).post('/api/v1/auth/google').send({
+      token: 'invalid-token',
+    });
+
+    fetchSpy.mockRestore();
+
+    expect(res.status).toBe(401);
+    expect(res.body.error.code).toBe('INVALID_GOOGLE_TOKEN');
   });
 });

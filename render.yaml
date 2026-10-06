@@ -11,11 +11,17 @@ services:
         value: production
       - key: PORT
         value: 10000
+      - key: MONGO_URI
+        sync: false
       - key: MONGODB_URI
         sync: false
       - key: JWT_SECRET
         generateValue: true
       - key: JWT_EXPIRES_IN
+        value: 15m
+      - key: JWT_REFRESH_SECRET
+        generateValue: true
+      - key: JWT_REFRESH_EXPIRES_IN
         value: 7d
       - key: RAZORPAY_KEY_ID
         sync: false
@@ -23,9 +29,12 @@ services:
         sync: false
       - key: RAZORPAY_WEBHOOK_SECRET
         sync: false
-      - key: OPENAI_API_KEY
+      - key: AWS_BEDROCK_API_KEY
         sync: false
+      - key: AWS_BEDROCK_REGION
+        value: us-east-1
       - key: LLM_DEFAULT_MODEL
-        value: gpt-4o-mini
+        value: anthropic.claude-3-5-sonnet-20240620-v1:0
       - key: CORS_ORIGIN
         value: '*'
+

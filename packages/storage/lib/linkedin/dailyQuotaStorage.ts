@@ -54,7 +54,18 @@ export const dailyQuotaStore: DailyQuotaStorageType = {
   },
 
   async canApplyToday(): Promise<{ allowed: boolean; remaining: number; currentCount: number }> {
-    const data = await this.getQuotaData();
+    let data = await this.getQuotaData();
+
+    // Auto-unpause if limit was upgraded or applied count < maxDailyQuota
+    if (data.appliedCount < data.maxDailyQuota && data.isPausedDueToQuota) {
+      data = {
+        ...data,
+        isPausedDueToQuota: false,
+        nextResumeTimestamp: null,
+      };
+      await storage.set(data);
+    }
+
     const remaining = Math.max(0, data.maxDailyQuota - data.appliedCount);
     const allowed = remaining > 0 && !data.isPausedDueToQuota;
 

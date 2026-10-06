@@ -39,6 +39,7 @@ export function withPageConfig(config) {
         },
         define: {
           'process.env.NODE_ENV': isDev ? `"development"` : `"production"`,
+          'import.meta.env.VITE_BACKEND_API_URL': JSON.stringify(process.env.VITE_BACKEND_API_URL || 'http://localhost:5000'),
         },
         envDir: '../..'
       },

@@ -1,5 +1,6 @@
 import { Types } from 'mongoose';
 import { CareerBrain, type ICareerBrainDocument } from '../models/careerBrain.model.js';
+import { Subscription } from '../models/subscription.model.js';
 import { AppError } from '../middleware/errorHandler.js';
 import type { ParsedResumeData } from '../schemas/resume.schema.js';
 
@@ -69,7 +70,9 @@ export class ProfileService {
           noticePeriod: profileData.noticePeriod ?? existing.noticePeriod,
           workAuthorization: profileData.workAuthorization ?? existing.workAuthorization,
           salaryExpectation: profileData.salaryExpectation ?? existing.salaryExpectation,
+          currentLocation: profileData.currentLocation ?? existing.currentLocation,
           preferredLocation: profileData.preferredLocation ?? existing.preferredLocation,
+          preferredLocations: profileData.preferredLocations ?? existing.preferredLocations,
           portfolioUrl: profileData.portfolioUrl ?? existing.portfolioUrl,
           githubUrl: profileData.githubUrl ?? existing.githubUrl,
           linkedinUrl: profileData.linkedinUrl ?? existing.linkedinUrl,
@@ -102,51 +105,40 @@ export class ProfileService {
 
     const existing = await CareerBrain.findOne({ userId: userObjectId });
 
-    // 1. Skill Experience merge: CRITICAL - never overwrite existing manual entries
-    const existingSkillExp: Record<string, number> = existing?.skillExperience
-      ? existing.skillExperience instanceof Map
-        ? Object.fromEntries(existing.skillExperience)
-        : (existing.skillExperience as Record<string, number>)
-      : {};
-    const mergedSkillExp: Record<string, number> = { ...existingSkillExp };
+    // When user uploads a new resume, completely overwrite old resume data with clean new parsed data
+    const cleanSkillExp: Record<string, number> = {};
     if (parsed.skillExperience) {
       for (const [skill, yrs] of Object.entries(parsed.skillExperience)) {
         if (!skill || yrs === undefined || isNaN(Number(yrs))) continue;
-        const exists = Object.keys(existingSkillExp).some(k => k.toLowerCase() === skill.toLowerCase());
-        if (!exists) {
-          mergedSkillExp[skill] = Number(yrs);
-        }
+        cleanSkillExp[skill] = Number(yrs);
       }
     }
 
-    // 2. Screening fields: Only populate if existing doesn't already have values
     const updatePayload = {
-      fullName: parsed.fullName || existing?.fullName || 'Candidate',
-      email: parsed.email || existing?.email || '',
-      phoneNumber: parsed.phoneNumber || existing?.phoneNumber || '',
-      currentTitle: parsed.currentTitle || existing?.currentTitle || 'Software Professional',
-      resumeText: rawResumeText || parsed.backgroundNarrative || existing?.resumeText || '',
+      fullName: parsed.fullName?.trim() || existing?.fullName || 'Candidate',
+      email: parsed.email?.trim() || existing?.email || '',
+      phoneNumber: parsed.phoneNumber?.trim() || '',
+      currentTitle: parsed.currentTitle?.trim() || 'Software Professional',
+      resumeText: rawResumeText || parsed.backgroundNarrative || '',
       resumeFileName: fileName,
-      backgroundNarrative: parsed.backgroundNarrative || existing?.backgroundNarrative || '',
-      skills: parsed.skills && parsed.skills.length > 0 ? parsed.skills : existing?.skills || [],
-      yearsOfExperience:
-        parsed.yearsOfExperience !== undefined && parsed.yearsOfExperience > 0
-          ? parsed.yearsOfExperience
-          : (existing?.yearsOfExperience ?? 0),
-      education: parsed.education || existing?.education || '',
-      college: parsed.college || existing?.college || '',
-      cgpa: parsed.cgpa || existing?.cgpa || '',
-      noticePeriod: parsed.noticePeriod || existing?.noticePeriod || 'Immediate',
-      workHistory:
-        parsed.workHistory && parsed.workHistory.length > 0 ? parsed.workHistory : existing?.workHistory || [],
-      preferredLocation: parsed.preferredLocation || existing?.preferredLocation || '',
-      workAuthorization:
-        parsed.workAuthorization || existing?.workAuthorization || 'Authorized to work without sponsorship',
-      skillExperience: mergedSkillExp,
-      salaryExpectation: parsed.salaryExpectation || existing?.salaryExpectation || '',
-      portfolioUrl: parsed.portfolioUrl || existing?.portfolioUrl || '',
-      githubUrl: parsed.githubUrl || existing?.githubUrl || '',
-      linkedinUrl: parsed.linkedinUrl || existing?.linkedinUrl || '',
+      backgroundNarrative: parsed.backgroundNarrative || '',
+      skills: parsed.skills && parsed.skills.length > 0 ? parsed.skills : Object.keys(cleanSkillExp),
+      yearsOfExperience: parsed.yearsOfExperience !== undefined ? parsed.yearsOfExperience : 0,
+      education: parsed.education || '',
+      college: parsed.college || '',
+      cgpa: parsed.cgpa || '',
+      noticePeriod: parsed.noticePeriod || 'Immediate',
+      workHistory: parsed.workHistory || [],
+      currentLocation: parsed.currentLocation || '',
+      preferredLocation: parsed.preferredLocation || '',
+      preferredLocations: parsed.preferredLocations || [],
+      workAuthorization: parsed.workAuthorization || 'Authorized to work without sponsorship',
+      skillExperience: cleanSkillExp,
+      salaryExpectation: parsed.salaryExpectation || '',
+      goldenAnswers: parsed.goldenAnswers && parsed.goldenAnswers.length > 0 ? parsed.goldenAnswers : [],
+      portfolioUrl: parsed.portfolioUrl || '',
+      githubUrl: parsed.githubUrl || '',
+      linkedinUrl: parsed.linkedinUrl || '',
     };
 
     if (!existing) {
@@ -178,34 +170,68 @@ export class ProfileService {
   }
 
   /**
+   * Resolves the maximum daily application limit based on the user's active subscription plan.
+   * Free Trial / Default: 15/day
+   * Starter Plan: 50/day
+   * Pro Automation Plan: 100/day
+   * Power Enterprise Plan: 500/day
+   */
+  public static async getDailyLimitForUser(userObjectId: Types.ObjectId): Promise<number> {
+    const sub = await Subscription.findOne({
+      userId: userObjectId,
+      status: { $in: ['TRIALING', 'ACTIVE'] },
+    }).sort({ createdAt: -1 });
+
+    if (!sub || sub.status !== 'ACTIVE') {
+      return 15;
+    }
+
+    switch (sub.planCodeSnapshot) {
+      case 'power':
+        return 500;
+      case 'pro':
+        return 100;
+      case 'starter':
+        return 50;
+      default:
+        return 50;
+    }
+  }
+
+  /**
    * Retrieves active daily quota with lazy reset.
    */
   public static async getQuota(userId: string): Promise<QuotaStatus> {
     const userObjectId = new Types.ObjectId(userId);
     const today = this.getTodayString();
+    const expectedLimit = await this.getDailyLimitForUser(userObjectId);
 
     let profile = await CareerBrain.findOne({ userId: userObjectId });
 
     if (!profile) {
-      // Return default free quota status
+      // Return default free/tier quota status
       return {
         allowed: true,
         appliedToday: 0,
-        dailyLimit: 15,
-        remaining: 15,
-        tier: 'free',
+        dailyLimit: expectedLimit,
+        remaining: expectedLimit,
+        tier: expectedLimit > 15 ? 'premium' : 'free',
         lastResetDate: today,
       };
     }
 
-    // Lazy reset if calendar date changed
-    if (profile.dailyQuota.lastResetDate !== today) {
+    // Lazy reset if calendar date changed OR if subscription tier limit changed
+    const needsDateReset = profile.dailyQuota.lastResetDate !== today;
+    const needsLimitUpdate = profile.dailyQuota.dailyLimit !== expectedLimit;
+
+    if (needsDateReset || needsLimitUpdate) {
       profile = await CareerBrain.findOneAndUpdate(
         { userId: userObjectId },
         {
           $set: {
-            'dailyQuota.appliedToday': 0,
-            'dailyQuota.lastResetDate': today,
+            ...(needsDateReset ? { 'dailyQuota.appliedToday': 0, 'dailyQuota.lastResetDate': today } : {}),
+            'dailyQuota.dailyLimit': expectedLimit,
+            tier: expectedLimit > 15 ? 'premium' : 'free',
           },
         },
         { new: true },
@@ -213,7 +239,7 @@ export class ProfileService {
     }
 
     const appliedToday = profile?.dailyQuota.appliedToday ?? 0;
-    const dailyLimit = profile?.dailyQuota.dailyLimit ?? 15;
+    const dailyLimit = profile?.dailyQuota.dailyLimit ?? expectedLimit;
     const remaining = Math.max(0, dailyLimit - appliedToday);
 
     return {
@@ -221,7 +247,7 @@ export class ProfileService {
       appliedToday,
       dailyLimit,
       remaining,
-      tier: profile?.tier ?? 'free',
+      tier: profile?.tier ?? (expectedLimit > 15 ? 'premium' : 'free'),
       lastResetDate: profile?.dailyQuota.lastResetDate ?? today,
     };
   }
@@ -233,6 +259,7 @@ export class ProfileService {
   public static async checkAndIncrementQuota(userId: string): Promise<QuotaStatus> {
     const userObjectId = new Types.ObjectId(userId);
     const today = this.getTodayString();
+    const expectedLimit = await this.getDailyLimitForUser(userObjectId);
 
     let profile = await CareerBrain.findOne({ userId: userObjectId });
 
@@ -245,31 +272,37 @@ export class ProfileService {
         phoneNumber: '+91 0000000000',
         currentTitle: 'Developer',
         resumeText: 'Auto-initialized Career Brain record.',
-        tier: 'free',
+        tier: expectedLimit > 15 ? 'premium' : 'free',
         dailyQuota: {
           appliedToday: 0,
-          dailyLimit: 15,
+          dailyLimit: expectedLimit,
           lastResetDate: today,
         },
       });
       await profile.save();
     }
 
-    // 1. Lazy reset if date rolled over
-    if (profile.dailyQuota.lastResetDate !== today) {
+    // 1. Lazy reset if date rolled over OR if subscription tier limit updated
+    const needsDateReset = profile.dailyQuota.lastResetDate !== today;
+    const needsLimitUpdate = profile.dailyQuota.dailyLimit !== expectedLimit;
+
+    if (needsDateReset || needsLimitUpdate) {
       await CareerBrain.updateOne(
         { userId: userObjectId },
         {
           $set: {
-            'dailyQuota.appliedToday': 0,
-            'dailyQuota.lastResetDate': today,
+            ...(needsDateReset ? { 'dailyQuota.appliedToday': 0, 'dailyQuota.lastResetDate': today } : {}),
+            'dailyQuota.dailyLimit': expectedLimit,
+            tier: expectedLimit > 15 ? 'premium' : 'free',
           },
         },
       );
+      profile.dailyQuota.dailyLimit = expectedLimit;
+      if (needsDateReset) profile.dailyQuota.appliedToday = 0;
     }
 
     // 2. Atomic find and increment with quota boundary check
-    const currentLimit = profile.dailyQuota.dailyLimit;
+    const currentLimit = expectedLimit;
 
     const updated = await CareerBrain.findOneAndUpdate(
       {
@@ -292,7 +325,7 @@ export class ProfileService {
         appliedToday,
         dailyLimit: currentLimit,
         remaining: 0,
-        tier: fresh?.tier ?? 'free',
+        tier: fresh?.tier ?? (expectedLimit > 15 ? 'premium' : 'free'),
         lastResetDate: fresh?.dailyQuota.lastResetDate ?? today,
       };
     }
@@ -311,16 +344,17 @@ export class ProfileService {
   }
 
   /**
-   * Upgrades user tier to Premium and sets 100/day quota (called by Razorpay webhook).
+   * Upgrades user tier to Premium and sets plan-based quota (called by payment flows / webhooks).
    */
-  public static async upgradeToPremium(userId: string): Promise<ICareerBrainDocument | null> {
+  public static async upgradeToPremium(userId: string, targetLimit?: number): Promise<ICareerBrainDocument | null> {
     const userObjectId = new Types.ObjectId(userId);
+    const limit = targetLimit || (await this.getDailyLimitForUser(userObjectId));
     return CareerBrain.findOneAndUpdate(
       { userId: userObjectId },
       {
         $set: {
           tier: 'premium',
-          'dailyQuota.dailyLimit': 100,
+          'dailyQuota.dailyLimit': limit,
         },
       },
       { new: true },

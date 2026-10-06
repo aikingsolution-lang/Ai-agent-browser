@@ -7,6 +7,7 @@ import type {
   IPlatformExecutionContext,
   SupportedPlatform,
 } from '../types';
+import { sanitizeRoleSearchQuery } from '@extension/storage';
 import { createLogger } from '@src/background/log';
 
 const logger = createLogger('LinkedInAdapter');
@@ -21,8 +22,13 @@ export class LinkedInAdapter implements IPlatformAdapter {
     return url.toLowerCase().includes('linkedin.com');
   }
 
-  public buildSearchUrl(role: string, location: string): string {
-    const sanitizedRole = (role || 'Software Engineer')
+  public buildSearchUrl(
+    role: string,
+    location: string,
+    candidateName?: string | (string | undefined | null)[],
+  ): string {
+    const cleanRole = sanitizeRoleSearchQuery(role, candidateName, 'Software Engineer');
+    const sanitizedRole = cleanRole
       .replace(/[/\\|]+/g, ' OR ')
       .replace(/[,+;]/g, ' ')
       .replace(/\s+/g, ' ')

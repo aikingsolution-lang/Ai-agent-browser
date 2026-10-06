@@ -13,6 +13,8 @@ export * from './linkedin/queueSafetyStorage';
 export * from './linkedin/processedJobsStorage';
 export * from './linkedin/runnerStateStorage';
 export * from './linkedin/urlUtils';
+export * from './linkedin/csvExport';
+export * from './subscription/copilotTier';
 
 // Re-export instances for direct use
 export { default as favoritesStorage } from './prompt/favorites';

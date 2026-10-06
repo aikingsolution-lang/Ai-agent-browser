@@ -9,11 +9,15 @@ export interface ApiResponse<T = any> {
   timestamp?: string;
 }
 
+import { BACKEND_API_URL } from './config';
+
 export class BackendApiClient {
   private baseUrl: string;
   private token: string | null = null;
+  private refreshToken: string | null = null;
+  private refreshPromise: Promise<string | null> | null = null;
 
-  constructor(baseUrl = 'http://localhost:5000/api/v1') {
+  constructor(baseUrl = BACKEND_API_URL) {
     this.baseUrl = baseUrl;
   }
 
@@ -25,6 +29,14 @@ export class BackendApiClient {
     return this.token;
   }
 
+  public setRefreshToken(refreshToken: string | null): void {
+    this.refreshToken = refreshToken;
+  }
+
+  public getRefreshToken(): string | null {
+    return this.refreshToken;
+  }
+
   public async ensureToken(): Promise<void> {
     try {
       if (typeof chrome !== 'undefined' && chrome?.storage?.local) {
@@ -33,10 +45,83 @@ export class BackendApiClient {
         if (session?.token) {
           this.token = session.token;
         }
+        if (session?.refreshToken) {
+          this.refreshToken = session.refreshToken;
+        }
       }
     } catch {
       // Storage not accessible or not available in this context
     }
+  }
+
+  public async refreshAccessToken(): Promise<string | null> {
+    if (this.refreshPromise) {
+      return this.refreshPromise;
+    }
+
+    this.refreshPromise = (async () => {
+      try {
+        await this.ensureToken();
+        if (!this.refreshToken) {
+          return null;
+        }
+
+        const res = await fetch(`${this.baseUrl}/auth/refresh`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ refreshToken: this.refreshToken }),
+        });
+
+        if (!res.ok) {
+          this.setToken(null);
+          this.setRefreshToken(null);
+          if (typeof chrome !== 'undefined' && chrome?.storage?.local) {
+            const current = (await chrome.storage.local.get(['nanobrowser_auth_session']))?.nanobrowser_auth_session;
+            if (current) {
+              await chrome.storage.local.set({
+                nanobrowser_auth_session: {
+                  ...current,
+                  token: null,
+                  refreshToken: null,
+                },
+              });
+            }
+          }
+          return null;
+        }
+
+        const data: ApiResponse<{ token: string; refreshToken: string }> = await res.json();
+        if (data.success && data.data?.token) {
+          const newToken = data.data.token;
+          const newRefreshToken = data.data.refreshToken || this.refreshToken;
+          this.setToken(newToken);
+          this.setRefreshToken(newRefreshToken);
+
+          if (typeof chrome !== 'undefined' && chrome?.storage?.local) {
+            const current = (await chrome.storage.local.get(['nanobrowser_auth_session']))?.nanobrowser_auth_session;
+            if (current) {
+              await chrome.storage.local.set({
+                nanobrowser_auth_session: {
+                  ...current,
+                  token: newToken,
+                  refreshToken: newRefreshToken,
+                },
+              });
+            }
+          }
+          return newToken;
+        }
+        return null;
+      } catch {
+        return null;
+      } finally {
+        this.refreshPromise = null;
+      }
+    })();
+
+    return this.refreshPromise;
   }
 
   private getHeaders(extraHeaders: Record<string, string> = {}): Record<string, string> {
@@ -61,10 +146,12 @@ export class BackendApiClient {
         headers,
       });
 
-      if (response.status === 401 && !isRetry) {
-        // Token might have expired or updated; refresh from storage and retry once
-        await this.ensureToken();
-        if (this.token) {
+      const isAuthEndpoint =
+        endpoint === '/auth/refresh' || endpoint === '/auth/login' || endpoint === '/auth/register';
+
+      if (response.status === 401 && !isRetry && !isAuthEndpoint) {
+        const refreshedToken = await this.refreshAccessToken();
+        if (refreshedToken) {
           return this.request<T>(endpoint, options, true);
         }
       }
@@ -94,23 +181,49 @@ export class BackendApiClient {
 
   // --- Auth APIs ---
   public async register(payload: { name: string; email: string; password: string }) {
-    const res = await this.request<{ user: any; token: string }>('/auth/register', {
+    const res = await this.request<{ user: any; token: string; refreshToken?: string; subscription?: any }>(
+      '/auth/register',
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      },
+    );
+    if (res.data?.token) {
+      this.setToken(res.data.token);
+    }
+    if (res.data?.refreshToken) {
+      this.setRefreshToken(res.data.refreshToken);
+    }
+    return res;
+  }
+
+  public async login(payload: { email: string; password: string }) {
+    const res = await this.request<{ user: any; token: string; refreshToken?: string }>('/auth/login', {
       method: 'POST',
       body: JSON.stringify(payload),
     });
     if (res.data?.token) {
       this.setToken(res.data.token);
     }
+    if (res.data?.refreshToken) {
+      this.setRefreshToken(res.data.refreshToken);
+    }
     return res;
   }
 
-  public async login(payload: { email: string; password: string }) {
-    const res = await this.request<{ user: any; token: string }>('/auth/login', {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    });
+  public async loginWithGoogle(token: string) {
+    const res = await this.request<{ user: any; token: string; refreshToken?: string; subscription?: any }>(
+      '/auth/google',
+      {
+        method: 'POST',
+        body: JSON.stringify({ token }),
+      },
+    );
     if (res.data?.token) {
       this.setToken(res.data.token);
+    }
+    if (res.data?.refreshToken) {
+      this.setRefreshToken(res.data.refreshToken);
     }
     return res;
   }
@@ -121,8 +234,21 @@ export class BackendApiClient {
     });
   }
 
-  public logout() {
-    this.setToken(null);
+  public async logout(): Promise<void> {
+    try {
+      if (this.refreshToken) {
+        await fetch(`${this.baseUrl}/auth/logout`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ refreshToken: this.refreshToken }),
+        });
+      }
+    } catch {
+      // Ignore network errors on logout
+    } finally {
+      this.setToken(null);
+      this.setRefreshToken(null);
+    }
   }
 
   // --- Credit APIs ---
@@ -411,6 +537,163 @@ export class BackendApiClient {
     }
     return data;
   }
+
+  // --- Job Application APIs ---
+  public async recordJobApplication(payload: {
+    jobId?: string;
+    jobTitle: string;
+    company: string;
+    platform?: string;
+    applicationUrl?: string;
+    location?: string;
+    salaryRange?: string;
+    fitScore?: number;
+    status?: string;
+    appliedAt?: string;
+  }) {
+    return this.request<{ application: any }>('/job-applications', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  public async getJobApplications(query: { status?: string; limit?: number; page?: number } = {}) {
+    const params = new URLSearchParams();
+    if (query.status) params.append('status', query.status);
+    if (query.limit) params.append('limit', String(query.limit));
+    if (query.page) params.append('page', String(query.page));
+
+    const qs = params.toString();
+    const endpoint = qs ? `/job-applications?${qs}` : '/job-applications';
+    return this.request<{ items: any[]; total: number; page: number; limit: number }>(endpoint, {
+      method: 'GET',
+    });
+  }
+
+  public async checkDuplicateJob(jobId: string): Promise<boolean> {
+    try {
+      await this.ensureToken();
+      if (!this.token) return false;
+      const res = await this.request<{ exists: boolean }>(`/job-applications/check/${encodeURIComponent(jobId)}`, {
+        method: 'GET',
+      });
+      return Boolean(res.data?.exists);
+    } catch {
+      return false;
+    }
+  }
+
+  public async requestTailoredResume(params: {
+    candidateName: string;
+    candidateEmail: string;
+    candidatePhone?: string;
+    currentTitle?: string;
+    skills: string[];
+    targetKeywords: string[];
+    jobTitle: string;
+    company: string;
+    backgroundNarrative?: string;
+  }): Promise<BackendResumeResponse | null> {
+    try {
+      const res = await this.request<BackendResumeResponse>('/resume/generate', {
+        method: 'POST',
+        body: JSON.stringify(params),
+      });
+      return res.data || null;
+    } catch {
+      return null;
+    }
+  }
+
+  public async syncCareerBrainProfile(profileData: any): Promise<boolean> {
+    try {
+      await this.ensureToken();
+      if (!this.token) return false;
+      const res = await this.request('/profile', {
+        method: 'PUT',
+        body: JSON.stringify(profileData),
+      });
+      return Boolean(res.success);
+    } catch {
+      return false;
+    }
+  }
+
+  public async fetchCareerBrainProfile(): Promise<any | null> {
+    try {
+      await this.ensureToken();
+      if (!this.token) return null;
+      const res = await this.request('/profile', {
+        method: 'GET',
+      });
+      return res.data || null;
+    } catch {
+      return null;
+    }
+  }
+
+  public async getProfileQuota(): Promise<{
+    allowed: boolean;
+    appliedToday: number;
+    dailyLimit: number;
+    remaining: number;
+    tier: string;
+  } | null> {
+    try {
+      await this.ensureToken();
+      if (!this.token) {
+        return null;
+      }
+      const res = await this.request<{
+        allowed: boolean;
+        appliedToday: number;
+        dailyLimit: number;
+        remaining: number;
+        tier: string;
+      }>('/profile/quota', {
+        method: 'GET',
+      });
+      return res.data || null;
+    } catch {
+      return null;
+    }
+  }
+
+  public async checkAndIncrementDailyQuota(): Promise<{ allowed: boolean; appliedToday: number; dailyLimit: number }> {
+    try {
+      await this.ensureToken();
+      if (!this.token) {
+        return { allowed: true, appliedToday: 0, dailyLimit: 15 };
+      }
+      const res = await this.request<{ appliedToday: number; dailyLimit: number }>(
+        '/profile/quota/check-and-increment',
+        {
+          method: 'POST',
+        },
+      );
+      return {
+        allowed: true,
+        appliedToday: res.data?.appliedToday ?? 1,
+        dailyLimit: res.data?.dailyLimit ?? 15,
+      };
+    } catch (err: any) {
+      if (err.status === 429) {
+        return {
+          allowed: false,
+          appliedToday: err.details?.appliedToday ?? 15,
+          dailyLimit: err.details?.dailyLimit ?? 15,
+        };
+      }
+      return { allowed: true, appliedToday: 0, dailyLimit: 15 };
+    }
+  }
+}
+
+export interface BackendResumeResponse {
+  fileName: string;
+  fileSize: number;
+  base64Pdf: string;
+  highlightedKeywords: string[];
 }
 
 export interface IWorkExperience {
@@ -433,6 +716,14 @@ export interface IWorkExperienceItem {
   source?: 'manual' | 'resume';
 }
 
+export interface IGoldenAnswerItem {
+  id: string;
+  question: string;
+  answer: string;
+  category?: string;
+  isDefault?: boolean;
+}
+
 export interface ParsedResumeData {
   fullName: string;
   email: string;
@@ -451,7 +742,9 @@ export interface ParsedResumeData {
   noticePeriod?: string;
   workHistory: IWorkExperience[];
   backgroundNarrative: string;
+  goldenAnswers?: IGoldenAnswerItem[];
   preferredLocation: string;
+  preferredLocations?: string[];
   workAuthorization: string;
   salaryExpectation: string;
   portfolioUrl: string;

@@ -6,7 +6,9 @@ export interface IUser extends Document {
   _id: Types.ObjectId;
   name: string;
   email: string;
-  passwordHash: string;
+  passwordHash?: string;
+  googleLinked?: boolean;
+  googleId?: string;
   role: 'user' | 'admin';
   status: 'active' | 'suspended';
   hasUsedTrial: boolean;
@@ -35,8 +37,17 @@ const userSchema = new Schema<IUser>(
     },
     passwordHash: {
       type: String,
-      required: [true, 'Password hash is required'],
+      required: false,
       select: false,
+    },
+    googleLinked: {
+      type: Boolean,
+      default: false,
+    },
+    googleId: {
+      type: String,
+      default: null,
+      index: true,
     },
     role: {
       type: String,
@@ -70,6 +81,9 @@ const userSchema = new Schema<IUser>(
 );
 
 userSchema.methods.comparePassword = async function (password: string): Promise<boolean> {
+  if (!this.passwordHash) {
+    return false;
+  }
   return bcrypt.compare(password, this.passwordHash);
 };
 

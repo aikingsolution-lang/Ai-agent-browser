@@ -2,6 +2,8 @@ import { z } from 'zod';
 import { StorageEnum } from '../base/enums';
 import { createStorage } from '../base/base';
 import type { BaseStorage } from '../base/types';
+import { areQuestionsSemanticallyEquivalent } from './questionSemanticMatcher';
+import { extractResumeFocusTags } from './resumeTagMatcher';
 
 // ─── 1. The Strict Schema Layer ─────────────────────────────────────────────
 
@@ -56,6 +58,41 @@ export function isSocialMediaOrUrlQuestion(question: string): boolean {
     q === 'x' ||
     q === 'facebook' ||
     q === 'twitter'
+  );
+}
+
+/**
+ * Detects questions that can and should be answered dynamically from Candidate Background Narrative,
+ * resume work history, or dedicated profile fields (e.g. years of experience, highest degree,
+ * current/expected CTC, notice period, technical skills, employment status).
+ * These must be excluded from Golden Q&A to avoid conflicting/overlapping answers.
+ */
+export const NARRATIVE_OVERLAPPING_QUESTION_IDS = new Set([
+  'experience_years',
+  'highest_education',
+  'current_ctc',
+  'expected_ctc',
+  'salary_range_acceptable',
+  'notice_period',
+  'currently_employed',
+  'skill_react_exp',
+  'skill_node_exp',
+  'skill_sql_exp',
+  'production_llm_shipped',
+  'date_of_birth',
+]);
+
+export function isNarrativeAnswerableQuestion(question?: string, id?: string): boolean {
+  if (id && NARRATIVE_OVERLAPPING_QUESTION_IDS.has(id)) return true;
+  if (!question || typeof question !== 'string') return false;
+  const q = question.toLowerCase().trim();
+  return (
+    /how\s*many|total\s*(?:years|yrs)|years\s*of\s*(?:total\s*|overall\s*)?experience|relevant\s*experience/i.test(q) ||
+    /highest\s*(?:completed\s*)?(?:level\s*of\s*)?education|highest\s*degree|highest\s*qualification/i.test(q) ||
+    /current\s*ctc|expected\s*ctc|current\s*salary|expected\s*salary|salary\s*expectation|ctc\s*\(annual\)/i.test(q) ||
+    /notice\s*period|when\s*can\s*you\s*join|availability\s*period/i.test(q) ||
+    /^are\s*you\s*currently\s*employed\??$/i.test(q) ||
+    /\b(?:react|node|python|java|javascript|typescript|sql|aws|docker)\b.*(?:experience|years|yrs)/i.test(q)
   );
 }
 
@@ -175,6 +212,179 @@ export function cleanLocationForCityField(rawLocation: string | undefined | null
     .replace(/^[,\-\s/\\|]+|[,\-\s/\\|]+$/g, '')
     .trim();
   return loc;
+}
+
+/**
+ * Common technical job title keywords. Used to identify whether a string
+ * resembles an actual job role rather than an arbitrary personal name.
+ */
+export const RECOGNIZED_ROLE_KEYWORDS_REGEX =
+  /\b(developer|engineer|architect|programmer|lead|manager|analyst|designer|consultant|specialist|tester|devops|administrator|intern|sde|scientist|associate|officer|executive|technician|full\s*stack|frontend|backend|mern|mean|software|web|mobile|cloud|data|ai|ml|ui|ux|tech|qa|support|coder|sre|sysadmin)\b/i;
+
+/**
+ * Detects whether a string is a candidate's personal name, empty, or an invalid job title placeholder
+ * (e.g. "MUBASSHIR ALI", "Mubasshir", "Candidate", "Software Professional", "N/A").
+ * Used to prevent personal candidate names from being populated into search queries or job target roles.
+ */
+export function isCandidateNameOrInvalidTitle(
+  title: string | undefined | null,
+  fullNameOrNames?: string | (string | undefined | null)[] | null,
+): boolean {
+  if (!title || typeof title !== 'string' || !title.trim()) return true;
+  const cleanTitle = title.trim().toLowerCase();
+
+  // 1. Generic placeholder strings that are not real target roles
+  const invalidPlaceholders = new Set([
+    'candidate',
+    'professional',
+    'software professional',
+    'user',
+    'applicant',
+    'n/a',
+    'na',
+    'none',
+    'null',
+    'undefined',
+    'title',
+    'job title',
+    'developer',
+    'engineer',
+    'job seeker',
+    'fresher',
+    'student',
+    'employee',
+  ]);
+  if (invalidPlaceholders.has(cleanTitle)) return true;
+
+  // 2. Personal candidate name matching
+  const rawNames = Array.isArray(fullNameOrNames) ? fullNameOrNames : [fullNameOrNames];
+  const candidateNames = rawNames
+    .filter((n): n is string => typeof n === 'string' && Boolean(n.trim()))
+    .map(n => n.trim().toLowerCase())
+    .filter(n => !invalidPlaceholders.has(n));
+
+  const roleKeywordsRegex = RECOGNIZED_ROLE_KEYWORDS_REGEX;
+
+  for (const cleanFull of candidateNames) {
+    // Exact match: title is identical to full name (e.g. "Mubasshir Ali" === "Mubasshir Ali")
+    if (cleanTitle === cleanFull) return true;
+
+    // Tokenize full name into individual names (e.g. ["mubasshir", "ali"])
+    const nameTokens = cleanFull
+      .split(/[\s,.-]+/)
+      .map(t => t.trim())
+      .filter(t => t.length > 1 && !roleKeywordsRegex.test(t));
+
+    // Title equals an individual name token (e.g. "Mubasshir" or "Ali")
+    if (nameTokens.includes(cleanTitle)) return true;
+
+    // All words in the title are tokens of candidate name
+    const titleTokens = cleanTitle.split(/[\s,.-]+/).filter(t => t.length > 0);
+    if (titleTokens.length > 0 && titleTokens.every(t => nameTokens.includes(t))) return true;
+
+    // Title contains any multi-char name token (>= 3 chars) as a distinct word boundary
+    for (const token of nameTokens) {
+      if (token.length >= 3) {
+        const tokenRegex = new RegExp(`\\b${token}\\b`, 'i');
+        if (tokenRegex.test(cleanTitle)) {
+          return true;
+        }
+      }
+    }
+
+    // Title is contained in candidate name or vice versa, and contains no common tech/role words
+    const hasRoleKeyword = roleKeywordsRegex.test(cleanTitle);
+    if (!hasRoleKeyword && (cleanFull.includes(cleanTitle) || cleanTitle.includes(cleanFull))) {
+      return true;
+    }
+  }
+
+  // 3. Fallback: if string lacks ANY recognized job role keywords and consists purely of 1-3 alphabetical words
+  // (e.g. "Mubasshir Ali", "John Smith"), treat as personal name / invalid title
+  const hasRecognizedRoleWord = roleKeywordsRegex.test(cleanTitle);
+  if (!hasRecognizedRoleWord) {
+    if (/^[a-zA-Z\s.-]+$/.test(cleanTitle) && cleanTitle.split(/\s+/).length <= 3) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Robust, defensive sanitizer for job search queries.
+ * Ensures the search query NEVER contains or equals the candidate's personal name.
+ * If candidate name tokens are found within a compound title (e.g. "Mubasshir Ali - Full Stack Developer"),
+ * strips the name and retains the valid role.
+ * If the role is purely the candidate's name or is invalid, rejects it and safely falls back
+ * to the user's explicitly configured role or a sensible default ("Full Stack Developer").
+ */
+export function sanitizeRoleSearchQuery(
+  role: string | undefined | null,
+  candidateNames?: string | (string | undefined | null)[] | null,
+  fallbackRole: string = 'Full Stack Developer',
+): string {
+  const safeFallback = (fallbackRole || 'Full Stack Developer').trim();
+  const rawRole = (role || '').trim();
+
+  if (!rawRole) {
+    return safeFallback;
+  }
+
+  const rawNames = Array.isArray(candidateNames) ? candidateNames : [candidateNames];
+  const validCandidateNames = rawNames
+    .filter((n): n is string => typeof n === 'string' && Boolean(n.trim()))
+    .map(n => n.trim());
+
+  // Extract all individual name tokens (length >= 3) to strip or detect
+  const nameTokens: string[] = [];
+  for (const n of validCandidateNames) {
+    const tokens = n
+      .toLowerCase()
+      .split(/[\s,.-]+/)
+      .map(t => t.trim())
+      .filter(t => t.length >= 3 && !RECOGNIZED_ROLE_KEYWORDS_REGEX.test(t));
+    for (const t of tokens) {
+      if (!nameTokens.includes(t)) {
+        nameTokens.push(t);
+      }
+    }
+  }
+
+  // Attempt to strip candidate name tokens from compound strings (e.g. "Mubasshir Ali - Full Stack Developer")
+  let strippedRole = rawRole;
+  for (const name of validCandidateNames) {
+    if (name.length >= 3) {
+      const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      strippedRole = strippedRole.replace(new RegExp(`\\b${escaped}\\b`, 'gi'), '');
+    }
+  }
+  for (const token of nameTokens) {
+    const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    strippedRole = strippedRole.replace(new RegExp(`\\b${escaped}\\b`, 'gi'), '');
+  }
+
+  // Clean remaining punctuation and whitespace
+  strippedRole = strippedRole
+    .replace(/^[\s\-_:|,/]+|[\s\-_:|,/]+$/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  // If stripping left a valid role that does NOT match candidate name and has recognized keywords
+  if (strippedRole && !isCandidateNameOrInvalidTitle(strippedRole, validCandidateNames)) {
+    return strippedRole;
+  }
+
+  // If strippedRole is still invalid or empty, check original rawRole
+  if (!isCandidateNameOrInvalidTitle(rawRole, validCandidateNames)) {
+    return rawRole;
+  }
+
+  // Fallback triggered: log warning as this indicates something upstream tried to use candidate name
+  console.warn(
+    `[CareerBrain] ⚠️ Sanitizer rejected candidate name or invalid role query "${rawRole}". Falling back to configured/default role "${safeFallback}".`,
+  );
+  return safeFallback;
 }
 
 /**
@@ -322,6 +532,23 @@ export const workExperienceItemSchema = z.object({
 export type IWorkExperienceItem = z.infer<typeof workExperienceItemSchema>;
 
 /**
+ * Schema for stored resume profiles with focus tags for auto-selection.
+ */
+export const resumeProfileItemSchema = z.object({
+  id: z.string(),
+  fileName: z.string().trim().min(1, 'File name is required'),
+  uploadedAt: z.number().default(() => Date.now()),
+  focusTags: z.array(z.string()).default([]),
+  rawText: z.string().default(''),
+  extractedSkills: z.array(z.string()).default([]),
+  summary: z.string().optional(),
+  targetRole: z.string().optional(),
+  isDefault: z.boolean().default(false),
+});
+
+export type IResumeProfileItem = z.infer<typeof resumeProfileItemSchema>;
+
+/**
  * Strict Zod Schema for Career Brain.
  * Enforces mandatory resumeText (minimum 50 chars), core contact fields,
  * and valid Golden Q&A list to prevent Bedrock AI form filler crashes.
@@ -389,6 +616,10 @@ export const careerBrainSchema = z.object({
   jobTypes: z.array(z.string()).default([]),
   /** Name of the active resume on file */
   resumeFileName: z.string().optional(),
+  /** Stored candidate resume profiles for smart matching */
+  resumes: z.array(resumeProfileItemSchema).default([]),
+  /** ID of active / default resume */
+  activeResumeId: z.string().optional(),
   /** Skills auto-extracted from resume to display "from resume" indicator */
   autoExtractedSkills: z.array(z.string()).default([]),
   /** Candidate gender identity (Male, Female, Other, Prefer not to say) */
@@ -479,10 +710,10 @@ export function validateProfileCompleteness(profile?: Partial<ICareerBrain> | nu
 }
 
 export const DEFAULT_GOLDEN_ANSWERS: IGoldenAnswer[] = [
-  // ── 1. Eligibility / Legal ──
+  // ── 1. Eligibility / Legal (Strict Gatekeepers) ──
   {
     id: 'work_auth',
-    question: 'Are you legally authorized to work in this country / India?',
+    question: 'Are you legally authorized to work in India / your resident country?',
     answer: 'Yes',
     category: 'Eligibility / Legal',
     isDefault: true,
@@ -502,8 +733,8 @@ export const DEFAULT_GOLDEN_ANSWERS: IGoldenAnswer[] = [
     isDefault: true,
   },
   {
-    id: 'security_clearance',
-    question: 'Do you currently hold or require an active security clearance?',
+    id: 'felony_conviction',
+    question: 'Have you ever been convicted of a criminal offense or felony?',
     answer: 'No',
     category: 'Eligibility / Legal',
     isDefault: true,
@@ -516,8 +747,8 @@ export const DEFAULT_GOLDEN_ANSWERS: IGoldenAnswer[] = [
     isDefault: true,
   },
   {
-    id: 'felony_conviction',
-    question: 'Have you ever been convicted of a criminal offense or felony?',
+    id: 'security_clearance',
+    question: 'Do you currently hold or require an active security clearance?',
     answer: 'No',
     category: 'Eligibility / Legal',
     isDefault: true,
@@ -525,109 +756,28 @@ export const DEFAULT_GOLDEN_ANSWERS: IGoldenAnswer[] = [
 
   // ── 2. Location & Relocation ──
   {
-    id: 'current_location_city',
-    question: 'What is your current location / city of residence?',
-    answer: 'Bengaluru, India',
-    category: 'Location & Relocation',
-    isDefault: true,
-  },
-  {
     id: 'relocation',
-    question: 'Are you willing to relocate for this role?',
+    question: 'Are you open or willing to relocate for this role if required?',
     answer: 'Yes',
     category: 'Location & Relocation',
     isDefault: true,
   },
   {
     id: 'work_mode_preference',
-    question: 'Are you willing to work from office / hybrid / remote?',
-    answer: 'Yes (Open to Remote, Hybrid, or Onsite)',
+    question: 'What is your preferred work mode / arrangement?',
+    answer: 'Remote / Hybrid / On-site',
     category: 'Location & Relocation',
     isDefault: true,
   },
   {
     id: 'commute_onsite',
-    question: 'Are you able to reliably commute or work onsite?',
+    question: 'Can you reliably commute to the job location if needed?',
     answer: 'Yes',
     category: 'Location & Relocation',
     isDefault: true,
   },
 
-  // ── 3. Compensation ──
-  {
-    id: 'current_ctc',
-    question: 'What is your current CTC / Annual Salary?',
-    answer: '₹6,00,000',
-    category: 'Compensation',
-    isDefault: true,
-  },
-  {
-    id: 'expected_ctc',
-    question: 'What is your expected CTC / Annual Salary expectation?',
-    answer: '₹10,00,000',
-    category: 'Compensation',
-    isDefault: true,
-  },
-  {
-    id: 'salary_range_acceptable',
-    question: 'Is the posted salary range acceptable to you?',
-    answer: 'Yes',
-    category: 'Compensation',
-    isDefault: true,
-  },
-
-  // ── 4. Experience & Education ──
-  {
-    id: 'experience_years',
-    question: 'Total years of relevant professional experience?',
-    answer: '1',
-    category: 'Experience & Education',
-    isDefault: true,
-  },
-  {
-    id: 'highest_education',
-    question: 'What is your highest level of completed education?',
-    answer: "Bachelor's Degree",
-    category: 'Experience & Education',
-    isDefault: true,
-  },
-  {
-    id: 'skill_react_exp',
-    question: 'How many years of experience do you have with React / Next.js?',
-    answer: '1',
-    category: 'Experience & Education',
-    isDefault: true,
-  },
-  {
-    id: 'skill_node_exp',
-    question: 'How many years of experience do you have with Node.js / TypeScript?',
-    answer: '1',
-    category: 'Experience & Education',
-    isDefault: true,
-  },
-  {
-    id: 'skill_sql_exp',
-    question: 'How many years of experience do you have with SQL / Databases?',
-    answer: '1',
-    category: 'Experience & Education',
-    isDefault: true,
-  },
-  {
-    id: 'production_llm_shipped',
-    question: 'Have you built and shipped software integrated with LLMs / AI APIs?',
-    answer: 'Yes',
-    category: 'Experience & Education',
-    isDefault: true,
-  },
-
-  // ── 5. Availability & Shifts ──
-  {
-    id: 'notice_period',
-    question: 'What is your current notice period / When can you join?',
-    answer: 'Immediate',
-    category: 'Availability & Shifts',
-    isDefault: true,
-  },
+  // ── 3. Availability & Shifts (Logistics) ──
   {
     id: 'start_immediately',
     question: 'Can you start immediately upon hire?',
@@ -657,7 +807,7 @@ export const DEFAULT_GOLDEN_ANSWERS: IGoldenAnswer[] = [
     isDefault: true,
   },
 
-  // ── 6. Yes/No Screening ──
+  // ── 4. Yes/No Screening & Compliance ──
   {
     id: 'driver_license',
     question: 'Do you possess a valid driver’s license?',
@@ -686,26 +836,12 @@ export const DEFAULT_GOLDEN_ANSWERS: IGoldenAnswer[] = [
     category: 'Yes/No Screening',
     isDefault: true,
   },
-  {
-    id: 'currently_employed',
-    question: 'Are you currently employed?',
-    answer: 'Yes',
-    category: 'Yes/No Screening',
-    isDefault: true,
-  },
 
-  // ── 7. Diversity / Self-Identification ──
+  // ── 5. Diversity / Self-Identification ──
   {
     id: 'gender_identity',
     question: 'What is your gender / gender identity?',
     answer: 'Male',
-    category: 'Diversity / Self-Identification',
-    isDefault: true,
-  },
-  {
-    id: 'date_of_birth',
-    question: 'What is your date of birth?',
-    answer: '2000-01-01',
     category: 'Diversity / Self-Identification',
     isDefault: true,
   },
@@ -787,11 +923,11 @@ Tools: Git, GitHub, Docker, Postman, VS Code`,
   cgpa: '8.57/10',
   currentCTC: undefined,
   expectedCTC: '₹6,00,000 - ₹12,00,000',
-  currentLocation: 'Bengaluru, India',
+  currentLocation: 'Bengaluru, Karnataka, India',
   noticePeriod: 'Immediate',
   workAuthorization: 'Citizen of India / Authorized to work without sponsorship',
   salaryExpectation: '₹6,00,000 - ₹12,00,000',
-  preferredLocation: 'Bengaluru, India',
+  preferredLocation: 'Bengaluru, Karnataka, India',
   portfolioUrl: '',
   githubUrl: 'https://github.com',
   linkedinUrl: 'https://linkedin.com',
@@ -805,9 +941,11 @@ Tools: Git, GitHub, Docker, Postman, VS Code`,
     'Full Stack Developer',
     'AI Evaluator',
   ],
-  preferredLocations: ['Bengaluru', 'Pune', 'Remote', 'India'],
+  preferredLocations: ['Bengaluru, Karnataka, India', 'Hyderabad, Telangana, India', 'Remote'],
   experienceLevels: ['Fresher', 'Entry Level', 'Internship'],
   jobTypes: ['Full-time', 'Internship'],
+  resumes: [],
+  activeResumeId: undefined,
   autoExtractedSkills: [],
   gender: 'Male',
   dateOfBirth: '2000-01-01',
@@ -864,8 +1002,23 @@ export async function saveCareerBrainData(data: unknown): Promise<SaveCareerBrai
       (parseResult.data.goldenAnswers || []).filter(ga => !isSocialMediaOrUrlQuestion(ga.question)),
     );
 
+    // Enforce 3 prioritized locations (Priority 1 mirrored to preferredLocation)
+    let finalPreferredLocations = (parseResult.data.preferredLocations || [])
+      .map(l => (typeof l === 'string' ? l.trim() : ''))
+      .filter(Boolean)
+      .slice(0, 3);
+    let finalPreferredLocation = parseResult.data.preferredLocation?.trim() || '';
+
+    if (finalPreferredLocations.length > 0) {
+      finalPreferredLocation = finalPreferredLocations[0];
+    } else if (finalPreferredLocation) {
+      finalPreferredLocations = [finalPreferredLocation];
+    }
+
     const validatedData: ICareerBrain = {
       ...parseResult.data,
+      preferredLocation: finalPreferredLocation,
+      preferredLocations: finalPreferredLocations,
       goldenAnswers: cleanGoldenAnswers,
       updatedAt: Date.now(),
     };
@@ -988,13 +1141,77 @@ export async function getCareerBrainData(): Promise<ICareerBrain> {
       }
     }
 
+    // Ensure up to 3 prioritized preferred locations
+    if (!Array.isArray(data.preferredLocations) || data.preferredLocations.length === 0) {
+      if (data.preferredLocation) {
+        data.preferredLocations = [data.preferredLocation];
+      } else {
+        data.preferredLocations = ['Bengaluru, Karnataka, India'];
+      }
+    }
+    data.preferredLocations = data.preferredLocations
+      .map(l => (typeof l === 'string' ? l.trim() : ''))
+      .filter(Boolean)
+      .slice(0, 3);
+    if (data.preferredLocations.length > 0) {
+      data.preferredLocation = data.preferredLocations[0];
+    }
+
+    // Clean out any social media handles / URLs and narrative-answerable overlapping questions from golden answers
+    let cleanedGoldenAnswers = false;
+    if (Array.isArray(data.goldenAnswers)) {
+      const validAnswers = data.goldenAnswers.filter(
+        ga =>
+          ga &&
+          ga.question &&
+          !isSocialMediaOrUrlQuestion(ga.question) &&
+          !isNarrativeAnswerableQuestion(ga.question, ga.id),
+      );
+      if (validAnswers.length !== data.goldenAnswers.length) {
+        data.goldenAnswers = validAnswers;
+        cleanedGoldenAnswers = true;
+      }
+    }
+
+    // Seamless auto-migration: Ensure single resume is migrated into multi-resume profile item
+    let migratedResumes = false;
+    if ((!data.resumes || data.resumes.length === 0) && data.resumeFileName) {
+      const defaultId = `res_${Date.now()}`;
+      const legacyTags = extractResumeFocusTags(
+        data.resumeText || '',
+        data.skills || data.autoExtractedSkills || [],
+        data.currentTitle,
+      );
+      data.resumes = [
+        {
+          id: defaultId,
+          fileName: data.resumeFileName,
+          uploadedAt: data.updatedAt || Date.now(),
+          focusTags: legacyTags,
+          rawText: data.resumeText || '',
+          extractedSkills: data.autoExtractedSkills || data.skills || [],
+          isDefault: true,
+          targetRole: data.currentTitle,
+        },
+      ];
+      data.activeResumeId = defaultId;
+      migratedResumes = true;
+    }
+
     // Seamless auto-migration: Ensure all default golden answers exist even for existing users
     const existingIds = new Set((data.goldenAnswers || []).map(ga => ga.id));
     const existingQuestions = new Set((data.goldenAnswers || []).map(ga => ga.question.toLowerCase().trim()));
     const missingDefaults = DEFAULT_GOLDEN_ANSWERS.filter(
       d => !existingIds.has(d.id) && !existingQuestions.has(d.question.toLowerCase().trim()),
     );
-    if (missingDefaults.length > 0 || purgedStaleGolden || sanitizedSkillExp || cleanedLocation) {
+    if (
+      missingDefaults.length > 0 ||
+      cleanedGoldenAnswers ||
+      purgedStaleGolden ||
+      sanitizedSkillExp ||
+      cleanedLocation ||
+      migratedResumes
+    ) {
       if (missingDefaults.length > 0) {
         data.goldenAnswers = [...(data.goldenAnswers || []), ...missingDefaults];
       }
@@ -1027,6 +1244,11 @@ export type CareerBrainStorage = BaseStorage<ICareerBrain> & {
   saveWorkExperienceItem: (item: Omit<IWorkExperienceItem, 'id'> & { id?: string }) => Promise<void>;
   deleteWorkExperienceItem: (id: string) => Promise<void>;
   setHasWorkExperience: (hasExperience: boolean) => Promise<void>;
+  saveResumeProfile: (
+    resume: Omit<IResumeProfileItem, 'id' | 'uploadedAt'> & { id?: string; uploadedAt?: number },
+  ) => Promise<IResumeProfileItem>;
+  deleteResumeProfile: (id: string) => Promise<void>;
+  setActiveResumeId: (id: string) => Promise<void>;
 };
 
 export const careerBrainStore: CareerBrainStorage = {
@@ -1066,8 +1288,12 @@ export const careerBrainStore: CareerBrainStorage = {
   },
 
   async saveGoldenAnswer(question: string, answer: string, category?: string): Promise<void> {
-    // Never persist ambiguous relative work-experience date fields or social media questions as generic golden answers
-    if (isGenericWorkExperienceDateField(question) || isSocialMediaOrUrlQuestion(question)) {
+    // Never persist ambiguous relative work-experience date fields, social media questions, or narrative questions
+    if (
+      isGenericWorkExperienceDateField(question) ||
+      isSocialMediaOrUrlQuestion(question) ||
+      isNarrativeAnswerableQuestion(question)
+    ) {
       return;
     }
 
@@ -1075,7 +1301,9 @@ export const careerBrainStore: CareerBrainStorage = {
     const cleanQ = question.trim();
     const cleanA = answer.trim();
     const existingIndex = current.goldenAnswers.findIndex(
-      ga => ga.question.toLowerCase().trim() === cleanQ.toLowerCase(),
+      ga =>
+        ga.question.toLowerCase().trim() === cleanQ.toLowerCase() ||
+        areQuestionsSemanticallyEquivalent(ga.question, cleanQ).matched,
     );
     let updatedGolden = [...current.goldenAnswers];
     if (existingIndex >= 0) {
@@ -1144,6 +1372,107 @@ export const careerBrainStore: CareerBrainStorage = {
     const currentList = Array.isArray(current.workExperience) ? [...current.workExperience] : [];
     const updatedList = currentList.filter(e => e.id !== id);
     await this.updateCareerBrain({ workExperience: updatedList });
+  },
+
+  async saveResumeProfile(
+    resume: Omit<IResumeProfileItem, 'id' | 'uploadedAt'> & { id?: string; uploadedAt?: number },
+  ): Promise<IResumeProfileItem> {
+    const current = await this.getCareerBrain();
+    const currentResumes = Array.isArray(current.resumes) ? [...current.resumes] : [];
+    const resumeId = resume.id || `res_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+    const fullItem: IResumeProfileItem = {
+      id: resumeId,
+      fileName: resume.fileName.trim(),
+      uploadedAt: resume.uploadedAt || Date.now(),
+      focusTags:
+        resume.focusTags && resume.focusTags.length > 0
+          ? resume.focusTags
+          : extractResumeFocusTags(resume.rawText || '', resume.extractedSkills || [], resume.targetRole),
+      rawText: resume.rawText || '',
+      extractedSkills: resume.extractedSkills || [],
+      summary: resume.summary || '',
+      targetRole: resume.targetRole || current.currentTitle,
+      isDefault: Boolean(resume.isDefault ?? currentResumes.length === 0),
+    };
+
+    const existingIdx = currentResumes.findIndex(r => r.id === resumeId);
+    if (existingIdx >= 0) {
+      currentResumes[existingIdx] = fullItem;
+    } else {
+      currentResumes.push(fullItem);
+    }
+
+    let activeId = current.activeResumeId;
+    if (fullItem.isDefault || currentResumes.length === 1 || !activeId) {
+      activeId = fullItem.id;
+      for (const r of currentResumes) {
+        r.isDefault = r.id === fullItem.id;
+      }
+    }
+
+    await this.updateCareerBrain({
+      resumes: currentResumes,
+      activeResumeId: activeId,
+      resumeFileName: fullItem.fileName,
+      resumeText: fullItem.rawText,
+      autoExtractedSkills: fullItem.extractedSkills,
+    });
+
+    return fullItem;
+  },
+
+  async deleteResumeProfile(id: string): Promise<void> {
+    const current = await this.getCareerBrain();
+    const currentResumes = Array.isArray(current.resumes) ? [...current.resumes] : [];
+    const updatedResumes = currentResumes.filter(r => r.id !== id);
+
+    let nextActiveId = current.activeResumeId;
+    let nextFileName = current.resumeFileName;
+    let nextRawText = current.resumeText;
+    let nextExtractedSkills = current.autoExtractedSkills;
+
+    if (current.activeResumeId === id) {
+      if (updatedResumes.length > 0) {
+        const nextDefault = updatedResumes.find(r => r.isDefault) || updatedResumes[0];
+        nextDefault.isDefault = true;
+        nextActiveId = nextDefault.id;
+        nextFileName = nextDefault.fileName;
+        nextRawText = nextDefault.rawText;
+        nextExtractedSkills = nextDefault.extractedSkills;
+      } else {
+        nextActiveId = undefined;
+        nextFileName = undefined;
+        nextRawText = '';
+        nextExtractedSkills = [];
+      }
+    }
+
+    await this.updateCareerBrain({
+      resumes: updatedResumes,
+      activeResumeId: nextActiveId,
+      resumeFileName: nextFileName,
+      resumeText: nextRawText,
+      autoExtractedSkills: nextExtractedSkills,
+    });
+  },
+
+  async setActiveResumeId(id: string): Promise<void> {
+    const current = await this.getCareerBrain();
+    const currentResumes = Array.isArray(current.resumes) ? [...current.resumes] : [];
+    const target = currentResumes.find(r => r.id === id);
+    if (!target) return;
+
+    for (const r of currentResumes) {
+      r.isDefault = r.id === id;
+    }
+
+    await this.updateCareerBrain({
+      resumes: currentResumes,
+      activeResumeId: id,
+      resumeFileName: target.fileName,
+      resumeText: target.rawText,
+      autoExtractedSkills: target.extractedSkills,
+    });
   },
 
   async saveData(data: unknown): Promise<SaveCareerBrainResult> {

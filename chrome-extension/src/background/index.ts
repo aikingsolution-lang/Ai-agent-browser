@@ -21,6 +21,7 @@ import {
   cleanSkillName,
   validateAndSanitizeSkillExperience,
   cleanLocationForCityField,
+  BACKEND_LLM_URL,
 } from '@extension/shared';
 import BrowserContext from './browser/context';
 import { Executor } from './agent/executor';
@@ -45,6 +46,7 @@ import { userQuestionManager } from './agent/linkedin/userQuestionManager';
 import { dedicatedJobRunner } from './agent/linkedin/dedicatedJobRunner';
 import { normalizeLinkedInJobUrl } from './agent/linkedin/urlUtils';
 import type { IJobData } from './agent/linkedin/types';
+import { careerCopilotEngine, auditCareerBrain } from './agent/copilot/careerCopilotEngine';
 
 const logger = createLogger('background');
 
@@ -57,6 +59,10 @@ queueManager.setAgentApplyRunner(async () => {
 dedicatedJobRunner.setBrowserContext(browserContext);
 dedicatedJobRunner.setExecutorFactory(setupExecutor);
 dedicatedJobRunner.setExecutorSubscriber(subscribeToExecutorEvents);
+dedicatedJobRunner.onStop(() => {
+  logger.info('[Background] DedicatedJobRunner stopped: resetting isJobApplyInProgress');
+  isJobApplyInProgress = false;
+});
 
 // Recover any interrupted job run from previous worker lifecycle
 dedicatedJobRunner.recoverInterruptedRunOnStartup().catch(err => {
@@ -89,7 +95,7 @@ async function getActiveChatModel(): Promise<BaseChatModel | undefined> {
         modelName: 'amazon.nova-lite-v1:0',
         apiKey: session.token,
         configuration: {
-          baseURL: 'http://localhost:5000/api/v1/llm',
+          baseURL: BACKEND_LLM_URL,
           defaultHeaders: {
             Authorization: `Bearer ${session.token}`,
           },
@@ -727,6 +733,36 @@ CRITICAL RULES:
        "description": "Brief summary of responsibilities & accomplishments"
      }
    - hasWorkExperience: true if one or more legitimate work/internship positions are found, false if candidate is a fresher with no work experience.
+6. CANDIDATE BACKGROUND NARRATIVE (backgroundNarrative):
+   - Synthesize a comprehensive, high-impact 2-3 paragraph professional narrative grounded strictly in the resume.
+   - Paragraph 1: Professional identity, core specialization (e.g. Full Stack, Python, Frontend, MERN), total verifiable experience, and primary tech stack.
+   - Paragraph 2: Key real-world projects or systems engineered, architectural decisions, databases, APIs, performance optimizations, and business impact.
+   - Paragraph 3: Problem solving philosophy, engineering best practices (testing, CI/CD, clean code), and collaboration strengths.
+7. GOLDEN SCREENING ANSWERS (goldenAnswers):
+   - Generate calibrated baseline gatekeeper screening answers based on the candidate's factual location, legal eligibility, work authorization, visa sponsorship, and age from the resume:
+     [
+       {
+         "id": "work_auth",
+         "question": "Are you legally authorized to work in India / your resident country?",
+         "answer": "Yes",
+         "category": "Eligibility / Legal",
+         "isDefault": true
+       },
+       {
+         "id": "visa_sponsorship",
+         "question": "Will you now or in the future require visa sponsorship?",
+         "answer": "No",
+         "category": "Eligibility / Legal",
+         "isDefault": true
+       },
+       {
+         "id": "age_requirement",
+         "question": "Are you at least 18 years of age or older?",
+         "answer": "Yes",
+         "category": "Eligibility / Legal",
+         "isDefault": true
+       }
+     ]
 
 Return valid JSON ONLY matching this format:
 {
@@ -737,6 +773,30 @@ Return valid JSON ONLY matching this format:
   "education": string or null,
   "yearsOfExperience": number or null,
   "hasWorkExperience": boolean,
+  "backgroundNarrative": "A rich 2-3 paragraph narrative describing candidate background, projects, strengths...",
+  "goldenAnswers": [
+    {
+      "id": "work_auth",
+      "question": "Are you legally authorized to work in India / your resident country?",
+      "answer": "Yes",
+      "category": "Eligibility / Legal",
+      "isDefault": true
+    },
+    {
+      "id": "visa_sponsorship",
+      "question": "Will you now or in the future require visa sponsorship?",
+      "answer": "No",
+      "category": "Eligibility / Legal",
+      "isDefault": true
+    },
+    {
+      "id": "age_requirement",
+      "question": "Are you at least 18 years of age or older?",
+      "answer": "Yes",
+      "category": "Eligibility / Legal",
+      "isDefault": true
+    }
+  ],
   "workExperience": [
     {
       "company": "Company Name",
@@ -814,11 +874,88 @@ ${resumeText.slice(0, 12000)}
           parsed.currentLocation = cleanLocationForCityField(parsed.currentLocation) || parsed.currentLocation;
         }
 
+        // 4. Sanitize backgroundNarrative
+        if (parsed.backgroundNarrative && typeof parsed.backgroundNarrative === 'string') {
+          parsed.backgroundNarrative = parsed.backgroundNarrative.trim();
+        }
+
+        // 5. Sanitize goldenAnswers
+        if (Array.isArray(parsed.goldenAnswers)) {
+          parsed.goldenAnswers = parsed.goldenAnswers
+            .filter((item: any) => item && item.question && item.answer)
+            .map((item: any) => ({
+              id: String(item.id || `ga_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`),
+              question: String(item.question).trim(),
+              answer: String(item.answer).trim(),
+              category: item.category || 'Eligibility / Legal',
+              isDefault: Boolean(item.isDefault ?? true),
+            }));
+        }
+
         logger.info('[background] Successfully extracted enrichment data from resume:', parsed);
         sendResponse({ success: true, data: parsed });
       } catch (err) {
         logger.warning('[background] Resume enrichment failed:', err);
         sendResponse({ success: false, error: String(err) });
+      }
+    })();
+    return true;
+  }
+
+  // 0d. CAREER COPILOT CHAT: Conversational Profile Q&A, Auto-Fill, Job Fit & Pitch Engine
+  if (request.type === 'CAREER_COPILOT_CHAT') {
+    (async () => {
+      try {
+        const { userMessage, chatHistory } = request;
+        let activeTabInfo: { url?: string; title?: string; pageText?: string } | undefined = undefined;
+
+        try {
+          const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+          if (activeTab?.id && activeTab?.url?.startsWith('http')) {
+            const results = await chrome.scripting.executeScript({
+              target: { tabId: activeTab.id },
+              func: () => {
+                const jobContainer = document.querySelector(
+                  '.jobs-description, .job-details, [data-job-id], article, main',
+                );
+                return (jobContainer ? jobContainer.textContent : document.body.innerText) || '';
+              },
+            });
+            activeTabInfo = {
+              url: activeTab.url,
+              title: activeTab.title,
+              pageText: (results?.[0]?.result as string)?.slice(0, 10000) || '',
+            };
+          }
+        } catch (tabErr) {
+          logger.debug('[Copilot] Could not read active tab content:', tabErr);
+        }
+
+        const response = await careerCopilotEngine.processMessage({
+          userMessage: userMessage || '',
+          chatHistory: chatHistory || [],
+          activeTab: activeTabInfo,
+        });
+
+        sendResponse({ success: true, response });
+      } catch (err: any) {
+        logger.error('[Copilot] Error in CAREER_COPILOT_CHAT:', err);
+        sendResponse({ success: false, error: err?.message || String(err) });
+      }
+    })();
+    return true;
+  }
+
+  // 0e. CAREER COPILOT AUDIT: Instant profile completeness scoring & missing field priority
+  if (request.type === 'CAREER_COPILOT_AUDIT') {
+    (async () => {
+      try {
+        const brain = await careerBrainStore.getCareerBrain();
+        const audit = auditCareerBrain(brain);
+        sendResponse({ success: true, audit });
+      } catch (err: any) {
+        logger.error('[Copilot] Error in CAREER_COPILOT_AUDIT:', err);
+        sendResponse({ success: false, error: err?.message || String(err) });
       }
     })();
     return true;
@@ -958,6 +1095,7 @@ ${resumeText.slice(0, 12000)}
     request.type === 'STOP_JOB_APPLY' ||
     request.type === 'STOP_AUTO_APPLY'
   ) {
+    isJobApplyInProgress = false;
     if (currentExecutor) {
       currentExecutor.cancel();
     }
@@ -1087,8 +1225,9 @@ chrome.runtime.onConnect.addListener(port => {
             dedicatedJobRunner
               .startAutonomousJobLoop({
                 portToSend: port,
-                maxJobs: message.maxJobs || 10,
+                maxJobs: message.maxJobs || 20,
                 platform: message.platform || 'linkedin',
+                runnerMode: message.runnerMode || 'tab',
               })
               .finally(() => {
                 isJobApplyInProgress = false;
@@ -1102,6 +1241,7 @@ chrome.runtime.onConnect.addListener(port => {
           case 'STOP_AUTO_APPLY':
           case 'STOP_JOB_APPLY':
           case 'stop_linkedin_queue': {
+            isJobApplyInProgress = false;
             if (currentExecutor) {
               currentExecutor.cancel();
             }
@@ -1338,7 +1478,7 @@ async function setupExecutor(
 
   if (hasCloudAuth) {
     logger.info('Using Backend Managed LLM Gateway (/api/v1/llm/chat) for logged-in user');
-    const backendBaseUrl = 'http://localhost:5000/api/v1/llm';
+    const backendBaseUrl = BACKEND_LLM_URL;
     const backendToken = session!.token;
 
     navigatorLLM = new ChatOpenAI({

@@ -31,3 +31,6 @@ chrome-extension/public/manifest.json
 *.py
 HOW_JOB_APPLY_AND_LLM_WORKS.*
 *.pdf
+__pycache__/
+*.pyc
+pdf_builder/

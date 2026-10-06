@@ -70,7 +70,12 @@ const manifest = withOperaSidebar(
       'webNavigation',
       'cookies',
       'alarms',
+      'identity',
     ],
+    oauth2: {
+      client_id: 'GOOGLE_CLIENT_ID_PLACEHOLDER.apps.googleusercontent.com',
+      scopes: ['openid', 'email', 'profile'],
+    },
     options_page: 'options/index.html',
     background: {
       service_worker: 'background.iife.js',

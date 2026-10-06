@@ -8,6 +8,7 @@
 import { createStorage } from '@extension/storage/lib/base/base';
 import { StorageEnum } from '@extension/storage/lib/base/enums';
 import { createLogger } from '@src/background/log';
+import { backendApiClient } from '@extension/shared';
 
 const logger = createLogger('LinkedInRateLimiter');
 
@@ -68,8 +69,36 @@ export class DailyQuotaManager {
   /**
    * Checks whether the user can perform an application today.
    */
-  static async canApplyToday(): Promise<{ allowed: boolean; remaining: number; currentCount: number }> {
-    const data = await this.getQuotaData();
+  static async canApplyToday(): Promise<{
+    allowed: boolean;
+    remaining: number;
+    currentCount: number;
+    maxQuota: number;
+  }> {
+    let data = await this.getQuotaData();
+
+    // Dynamically sync maxDailyQuota from active subscription or backend profile quota
+    try {
+      const backendQuota = await backendApiClient.getProfileQuota().catch(() => null);
+      if (backendQuota?.dailyLimit && data.maxDailyQuota !== backendQuota.dailyLimit) {
+        data = {
+          ...data,
+          maxDailyQuota: backendQuota.dailyLimit,
+        };
+        await quotaStorage.set(data);
+      }
+    } catch {}
+
+    // Auto-unpause if limit was upgraded or applied count < maxDailyQuota
+    if (data.appliedCount < data.maxDailyQuota && data.isPausedDueToQuota) {
+      data = {
+        ...data,
+        isPausedDueToQuota: false,
+        nextResumeTimestamp: null,
+      };
+      await quotaStorage.set(data);
+    }
+
     const remaining = Math.max(0, data.maxDailyQuota - data.appliedCount);
     const allowed = remaining > 0 && !data.isPausedDueToQuota;
 
@@ -77,6 +106,7 @@ export class DailyQuotaManager {
       allowed,
       remaining,
       currentCount: data.appliedCount,
+      maxQuota: data.maxDailyQuota,
     };
   }
 
@@ -119,10 +149,29 @@ export class DailyQuotaManager {
    */
   static async setMaxDailyLimit(limit: number): Promise<void> {
     const data = await this.getQuotaData();
+    const newLimit = Math.max(1, limit);
+    const isPaused = data.appliedCount >= newLimit;
     await quotaStorage.set({
       ...data,
-      maxDailyQuota: Math.max(1, limit),
+      maxDailyQuota: newLimit,
+      isPausedDueToQuota: isPaused,
+      nextResumeTimestamp: isPaused ? data.nextResumeTimestamp : null,
     });
+  }
+
+  /**
+   * Resets today's applied count to 0.
+   */
+  static async resetTodayAppliedCount(): Promise<DailyQuotaData> {
+    const data = await this.getQuotaData();
+    const updatedData: DailyQuotaData = {
+      ...data,
+      appliedCount: 0,
+      isPausedDueToQuota: false,
+      nextResumeTimestamp: null,
+    };
+    await quotaStorage.set(updatedData);
+    return updatedData;
   }
 
   /**

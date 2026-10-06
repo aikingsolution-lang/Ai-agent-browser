@@ -42,7 +42,7 @@ export interface IPlatformExecutionContext {
     url: string;
     title: string;
     company: string;
-    status: 'applied' | 'skipped' | 'failed' | 'running' | 'modal_opened' | 'modal_failed';
+    status: 'applied' | 'skipped' | 'failed' | 'running' | 'modal_opened' | 'modal_failed' | 'needs_verification';
     reason?: string;
     creditsUsed?: number;
   }) => void;
@@ -57,7 +57,7 @@ export interface IPlatformAdapter {
   readonly domainMatches: string[];
 
   isMatchingUrl(url: string): boolean;
-  buildSearchUrl(role: string, location: string): string;
+  buildSearchUrl(role: string, location: string, ...args: any[]): string;
   validateSession(page: Page): Promise<IPlatformSession>;
   extractJobCards(page: Page): Promise<IJobQueueItem[]>;
   applyToJob(job: IJobQueueItem, context: IPlatformExecutionContext): Promise<IApplicationResult>;

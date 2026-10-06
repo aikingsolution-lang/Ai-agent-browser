@@ -7,8 +7,11 @@ export interface ProcessedJobRecord {
   url: string;
   title: string;
   company: string;
+  location?: string;
+  platform?: 'linkedin' | 'naukri' | 'indeed' | string;
   status: 'applied' | 'skipped' | 'failed';
   reason?: string;
+  fitScore?: number;
   creditsUsed: number;
   timestamp: number;
 }

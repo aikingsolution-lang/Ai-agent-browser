@@ -127,9 +127,39 @@ RULES:
        "isCurrent": true/false (true if currently working here / present),
        "description": "Brief summary of responsibilities & accomplishments"
      }
-   - hasWorkExperience: true if one or more legitimate work/internship positions are found, false if candidate is a fresher with no work experience.
+    - hasWorkExperience: true if one or more legitimate work/internship positions are found, false if candidate is a fresher with no work experience.
 6. WORK HISTORY: Extract all distinct past/present roles with company, title, duration, and key highlights.
-7. CLEAN OUTPUT: Output ONLY a valid JSON object matching the requested schema. Do NOT include markdown code blocks, backticks, XML tags, or conversational preamble.`;
+7. CANDIDATE BACKGROUND NARRATIVE:
+   - Synthesize a comprehensive, high-impact 2-3 paragraph professional narrative grounded strictly in the resume.
+   - Paragraph 1: Professional identity, core specialization (e.g. Full Stack, Python, Frontend, MERN), total verifiable experience, and primary tech stack.
+   - Paragraph 2: Key real-world projects or systems engineered, architectural decisions, databases, APIs, performance optimizations, and business impact.
+   - Paragraph 3: Problem solving philosophy, engineering best practices (testing, CI/CD, clean code), and collaboration strengths.
+8. GOLDEN SCREENING ANSWERS (goldenAnswers):
+   - Generate calibrated baseline gatekeeper screening answers based on the candidate's factual location, legal eligibility, work authorization, visa sponsorship, and age from the resume:
+     [
+       {
+         "id": "work_auth",
+         "question": "Are you legally authorized to work in India / your resident country?",
+         "answer": "Yes",
+         "category": "Eligibility / Legal",
+         "isDefault": true
+       },
+       {
+         "id": "visa_sponsorship",
+         "question": "Will you now or in the future require visa sponsorship?",
+         "answer": "No",
+         "category": "Eligibility / Legal",
+         "isDefault": true
+       },
+       {
+         "id": "age_requirement",
+         "question": "Are you at least 18 years of age or older?",
+         "answer": "Yes",
+         "category": "Eligibility / Legal",
+         "isDefault": true
+       }
+     ]
+9. CLEAN OUTPUT: Output ONLY a valid JSON object matching the requested schema. Do NOT include markdown code blocks, backticks, XML tags, or conversational preamble.`;
 
     const userPrompt = `Parse the following raw resume into a valid JSON object matching this schema:
 {
@@ -168,8 +198,32 @@ RULES:
       "highlights": ["Built dashboard", "Improved performance"]
     }
   ],
-  "backgroundNarrative": "A concise 2-3 sentence executive summary of the candidate's career and strengths.",
-  "preferredLocation": "City, Country (e.g. Bengaluru, India. Do NOT append 'or Remote')",
+  "backgroundNarrative": "A rich, comprehensive 2-3 paragraph professional narrative describing technical background, key projects built, technologies mastered, architecture & problem solving approach, and work style, grounded strictly in the resume.",
+  "goldenAnswers": [
+    {
+      "id": "work_auth",
+      "question": "Are you legally authorized to work in India / your resident country?",
+      "answer": "Yes",
+      "category": "Eligibility / Legal",
+      "isDefault": true
+    },
+    {
+      "id": "visa_sponsorship",
+      "question": "Will you now or in the future require visa sponsorship?",
+      "answer": "No",
+      "category": "Eligibility / Legal",
+      "isDefault": true
+    },
+    {
+      "id": "age_requirement",
+      "question": "Are you at least 18 years of age or older?",
+      "answer": "Yes",
+      "category": "Eligibility / Legal",
+      "isDefault": true
+    }
+  ],
+  "currentLocation": "City, State, Country (e.g. Bengaluru, Karnataka, India or San Francisco, California, United States. Standard LinkedIn/Indeed/Naukri format)",
+  "preferredLocation": "City, State, Country (e.g. Bengaluru, Karnataka, India. Do NOT append 'or Remote')",
   "salaryExpectation": "",
   "portfolioUrl": "",
   "githubUrl": "",
@@ -245,9 +299,44 @@ ${truncatedText}`;
         );
       }
 
-      // 4. Sanitize preferredLocation (strip any 'or Remote' / 'Remote /' suffixes)
+      // 4. Sanitize currentLocation and preferredLocation (strip any 'or Remote' / 'Remote /' suffixes)
+      if (parsed.currentLocation) {
+        parsed.currentLocation = cleanLocationForCityField(parsed.currentLocation) || parsed.currentLocation;
+      }
       if (parsed.preferredLocation) {
         parsed.preferredLocation = cleanLocationForCityField(parsed.preferredLocation) || parsed.preferredLocation;
+      }
+
+      // 5. Sanitize goldenAnswers
+      if (Array.isArray(parsed.goldenAnswers)) {
+        parsed.goldenAnswers = parsed.goldenAnswers
+          .filter((item: any) => item && item.question && item.answer)
+          .map((item: any) => ({
+            id: String(item.id || `ga_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`),
+            question: String(item.question).trim(),
+            answer: String(item.answer).trim(),
+            category: item.category || 'Eligibility / Legal',
+            isDefault: Boolean(item.isDefault ?? true),
+          }));
+      }
+
+      // 6. Sanitize currentTitle: Ensure candidate personal name or placeholder is never used as target role
+      if (parsed.currentTitle) {
+        const cleanTitle = String(parsed.currentTitle).trim();
+        const cleanFull = String(parsed.fullName || '')
+          .trim()
+          .toLowerCase();
+        const titleLo = cleanTitle.toLowerCase();
+        const isName =
+          cleanFull && (titleLo === cleanFull || titleLo.includes(cleanFull) || cleanFull.includes(titleLo));
+        const isGeneric =
+          /^(candidate|user|applicant|n\/a|developer|engineer|title|job title|software professional)$/i.test(titleLo);
+        if (isName || isGeneric) {
+          logger.warn(
+            `[ResumeParserService] currentTitle "${cleanTitle}" matched candidate name or generic placeholder. Sanitized to "Full Stack Developer".`,
+          );
+          parsed.currentTitle = 'Full Stack Developer';
+        }
       }
 
       const validated = parsedResumeSchema.safeParse(parsed);
@@ -397,9 +486,34 @@ ${truncatedText}`;
       noticePeriod,
       workHistory: [],
       backgroundNarrative: lines.slice(0, 10).join(' '),
+      currentLocation: '',
       preferredLocation: '',
+      preferredLocations: [],
       workAuthorization: workAuth,
       skillExperience,
+      goldenAnswers: [
+        {
+          id: 'work_auth',
+          question: 'Are you legally authorized to work in India / your resident country?',
+          answer: 'Yes',
+          category: 'Eligibility / Legal',
+          isDefault: true,
+        },
+        {
+          id: 'visa_sponsorship',
+          question: 'Will you now or in the future require visa sponsorship?',
+          answer: 'No',
+          category: 'Eligibility / Legal',
+          isDefault: true,
+        },
+        {
+          id: 'age_requirement',
+          question: 'Are you at least 18 years of age or older?',
+          answer: 'Yes',
+          category: 'Eligibility / Legal',
+          isDefault: true,
+        },
+      ],
       salaryExpectation: '',
       portfolioUrl: portfolioMatch ? portfolioMatch[0] : '',
       githubUrl: githubMatch ? githubMatch[0] : '',

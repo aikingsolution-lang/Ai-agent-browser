@@ -7,6 +7,8 @@ import { UserCreditBalance } from '../models/userCreditBalance.model.js';
 import { CreditLedger } from '../models/creditLedger.model.js';
 import { LlmUsageLog } from '../models/llmUsageLog.model.js';
 import { WebhookLedger } from '../models/webhookLedger.model.js';
+import { RefreshToken } from '../models/refreshToken.model.js';
+import { JobApplication } from '../models/jobApplication.model.js';
 import { Plan } from '../models/plan.model.js';
 
 export interface TestDbInstance {
@@ -42,6 +44,8 @@ export async function setupTestDatabase(): Promise<TestDbInstance> {
     if (mongoose.connection.readyState !== 0) {
       await Promise.all([
         User.deleteMany({}),
+        RefreshToken.deleteMany({}),
+        JobApplication.deleteMany({}),
         Subscription.deleteMany({}),
         UserCreditBalance.deleteMany({}),
         CreditLedger.deleteMany({}),

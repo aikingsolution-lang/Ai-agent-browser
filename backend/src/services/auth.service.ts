@@ -1,7 +1,9 @@
+import crypto from 'node:crypto';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import mongoose from 'mongoose';
 import { User, type IUser } from '../models/user.model.js';
+import { RefreshToken } from '../models/refreshToken.model.js';
 import { Subscription, type ISubscription } from '../models/subscription.model.js';
 import { UserCreditBalance } from '../models/userCreditBalance.model.js';
 import { CreditLedger } from '../models/creditLedger.model.js';
@@ -18,6 +20,7 @@ export interface JwtTokenPayload {
 export interface AuthResult {
   user: IUser;
   token: string;
+  refreshToken: string;
   subscription?: ISubscription;
 }
 
@@ -32,6 +35,34 @@ export class AuthService {
       algorithm: 'HS256',
       expiresIn: env.JWT_EXPIRES_IN as any,
     });
+  }
+
+  public static async generateAndSaveRefreshToken(
+    userId: mongoose.Types.ObjectId | string,
+    session?: mongoose.ClientSession,
+  ): Promise<string> {
+    const refreshToken = jwt.sign({ sub: userId.toString(), jti: crypto.randomUUID() }, env.JWT_REFRESH_SECRET, {
+      algorithm: 'HS256',
+      expiresIn: env.JWT_REFRESH_EXPIRES_IN as any,
+    });
+
+    const decoded: any = jwt.decode(refreshToken);
+    const expiresAt = new Date(decoded.exp * 1000);
+    const tokenHash = crypto.createHash('sha256').update(refreshToken).digest('hex');
+
+    const options = session ? { session } : undefined;
+    await RefreshToken.create(
+      [
+        {
+          userId,
+          tokenHash,
+          expiresAt,
+        },
+      ],
+      options,
+    );
+
+    return refreshToken;
   }
 
   public static async registerUser(input: RegisterInput): Promise<AuthResult> {
@@ -78,12 +109,13 @@ export class AuthService {
 
         const user = userDocs[0];
         const subscription = await TrialService.createFreeTrial(user._id, session);
+        const token = this.generateToken(user);
+        const refreshToken = await this.generateAndSaveRefreshToken(user._id, session);
 
         await session.commitTransaction();
         await session.endSession();
 
-        const token = this.generateToken(user);
-        return { user, token, subscription };
+        return { user, token, refreshToken, subscription };
       } catch (error: any) {
         if (session) {
           try {
@@ -134,11 +166,13 @@ export class AuthService {
     try {
       const subscription = await TrialService.createFreeTrial(user._id);
       const token = this.generateToken(user);
-      return { user, token, subscription };
+      const refreshToken = await this.generateAndSaveRefreshToken(user._id);
+      return { user, token, refreshToken, subscription };
     } catch (trialError) {
       // Complete compensating cleanup for standalone MongoDB fallback
       await Promise.all([
         User.findByIdAndDelete(user._id),
+        RefreshToken.deleteMany({ userId: user._id }),
         Subscription.deleteMany({ userId: user._id }),
         UserCreditBalance.deleteMany({ userId: user._id }),
         CreditLedger.deleteMany({ userId: user._id }),
@@ -168,10 +202,154 @@ export class AuthService {
     }
 
     const token = this.generateToken(user);
-    return { user, token };
+    const refreshToken = await this.generateAndSaveRefreshToken(user._id);
+    return { user, token, refreshToken };
+  }
+
+  public static async refreshTokens(rawRefreshToken: string): Promise<{ token: string; refreshToken: string }> {
+    let payload: any;
+    try {
+      payload = jwt.verify(rawRefreshToken, env.JWT_REFRESH_SECRET);
+    } catch (err: any) {
+      if (err.name === 'TokenExpiredError') {
+        throw new AppError('Refresh token has expired', 401, 'TOKEN_EXPIRED');
+      }
+      throw new AppError('Invalid refresh token', 401, 'INVALID_TOKEN');
+    }
+
+    const tokenHash = crypto.createHash('sha256').update(rawRefreshToken).digest('hex');
+    const tokenDoc = await RefreshToken.findOne({ tokenHash });
+
+    if (!tokenDoc) {
+      throw new AppError('Refresh token not found or invalid', 401, 'INVALID_TOKEN');
+    }
+
+    if (tokenDoc.revokedAt) {
+      // Security: Revoke all tokens for this user upon reuse detection
+      await RefreshToken.updateMany({ userId: tokenDoc.userId }, { revokedAt: new Date() });
+      throw new AppError('Refresh token reuse detected. All sessions revoked.', 401, 'REFRESH_TOKEN_REUSED');
+    }
+
+    if (tokenDoc.expiresAt < new Date()) {
+      throw new AppError('Refresh token has expired', 401, 'TOKEN_EXPIRED');
+    }
+
+    const user = await User.findById(tokenDoc.userId);
+    if (!user || user.status !== 'active') {
+      throw new AppError('User account not found or suspended', 401, 'ACCOUNT_SUSPENDED');
+    }
+
+    const newAccessToken = this.generateToken(user);
+    const newRefreshToken = await this.generateAndSaveRefreshToken(user._id);
+    const newTokenHash = crypto.createHash('sha256').update(newRefreshToken).digest('hex');
+
+    tokenDoc.revokedAt = new Date();
+    tokenDoc.replacedByTokenHash = newTokenHash;
+    await tokenDoc.save();
+
+    return {
+      token: newAccessToken,
+      refreshToken: newRefreshToken,
+    };
+  }
+
+  public static async revokeRefreshToken(rawRefreshToken?: string): Promise<void> {
+    if (!rawRefreshToken) return;
+    const tokenHash = crypto.createHash('sha256').update(rawRefreshToken).digest('hex');
+    await RefreshToken.updateOne({ tokenHash }, { revokedAt: new Date() });
   }
 
   public static async getUserById(userId: string): Promise<IUser | null> {
     return User.findById(userId);
+  }
+
+  public static async loginWithGoogle(googleToken: string): Promise<AuthResult> {
+    if (!googleToken) {
+      throw new AppError('Google access token is required', 400, 'GOOGLE_TOKEN_REQUIRED');
+    }
+
+    let googleUser: { sub: string; email: string; name?: string; picture?: string };
+    try {
+      const response = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+        headers: {
+          Authorization: `Bearer ${googleToken}`,
+        },
+      });
+
+      if (!response.ok) {
+        throw new Error('Google token verification failed');
+      }
+
+      googleUser = (await response.json()) as any;
+    } catch {
+      throw new AppError('Invalid or expired Google access token', 401, 'INVALID_GOOGLE_TOKEN');
+    }
+
+    if (!googleUser || !googleUser.email) {
+      throw new AppError('Google account does not provide an email address', 400, 'GOOGLE_EMAIL_MISSING');
+    }
+
+    const normalizedEmail = googleUser.email.trim().toLowerCase();
+    let user = await User.findOne({ email: normalizedEmail });
+
+    if (user) {
+      if (user.status !== 'active') {
+        throw new AppError('User account not found or suspended', 403, 'ACCOUNT_SUSPENDED');
+      }
+
+      let updated = false;
+      if (!user.googleLinked) {
+        user.googleLinked = true;
+        updated = true;
+      }
+      if (!user.googleId && googleUser.sub) {
+        user.googleId = googleUser.sub;
+        updated = true;
+      }
+      if (updated) {
+        await user.save();
+      }
+
+      const token = this.generateToken(user);
+      const refreshToken = await this.generateAndSaveRefreshToken(user._id);
+      const subscription = await Subscription.findOne({
+        userId: user._id,
+        status: { $in: ['TRIALING', 'ACTIVE'] },
+      });
+
+      return {
+        user,
+        token,
+        refreshToken,
+        subscription: subscription ?? undefined,
+      };
+    } else {
+      const userName = googleUser.name?.trim() || normalizedEmail.split('@')[0];
+      user = await User.create({
+        name: userName.length >= 2 ? userName : 'Google User',
+        email: normalizedEmail,
+        googleLinked: true,
+        googleId: googleUser.sub,
+        role: 'user',
+        status: 'active',
+      });
+
+      let subscription: ISubscription | undefined;
+      try {
+        subscription = await TrialService.createFreeTrial(user._id);
+      } catch (trialError) {
+        console.error('Failed to create free trial for new Google user:', trialError);
+      }
+
+      const token = this.generateToken(user);
+      const refreshToken = await this.generateAndSaveRefreshToken(user._id);
+
+      return {
+        user,
+        token,
+        refreshToken,
+        subscription,
+      };
+    }
   }
 }

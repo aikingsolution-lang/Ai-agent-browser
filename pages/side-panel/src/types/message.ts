@@ -34,4 +34,9 @@ export const ACTOR_PROFILES = {
     icon: 'icons/evaluator.svg',
     iconBackground: '#795548',
   },
+  copilot: {
+    name: 'Career Copilot',
+    icon: 'icons/planner.svg',
+    iconBackground: '#8B5CF6',
+  },
 } as const;

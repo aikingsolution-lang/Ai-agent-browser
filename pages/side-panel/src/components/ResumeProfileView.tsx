@@ -2,6 +2,10 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import {
   type ICareerBrain,
   type IWorkExperienceItem,
+  type IGoldenAnswer,
+  type IResumeProfileItem,
+  extractResumeFocusTags,
+  DEFAULT_GOLDEN_ANSWERS,
   getCareerBrainData,
   saveCareerBrainData,
   DEFAULT_CAREER_BRAIN,
@@ -9,6 +13,8 @@ import {
   authStorage,
   isGenericWorkExperienceDateField,
   cleanLocationForCityField,
+  isNarrativeAnswerableQuestion,
+  sanitizeRoleSearchQuery,
 } from '@extension/storage';
 import {
   backendApiClient,
@@ -37,9 +43,13 @@ import {
   FiCheck,
   FiX,
   FiCalendar,
+  FiLock,
+  FiFileText,
 } from 'react-icons/fi';
 import { AiOutlineLoading3Quarters } from 'react-icons/ai';
 import { SkillAutocompleteInput } from './SkillAutocompleteInput';
+import { LocationAutocompleteInput } from './LocationAutocompleteInput';
+import { PrioritizedLocationsInput } from './PrioritizedLocationsInput';
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
@@ -59,6 +69,23 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
   const [editForm, setEditForm] = useState<ICareerBrain>(DEFAULT_CAREER_BRAIN);
   const [isSaving, setIsSaving] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [hasAuth, setHasAuth] = useState<boolean>(true);
+
+  useEffect(() => {
+    let mounted = true;
+    const checkAuth = async () => {
+      const session = await authStorage.getSession();
+      if (mounted) setHasAuth(Boolean(session?.token));
+    };
+    checkAuth();
+    const unsub = authStorage.subscribe(() => {
+      checkAuth();
+    });
+    return () => {
+      mounted = false;
+      unsub();
+    };
+  }, []);
 
   // Skill experience & Golden Answers state
   const [newSkillName, setNewSkillName] = useState('');
@@ -280,8 +307,21 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
           let extractedEducation: string | undefined = parsed.education;
           let extractedYoe: number | undefined = parsed.yearsOfExperience;
           let extractedWorkExp: any[] = Array.isArray(parsed.workExperience) ? parsed.workExperience : [];
+          let extractedNarrative: string | undefined = parsed.backgroundNarrative;
+          let extractedGoldenAnswers: IGoldenAnswer[] | undefined = Array.isArray(parsed.goldenAnswers)
+            ? parsed.goldenAnswers
+            : undefined;
 
-          if ((Object.keys(extractedSkillExp).length === 0 || extractedWorkExp.length === 0) && rawResumeText) {
+          const needsEnrichment =
+            (!extractedNarrative ||
+              extractedNarrative.length < 100 ||
+              !extractedGoldenAnswers ||
+              extractedGoldenAnswers.length === 0 ||
+              Object.keys(extractedSkillExp).length === 0 ||
+              extractedWorkExp.length === 0) &&
+            Boolean(rawResumeText);
+
+          if (needsEnrichment && rawResumeText) {
             try {
               const enrichRes = await new Promise<any>(resolve => {
                 chrome.runtime.sendMessage(
@@ -311,6 +351,16 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
                 if (extractedWorkExp.length === 0 && Array.isArray(enrichRes.data.workExperience)) {
                   extractedWorkExp = enrichRes.data.workExperience;
                 }
+                if (enrichRes.data.backgroundNarrative && (!extractedNarrative || extractedNarrative.length < 100)) {
+                  extractedNarrative = enrichRes.data.backgroundNarrative;
+                }
+                if (
+                  Array.isArray(enrichRes.data.goldenAnswers) &&
+                  enrichRes.data.goldenAnswers.length > 0 &&
+                  (!extractedGoldenAnswers || extractedGoldenAnswers.length === 0)
+                ) {
+                  extractedGoldenAnswers = enrichRes.data.goldenAnswers;
+                }
               }
             } catch (e) {
               console.warn('[ResumeProfileView] Background LLM enrichment pass error:', e);
@@ -325,115 +375,133 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
             extractedYoe,
           );
 
-          // Merge skills with years: CRITICAL - NEVER overwrite existing manually-entered entries.
-          // Also strictly filter out stopwords, generic buzzwords, and non-skills (like "ai", "and", etc.)
-          const existingSkillExp: Record<string, number> = profile.skillExperience || {};
-          const mergedSkillExp: Record<string, number> = { ...existingSkillExp };
-          const newlyExtractedSkillNames: string[] = [];
+          // 1. Sanitize extracted skills against verifiable tenure and explicit mentions from the NEW resume
+          extractedSkillExp = validateAndSanitizeSkillExperience(
+            extractedSkillExp,
+            extractedWorkExp,
+            rawResumeText,
+            extractedYoe,
+          );
+
+          // 2. Clean-slate skills for NEW resume: Completely remove old resume skills!
+          const cleanSkillExp: Record<string, number> = {};
+          const autoExtractedSkillNames: string[] = [];
 
           for (const [skill, yrs] of Object.entries(extractedSkillExp)) {
             if (!skill || yrs === undefined || isNaN(Number(yrs))) continue;
             const cleanSkill = cleanSkillName(skill);
             if (!isValidSkillName(cleanSkill)) continue;
 
-            const alreadyExists = Object.keys(existingSkillExp).some(
-              existing => existing.toLowerCase() === cleanSkill.toLowerCase(),
-            );
-            if (!alreadyExists) {
-              mergedSkillExp[cleanSkill] = Number(yrs);
-              newlyExtractedSkillNames.push(cleanSkill);
-            }
+            cleanSkillExp[cleanSkill] = Number(yrs);
+            autoExtractedSkillNames.push(cleanSkill);
           }
 
-          const prevAuto = (profile.autoExtractedSkills || []).filter(s =>
-            Object.keys(mergedSkillExp).some(k => k.toLowerCase() === s.toLowerCase()),
-          );
-          const updatedAutoExtracted = Array.from(new Set([...prevAuto, ...newlyExtractedSkillNames]));
+          // 3. Clean-slate work experience for NEW resume: Completely remove old resume jobs!
+          const cleanWorkExp: IWorkExperienceItem[] = extractedWorkExp
+            .filter((item: any) => item && (item.company || item.title))
+            .map((item: any) => ({
+              id: item.id || `we_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+              company: (item.company || '').trim(),
+              title: (item.title || '').trim(),
+              startMonth: (item.startMonth || '').trim(),
+              startYear: (item.startYear || '').trim(),
+              endMonth: item.isCurrent ? null : item.endMonth ? String(item.endMonth).trim() : null,
+              endYear: item.isCurrent ? null : item.endYear ? String(item.endYear).trim() : null,
+              isCurrent: Boolean(item.isCurrent),
+              description: (item.description || '').trim(),
+              source: 'resume' as const,
+            }));
 
-          // 2. Merge work experience: loosely by company + title.
-          // NEVER overwrite manually-entered positions!
-          const existingWorkExp: IWorkExperienceItem[] = Array.isArray(profile.workExperience)
-            ? [...profile.workExperience]
-            : [];
-          const mergedWorkExp: IWorkExperienceItem[] = [...existingWorkExp];
-          let newlyExtractedWorkCount = 0;
+          const hasWorkExperience = cleanWorkExp.length > 0;
 
-          for (const item of extractedWorkExp) {
-            if (!item || (!item.company && !item.title)) continue;
-            const cName = (item.company || '').trim().toLowerCase();
-            const tName = (item.title || '').trim().toLowerCase();
-
-            const existingIdx = mergedWorkExp.findIndex(
-              w => (w.company || '').trim().toLowerCase() === cName && (w.title || '').trim().toLowerCase() === tName,
-            );
-
-            if (existingIdx === -1) {
-              mergedWorkExp.push({
-                id: item.id || `we_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-                company: (item.company || '').trim(),
-                title: (item.title || '').trim(),
-                startMonth: (item.startMonth || '').trim(),
-                startYear: (item.startYear || '').trim(),
-                endMonth: item.isCurrent ? null : item.endMonth ? String(item.endMonth).trim() : null,
-                endYear: item.isCurrent ? null : item.endYear ? String(item.endYear).trim() : null,
-                isCurrent: Boolean(item.isCurrent),
-                description: (item.description || '').trim(),
-                source: 'resume',
-              });
-              newlyExtractedWorkCount++;
-            }
-          }
-
-          const hasWorkExperience =
-            mergedWorkExp.length > 0
-              ? true
-              : profile.hasWorkExperience !== undefined
-                ? profile.hasWorkExperience
-                : true;
-
-          // Sanitize primary skills list as well
+          // 4. Primary skills: Extracted exclusively from the new resume
           const validParsedSkills = Array.isArray(parsed.skills)
             ? parsed.skills.map(cleanSkillName).filter(isValidSkillName)
             : [];
+          const finalSkills = Array.from(new Set([...validParsedSkills, ...autoExtractedSkillNames]));
 
-          // 3. Screening fields: Only populate if careerBrain does not already have values
+          // 5. Candidate Background Narrative: Exclusively from new resume
+          const finalBackgroundNarrative = extractedNarrative || parsed.backgroundNarrative || '';
+
+          // 6. Golden Q&A Screening Bank: Freshly calibrated exclusively from new resume (excluding narrative questions)!
+          let finalGoldenAnswers: IGoldenAnswer[] = [];
+          if (extractedGoldenAnswers && extractedGoldenAnswers.length > 0) {
+            finalGoldenAnswers = extractedGoldenAnswers
+              .filter(g => !isNarrativeAnswerableQuestion(g.question, g.id))
+              .map(g => ({
+                id: g.id || `ga_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+                question: g.question.trim(),
+                answer: g.answer.trim(),
+                category: g.category || 'Eligibility / Legal',
+                isDefault: Boolean(g.isDefault ?? true),
+              }));
+          } else {
+            finalGoldenAnswers = [...DEFAULT_GOLDEN_ANSWERS];
+          }
+
+          const resolvedCandidateName = parsed.fullName?.trim() || profile.fullName || 'Candidate';
+          const safeTitle = sanitizeRoleSearchQuery(
+            parsed.currentTitle || profile.currentTitle,
+            resolvedCandidateName,
+            'Full Stack Developer',
+          );
+
+          const focusTags = extractResumeFocusTags(rawResumeText, finalSkills, safeTitle);
+          const newResumeId = `res_${Date.now()}`;
+          const currentResumes = Array.isArray(profile.resumes) ? [...profile.resumes] : [];
+          const newResumeItem: IResumeProfileItem = {
+            id: newResumeId,
+            fileName: file.name,
+            uploadedAt: Date.now(),
+            focusTags,
+            rawText: rawResumeText,
+            extractedSkills: finalSkills,
+            summary: finalBackgroundNarrative.slice(0, 300),
+            targetRole: safeTitle,
+            isDefault: currentResumes.length === 0,
+          };
+
+          const existingIdx = currentResumes.findIndex(r => r.fileName.toLowerCase() === file.name.toLowerCase());
+          if (existingIdx >= 0) {
+            currentResumes[existingIdx] = { ...newResumeItem, id: currentResumes[existingIdx].id };
+          } else {
+            currentResumes.push(newResumeItem);
+          }
+
+          // 7. Assemble clean profile: completely replacing old resume data
           const updated: ICareerBrain = {
-            ...profile,
-            fullName: parsed.fullName || profile.fullName,
-            email: parsed.email || profile.email,
-            phoneNumber: parsed.phoneNumber || profile.phoneNumber,
-            currentTitle: parsed.currentTitle || profile.currentTitle,
-            skills:
-              validParsedSkills.length > 0
-                ? Array.from(new Set([...profile.skills, ...validParsedSkills]))
-                : profile.skills,
-            yearsOfExperience:
-              profile.yearsOfExperience !== undefined && profile.yearsOfExperience > 0
-                ? profile.yearsOfExperience
-                : (extractedYoe ?? profile.yearsOfExperience),
+            ...DEFAULT_CAREER_BRAIN,
+            fullName: resolvedCandidateName,
+            email: parsed.email?.trim() || profile.email || '',
+            phoneNumber: parsed.phoneNumber?.trim() || '',
+            currentTitle: safeTitle,
+            skills: finalSkills,
+            yearsOfExperience: extractedYoe !== undefined && extractedYoe >= 0 ? extractedYoe : 0,
             hasWorkExperience,
-            workExperience: mergedWorkExp,
-            education: extractedEducation || parsed.education || profile.education || '',
-            college: extractedCollege || parsed.college || profile.college || '',
-            cgpa: parsed.cgpa || profile.cgpa || '',
-            currentCTC: parsed.currentCTC || profile.currentCTC,
-            expectedCTC: parsed.expectedCTC || profile.expectedCTC,
-            currentLocation:
-              cleanLocationForCityField(parsed.currentLocation) || parsed.currentLocation || profile.currentLocation,
-            noticePeriod: extractedNotice || parsed.noticePeriod || profile.noticePeriod || 'Immediate',
-            backgroundNarrative: parsed.backgroundNarrative || profile.backgroundNarrative,
-            preferredLocation:
-              cleanLocationForCityField(parsed.preferredLocation) ||
-              parsed.preferredLocation ||
-              profile.preferredLocation,
-            workAuthorization:
-              profile.workAuthorization && profile.workAuthorization !== DEFAULT_CAREER_BRAIN.workAuthorization
-                ? profile.workAuthorization
-                : extractedWorkAuth || profile.workAuthorization || DEFAULT_CAREER_BRAIN.workAuthorization,
-            resumeText: rawResumeText || profile.resumeText,
+            workExperience: cleanWorkExp,
+            education: extractedEducation || parsed.education || '',
+            college: extractedCollege || parsed.college || '',
+            cgpa: parsed.cgpa || '',
+            currentCTC: parsed.currentCTC || '',
+            expectedCTC: parsed.expectedCTC || '',
+            currentLocation: cleanLocationForCityField(parsed.currentLocation) || parsed.currentLocation || '',
+            noticePeriod: extractedNotice || parsed.noticePeriod || 'Immediate',
+            backgroundNarrative: finalBackgroundNarrative,
+            goldenAnswers: finalGoldenAnswers,
+            preferredLocation: cleanLocationForCityField(parsed.preferredLocation) || parsed.preferredLocation || '',
+            preferredLocations:
+              Array.isArray(parsed.preferredLocations) && parsed.preferredLocations.length > 0
+                ? parsed.preferredLocations.slice(0, 3)
+                : cleanLocationForCityField(parsed.preferredLocation)
+                  ? [cleanLocationForCityField(parsed.preferredLocation)]
+                  : ['Bengaluru, Karnataka, India'],
+            workAuthorization: extractedWorkAuth || parsed.workAuthorization || DEFAULT_CAREER_BRAIN.workAuthorization,
+            resumeText: rawResumeText || '',
             resumeFileName: file.name,
-            skillExperience: mergedSkillExp,
-            autoExtractedSkills: updatedAutoExtracted,
+            resumes: currentResumes,
+            activeResumeId: currentResumes.find(r => r.isDefault)?.id || newResumeItem.id,
+            skillExperience: cleanSkillExp,
+            autoExtractedSkills: autoExtractedSkillNames,
             updatedAt: Date.now(),
           };
 
@@ -442,27 +510,31 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
           setEditForm(updated);
 
           const addedDetails: string[] = [];
-          if (newlyExtractedSkillNames.length > 0) {
-            addedDetails.push(`${newlyExtractedSkillNames.length} skill(s)`);
+          if (finalSkills.length > 0) {
+            addedDetails.push(`${finalSkills.length} skill(s)`);
           }
-          if (newlyExtractedWorkCount > 0) {
-            addedDetails.push(`${newlyExtractedWorkCount} work position(s)`);
+          if (cleanWorkExp.length > 0) {
+            addedDetails.push(`${cleanWorkExp.length} work position(s)`);
+          }
+          if (finalBackgroundNarrative) {
+            addedDetails.push('Candidate Narrative');
+          }
+          if (finalGoldenAnswers.length > 0) {
+            addedDetails.push('Screening Answer Bank');
+          }
+          if (focusTags.length > 0) {
+            addedDetails.push(`Tags: ${focusTags.join(', ')}`);
           }
 
           if (addedDetails.length > 0) {
             setUploadStatus({
               type: 'success',
-              message: `✅ "${file.name}" parsed & profile enriched! Auto-added ${addedDetails.join(' and ')} from resume.`,
-            });
-          } else if (Object.keys(extractedSkillExp).length === 0 && mergedWorkExp.length === 0) {
-            setUploadStatus({
-              type: 'warning',
-              message: `⚠️ "${file.name}" saved, but no technical skills or work positions could be detected. Please add details manually below.`,
+              message: `✅ New resume "${file.name}" saved! Profile updated with: ${addedDetails.join(', ')}.`,
             });
           } else {
             setUploadStatus({
-              type: 'success',
-              message: `✅ "${file.name}" parsed! All detected details are already present in your profile.`,
+              type: 'warning',
+              message: `⚠️ "${file.name}" saved, but limited details were extracted. Please check your fields below.`,
             });
           }
         } else {
@@ -471,10 +543,31 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
       } catch (err: unknown) {
         console.warn('[ResumeProfileView] Backend parsing offline or error, saving local metadata:', err);
 
-        // Local fallback: update file name and preserve profile
+        // Local fallback: update file name and preserve profile with resume profile entry
+        const localTags = extractResumeFocusTags(profile.resumeText || '', profile.skills || [], profile.currentTitle);
+        const localResumes = Array.isArray(profile.resumes) ? [...profile.resumes] : [];
+        const localResumeId = `res_${Date.now()}`;
+        const localItem: IResumeProfileItem = {
+          id: localResumeId,
+          fileName: file.name,
+          uploadedAt: Date.now(),
+          focusTags: localTags,
+          rawText: profile.resumeText || '',
+          extractedSkills: profile.skills || [],
+          isDefault: localResumes.length === 0,
+        };
+        const localIdx = localResumes.findIndex(r => r.fileName.toLowerCase() === file.name.toLowerCase());
+        if (localIdx >= 0) {
+          localResumes[localIdx] = { ...localItem, id: localResumes[localIdx].id };
+        } else {
+          localResumes.push(localItem);
+        }
+
         const localUpdated: ICareerBrain = {
           ...profile,
           resumeFileName: file.name,
+          resumes: localResumes,
+          activeResumeId: localResumes.find(r => r.isDefault)?.id || localResumeId,
           updatedAt: Date.now(),
         };
         await saveCareerBrainData(localUpdated);
@@ -512,6 +605,28 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
     [profile],
   );
 
+  const handleSetActiveResume = async (id: string) => {
+    await careerBrainStore.setActiveResumeId(id);
+    const updated = await careerBrainStore.getCareerBrain();
+    setProfile(updated);
+    setEditForm(updated);
+    setUploadStatus({
+      type: 'info',
+      message: `Active default resume switched to "${updated.resumeFileName}".`,
+    });
+  };
+
+  const handleDeleteResume = async (id: string) => {
+    await careerBrainStore.deleteResumeProfile(id);
+    const updated = await careerBrainStore.getCareerBrain();
+    setProfile(updated);
+    setEditForm(updated);
+    setUploadStatus({
+      type: 'info',
+      message: 'Resume profile removed.',
+    });
+  };
+
   const handleSaveProfile = async () => {
     setIsSaving(true);
     try {
@@ -547,6 +662,21 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
       handleFileUpload(e.dataTransfer.files[0]);
     }
   };
+
+  if (!hasAuth) {
+    return (
+      <div
+        className={`flex flex-1 flex-col items-center justify-center p-8 text-center min-h-[350px] ${
+          isDarkMode ? 'text-gray-300' : 'text-gray-600'
+        }`}>
+        <FiLock className="size-12 text-sky-400 mb-3" />
+        <h3 className="text-base font-bold mb-1">Authentication Required</h3>
+        <p className="text-xs text-gray-400 max-w-xs">
+          Please sign in to upload resumes, build your Career Brain, and configure application details.
+        </p>
+      </div>
+    );
+  }
 
   return (
     <div
@@ -589,7 +719,9 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
             </div>
             <div>
               <p className="text-xs font-bold">
-                {profile.resumeFileName ? 'Replace Resume (PDF / Word)' : 'Upload Resume (PDF / Word)'}
+                {profile.resumes && profile.resumes.length > 0
+                  ? 'Upload Another Resume (e.g. Frontend vs Backend)'
+                  : 'Upload Resume (PDF / Word)'}
               </p>
               <p className="text-[11px] opacity-70">Drag & drop or click to browse (Max 10MB)</p>
             </div>
@@ -624,6 +756,97 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
             <AiOutlineLoading3Quarters className="size-4 shrink-0 animate-spin text-sky-400 mt-0.5" />
           )}
           <span className="flex-1">{uploadStatus.message}</span>
+        </div>
+      )}
+
+      {/* Resume Profiles & Smart Best Match Auto-Select */}
+      {profile.resumes && profile.resumes.length > 0 && (
+        <div
+          className={`rounded-xl border p-4 space-y-3 ${
+            isDarkMode ? 'border-sky-900 bg-slate-800/80' : 'border-sky-100 bg-white/90 shadow-sm'
+          }`}>
+          <div className="flex items-center justify-between border-b pb-2 border-gray-200/20">
+            <div className="flex items-center space-x-2">
+              <FiFileText className="size-4 text-sky-500" />
+              <h3 className="text-sm font-bold">Resume Profiles ({profile.resumes.length})</h3>
+            </div>
+            <span className="rounded-full bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold text-emerald-400 border border-emerald-500/20">
+              ⚡ Best Match Auto-Select
+            </span>
+          </div>
+          <p className="text-[11px] opacity-70 leading-relaxed">
+            NanoBrowser dynamically analyzes job descriptions and auto-selects the resume profile with the highest skill
+            & keyword match for each application.
+          </p>
+
+          <div className="space-y-2">
+            {profile.resumes.map(r => {
+              const isActive = r.id === profile.activeResumeId || r.isDefault;
+              return (
+                <div
+                  key={r.id}
+                  className={`flex flex-col sm:flex-row items-start sm:items-center justify-between p-3 rounded-lg border text-xs transition-colors ${
+                    isActive
+                      ? isDarkMode
+                        ? 'border-emerald-500/40 bg-emerald-950/20'
+                        : 'border-emerald-300 bg-emerald-50/50'
+                      : isDarkMode
+                        ? 'border-gray-800 bg-slate-900/40 hover:border-gray-700'
+                        : 'border-gray-200 bg-gray-50/50 hover:border-gray-300'
+                  }`}>
+                  <div className="space-y-1.5 flex-1 pr-2">
+                    <div className="flex items-center space-x-2">
+                      <span className="font-semibold truncate max-w-[220px]" title={r.fileName}>
+                        {r.fileName}
+                      </span>
+                      {isActive && (
+                        <span className="inline-flex items-center gap-1 rounded bg-emerald-500/20 px-1.5 py-0.5 text-[10px] font-bold text-emerald-400">
+                          <FiCheck className="size-3" /> Default
+                        </span>
+                      )}
+                    </div>
+                    {r.focusTags && r.focusTags.length > 0 && (
+                      <div className="flex flex-wrap gap-1">
+                        {r.focusTags.map(tag => (
+                          <span
+                            key={tag}
+                            className={`rounded px-1.5 py-0.5 text-[9px] font-medium ${
+                              isDarkMode
+                                ? 'bg-sky-900/40 text-sky-300 border border-sky-800/40'
+                                : 'bg-sky-50 text-sky-700 border border-sky-200'
+                            }`}>
+                            #{tag}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="flex items-center space-x-2 mt-2 sm:mt-0 shrink-0">
+                    {!isActive && (
+                      <button
+                        onClick={() => handleSetActiveResume(r.id)}
+                        className={`px-2.5 py-1 rounded text-[11px] font-medium transition-colors ${
+                          isDarkMode
+                            ? 'bg-slate-700 hover:bg-slate-600 text-gray-200'
+                            : 'bg-white hover:bg-gray-100 text-gray-700 border border-gray-200 shadow-sm'
+                        }`}>
+                        Set Default
+                      </button>
+                    )}
+                    {profile.resumes.length > 1 && (
+                      <button
+                        onClick={() => handleDeleteResume(r.id)}
+                        className="p-1.5 rounded text-red-400 hover:bg-red-500/10 transition-colors"
+                        title="Delete resume profile">
+                        <FiTrash2 className="size-3.5" />
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
         </div>
       )}
 
@@ -799,15 +1022,15 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
             </div>
             <div className="grid grid-cols-2 gap-2">
               <div>
-                <label className="block text-[11px] font-semibold opacity-70 mb-1">Current Location</label>
-                <input
-                  type="text"
+                <label className="block text-[11px] font-semibold opacity-70 mb-1">
+                  Current Location <span className="text-[9px] text-sky-400 font-normal">(City, State, Country)</span>
+                </label>
+                <LocationAutocompleteInput
                   value={editForm.currentLocation || ''}
-                  onChange={e => setEditForm(prev => ({ ...prev, currentLocation: e.target.value }))}
-                  className={`w-full rounded-lg border px-3 py-1.5 text-xs outline-none ${
-                    isDarkMode ? 'border-sky-800 bg-slate-900 text-white' : 'border-sky-200 bg-white text-gray-900'
-                  }`}
-                  placeholder="e.g. Bengaluru, India"
+                  onChange={val => setEditForm(prev => ({ ...prev, currentLocation: val }))}
+                  isDarkMode={isDarkMode}
+                  isPreferred={false}
+                  placeholder="e.g. Bengaluru, Karnataka, India"
                 />
               </div>
               <div>
@@ -824,15 +1047,28 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
               </div>
             </div>
             <div>
-              <label className="block text-[11px] font-semibold opacity-70 mb-1">Preferred Location</label>
-              <input
-                type="text"
-                value={editForm.preferredLocation}
-                onChange={e => setEditForm(prev => ({ ...prev, preferredLocation: e.target.value }))}
-                className={`w-full rounded-lg border px-3 py-1.5 text-xs outline-none ${
-                  isDarkMode ? 'border-sky-800 bg-slate-900 text-white' : 'border-sky-200 bg-white text-gray-900'
-                }`}
-                placeholder="India (Remote / Hybrid)"
+              <div className="flex items-center justify-between mb-1">
+                <label className="block text-[11px] font-semibold opacity-70">
+                  Target Preferred Locations{' '}
+                  <span className="text-[9px] text-sky-400 font-normal">(Top 3 Prioritized)</span>
+                </label>
+                <span className="text-[9px] text-gray-400">#1 gets highest priority</span>
+              </div>
+              <PrioritizedLocationsInput
+                locations={
+                  editForm.preferredLocations && editForm.preferredLocations.length > 0
+                    ? editForm.preferredLocations
+                    : [editForm.preferredLocation || '']
+                }
+                onChange={locs => {
+                  setEditForm(prev => ({
+                    ...prev,
+                    preferredLocations: locs,
+                    preferredLocation: locs[0] || '',
+                  }));
+                }}
+                isDarkMode={isDarkMode}
+                maxLocations={3}
               />
             </div>
             <div>
@@ -963,13 +1199,38 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
                 </span>
               </div>
             )}
-            <div className="flex items-center space-x-2">
-              <FiMapPin className="size-3.5 shrink-0 text-sky-400" />
-              <span>
-                {profile.currentLocation
-                  ? `${profile.currentLocation} (Pref: ${profile.preferredLocation || 'Any'})`
-                  : profile.preferredLocation || 'India (Remote / Hybrid)'}
-              </span>
+            <div className="flex items-start space-x-2">
+              <FiMapPin className="size-3.5 shrink-0 text-sky-400 mt-0.5" />
+              <div className="min-w-0 flex-1 text-xs">
+                <div>
+                  <span className="opacity-70">Current: </span>
+                  <strong className="font-semibold">{profile.currentLocation || 'Not specified'}</strong>
+                </div>
+                {profile.preferredLocations && profile.preferredLocations.length > 0 ? (
+                  <div className="mt-1 space-y-0.5">
+                    <span className="text-[10px] font-semibold text-sky-400">Target Locations (by Priority):</span>
+                    {profile.preferredLocations.slice(0, 3).map((loc, i) => (
+                      <div key={i} className="flex items-center gap-1.5 pl-0.5 text-[11px]">
+                        <span
+                          className={`text-[9px] font-bold px-1 rounded border ${
+                            i === 0
+                              ? 'text-emerald-300 bg-emerald-950/60 border-emerald-800'
+                              : i === 1
+                                ? 'text-sky-300 bg-sky-950/60 border-sky-800'
+                                : 'text-purple-300 bg-purple-950/60 border-purple-800'
+                          }`}>
+                          #{i + 1}
+                        </span>
+                        <span className="truncate">{loc}</span>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  profile.preferredLocation && (
+                    <div className="text-[11px] text-gray-400 mt-0.5">Pref: {profile.preferredLocation}</div>
+                  )
+                )}
+              </div>
             </div>
             <div className="flex items-center space-x-2">
               <FiClock className="size-3.5 shrink-0 text-sky-400" />

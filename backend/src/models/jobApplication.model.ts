@@ -33,6 +33,8 @@ export interface IJobApplication extends Document {
   location: string;
   salaryRange: string;
   fitScore: number;
+  platform?: string;
+  applicationUrl?: string;
   status: JobApplicationStatus;
   appliedAt: Date | null;
   createdAt: Date;
@@ -77,6 +79,16 @@ const jobApplicationSchema = new Schema<IJobApplication>(
       default: 0,
       min: [0, 'Fit score cannot be negative'],
       max: [100, 'Fit score cannot exceed 100'],
+    },
+    platform: {
+      type: String,
+      default: 'linkedin',
+      trim: true,
+    },
+    applicationUrl: {
+      type: String,
+      default: '',
+      trim: true,
     },
     status: {
       type: String,

@@ -23,5 +23,26 @@ export const loginSchema = z
   })
   .strict();
 
+export const refreshTokenSchema = z
+  .object({
+    refreshToken: z.string({ required_error: 'Refresh token is required' }).min(1, 'Refresh token is required'),
+  })
+  .strict();
+
+export const logoutSchema = z
+  .object({
+    refreshToken: z.string().optional(),
+  })
+  .strict();
+
+export const googleAuthSchema = z
+  .object({
+    token: z.string({ required_error: 'Google token is required' }).min(1, 'Google token is required'),
+  })
+  .strict();
+
 export type RegisterInput = z.infer<typeof registerSchema>;
 export type LoginInput = z.infer<typeof loginSchema>;
+export type RefreshTokenInput = z.infer<typeof refreshTokenSchema>;
+export type LogoutInput = z.infer<typeof logoutSchema>;
+export type GoogleAuthInput = z.infer<typeof googleAuthSchema>;

@@ -4,12 +4,23 @@ export enum Actors {
   PLANNER = 'planner',
   NAVIGATOR = 'navigator',
   VALIDATOR = 'validator',
+  COPILOT = 'copilot',
+}
+
+export interface CopilotActionCard {
+  type: 'profile_updated' | 'job_fit' | 'pitch' | 'cover_letter' | 'profile_summary' | 'audit' | 'general';
+  title?: string;
+  data?: any;
 }
 
 export interface Message {
   actor: Actors;
   content: string;
   timestamp: number; // Unix timestamp in milliseconds
+  metadata?: {
+    actionCard?: CopilotActionCard;
+    quickOptions?: string[];
+  };
 }
 
 export interface ChatMessage extends Message {

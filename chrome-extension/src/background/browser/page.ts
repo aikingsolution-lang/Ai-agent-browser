@@ -2135,7 +2135,7 @@ export default class Page {
           ),
         ) as HTMLElement[];
 
-        const easyApplyBtn = candidates.find(btn => {
+        let easyApplyBtn = candidates.find(btn => {
           if (btn.closest('.jobs-search-results-list, .scaffold-layout__list, [data-view-name="job-card"]')) {
             return false;
           }
@@ -2143,13 +2143,26 @@ export default class Page {
           const aria = (btn.getAttribute('aria-label') || '').trim().toLowerCase();
           return (
             btn.classList.contains('jobs-apply-button') ||
-            /^\s*easy\s*apply/i.test(text) ||
-            /^\s*easy\s*apply/i.test(aria)
+            /\beasy\s*apply\b/i.test(text) ||
+            /\beasy\s*apply\b/i.test(aria)
           );
         });
 
+        // Global fallback if not found in detailsContainer
+        if (!easyApplyBtn) {
+          const globalCandidates = Array.from(
+            document.querySelectorAll(
+              'button.jobs-apply-button, button[aria-label*="Easy Apply" i], button[data-control-name*="apply" i]',
+            ),
+          ) as HTMLElement[];
+          easyApplyBtn = globalCandidates.find(
+            btn => !btn.closest('.jobs-search-results-list, .scaffold-layout__list, [data-view-name="job-card"]'),
+          );
+        }
+
         if (easyApplyBtn) {
           easyApplyBtn.scrollIntoView({ behavior: 'instant', block: 'center' });
+          easyApplyBtn.focus();
           easyApplyBtn.click();
           return { clicked: true };
         }
@@ -2470,6 +2483,12 @@ export default class Page {
             /thank you for applying/i,
             /we have received your application/i,
             /application sent to/i,
+            /\bapplication sent\b/i,
+            /\bapplication has been sent\b/i,
+            /\byou applied\b/i,
+            /\bapplied to\b/i,
+            /\bapplication delivered\b/i,
+            /\bapplied successfully\b/i,
           ];
 
           // 1. Check headings, alerts, feedback banners
@@ -2872,6 +2891,39 @@ export default class Page {
                 options,
               });
             }
+          }
+        }
+
+        // 3b. Standalone required checkboxes
+        const standaloneCheckboxes = Array.from(modal.querySelectorAll('input[type="checkbox"]')) as HTMLInputElement[];
+        for (const cb of standaloneCheckboxes) {
+          if (cb.closest('fieldset, div[role="radiogroup"], div[role="group"]')) continue;
+          if (cb.checked) continue;
+
+          let label = '';
+          const id = cb.getAttribute('id');
+          if (id) {
+            const lbl = modal.querySelector(`label[for="${id}"]`);
+            if (lbl) label = cleanElementText(lbl);
+          }
+          if (!label) {
+            const parent = cb.closest('.fb-dash-form-element, div[data-test-form-element], label');
+            if (parent) label = cleanElementText(parent);
+          }
+          if (!label) label = cleanDuplicateString(cb.getAttribute('aria-label') || '');
+
+          const isRequired =
+            cb.hasAttribute('required') ||
+            cb.getAttribute('aria-required') === 'true' ||
+            /agree|terms|certify|acknowledge|consent|confirm/i.test(label);
+
+          if (isRequired && label) {
+            emptyRequiredFields.push({
+              id: cb.id || undefined,
+              label,
+              fieldType: 'checkbox',
+              options: ['Yes', 'No'],
+            });
           }
         }
 
@@ -4416,6 +4468,40 @@ export default class Page {
           }
         }
 
+        // 1b. Standalone checkboxes outside fieldsets (e.g. Terms, Acknowledgment, Agreements)
+        const standaloneCheckboxes = Array.from(modal.querySelectorAll('input[type="checkbox"]')) as HTMLInputElement[];
+        for (const cb of standaloneCheckboxes) {
+          if (cb.closest('fieldset, div[role="radiogroup"], div[role="group"]')) continue;
+          if (cb.checked) continue;
+
+          let label = '';
+          const id = cb.getAttribute('id');
+          if (id) {
+            const lbl = modal.querySelector(`label[for="${id}"]`);
+            if (lbl) label = cleanElementText(lbl);
+          }
+          if (!label) {
+            const parent = cb.closest('.fb-dash-form-element, div[data-test-form-element], label');
+            if (parent) label = cleanElementText(parent);
+          }
+          if (!label) label = cleanDuplicateString(cb.getAttribute('aria-label') || '');
+
+          if (!label) continue;
+
+          const isRequired =
+            cb.hasAttribute('required') ||
+            cb.getAttribute('aria-required') === 'true' ||
+            /agree|terms|certify|acknowledge|consent|confirm/i.test(label);
+
+          descriptors.push({
+            id: cb.id || undefined,
+            label,
+            fieldType: 'checkbox',
+            options: ['Yes', 'No'],
+            required: isRequired,
+          });
+        }
+
         // 2. Selects / Dropdowns
         const selects = Array.from(modal.querySelectorAll('select')) as HTMLSelectElement[];
         for (const sel of selects) {
@@ -4858,13 +4944,42 @@ export default class Page {
         }
 
         const modal = findActiveModal(document) || document.body;
+
+        // 1. Scroll content to bottom to ensure review screen is fully loaded
+        const scrollable = modal.querySelector(
+          '.jobs-easy-apply-modal__content, .artdeco-modal__content, div[role="dialog"] > div',
+        );
+        if (scrollable) {
+          scrollable.scrollTop = scrollable.scrollHeight;
+        }
+
+        // 2. Ensure any review agreement checkboxes are checked
+        const checkboxes = Array.from(modal.querySelectorAll('input[type="checkbox"]')) as HTMLInputElement[];
+        for (const cb of checkboxes) {
+          if (!cb.checked) {
+            const txt = (cb.closest('label, div')?.textContent || cb.getAttribute('aria-label') || '').toLowerCase();
+            if (/agree|confirm|acknowledge|consent|certify|terms/i.test(txt)) {
+              cb.click();
+              cb.checked = true;
+              cb.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+          }
+        }
+
         const buttons = Array.from(modal.querySelectorAll('button')) as HTMLButtonElement[];
 
         for (const btn of buttons) {
           const text = (btn.textContent || '').trim();
           const aria = (btn.getAttribute('aria-label') || '').trim();
-          if (/submit application/i.test(aria) || /^\s*submit(\s*application)?\s*$/i.test(text)) {
+          const isSubmit =
+            /submit application/i.test(aria) ||
+            /^\s*submit(\s*application)?\s*$/i.test(text) ||
+            btn.getAttribute('data-control-name') === 'submit_unify' ||
+            (btn.hasAttribute('data-easy-apply-next-button') && /submit/i.test(text));
+
+          if (isSubmit) {
             btn.scrollIntoView({ behavior: 'instant', block: 'center' });
+            btn.focus();
             btn.click();
             return { clicked: true };
           }
@@ -4891,9 +5006,126 @@ export default class Page {
         return { confirmed: true, message: 'Verified applied status on LinkedIn top-card' };
       }
 
+      const isModalStillOpen = await this.isEasyApplyModalOpen().catch(() => false);
+      if (!isModalStillOpen && topCard && !topCard.hasEasyApply) {
+        return { confirmed: true, message: 'Verified: Easy Apply modal closed and application completed' };
+      }
+
       await new Promise(r => setTimeout(r, 600));
     }
     return { confirmed: false, message: 'Submission confirmation was not observed within timeout' };
+  }
+
+  /**
+   * Selects the best matching resume radio button in the Easy Apply modal.
+   * Compares pre-uploaded resume cards against targetFileName and resumeTags.
+   */
+  async selectResumeInModal(
+    targetFileName?: string,
+    resumeTags: string[] = [],
+  ): Promise<{ selected: boolean; label?: string }> {
+    if (!this._puppeteerPage) return { selected: false };
+
+    return this._puppeteerPage.evaluate(
+      (fileNameTarget, tags) => {
+        function findActiveModal(root: any): HTMLElement | null {
+          const candidates = root.querySelectorAll
+            ? (Array.from(
+                root.querySelectorAll(
+                  'div.jobs-easy-apply-modal, div[data-test-modal], div.artdeco-modal, div[role="dialog"]',
+                ),
+              ) as HTMLElement[])
+            : [];
+          for (const c of candidates) {
+            const style = window.getComputedStyle(c);
+            if (style.display === 'none' || style.visibility === 'hidden') continue;
+            const rect = c.getBoundingClientRect();
+            if (rect.width >= 200 && rect.height >= 150) return c;
+          }
+          return null;
+        }
+
+        function clickReactRadio(element: HTMLInputElement) {
+          element.focus();
+          element.checked = true;
+          element.dispatchEvent(new Event('input', { bubbles: true }));
+          element.dispatchEvent(new Event('change', { bubbles: true }));
+          element.click();
+          element.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+        }
+
+        const modal = findActiveModal(document) || document.body;
+        const radios = Array.from(modal.querySelectorAll<HTMLInputElement>('input[type="radio"]'));
+
+        if (radios.length === 0) return { selected: false };
+
+        // Clean target filename without extension for fuzzy matching
+        const cleanTarget = (fileNameTarget || '')
+          .toLowerCase()
+          .replace(/\.(pdf|doc|docx)$/i, '')
+          .replace(/[_-]/g, ' ')
+          .trim();
+
+        const cleanTags = (tags || []).map(t => t.toLowerCase().trim()).filter(Boolean);
+
+        let bestRadio: HTMLInputElement | null = null;
+        let bestRadioLabel = '';
+        let highestScore = -1;
+
+        for (const radio of radios) {
+          const cardEl = radio.closest('div, label, li, tr') || radio.parentElement;
+          const cardText = (cardEl?.textContent || '').toLowerCase().trim();
+
+          const isResumeRadio =
+            cardText.includes('.pdf') ||
+            cardText.includes('.doc') ||
+            cardText.includes('resume') ||
+            radio.name.toLowerCase().includes('resume') ||
+            radio.id.toLowerCase().includes('resume');
+
+          if (!isResumeRadio) continue;
+
+          let score = 0;
+
+          // 1. Exact or strong substring match on target file name
+          if (cleanTarget && cardText.includes(cleanTarget)) {
+            score += 100;
+          } else if (cleanTarget) {
+            const targetWords = cleanTarget.split(/\s+/).filter(w => w.length > 2);
+            for (const word of targetWords) {
+              if (cardText.includes(word)) score += 20;
+            }
+          }
+
+          // 2. Resume tags match in card text
+          for (const tag of cleanTags) {
+            if (cardText.includes(tag)) {
+              score += 15;
+            }
+          }
+
+          // 3. Fallback: already checked radio has base score 1
+          if (radio.checked) {
+            score += 1;
+          }
+
+          if (score > highestScore) {
+            highestScore = score;
+            bestRadio = radio;
+            bestRadioLabel = cardText.slice(0, 80);
+          }
+        }
+
+        if (bestRadio) {
+          clickReactRadio(bestRadio);
+          return { selected: true, label: bestRadioLabel };
+        }
+
+        return { selected: false };
+      },
+      targetFileName,
+      resumeTags,
+    );
   }
 }
 

@@ -11,13 +11,18 @@ const envSchema = z
       .default('5000'),
     NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
     CORS_ORIGIN: z.string().default('*'),
-    MONGO_URI: z.string().default('mongodb://127.0.0.1:27017/nanobrowser_saas'),
+    MONGO_URI: z.string().default(process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/nanobrowser_saas'),
     LOG_LEVEL: z.enum(['error', 'warn', 'info', 'http', 'debug']).default('info'),
     JWT_SECRET: z
       .string()
       .min(16, 'JWT_SECRET must be at least 16 characters')
       .default('super_secret_jwt_key_must_be_changed_in_production_min_32_chars'),
     JWT_EXPIRES_IN: z.string().default('15m'),
+    JWT_REFRESH_SECRET: z
+      .string()
+      .min(16, 'JWT_REFRESH_SECRET must be at least 16 characters')
+      .default('super_secret_jwt_refresh_key_must_be_changed_in_production_min_32_chars'),
+    JWT_REFRESH_EXPIRES_IN: z.string().default('7d'),
     RAZORPAY_KEY_ID: z.string().default('rzp_test_mock_key_id_12345'),
     RAZORPAY_KEY_SECRET: z.string().default('rzp_test_mock_key_secret_67890'),
     RAZORPAY_WEBHOOK_SECRET: z.string().default('rzp_test_mock_webhook_secret_abcde'),
@@ -34,7 +39,9 @@ const envSchema = z
           data.RAZORPAY_KEY_SECRET.includes('mock') ||
           data.RAZORPAY_WEBHOOK_SECRET.includes('mock');
         const isMockBedrock = !data.AWS_BEDROCK_API_KEY || data.AWS_BEDROCK_API_KEY.includes('mock');
-        const isDefaultJwt = data.JWT_SECRET.includes('must_be_changed_in_production');
+        const isDefaultJwt =
+          data.JWT_SECRET.includes('must_be_changed_in_production') ||
+          data.JWT_REFRESH_SECRET.includes('must_be_changed_in_production');
 
         return !isMockRazorpay && !isMockBedrock && !isDefaultJwt;
       }
@@ -42,7 +49,7 @@ const envSchema = z
     },
     {
       message:
-        'In production mode, real non-mock Razorpay secrets, real AWS_BEDROCK_API_KEY, and secure JWT_SECRET must be configured',
+        'In production mode, real non-mock Razorpay secrets, real AWS_BEDROCK_API_KEY, and secure JWT_SECRET and JWT_REFRESH_SECRET must be configured',
     },
   );
 

@@ -2,6 +2,20 @@ import { createStorage } from '../base/base';
 import { StorageEnum } from '../base/enums';
 import type { BaseStorage } from '../base/types';
 
+export const DEFAULT_NEGATIVE_KEYWORDS: string[] = [
+  'unpaid',
+  'volunteer',
+  'commission only',
+  'senior architect',
+  'staff engineer',
+  'principal engineer',
+  'director',
+  'vp of engineering',
+  'us citizen only',
+  'security clearance required',
+  'c2c',
+];
+
 export interface ILinkedInAutomationConfig {
   /** Target job title / keywords to search for */
   targetJobTitle: string;
@@ -17,6 +31,12 @@ export interface ILinkedInAutomationConfig {
   requireTailoredResume: boolean;
   /** Overall automation active status */
   autoApplyEnabled: boolean;
+  /** Negative keywords in job titles or descriptions to skip automatically */
+  negativeKeywords: string[];
+  /** Companies to never apply to (blacklist) */
+  blacklistedCompanies: string[];
+  /** Maximum experience gap (years) allowed before skipping (default: 3) */
+  maxExperienceGapYears: number;
 }
 
 export const DEFAULT_LINKEDIN_CONFIG: ILinkedInAutomationConfig = {
@@ -27,6 +47,9 @@ export const DEFAULT_LINKEDIN_CONFIG: ILinkedInAutomationConfig = {
   dryRun: true, // Default ON for user safety
   requireTailoredResume: false,
   autoApplyEnabled: false,
+  negativeKeywords: [...DEFAULT_NEGATIVE_KEYWORDS],
+  blacklistedCompanies: [],
+  maxExperienceGapYears: 3,
 };
 
 const storage = createStorage<ILinkedInAutomationConfig>('linkedin_automation_config', DEFAULT_LINKEDIN_CONFIG, {

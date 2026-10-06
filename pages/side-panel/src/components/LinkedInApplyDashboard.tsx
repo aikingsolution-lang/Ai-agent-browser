@@ -1,6 +1,27 @@
-import { useState, useEffect, useCallback } from 'react';
-import { dailyQuotaStore, type DailyQuotaData } from '@extension/storage';
-import { FiPlay, FiSquare, FiCheckCircle, FiAlertTriangle, FiExternalLink, FiZap, FiHelpCircle } from 'react-icons/fi';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import {
+  dailyQuotaStore,
+  processedJobsStore,
+  exportApplicationsToCsv,
+  detectPlatformFromUrl,
+  type DailyQuotaData,
+  authStorage,
+  type UserSessionData,
+  queueSafetyStore,
+} from '@extension/storage';
+import { backendApiClient } from '@extension/shared';
+import {
+  FiPlay,
+  FiSquare,
+  FiCheckCircle,
+  FiAlertTriangle,
+  FiExternalLink,
+  FiZap,
+  FiHelpCircle,
+  FiDownload,
+  FiLock,
+  FiPauseCircle,
+} from 'react-icons/fi';
 import { AiOutlineLoading3Quarters } from 'react-icons/ai';
 
 export interface PendingQuestionData {
@@ -36,7 +57,7 @@ export interface StructuredActivityItem {
   url?: string;
   title?: string;
   company?: string;
-  status: 'applied' | 'skipped' | 'failed' | 'running' | 'modal_opened' | 'modal_failed';
+  status: 'applied' | 'skipped' | 'failed' | 'running' | 'modal_opened' | 'modal_failed' | 'needs_verification';
   reason?: string;
   creditsUsed?: number;
   timestamp: number;
@@ -46,6 +67,8 @@ interface LinkedInApplyDashboardProps {
   isDarkMode?: boolean;
   onStartAutoApply?: (platform?: 'linkedin' | 'naukri' | 'indeed') => void;
   onStop: () => void;
+  onOpenAuthModal?: () => void;
+  onOpenPlansModal?: () => void;
   isApplying: boolean;
   activeStatusText: string;
   appliedLogs: Array<{ id: string; text: string; status: 'ok' | 'fail' | 'info'; timestamp: number }>;
@@ -60,6 +83,8 @@ export function LinkedInApplyDashboard({
   isDarkMode = false,
   onStartAutoApply,
   onStop,
+  onOpenAuthModal,
+  onOpenPlansModal,
   isApplying,
   activeStatusText,
   appliedLogs,
@@ -71,6 +96,78 @@ export function LinkedInApplyDashboard({
 }: LinkedInApplyDashboardProps) {
   const [selectedPlatform, setSelectedPlatform] = useState<'linkedin' | 'naukri' | 'indeed'>('linkedin');
   const [quota, setQuota] = useState<DailyQuotaData | null>(null);
+  const [session, setSession] = useState<UserSessionData | null>(null);
+  const [platformPauseInfo, setPlatformPauseInfo] = useState<{ isPaused: boolean; reason?: string }>({
+    isPaused: false,
+  });
+
+  // Sync platform pause status from queueSafetyStore
+  useEffect(() => {
+    let isMounted = true;
+    const syncPause = async () => {
+      try {
+        const pauseStatus = await queueSafetyStore.getPlatformPause(selectedPlatform);
+        if (isMounted) {
+          setPlatformPauseInfo(pauseStatus);
+        }
+      } catch {
+        if (isMounted) setPlatformPauseInfo({ isPaused: false });
+      }
+    };
+
+    syncPause();
+    const unsub = queueSafetyStore.subscribe(() => {
+      syncPause();
+    });
+
+    return () => {
+      isMounted = false;
+      unsub();
+    };
+  }, [selectedPlatform]);
+
+  const isStatusTextPaused = Boolean(
+    activeStatusText &&
+      (activeStatusText.toLowerCase().includes('pausing') ||
+        activeStatusText.toLowerCase().includes('paused') ||
+        activeStatusText.toLowerCase().includes('additional verification')),
+  );
+  const isPlatformPaused = platformPauseInfo.isPaused || isStatusTextPaused;
+
+  // Sync auth session and refresh if expired
+  useEffect(() => {
+    let isMounted = true;
+    const syncSession = async () => {
+      try {
+        const cur = await authStorage.getSession();
+        if (cur?.token) {
+          if (isMounted) setSession(cur);
+        } else if (cur?.refreshToken) {
+          const newToken = await backendApiClient.refreshAccessToken();
+          if (newToken && isMounted) {
+            const updated = await authStorage.getSession();
+            setSession(updated);
+          } else if (isMounted) {
+            setSession(null);
+          }
+        } else {
+          if (isMounted) setSession(null);
+        }
+      } catch {
+        if (isMounted) setSession(null);
+      }
+    };
+
+    syncSession();
+    const unsub = authStorage.subscribe(() => {
+      syncSession();
+    });
+
+    return () => {
+      isMounted = false;
+      unsub();
+    };
+  }, []);
 
   // Question answering state (single)
   const [userAnswerInput, setUserAnswerInput] = useState<string>('');
@@ -138,25 +235,112 @@ export function LinkedInApplyDashboard({
     return () => clearInterval(interval);
   }, [pendingBatch]);
 
-  // Sync quota from storage
-  const loadQuota = useCallback(async () => {
+  const lastBackendSyncRef = useRef<number>(0);
+
+  // Sync quota from storage & backend (event-driven + 60s background sync)
+  const loadQuota = useCallback(async (forceBackend = false) => {
     try {
-      const data = await dailyQuotaStore.get();
-      if (data) setQuota(data);
-    } catch {}
+      const data = await dailyQuotaStore.getQuotaData();
+      setQuota(data);
+
+      const now = Date.now();
+      // Only call backend if forced or if at least 60s have elapsed since last sync
+      if (!forceBackend && now - lastBackendSyncRef.current < 60000) {
+        return;
+      }
+      lastBackendSyncRef.current = now;
+
+      // 1. Try syncing directly from backend quota endpoint
+      const backendQuota = await backendApiClient.getProfileQuota().catch(() => null);
+      if (backendQuota) {
+        const activeLimit = backendQuota.dailyLimit;
+        if (data.maxDailyQuota !== activeLimit) {
+          await dailyQuotaStore.setMaxDailyLimit(activeLimit);
+        }
+        setQuota({
+          ...data,
+          appliedCount: Math.max(data.appliedCount, backendQuota.appliedToday),
+          maxDailyQuota: activeLimit,
+        });
+        return;
+      }
+
+      // 2. Fallback to subscription plan check
+      const subRes = await backendApiClient.getSubscriptionMe().catch(() => null);
+      if (subRes?.data?.subscription) {
+        const sub = subRes.data.subscription;
+        let activeLimit = 15;
+        if (sub.status === 'ACTIVE') {
+          if (sub.planCodeSnapshot === 'power') activeLimit = 500;
+          else if (sub.planCodeSnapshot === 'pro') activeLimit = 100;
+          else if (sub.planCodeSnapshot === 'starter') activeLimit = 50;
+        }
+        if (data.maxDailyQuota !== activeLimit) {
+          await dailyQuotaStore.setMaxDailyLimit(activeLimit);
+        }
+        setQuota({
+          ...data,
+          maxDailyQuota: activeLimit,
+        });
+      }
+    } catch {
+      const localData = await dailyQuotaStore.getQuotaData().catch(() => null);
+      if (localData) setQuota(localData);
+    }
   }, []);
 
   useEffect(() => {
-    loadQuota();
+    // Initial fetch from backend
+    loadQuota(true);
 
+    // Event-driven reactive updates whenever local storage changes (zero API calls)
+    const unsubscribe = dailyQuotaStore.subscribe(async () => {
+      const localData = await dailyQuotaStore.getQuotaData().catch(() => null);
+      if (localData) setQuota(localData);
+    });
+
+    // Controlled 60s background sync interval (increased from 5s to eliminate excessive polling)
     const interval = setInterval(() => {
-      loadQuota();
-    }, 5000);
+      loadQuota(true);
+    }, 60000);
 
     return () => {
+      unsubscribe();
       clearInterval(interval);
     };
   }, [loadQuota]);
+
+  const [isExporting, setIsExporting] = useState<boolean>(false);
+
+  const handleExportSidePanelCsv = async () => {
+    try {
+      setIsExporting(true);
+      const records = await processedJobsStore.getAllRecords();
+      if (!records || records.length === 0) {
+        alert('No job records found to export yet. Run an Auto Apply task first!');
+        setIsExporting(false);
+        return;
+      }
+      const exportable = records.map(r => ({
+        jobId: r.jobId,
+        title: r.title,
+        company: r.company,
+        location: r.location,
+        platform: r.platform || detectPlatformFromUrl(r.url),
+        status: r.status,
+        reason: r.reason,
+        fitScore: r.fitScore,
+        creditsUsed: r.creditsUsed,
+        url: r.url,
+        timestamp: r.timestamp,
+      }));
+      exportApplicationsToCsv(exportable, 'JobPilot_Applied_Jobs');
+    } catch (err) {
+      console.error('Failed to export CSV from side panel:', err);
+    } finally {
+      setTimeout(() => setIsExporting(false), 1500);
+    }
+  };
 
   return (
     <div
@@ -223,37 +407,66 @@ export function LinkedInApplyDashboard({
             )}
           </div>
         </div>
-        <div className="text-right">
+        <div className="text-right flex items-center gap-1.5">
           <span className="rounded-full border border-sky-500/30 bg-sky-500/10 px-2.5 py-1 text-[11px] font-semibold text-sky-400">
             {quota ? Math.max(0, quota.maxDailyQuota - quota.appliedCount) : 15} Remaining
           </span>
+          {onOpenPlansModal && (
+            <button
+              type="button"
+              onClick={onOpenPlansModal}
+              className="rounded-full bg-gradient-to-r from-amber-500 to-orange-500 px-2.5 py-1 text-[10px] font-bold text-white hover:from-amber-600 hover:to-orange-600 transition-all cursor-pointer shadow-sm">
+              Upgrade
+            </button>
+          )}
         </div>
       </div>
 
-      {/* Single Entry Point: Start Auto Apply */}
+      {/* Single Entry Point: Start Auto Apply or Sign In */}
       <div className="space-y-2">
-        <button
-          onClick={() => onStartAutoApply?.(selectedPlatform)}
-          disabled={isApplying}
-          className={`w-full flex items-center justify-center space-x-2 rounded-xl py-3 px-4 font-bold text-sm shadow-md transition-all ${
-            isApplying
-              ? 'bg-slate-700 text-gray-400 cursor-not-allowed opacity-60'
-              : 'bg-gradient-to-r from-sky-500 to-blue-600 text-white hover:from-sky-600 hover:to-blue-700 hover:shadow-sky-500/20 active:scale-[0.99] cursor-pointer'
-          }`}>
-          <FiPlay className="size-4 text-emerald-300" />
-          <span>
-            Start Auto Apply (
-            {selectedPlatform === 'naukri' ? 'Naukri' : selectedPlatform === 'indeed' ? 'Indeed' : 'LinkedIn'})
-          </span>
-        </button>
-        <p className="text-[11px] text-center opacity-60">
-          Autonomous end-to-end{' '}
-          {selectedPlatform === 'naukri' ? 'Naukri.com' : selectedPlatform === 'indeed' ? 'Indeed' : 'LinkedIn'}{' '}
-          application flow
-        </p>
+        {!session?.token ? (
+          <div className="space-y-2">
+            <button
+              onClick={() => onOpenAuthModal?.()}
+              className="w-full flex items-center justify-center space-x-2 rounded-xl py-3 px-4 font-bold text-sm bg-gradient-to-r from-blue-600 to-indigo-600 text-white hover:from-blue-500 hover:to-indigo-500 shadow-md shadow-blue-500/20 active:scale-[0.99] cursor-pointer transition-all">
+              <FiLock className="size-4" />
+              <span>Sign In to Auto Apply</span>
+            </button>
+            <p className="text-[11px] text-center text-gray-400">
+              An account is required to run automation and track applications.
+            </p>
+          </div>
+        ) : (
+          <>
+            <button
+              onClick={() => onStartAutoApply?.(selectedPlatform)}
+              disabled={isApplying || platformPauseInfo.isPaused}
+              className={`w-full flex items-center justify-center space-x-2 rounded-xl py-3 px-4 font-bold text-sm shadow-md transition-all ${
+                isApplying || platformPauseInfo.isPaused
+                  ? 'bg-slate-700 text-gray-400 cursor-not-allowed opacity-60'
+                  : 'bg-gradient-to-r from-sky-500 to-blue-600 text-white hover:from-sky-600 hover:to-blue-700 hover:shadow-sky-500/20 active:scale-[0.99] cursor-pointer'
+              }`}>
+              {platformPauseInfo.isPaused ? (
+                <FiPauseCircle className="size-4 text-amber-300" />
+              ) : (
+                <FiPlay className="size-4 text-emerald-300" />
+              )}
+              <span>
+                {platformPauseInfo.isPaused
+                  ? `Paused for Today (${selectedPlatform === 'naukri' ? 'Naukri' : selectedPlatform === 'indeed' ? 'Indeed' : 'LinkedIn'})`
+                  : `Start Auto Apply (${selectedPlatform === 'naukri' ? 'Naukri' : selectedPlatform === 'indeed' ? 'Indeed' : 'LinkedIn'})`}
+              </span>
+            </button>
+            <p className="text-[11px] text-center opacity-60">
+              {platformPauseInfo.isPaused
+                ? `${selectedPlatform === 'indeed' ? 'Indeed' : selectedPlatform} auto-apply is paused for today to protect your account. You can solve verification directly on the site.`
+                : `Autonomous end-to-end ${selectedPlatform === 'naukri' ? 'Naukri.com' : selectedPlatform === 'indeed' ? 'Indeed' : 'LinkedIn'} application flow`}
+            </p>
+          </>
+        )}
 
         {/* Visible Stop Application Button */}
-        {isApplying && (
+        {isApplying && !isPlatformPaused && (
           <button
             onClick={onStop}
             className="w-full flex items-center justify-center space-x-2 rounded-xl py-2.5 px-4 font-bold text-xs bg-red-500 text-white hover:bg-red-600 shadow-md transition-all cursor-pointer animate-pulse">
@@ -429,26 +642,82 @@ export function LinkedInApplyDashboard({
       )}
 
       {/* Live Application Status Banner */}
-      {isApplying && (
-        <div
-          className={`rounded-xl border p-3.5 space-y-2 ${isDarkMode ? 'border-sky-500/40 bg-sky-950/30' : 'border-sky-200 bg-sky-50/90'}`}>
-          <div
-            className={`flex items-center space-x-2 text-xs font-bold ${isDarkMode ? 'text-sky-400' : 'text-sky-700'}`}>
-            <AiOutlineLoading3Quarters
-              className={`size-4 animate-spin shrink-0 ${isDarkMode ? 'text-sky-400' : 'text-sky-600'}`}
-            />
-            <span>Application in Progress...</span>
-          </div>
-          <p
-            className={`text-xs font-medium leading-relaxed p-2.5 rounded-lg border ${
-              isDarkMode
-                ? 'text-[#f1f5f9] bg-slate-900/80 border-sky-500/20'
-                : 'text-[#0f172a] bg-white border-sky-200 shadow-sm'
-            }`}>
-            {activeStatusText || 'Detecting job and initializing Easy Apply solver...'}
-          </p>
-        </div>
-      )}
+      {(isApplying || isPlatformPaused) &&
+        (() => {
+          const isWaitingVerification =
+            !isPlatformPaused &&
+            (activeStatusText?.toLowerCase().includes('verification') ||
+              activityItems.some(i => i.status === 'needs_verification'));
+
+          return (
+            <div
+              className={`rounded-xl border p-3.5 space-y-2 transition-colors ${
+                isPlatformPaused
+                  ? isDarkMode
+                    ? 'border-red-500/50 bg-red-950/30'
+                    : 'border-red-300 bg-red-50/90'
+                  : isWaitingVerification
+                    ? isDarkMode
+                      ? 'border-amber-500/50 bg-amber-950/40 animate-pulse'
+                      : 'border-amber-400 bg-amber-50/95 shadow-sm'
+                    : isDarkMode
+                      ? 'border-sky-500/40 bg-sky-950/30'
+                      : 'border-sky-200 bg-sky-50/90'
+              }`}>
+              <div
+                className={`flex items-center space-x-2 text-xs font-bold ${
+                  isPlatformPaused
+                    ? isDarkMode
+                      ? 'text-red-400'
+                      : 'text-red-700'
+                    : isWaitingVerification
+                      ? isDarkMode
+                        ? 'text-amber-300'
+                        : 'text-amber-800'
+                      : isDarkMode
+                        ? 'text-sky-400'
+                        : 'text-sky-700'
+                }`}>
+                {isPlatformPaused ? (
+                  <FiPauseCircle className={`size-4 shrink-0 ${isDarkMode ? 'text-red-400' : 'text-red-600'}`} />
+                ) : isWaitingVerification ? (
+                  <FiAlertTriangle
+                    className={`size-4 shrink-0 animate-bounce ${isDarkMode ? 'text-amber-300' : 'text-amber-600'}`}
+                  />
+                ) : (
+                  <AiOutlineLoading3Quarters
+                    className={`size-4 animate-spin shrink-0 ${isDarkMode ? 'text-sky-400' : 'text-sky-600'}`}
+                  />
+                )}
+                <span>
+                  {isPlatformPaused
+                    ? 'Application Paused for Today'
+                    : isWaitingVerification
+                      ? 'Manual Verification Required'
+                      : 'Application in Progress...'}
+                </span>
+              </div>
+              <p
+                className={`text-xs font-medium leading-relaxed p-2.5 rounded-lg border ${
+                  isPlatformPaused
+                    ? isDarkMode
+                      ? 'text-red-100 bg-slate-900/80 border-red-500/30'
+                      : 'text-red-950 bg-white border-red-300 shadow-sm'
+                    : isWaitingVerification
+                      ? isDarkMode
+                        ? 'text-amber-100 bg-slate-900/80 border-amber-500/40'
+                        : 'text-amber-950 bg-white border-amber-300 shadow-sm'
+                      : isDarkMode
+                        ? 'text-[#f1f5f9] bg-slate-900/80 border-sky-500/20'
+                        : 'text-[#0f172a] bg-white border-sky-200 shadow-sm'
+                }`}>
+                {activeStatusText ||
+                  platformPauseInfo.reason ||
+                  'Auto-apply is paused for today to protect your account.'}
+              </p>
+            </div>
+          );
+        })()}
 
       {/* Live Activity Logs */}
       <div
@@ -459,9 +728,24 @@ export function LinkedInApplyDashboard({
             className={`text-[11px] font-bold uppercase tracking-wider ${isDarkMode ? 'text-sky-400' : 'text-sky-600'}`}>
             Live Activity
           </span>
-          <span className={`text-[10px] ${isDarkMode ? 'text-[#94a3b8]' : 'text-[#64748b]'}`}>
-            {activityItems.length > 0 ? `${activityItems.length} jobs` : `${appliedLogs.length} updates`}
-          </span>
+          <div className="flex items-center gap-2">
+            <span className={`text-[10px] ${isDarkMode ? 'text-[#94a3b8]' : 'text-[#64748b]'}`}>
+              {activityItems.length > 0 ? `${activityItems.length} jobs` : `${appliedLogs.length} updates`}
+            </span>
+            <button
+              type="button"
+              onClick={handleExportSidePanelCsv}
+              disabled={isExporting}
+              title="Export Applied & Processed Jobs to CSV / Excel"
+              className={`flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-bold transition shadow-xs cursor-pointer ${
+                isDarkMode
+                  ? 'bg-emerald-950/60 text-emerald-300 border border-emerald-500/40 hover:bg-emerald-900/60'
+                  : 'bg-emerald-50 text-emerald-700 border border-emerald-300 hover:bg-emerald-100'
+              }`}>
+              <FiDownload className={`size-3 ${isExporting ? 'animate-bounce' : ''}`} />
+              <span>{isExporting ? 'Saved' : 'CSV'}</span>
+            </button>
+          </div>
         </div>
 
         <div className="flex-1 overflow-y-auto space-y-2.5 text-xs">
@@ -472,28 +756,32 @@ export function LinkedInApplyDashboard({
                   key={item.id}
                   className={`rounded-xl border p-2.5 space-y-1.5 text-xs transition-colors ${
                     isDarkMode
-                      ? item.status === 'modal_opened'
-                        ? 'border-purple-900/60 bg-[#1e293b] hover:bg-[#273449]'
-                        : item.status === 'modal_failed'
-                          ? 'border-rose-900/60 bg-[#1e293b] hover:bg-[#273449]'
-                          : item.status === 'applied'
-                            ? 'border-emerald-900/60 bg-[#1e293b] hover:bg-[#273449]'
-                            : item.status === 'skipped'
-                              ? 'border-amber-900/60 bg-[#1e293b] hover:bg-[#273449]'
-                              : item.status === 'failed'
-                                ? 'border-red-900/60 bg-[#1e293b] hover:bg-[#273449]'
-                                : 'border-[#334155] bg-[#1e293b] hover:bg-[#273449]'
-                      : item.status === 'modal_opened'
-                        ? 'border-purple-200 bg-white hover:bg-[#f8fafc] shadow-sm'
-                        : item.status === 'modal_failed'
-                          ? 'border-rose-200 bg-white hover:bg-[#f8fafc] shadow-sm'
-                          : item.status === 'applied'
-                            ? 'border-emerald-200 bg-white hover:bg-[#f8fafc] shadow-sm'
-                            : item.status === 'skipped'
-                              ? 'border-amber-200 bg-white hover:bg-[#f8fafc] shadow-sm'
-                              : item.status === 'failed'
-                                ? 'border-red-200 bg-white hover:bg-[#f8fafc] shadow-sm'
-                                : 'border-[#e2e8f0] bg-white hover:bg-[#f8fafc] shadow-sm'
+                      ? item.status === 'needs_verification'
+                        ? 'border-amber-500/60 bg-[#1e293b] hover:bg-[#273449]'
+                        : item.status === 'modal_opened'
+                          ? 'border-purple-900/60 bg-[#1e293b] hover:bg-[#273449]'
+                          : item.status === 'modal_failed'
+                            ? 'border-rose-900/60 bg-[#1e293b] hover:bg-[#273449]'
+                            : item.status === 'applied'
+                              ? 'border-emerald-900/60 bg-[#1e293b] hover:bg-[#273449]'
+                              : item.status === 'skipped'
+                                ? 'border-amber-900/60 bg-[#1e293b] hover:bg-[#273449]'
+                                : item.status === 'failed'
+                                  ? 'border-red-900/60 bg-[#1e293b] hover:bg-[#273449]'
+                                  : 'border-[#334155] bg-[#1e293b] hover:bg-[#273449]'
+                      : item.status === 'needs_verification'
+                        ? 'border-amber-400 bg-amber-50/90 hover:bg-amber-100/90 shadow-sm'
+                        : item.status === 'modal_opened'
+                          ? 'border-purple-200 bg-white hover:bg-[#f8fafc] shadow-sm'
+                          : item.status === 'modal_failed'
+                            ? 'border-rose-200 bg-white hover:bg-[#f8fafc] shadow-sm'
+                            : item.status === 'applied'
+                              ? 'border-emerald-200 bg-white hover:bg-[#f8fafc] shadow-sm'
+                              : item.status === 'skipped'
+                                ? 'border-amber-200 bg-white hover:bg-[#f8fafc] shadow-sm'
+                                : item.status === 'failed'
+                                  ? 'border-red-200 bg-white hover:bg-[#f8fafc] shadow-sm'
+                                  : 'border-[#e2e8f0] bg-white hover:bg-[#f8fafc] shadow-sm'
                   }`}>
                   <div className="flex items-start justify-between gap-2">
                     <div className={`font-bold truncate ${isDarkMode ? 'text-[#f1f5f9]' : 'text-[#0f172a]'}`}>
@@ -507,41 +795,47 @@ export function LinkedInApplyDashboard({
                     </div>
                     <span
                       className={`text-[10px] px-2 py-0.5 rounded-full font-bold uppercase shrink-0 ${
-                        item.status === 'modal_opened'
+                        item.status === 'needs_verification'
                           ? isDarkMode
-                            ? 'bg-[#4c1d95] text-[#c4b5fd] border border-purple-500/40'
-                            : 'bg-[#ede9fe] text-[#6d28d9] border border-[#c4b5fd]'
-                          : item.status === 'modal_failed'
+                            ? 'bg-[#78350f] text-[#fbbf24] border border-amber-500/50 animate-pulse'
+                            : 'bg-[#fef3c7] text-[#b45309] border border-[#fcd34d] animate-pulse'
+                          : item.status === 'modal_opened'
                             ? isDarkMode
-                              ? 'bg-rose-950/60 text-rose-300 border border-rose-500/40'
-                              : 'bg-rose-100 text-rose-700 border border-rose-300'
-                            : item.status === 'applied'
+                              ? 'bg-[#4c1d95] text-[#c4b5fd] border border-purple-500/40'
+                              : 'bg-[#ede9fe] text-[#6d28d9] border border-[#c4b5fd]'
+                            : item.status === 'modal_failed'
                               ? isDarkMode
-                                ? 'bg-[#14532d] text-[#4ade80] border border-emerald-500/40'
-                                : 'bg-[#dcfce7] text-[#15803d] border border-[#86efac]'
-                              : item.status === 'skipped'
+                                ? 'bg-rose-950/60 text-rose-300 border border-rose-500/40'
+                                : 'bg-rose-100 text-rose-700 border border-rose-300'
+                              : item.status === 'applied'
                                 ? isDarkMode
-                                  ? 'bg-[#78350f] text-[#fbbf24] border border-amber-500/40'
-                                  : 'bg-[#fef3c7] text-[#b45309] border border-[#fcd34d]'
-                                : item.status === 'failed'
+                                  ? 'bg-[#14532d] text-[#4ade80] border border-emerald-500/40'
+                                  : 'bg-[#dcfce7] text-[#15803d] border border-[#86efac]'
+                                : item.status === 'skipped'
                                   ? isDarkMode
-                                    ? 'bg-red-950/60 text-red-300 border border-red-500/40'
-                                    : 'bg-red-100 text-red-700 border border-red-300'
-                                  : isDarkMode
-                                    ? 'bg-sky-950/60 text-sky-300 border border-sky-500/40 animate-pulse'
-                                    : 'bg-sky-100 text-sky-700 border border-sky-300 animate-pulse'
+                                    ? 'bg-[#78350f] text-[#fbbf24] border border-amber-500/40'
+                                    : 'bg-[#fef3c7] text-[#b45309] border border-[#fcd34d]'
+                                  : item.status === 'failed'
+                                    ? isDarkMode
+                                      ? 'bg-red-950/60 text-red-300 border border-red-500/40'
+                                      : 'bg-red-100 text-red-700 border border-red-300'
+                                    : isDarkMode
+                                      ? 'bg-sky-950/60 text-sky-300 border border-sky-500/40 animate-pulse'
+                                      : 'bg-sky-100 text-sky-700 border border-sky-300 animate-pulse'
                       }`}>
-                      {item.status === 'modal_opened'
-                        ? 'Modal Opened'
-                        : item.status === 'modal_failed'
-                          ? 'Modal Failed'
-                          : item.status === 'applied'
-                            ? 'Applied'
-                            : item.status === 'skipped'
-                              ? 'Skipped (0 cr)'
-                              : item.status === 'failed'
-                                ? 'Failed (Refunded)'
-                                : 'Running...'}
+                      {item.status === 'needs_verification'
+                        ? 'Needs Verification'
+                        : item.status === 'modal_opened'
+                          ? 'Modal Opened'
+                          : item.status === 'modal_failed'
+                            ? 'Modal Failed'
+                            : item.status === 'applied'
+                              ? 'Applied'
+                              : item.status === 'skipped'
+                                ? 'Skipped (0 cr)'
+                                : item.status === 'failed'
+                                  ? 'Failed (Refunded)'
+                                  : 'Running...'}
                     </span>
                   </div>
 

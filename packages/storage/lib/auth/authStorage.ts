@@ -4,6 +4,7 @@ import type { BaseStorage } from '../base/types';
 
 export interface UserSessionData {
   token: string | null;
+  refreshToken?: string | null;
   user: {
     id: string;
     name: string;
@@ -33,6 +34,7 @@ export type AuthStorage = BaseStorage<UserSessionData> & {
 
 const DEFAULT_AUTH_SESSION: UserSessionData = {
   token: null,
+  refreshToken: null,
   user: null,
   subscription: null,
   credits: null,

@@ -11,9 +11,11 @@ import {
   DEFAULT_CAREER_BRAIN,
   DEFAULT_GOLDEN_ANSWERS,
   DEFAULT_LINKEDIN_CONFIG,
+  DEFAULT_NEGATIVE_KEYWORDS,
   GOLDEN_ANSWER_CATEGORIES,
   sortGoldenAnswersByPriority,
   isSocialMediaOrUrlQuestion,
+  isNarrativeAnswerableQuestion,
 } from '@extension/storage';
 import {
   FiUser,
@@ -35,8 +37,13 @@ import {
   FiFilter,
   FiTag,
   FiLayers,
+  FiSlash,
+  FiBriefcase,
+  FiPercent,
 } from 'react-icons/fi';
 import { PREDEFINED_TECH_SKILLS } from '../constants/skillsList';
+import { LocationAutocompleteInput } from './LocationAutocompleteInput';
+import { PrioritizedLocationsInput } from './PrioritizedLocationsInput';
 
 interface CareerBrainSettingsProps {
   isDarkMode?: boolean;
@@ -46,6 +53,8 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
   const [careerBrain, setCareerBrain] = useState<ICareerBrain>(DEFAULT_CAREER_BRAIN);
   const [config, setConfig] = useState<ILinkedInAutomationConfig>({ ...DEFAULT_LINKEDIN_CONFIG, dryRun: true });
   const [newSkill, setNewSkill] = useState<string>('');
+  const [newNegativeKeyword, setNewNegativeKeyword] = useState<string>('');
+  const [newBlacklistedCompany, setNewBlacklistedCompany] = useState<string>('');
   const [saveSuccess, setSaveSuccess] = useState<boolean>(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [validationErrors, setValidationErrors] = useState<Record<string, string>>({});
@@ -61,6 +70,49 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
   const skillInputContainerRef = useRef<HTMLDivElement>(null);
   const skillInputRef = useRef<HTMLInputElement>(null);
 
+  const handleAddNegativeKeyword = () => {
+    const kw = newNegativeKeyword.trim();
+    if (kw && !(config.negativeKeywords || []).some(k => k.toLowerCase() === kw.toLowerCase())) {
+      setConfig(prev => ({
+        ...prev,
+        negativeKeywords: [...(prev.negativeKeywords || []), kw],
+      }));
+      setNewNegativeKeyword('');
+    }
+  };
+
+  const handleRemoveNegativeKeyword = (kwToRemove: string) => {
+    setConfig(prev => ({
+      ...prev,
+      negativeKeywords: (prev.negativeKeywords || []).filter(k => k !== kwToRemove),
+    }));
+  };
+
+  const handleRestoreDefaultNegativeKeywords = () => {
+    setConfig(prev => ({
+      ...prev,
+      negativeKeywords: [...DEFAULT_NEGATIVE_KEYWORDS],
+    }));
+  };
+
+  const handleAddBlacklistedCompany = () => {
+    const comp = newBlacklistedCompany.trim();
+    if (comp && !(config.blacklistedCompanies || []).some(c => c.toLowerCase() === comp.toLowerCase())) {
+      setConfig(prev => ({
+        ...prev,
+        blacklistedCompanies: [...(prev.blacklistedCompanies || []), comp],
+      }));
+      setNewBlacklistedCompany('');
+    }
+  };
+
+  const handleRemoveBlacklistedCompany = (compToRemove: string) => {
+    setConfig(prev => ({
+      ...prev,
+      blacklistedCompanies: (prev.blacklistedCompanies || []).filter(c => c !== compToRemove),
+    }));
+  };
+
   useEffect(() => {
     Promise.all([getCareerBrainData(), linkedInConfigStore.getConfig()]).then(([brainData, configData]) => {
       // Ensure goldenAnswers exists even if user previously had old storage format
@@ -68,16 +120,25 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
         brainData.goldenAnswers = DEFAULT_GOLDEN_ANSWERS;
       }
       brainData.goldenAnswers = sortGoldenAnswersByPriority(
-        brainData.goldenAnswers.filter(ga => !isSocialMediaOrUrlQuestion(ga.question)),
+        brainData.goldenAnswers.filter(
+          ga => !isSocialMediaOrUrlQuestion(ga.question) && !isNarrativeAnswerableQuestion(ga.question, ga.id),
+        ),
       );
       if (!brainData.resumeText) {
         brainData.resumeText = DEFAULT_CAREER_BRAIN.resumeText;
       }
       setCareerBrain(brainData);
-      // Auto-persist cleaned & sorted golden answers so storage is immediately purged of Facebook/X
+      // Auto-persist cleaned & sorted golden answers so storage is immediately purged of Facebook/X and overlapping questions
       saveCareerBrainData(brainData).catch(() => {});
       // Live-Mode is temporarily hardcode-disabled / locked for safety verification
-      setConfig({ ...configData, dryRun: true });
+      setConfig({
+        ...DEFAULT_LINKEDIN_CONFIG,
+        ...configData,
+        negativeKeywords: configData.negativeKeywords || DEFAULT_LINKEDIN_CONFIG.negativeKeywords,
+        blacklistedCompanies: configData.blacklistedCompanies || [],
+        maxExperienceGapYears: configData.maxExperienceGapYears ?? 3,
+        dryRun: true,
+      });
     });
 
     // Real-time bidirectional synchronization with Side Panel and background storage
@@ -86,7 +147,9 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
         const newData = changes['linkedin_career_brain'].newValue as ICareerBrain;
         if (newData.goldenAnswers) {
           newData.goldenAnswers = sortGoldenAnswersByPriority(
-            newData.goldenAnswers.filter(ga => !isSocialMediaOrUrlQuestion(ga.question)),
+            newData.goldenAnswers.filter(
+              ga => !isSocialMediaOrUrlQuestion(ga.question) && !isNarrativeAnswerableQuestion(ga.question, ga.id),
+            ),
           );
         }
         setCareerBrain(newData);
@@ -182,26 +245,35 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
     }));
   };
 
-  const handleRestoreStandardSuite = () => {
+  const handleRestoreStandardSuite = async () => {
     if (
       window.confirm(
-        'Restore the standard 33 Golden Answers covering all 7 categories? Custom rules not in the defaults will be preserved.',
+        'Restore all standard default screening questions & answers? Custom rules not in the defaults will be preserved.',
       )
     ) {
-      setCareerBrain(prev => {
-        const existingCustom = prev.goldenAnswers.filter(ga => !ga.isDefault);
-        const merged = [
-          ...DEFAULT_GOLDEN_ANSWERS,
-          ...existingCustom.filter(
-            c => !DEFAULT_GOLDEN_ANSWERS.some(d => d.question.toLowerCase() === c.question.toLowerCase()),
-          ),
-        ];
-        const cleanMerged = sortGoldenAnswersByPriority(merged.filter(ga => !isSocialMediaOrUrlQuestion(ga.question)));
-        return {
-          ...prev,
-          goldenAnswers: cleanMerged,
-        };
-      });
+      const existingCustom = careerBrain.goldenAnswers.filter(
+        ga => !ga.isDefault && !isNarrativeAnswerableQuestion(ga.question, ga.id),
+      );
+      const merged = [
+        ...DEFAULT_GOLDEN_ANSWERS,
+        ...existingCustom.filter(
+          c => !DEFAULT_GOLDEN_ANSWERS.some(d => d.question.toLowerCase() === c.question.toLowerCase()),
+        ),
+      ];
+      const cleanMerged = sortGoldenAnswersByPriority(
+        merged.filter(
+          ga => !isSocialMediaOrUrlQuestion(ga.question) && !isNarrativeAnswerableQuestion(ga.question, ga.id),
+        ),
+      );
+      const updatedBrain: ICareerBrain = {
+        ...careerBrain,
+        goldenAnswers: cleanMerged,
+        updatedAt: Date.now(),
+      };
+      setCareerBrain(updatedBrain);
+      await saveCareerBrainData(updatedBrain);
+      setSaveSuccess(true);
+      setTimeout(() => setSaveSuccess(false), 3000);
     }
   };
 
@@ -213,7 +285,9 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
   };
 
   const getCategoryCount = (category: string) => {
-    const valid = careerBrain.goldenAnswers.filter(ga => !isSocialMediaOrUrlQuestion(ga.question));
+    const valid = careerBrain.goldenAnswers.filter(
+      ga => !isSocialMediaOrUrlQuestion(ga.question) && !isNarrativeAnswerableQuestion(ga.question, ga.id),
+    );
     if (category === 'All') return valid.length;
     return valid.filter(ga => (ga.category || '').toLowerCase().trim() === category.toLowerCase().trim()).length;
   };
@@ -246,8 +320,8 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
 
   const filteredGoldenAnswers = sortGoldenAnswersByPriority(
     careerBrain.goldenAnswers.filter(item => {
-      // Always exclude social media handles / URLs from screening questions
-      if (isSocialMediaOrUrlQuestion(item.question)) {
+      // Always exclude social media handles / URLs and narrative-answerable questions from screening questions
+      if (isSocialMediaOrUrlQuestion(item.question) || isNarrativeAnswerableQuestion(item.question, item.id)) {
         return false;
       }
       // Category filter
@@ -651,31 +725,47 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
 
           <div>
             <label className="mb-1 block text-xs font-semibold text-gray-700 dark:text-gray-300">
-              Current Location (City)
+              Current Location{' '}
+              <span className="text-[10px] text-sky-500 font-normal">
+                (City, State, Country - LinkedIn / Indeed format)
+              </span>
             </label>
-            <input
-              type="text"
+            <LocationAutocompleteInput
               value={careerBrain.currentLocation || ''}
-              onChange={e => setCareerBrain(prev => ({ ...prev, currentLocation: e.target.value }))}
-              placeholder="e.g. Bengaluru, India"
-              className={`w-full rounded-md border ${
-                isDarkMode ? 'border-slate-600 bg-slate-700 text-gray-100' : 'border-gray-300 bg-white text-gray-800'
-              } px-3 py-2 text-sm`}
+              onChange={val => setCareerBrain(prev => ({ ...prev, currentLocation: val }))}
+              isDarkMode={isDarkMode}
+              isPreferred={false}
+              placeholder="e.g. Bengaluru, Karnataka, India"
             />
           </div>
 
-          <div>
-            <label className="mb-1 block text-xs font-semibold text-gray-700 dark:text-gray-300">
-              Preferred Location / Remote
-            </label>
-            <input
-              type="text"
-              value={careerBrain.preferredLocation}
-              onChange={e => setCareerBrain(prev => ({ ...prev, preferredLocation: e.target.value }))}
-              placeholder="e.g. Remote / Bengaluru / Hybrid"
-              className={`w-full rounded-md border ${
-                isDarkMode ? 'border-slate-600 bg-slate-700 text-gray-100' : 'border-gray-300 bg-white text-gray-800'
-              } px-3 py-2 text-sm`}
+          <div className="md:col-span-2">
+            <div className="flex items-center justify-between mb-1.5">
+              <label className="block text-xs font-semibold text-gray-700 dark:text-gray-300">
+                Target Preferred Locations{' '}
+                <span className="text-[10px] text-sky-500 font-normal">
+                  (Top 3 Prioritized - #1 is searched & applied first)
+                </span>
+              </label>
+              <span className="text-[11px] text-gray-400">
+                Priority Hierarchy: #1 (Highest) &rarr; #2 (Secondary) &rarr; #3 (Tertiary)
+              </span>
+            </div>
+            <PrioritizedLocationsInput
+              locations={
+                careerBrain.preferredLocations && careerBrain.preferredLocations.length > 0
+                  ? careerBrain.preferredLocations
+                  : [careerBrain.preferredLocation || '']
+              }
+              onChange={locs => {
+                setCareerBrain(prev => ({
+                  ...prev,
+                  preferredLocations: locs,
+                  preferredLocation: locs[0] || '',
+                }));
+              }}
+              isDarkMode={isDarkMode}
+              maxLocations={3}
             />
           </div>
 
@@ -1053,8 +1143,8 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
                 </span>
               </div>
               <p className="text-xs text-gray-500 dark:text-gray-400">
-                Ground-truth screening answers categorized across Eligibility, Location, Compensation, Experience,
-                Availability, Screening, and Diversity.
+                Essential baseline screening answers for legal authorization, relocation, and availability. All other
+                questions are resolved intelligently by AI from your resume.
               </p>
             </div>
           </div>
@@ -1062,14 +1152,14 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
             <button
               type="button"
               onClick={handleRestoreStandardSuite}
-              title="Reset or update all standard screening rules across all 7 categories"
+              title="Reset or restore essential standard screening rules"
               className={`flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold transition-colors cursor-pointer ${
                 isDarkMode
                   ? 'border-slate-600 bg-slate-700 text-gray-200 hover:bg-slate-650'
                   : 'border-gray-300 bg-gray-50 text-gray-700 hover:bg-gray-100'
               }`}>
               <FiRotateCcw className="size-3.5 text-amber-500" />
-              Restore 33 Standard Defaults
+              Restore Standard Defaults
             </button>
             <button
               type="button"
@@ -1298,16 +1388,16 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
           {/* Target Location */}
           <div>
             <label className="mb-1 block text-xs font-semibold text-gray-700 dark:text-gray-300">
-              Target Search Location
+              Target Search Location{' '}
+              <span className="text-[10px] text-sky-500 font-normal">(LinkedIn / Indeed format)</span>
             </label>
-            <input
-              type="text"
+            <LocationAutocompleteInput
               value={config.targetLocation}
-              onChange={e => setConfig(prev => ({ ...prev, targetLocation: e.target.value }))}
-              placeholder="e.g. Remote, India, Bengaluru"
-              className={`w-full rounded-md border ${
-                isDarkMode ? 'border-slate-600 bg-slate-700 text-gray-100' : 'border-gray-300 bg-white text-gray-800'
-              } px-3 py-2 text-sm`}
+              onChange={val => setConfig(prev => ({ ...prev, targetLocation: val }))}
+              isDarkMode={isDarkMode}
+              isPreferred={true}
+              showQuickPills={true}
+              placeholder="e.g. Bengaluru, Karnataka, India or Remote"
             />
           </div>
 
@@ -1315,7 +1405,7 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
           <div>
             <div className="mb-1 flex items-center justify-between">
               <label className="text-xs font-semibold text-gray-700 dark:text-gray-300">
-                Minimum Fit Score Threshold
+                Minimum Match / Fit Score Threshold
               </label>
               <span className="text-xs font-bold text-sky-600 dark:text-sky-400">{config.minFitScore} / 100</span>
             </div>
@@ -1328,8 +1418,31 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
               onChange={e => setConfig(prev => ({ ...prev, minFitScore: Number(e.target.value) }))}
               className="w-full cursor-pointer accent-sky-600"
             />
-            <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-              Jobs with RAG fit score below {config.minFitScore} are automatically skipped. (Default: 75)
+            {/* Quick Preset Buttons */}
+            <div className="mt-1.5 flex flex-wrap gap-1.5">
+              {[
+                { label: '60% (Broad)', val: 60 },
+                { label: '70% (Balanced)', val: 70 },
+                { label: '75% (Recommended)', val: 75 },
+                { label: '85% (Strict)', val: 85 },
+              ].map(preset => (
+                <button
+                  key={preset.val}
+                  type="button"
+                  onClick={() => setConfig(prev => ({ ...prev, minFitScore: preset.val }))}
+                  className={`rounded px-2 py-0.5 text-[11px] font-medium transition-colors ${
+                    config.minFitScore === preset.val
+                      ? 'bg-sky-600 text-white'
+                      : isDarkMode
+                        ? 'bg-slate-700 text-slate-300 hover:bg-slate-600'
+                        : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                  }`}>
+                  {preset.label}
+                </button>
+              ))}
+            </div>
+            <p className="mt-1.5 text-xs text-gray-500 dark:text-gray-400">
+              Jobs with tech stack relevance below {config.minFitScore}% are automatically skipped before applying.
             </p>
           </div>
 
@@ -1351,8 +1464,164 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
               } px-3 py-2 text-sm`}
             />
             <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-              Maximum applications per day. Automatically pauses and reschedules for next day upon limit.
+              Maximum applications per day. Automatically pauses when limit is reached.
             </p>
+          </div>
+
+          {/* Max Experience Gap Tolerance */}
+          <div className="md:col-span-2">
+            <div className="mb-1 flex items-center justify-between">
+              <label className="text-xs font-semibold text-gray-700 dark:text-gray-300">
+                Max Experience Gap Tolerance
+              </label>
+              <span className="text-xs font-bold text-purple-600 dark:text-purple-400">
+                +{config.maxExperienceGapYears ?? 3} Years
+              </span>
+            </div>
+            <div className="flex items-center gap-3">
+              <input
+                type="number"
+                min={0}
+                max={10}
+                value={config.maxExperienceGapYears ?? 3}
+                onChange={e =>
+                  setConfig(prev => ({ ...prev, maxExperienceGapYears: Math.max(0, Number(e.target.value) || 0) }))
+                }
+                className={`w-28 rounded-md border ${
+                  isDarkMode ? 'border-slate-600 bg-slate-700 text-gray-100' : 'border-gray-300 bg-white text-gray-800'
+                } px-3 py-1.5 text-sm`}
+              />
+              <p className="text-xs text-gray-500 dark:text-gray-400">
+                Skip jobs requiring more than your experience + {config.maxExperienceGapYears ?? 3} years. (e.g. If you
+                have {careerBrain.yearsOfExperience || 1} yrs experience, automatically skip jobs requiring{' '}
+                {(careerBrain.yearsOfExperience || 1) + (config.maxExperienceGapYears ?? 3) + 1}+ yrs).
+              </p>
+            </div>
+          </div>
+        </div>
+
+        {/* Negative Keyword Blacklist */}
+        <div className="border-t border-gray-100 pt-4 dark:border-gray-700">
+          <div className="mb-2 flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <FiSlash className="size-4 text-rose-500" />
+              <label className="text-xs font-bold uppercase tracking-wider text-gray-800 dark:text-gray-200">
+                Negative Keywords Blacklist (Skip Titles & Descriptions)
+              </label>
+            </div>
+            <button
+              type="button"
+              onClick={handleRestoreDefaultNegativeKeywords}
+              className="text-xs text-sky-600 hover:underline dark:text-sky-400">
+              Restore Recommended Defaults
+            </button>
+          </div>
+          <p className="mb-3 text-xs text-gray-500 dark:text-gray-400">
+            Jobs containing any of these keywords in the title or requirements (e.g., Unpaid, Intern, Senior Architect,
+            US Citizen Only) will be skipped immediately with 0 credit cost.
+          </p>
+
+          {/* Tags */}
+          <div className="mb-3 flex flex-wrap gap-1.5">
+            {(config.negativeKeywords || []).map(kw => (
+              <span
+                key={kw}
+                className="inline-flex items-center gap-1 rounded-full border border-rose-200 bg-rose-50 px-2.5 py-1 text-xs font-medium text-rose-700 dark:border-rose-900/60 dark:bg-rose-950/40 dark:text-rose-300">
+                {kw}
+                <button
+                  type="button"
+                  onClick={() => handleRemoveNegativeKeyword(kw)}
+                  className="rounded-full p-0.5 hover:bg-rose-200 dark:hover:bg-rose-800">
+                  <FiX className="size-3" />
+                </button>
+              </span>
+            ))}
+          </div>
+
+          {/* Add Keyword Input */}
+          <div className="flex gap-2">
+            <input
+              type="text"
+              value={newNegativeKeyword}
+              onChange={e => setNewNegativeKeyword(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  handleAddNegativeKeyword();
+                }
+              }}
+              placeholder="e.g. Unpaid, Staff Engineer, Security Clearance..."
+              className={`flex-1 rounded-md border ${
+                isDarkMode ? 'border-slate-600 bg-slate-700 text-gray-100' : 'border-gray-300 bg-white text-gray-800'
+              } px-3 py-1.5 text-sm`}
+            />
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={handleAddNegativeKeyword}
+              className="flex items-center gap-1">
+              <FiPlus className="size-4" /> Add Keyword
+            </Button>
+          </div>
+        </div>
+
+        {/* Blacklisted Companies */}
+        <div className="border-t border-gray-100 pt-4 dark:border-gray-700">
+          <div className="mb-2 flex items-center gap-2">
+            <FiBriefcase className="size-4 text-amber-500" />
+            <label className="text-xs font-bold uppercase tracking-wider text-gray-800 dark:text-gray-200">
+              Blacklisted Companies (Never Apply)
+            </label>
+          </div>
+          <p className="mb-3 text-xs text-gray-500 dark:text-gray-400">
+            The autonomous agent will never submit applications to companies on this list.
+          </p>
+
+          {/* Tags */}
+          <div className="mb-3 flex flex-wrap gap-1.5">
+            {(config.blacklistedCompanies || []).length === 0 ? (
+              <span className="text-xs text-gray-400 italic">No companies blacklisted yet.</span>
+            ) : (
+              (config.blacklistedCompanies || []).map(comp => (
+                <span
+                  key={comp}
+                  className="inline-flex items-center gap-1 rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 text-xs font-medium text-amber-700 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-300">
+                  {comp}
+                  <button
+                    type="button"
+                    onClick={() => handleRemoveBlacklistedCompany(comp)}
+                    className="rounded-full p-0.5 hover:bg-amber-200 dark:hover:bg-amber-800">
+                    <FiX className="size-3" />
+                  </button>
+                </span>
+              ))
+            )}
+          </div>
+
+          {/* Add Company Input */}
+          <div className="flex gap-2">
+            <input
+              type="text"
+              value={newBlacklistedCompany}
+              onChange={e => setNewBlacklistedCompany(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  handleAddBlacklistedCompany();
+                }
+              }}
+              placeholder="e.g. Revature, CyberCoders..."
+              className={`flex-1 rounded-md border ${
+                isDarkMode ? 'border-slate-600 bg-slate-700 text-gray-100' : 'border-gray-300 bg-white text-gray-800'
+              } px-3 py-1.5 text-sm`}
+            />
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={handleAddBlacklistedCompany}
+              className="flex items-center gap-1">
+              <FiPlus className="size-4" /> Add Company
+            </Button>
           </div>
         </div>
       </div>

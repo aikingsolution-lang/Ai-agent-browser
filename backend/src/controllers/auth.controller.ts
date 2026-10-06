@@ -10,6 +10,7 @@ export class AuthController {
         res,
         {
           token: result.token,
+          refreshToken: result.refreshToken,
           user: result.user,
           subscription: result.subscription,
         },
@@ -28,10 +29,21 @@ export class AuthController {
         res,
         {
           token: result.token,
+          refreshToken: result.refreshToken,
           user: result.user,
         },
         'Login successful',
       );
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  public static async refresh(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const { refreshToken } = req.body;
+      const result = await AuthService.refreshTokens(refreshToken);
+      sendSuccess(res, result, 'Token refreshed successfully');
     } catch (error) {
       next(error);
     }
@@ -45,10 +57,31 @@ export class AuthController {
     }
   }
 
-  public static async logout(_req: Request, res: Response, next: NextFunction): Promise<void> {
+  public static async logout(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
-      // Logout in Phase 4 relies on client-side token discard semantics
+      const { refreshToken } = req.body || {};
+      if (refreshToken) {
+        await AuthService.revokeRefreshToken(refreshToken);
+      }
       sendSuccess(res, null, 'Successfully logged out');
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  public static async google(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const result = await AuthService.loginWithGoogle(req.body.token);
+      sendSuccess(
+        res,
+        {
+          token: result.token,
+          refreshToken: result.refreshToken,
+          user: result.user,
+          subscription: result.subscription,
+        },
+        'Google authentication successful',
+      );
     } catch (error) {
       next(error);
     }

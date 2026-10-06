@@ -9,7 +9,11 @@ import type {
 } from '../types';
 import { NAUKRI_SELECTORS } from './selectors';
 import { resolveNaukriQuestion } from './naukriResolver';
+import { inspectAndHealFormErrors } from '../../intelligence';
+import { sanitizeRoleSearchQuery } from '@extension/storage';
 import { createLogger } from '@src/background/log';
+import { solveQuestionAutonomousWithLLM } from '../../linkedin/formQuestionResolver';
+import { getActiveChatModel } from '../../activeModelHelper';
 
 const logger = createLogger('NaukriAdapter');
 
@@ -23,23 +27,47 @@ export class NaukriAdapter implements IPlatformAdapter {
     return url.toLowerCase().includes('naukri.com');
   }
 
-  public buildSearchUrl(role: string, location: string): string {
-    const cleanRole = (role || 'Software Engineer').trim();
+  public buildSearchUrl(
+    role: string,
+    location: string,
+    candidateName?: string | (string | undefined | null)[],
+  ): string {
+    const cleanRole = sanitizeRoleSearchQuery(role, candidateName, 'Software Engineer');
     // Normalize city for Naukri (e.g. "Bengaluru, India" -> "Bengaluru")
     const cleanLoc = (location || '')
       .replace(/,\s*India\b/gi, '')
       .replace(/,\s*IN\b/gi, '')
       .trim();
 
+    const roleSlug =
+      cleanRole
+        .toLowerCase()
+        .replace(/[/\\|]+/g, '-')
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '') || 'software-engineer';
+
+    const hasSpecificCity =
+      cleanLoc &&
+      cleanLoc.toLowerCase() !== 'remote' &&
+      cleanLoc.toLowerCase() !== 'all india' &&
+      cleanLoc.toLowerCase() !== 'india';
+
+    const locSlug = hasSpecificCity
+      ? `-in-${cleanLoc
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, '-')
+          .replace(/^-+|-+$/g, '')}`
+      : '';
+
     const params = new URLSearchParams();
     params.set('k', cleanRole);
-    if (cleanLoc && cleanLoc.toLowerCase() !== 'remote') {
+    if (hasSpecificCity) {
       params.set('l', cleanLoc);
     }
     // Sort by relevance/freshness
     params.set('nignbevent', 'auto_apply');
 
-    return `https://www.naukri.com/jobs-in-india?${params.toString()}`;
+    return `https://www.naukri.com/${roleSlug}-jobs${locSlug}?${params.toString()}`;
   }
 
   public async validateSession(page: any): Promise<IPlatformSession> {
@@ -99,6 +127,7 @@ export class NaukriAdapter implements IPlatformAdapter {
           experience?: string;
           salary?: string;
           isQuickApply?: boolean;
+          descriptionSnippet?: string;
         }> = [];
 
         // Query job containers
@@ -151,6 +180,15 @@ export class NaukriAdapter implements IPlatformAdapter {
             const textContent = (el.textContent || '').toLowerCase();
             const isExternal = selectors.EXTERNAL_APPLY_INDICATORS.some(ind => textContent.includes(ind));
 
+            // Extract tags / skills snippet
+            const tagsEl = el.querySelectorAll(
+              '.tags-gt .tag-li, .row5 ul li, .job-desc, [class*="tag" i], .job-description, .tagsAndDescription',
+            );
+            const snippet = Array.from(tagsEl)
+              .map(t => (t.textContent || '').trim())
+              .filter(Boolean)
+              .join(' | ');
+
             results.push({
               jobId,
               title,
@@ -160,6 +198,7 @@ export class NaukriAdapter implements IPlatformAdapter {
               experience,
               salary,
               isQuickApply: !isExternal,
+              descriptionSnippet: snippet,
             });
           } catch {
             // Skip individual parsing error
@@ -320,7 +359,7 @@ export class NaukriAdapter implements IPlatformAdapter {
         logger.info('[NaukriAdapter] Questionnaire or Chatbot opened. Solving questions...');
 
         // Fill fields in modal
-        const fillResult = await this.handleNaukriQuestionnaire(puppeteerPage, careerBrain);
+        const fillResult = await this.handleNaukriQuestionnaire(puppeteerPage, careerBrain, context);
         if (fillResult.success) {
           return { status: 'applied', creditsUsed: 1, modalOpened: true };
         }
@@ -348,6 +387,7 @@ export class NaukriAdapter implements IPlatformAdapter {
   private async handleNaukriQuestionnaire(
     puppeteerPage: any,
     careerBrain: any,
+    context?: IPlatformExecutionContext,
   ): Promise<{ success: boolean; reason?: string }> {
     try {
       // Find all input and select fields in modal
@@ -392,7 +432,33 @@ export class NaukriAdapter implements IPlatformAdapter {
       logger.info(`[NaukriAdapter] Detected ${fields.length} questionnaire fields.`);
 
       for (const f of fields) {
-        const answer = resolveNaukriQuestion(f.labelText, f.fieldType as any, f.options, careerBrain);
+        let answer = resolveNaukriQuestion(f.labelText, f.fieldType as any, f.options, careerBrain);
+
+        if (answer.confidence < 0.9) {
+          try {
+            const llm = context?.scopedLLM || (await getActiveChatModel(context?.runId)) || undefined;
+            if (llm) {
+              logger.info(`[NaukriAdapter] 🧠 Asking LLM to resolve field: "${f.labelText}"`);
+              const llmFieldType =
+                f.fieldType === 'select'
+                  ? 'dropdown'
+                  : ['text', 'number', 'radio', 'checkbox'].includes(f.fieldType)
+                    ? (f.fieldType as 'text' | 'number' | 'radio' | 'checkbox')
+                    : 'text';
+              const llmRes = await solveQuestionAutonomousWithLLM(
+                { label: f.labelText, fieldType: llmFieldType, options: f.options },
+                careerBrain,
+                llm,
+              );
+              if (llmRes.success && llmRes.answer) {
+                answer = { value: llmRes.answer, confidence: 0.99, source: 'profile' };
+                logger.info(`[NaukriAdapter] ✅ LLM resolved "${f.labelText}" -> "${answer.value}"`);
+              }
+            }
+          } catch (err) {
+            logger.warning(`[NaukriAdapter] LLM field resolution fallback error:`, err);
+          }
+        }
 
         logger.info(
           `[NaukriAdapter] Field "${f.labelText}" -> Answering: "${answer.value}" (source: ${answer.source})`,
@@ -409,12 +475,22 @@ export class NaukriAdapter implements IPlatformAdapter {
             if (!el) return;
 
             if (fType === 'select') {
+              let matchedIdx = -1;
+              const vLower = val.toLowerCase().trim();
               for (let i = 0; i < el.options.length; i++) {
-                if (el.options[i].text.toLowerCase().includes(val.toLowerCase())) {
-                  el.selectedIndex = i;
-                  el.dispatchEvent(new Event('change', { bubbles: true }));
+                const optText = el.options[i].text.toLowerCase().trim();
+                const optVal = (el.options[i].value || '').toLowerCase().trim();
+                if (optText === vLower || optVal === vLower) {
+                  matchedIdx = i;
                   break;
                 }
+                if (matchedIdx === -1 && (optText.includes(vLower) || vLower.includes(optText))) {
+                  matchedIdx = i;
+                }
+              }
+              if (matchedIdx !== -1) {
+                el.selectedIndex = matchedIdx;
+                el.dispatchEvent(new Event('change', { bubbles: true }));
               }
             } else if (fType === 'radio' || fType === 'checkbox') {
               el.checked = true;
@@ -433,6 +509,12 @@ export class NaukriAdapter implements IPlatformAdapter {
         await new Promise(r => setTimeout(r, 400));
       }
 
+      // Check and self-heal any validation errors before submitting
+      const preHealing = await inspectAndHealFormErrors({ puppeteerPage });
+      if (preHealing.correctedCount > 0) {
+        logger.info(`[NaukriAdapter] Self-healed ${preHealing.correctedCount} validation errors before submit.`);
+      }
+
       // Click submit in modal
       await puppeteerPage.evaluate((selectors: typeof NAUKRI_SELECTORS) => {
         for (const sel of selectors.SUBMIT_BUTTON) {
@@ -445,6 +527,23 @@ export class NaukriAdapter implements IPlatformAdapter {
       }, NAUKRI_SELECTORS);
 
       await new Promise(r => setTimeout(r, 2000));
+
+      // Check if modal is still open due to an error, and self-heal
+      const postHealing = await inspectAndHealFormErrors({ puppeteerPage });
+      if (postHealing.hasErrors && postHealing.correctedCount > 0) {
+        logger.info(`[NaukriAdapter] Post-submit error detected. Re-submitting after self-healing...`);
+        await puppeteerPage.evaluate((selectors: typeof NAUKRI_SELECTORS) => {
+          for (const sel of selectors.SUBMIT_BUTTON) {
+            const btn = document.querySelector(sel) as HTMLElement | null;
+            if (btn && btn.offsetParent !== null) {
+              btn.click();
+              return;
+            }
+          }
+        }, NAUKRI_SELECTORS);
+        await new Promise(r => setTimeout(r, 2000));
+      }
+
       return { success: true };
     } catch (err: any) {
       logger.warning('[NaukriAdapter] Failed filling questionnaire:', err);

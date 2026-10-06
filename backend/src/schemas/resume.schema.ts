@@ -55,9 +55,22 @@ export const parsedResumeSchema = z.object({
     )
     .default([]),
   backgroundNarrative: z.string().default(''),
+  currentLocation: z.string().default(''),
   preferredLocation: z.string().default(''),
+  preferredLocations: z.array(z.string()).default([]),
   workAuthorization: z.string().default('Authorized to work without sponsorship'),
   skillExperience: z.record(z.string(), z.number()).default({}),
+  goldenAnswers: z
+    .array(
+      z.object({
+        id: z.string(),
+        question: z.string(),
+        answer: z.string(),
+        category: z.string().default('Eligibility / Legal'),
+        isDefault: z.boolean().default(true),
+      }),
+    )
+    .default([]),
   salaryExpectation: z.string().default(''),
   portfolioUrl: z.string().default(''),
   githubUrl: z.string().default(''),

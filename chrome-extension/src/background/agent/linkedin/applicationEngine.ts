@@ -48,7 +48,7 @@ import { visionFallback } from './visionFallback';
 import { HumanPacingSimulator } from './humanPacing';
 import { DailyQuotaManager } from './rateLimiter';
 import { ResumeApprovalGate } from './resumeApproval';
-import { LinkedInBackendClient } from './backendClient';
+import { backendApiClient } from '@extension/shared';
 import type {
   IJobData,
   IApplicationState,
@@ -1295,7 +1295,7 @@ export class ApplicationEngine {
     // to prevent SPA hydration race conditions from aborting prematurely.
 
     // 1. Duplicate Check
-    const isDuplicate = await LinkedInBackendClient.checkDuplicateJob(jobData.jobId);
+    const isDuplicate = await backendApiClient.checkDuplicateJob(jobData.jobId);
     if (isDuplicate) {
       const msg = `Job "${jobData.title}" was already applied in database. Skipping.`;
       logger.info(`[ApplicationEngine] ${msg}`);
@@ -1340,8 +1340,14 @@ export class ApplicationEngine {
       this.state.completedAt = Date.now();
       if (!this.config.dryRun) {
         await DailyQuotaManager.incrementAppliedCount();
-        await LinkedInBackendClient.recordJobApplication({
-          jobData,
+        await backendApiClient.recordJobApplication({
+          jobId: jobData.jobId,
+          jobTitle: jobData.title,
+          company: jobData.company,
+          platform: 'linkedin',
+          applicationUrl: jobData.url,
+          location: jobData.location,
+          salaryRange: jobData.salaryRange,
           fitScore: fitScoreValue,
           status: 'APPLIED',
         });

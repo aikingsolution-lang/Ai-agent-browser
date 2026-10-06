@@ -51,7 +51,9 @@ export interface ICareerBrainDocument extends Document {
   workAuthorization: string;
   skillExperience?: Record<string, number>;
   salaryExpectation?: string;
+  currentLocation?: string;
   preferredLocation?: string;
+  preferredLocations?: string[];
   portfolioUrl?: string;
   githubUrl?: string;
   linkedinUrl?: string;
@@ -132,7 +134,9 @@ const careerBrainSchema = new Schema<ICareerBrainDocument>(
     workAuthorization: { type: String, default: 'Authorized to work', trim: true },
     skillExperience: { type: Schema.Types.Mixed, default: {} },
     salaryExpectation: { type: String, default: '', trim: true },
+    currentLocation: { type: String, default: '', trim: true },
     preferredLocation: { type: String, default: '', trim: true },
+    preferredLocations: { type: [String], default: [] },
     portfolioUrl: { type: String, default: '', trim: true },
     githubUrl: { type: String, default: '', trim: true },
     linkedinUrl: { type: String, default: '', trim: true },

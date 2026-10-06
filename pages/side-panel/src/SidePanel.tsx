@@ -18,6 +18,8 @@ import {
   validateProfileCompleteness,
   queueSafetyStore,
   normalizeLinkedInJobUrl,
+  checkCopilotAccess,
+  dailyQuotaStore,
 } from '@extension/storage';
 import { backendApiClient } from '@extension/shared';
 import favoritesStorage, { type FavoritePrompt } from '@extension/storage/lib/prompt/favorites';
@@ -27,6 +29,8 @@ import ChatInput from './components/ChatInput';
 import ChatHistoryList from './components/ChatHistoryList';
 import BookmarkList from './components/BookmarkList';
 import { AuthModal } from './components/AuthModal';
+import { AuthGateView } from './components/AuthGateView';
+import { PremiumPlansModal } from './components/PremiumPlansModal';
 import { EventType, type AgentEvent, ExecutionState } from './types/event';
 import { FiBriefcase, FiFileText, FiMessageSquare } from 'react-icons/fi';
 import { ResumeProfileView } from './components/ResumeProfileView';
@@ -59,7 +63,9 @@ const SidePanel = () => {
   const [replayEnabled, setReplayEnabled] = useState(false);
   const [cloudSettings, setCloudSettings] = useState<CloudApiSettingsConfig | null>(null);
   const [authSession, setAuthSession] = useState<UserSessionData | null>(null);
+  const [isAuthLoading, setIsAuthLoading] = useState<boolean>(true);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
+  const [isPlansModalOpen, setIsPlansModalOpen] = useState(false);
   const [userCredits, setUserCredits] = useState<{ remainingCredits: number; allocatedCredits: number } | null>(null);
   const [mainTab, setMainTab] = useState<'apply' | 'resume' | 'chat'>('apply');
   const [isApplying, setIsApplying] = useState(false);
@@ -70,6 +76,28 @@ const SidePanel = () => {
   const [activityItems, setActivityItems] = useState<StructuredActivityItem[]>([]);
   const [pendingQuestion, setPendingQuestion] = useState<any | null>(null);
   const [pendingBatch, setPendingBatch] = useState<any | null>(null);
+  const [chatMode, setChatMode] = useState<'agent' | 'copilot'>('copilot');
+  const [copilotMessages, setCopilotMessages] = useState<Message[]>([]);
+  const [isCopilotTyping, setIsCopilotTyping] = useState(false);
+  const [copilotAudit, setCopilotAudit] = useState<{ score: number; missingFields: any[] } | null>(null);
+
+  const refreshCopilotAudit = useCallback(async () => {
+    try {
+      chrome.runtime.sendMessage({ type: 'CAREER_COPILOT_AUDIT' }, (res: any) => {
+        if (res && res.success && res.audit) {
+          setCopilotAudit(res.audit);
+        }
+      });
+    } catch (err) {
+      console.error('Failed to fetch copilot audit:', err);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (mainTab === 'chat' && chatMode === 'copilot') {
+      refreshCopilotAudit();
+    }
+  }, [mainTab, chatMode, refreshCopilotAudit]);
 
   // Check if models are configured OR user is authenticated with Cloud API
   const checkModelConfiguration = useCallback(async () => {
@@ -90,9 +118,15 @@ const SidePanel = () => {
   // 1. Pure Local Storage Sync (Does NOT make HTTP API calls, preventing storage subscription infinite loops)
   const syncAuthFromStorage = useCallback(async () => {
     try {
-      const session = await authStorage.getSession();
+      let session = await authStorage.getSession();
+      if (!session?.token && session?.refreshToken) {
+        const refreshedToken = await backendApiClient.refreshAccessToken();
+        if (refreshedToken) {
+          session = await authStorage.getSession();
+        }
+      }
       setAuthSession(session);
-      if (session.credits) {
+      if (session?.credits) {
         setUserCredits({
           remainingCredits: session.credits.remainingCredits,
           allocatedCredits: session.credits.allocatedCredits,
@@ -100,12 +134,14 @@ const SidePanel = () => {
       } else {
         setUserCredits(null);
       }
-      if (session.token) {
+      if (session?.token) {
         backendApiClient.setToken(session.token);
       }
       checkModelConfiguration();
     } catch (error) {
       console.error('Error syncing auth state from storage:', error);
+    } finally {
+      setIsAuthLoading(false);
     }
   }, [checkModelConfiguration]);
 
@@ -125,6 +161,12 @@ const SidePanel = () => {
           allocatedCredits: creditsRes.data.allocatedCredits,
         });
         await authStorage.setSession({ credits: creditsRes.data });
+      }
+
+      // Sync user subscription daily apply quota limit
+      const quotaRes = await backendApiClient.getProfileQuota().catch(() => null);
+      if (quotaRes?.dailyLimit) {
+        await dailyQuotaStore.setMaxDailyLimit(quotaRes.dailyLimit);
       }
     } catch (error) {
       console.error('Error fetching credits balance from API:', error);
@@ -363,7 +405,14 @@ const SidePanel = () => {
       if (content && data?.taskId !== 'runner_status') {
         setActiveStatusText(content);
         setAppliedLogs(prev => {
-          if (prev.length > 0 && prev[0].text === content) return prev;
+          if (
+            prev.length > 0 &&
+            (prev[0].text === content ||
+              (content.includes('Application stopped by user') &&
+                prev.some(item => item.text.includes('Application stopped by user'))))
+          ) {
+            return prev;
+          }
           return [
             {
               id: String(Date.now()) + Math.random(),
@@ -497,8 +546,29 @@ const SidePanel = () => {
         } else if (message && message.type === 'LINKEDIN_STATUS_UPDATE') {
           if (message.text) {
             setActiveStatusText(message.text);
+            const lowerText = message.text.toLowerCase();
+            if (
+              lowerText.includes('stopped') ||
+              lowerText.includes('window was closed') ||
+              lowerText.includes('already in progress') ||
+              lowerText.includes('quota reached') ||
+              lowerText.includes('insufficient credit') ||
+              lowerText.includes('timeout') ||
+              lowerText.includes('pausing') ||
+              lowerText.includes('paused') ||
+              lowerText.includes('additional verification')
+            ) {
+              setIsApplying(false);
+            }
             setAppliedLogs(prev => {
-              if (prev.length > 0 && prev[0].text === message.text) return prev;
+              if (
+                prev.length > 0 &&
+                (prev[0].text === message.text ||
+                  (message.text.includes('Application stopped by user') &&
+                    prev.some(item => item.text.includes('Application stopped by user'))))
+              ) {
+                return prev;
+              }
               return [
                 {
                   id: String(Date.now()) + Math.random().toString(36).slice(2, 6),
@@ -515,7 +585,14 @@ const SidePanel = () => {
           if (message.summary) {
             setActiveStatusText(message.summary);
             setAppliedLogs(prev => {
-              if (prev.length > 0 && prev[0].text === message.summary) return prev;
+              if (
+                prev.length > 0 &&
+                (prev[0].text === message.summary ||
+                  (message.summary.includes('Application stopped by user') &&
+                    prev.some(item => item.text.includes('Application stopped by user'))))
+              ) {
+                return prev;
+              }
               return [
                 {
                   id: String(Date.now()) + Math.random().toString(36).slice(2, 6),
@@ -748,6 +825,118 @@ const SidePanel = () => {
     }
   };
 
+  const handleCopilotSendMessage = async (text: string) => {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+
+    // Check copilot tier access (future-proof subscription)
+    const access = await checkCopilotAccess();
+    if (!access.allowed) {
+      setCopilotMessages(prev => [
+        ...prev,
+        {
+          actor: Actors.SYSTEM,
+          content: access.reason || 'Upgrade to Pro to unlock Career Copilot.',
+          timestamp: Date.now(),
+        },
+      ]);
+      return;
+    }
+
+    // 1. Add user message
+    const userMsg: Message = {
+      actor: Actors.USER,
+      content: trimmed,
+      timestamp: Date.now(),
+    };
+    setCopilotMessages(prev => [...prev, userMsg]);
+    setIsCopilotTyping(true);
+
+    // 2. Prepare chat history
+    const history = copilotMessages
+      .filter(m => m.actor === Actors.USER || m.actor === Actors.COPILOT)
+      .slice(-6)
+      .map(m => ({
+        role: (m.actor === Actors.USER ? 'user' : 'assistant') as 'user' | 'assistant',
+        content: m.content,
+      }));
+
+    // 3. Dispatch to background service worker
+    chrome.runtime.sendMessage(
+      {
+        type: 'CAREER_COPILOT_CHAT',
+        userMessage: trimmed,
+        chatHistory: history,
+      },
+      (res: any) => {
+        setIsCopilotTyping(false);
+        if (chrome.runtime.lastError || !res?.success) {
+          const errorText = res?.error || chrome.runtime.lastError?.message || 'Failed to connect to Career Copilot.';
+          setCopilotMessages(prev => [
+            ...prev,
+            {
+              actor: Actors.COPILOT,
+              content: `⚠️ Error: ${errorText}`,
+              timestamp: Date.now(),
+            },
+          ]);
+          return;
+        }
+
+        const copilotResponse = res.response;
+        let actionCard: any = undefined;
+
+        if (copilotResponse.actionType === 'update' && copilotResponse.updatedFields) {
+          actionCard = {
+            type: 'profile_updated',
+            title: 'Career Brain Updated',
+            data: {
+              updatedFields: copilotResponse.updatedFields,
+              profileCompleteness: copilotResponse.profileCompleteness,
+            },
+          };
+          refreshCopilotAudit();
+        } else if (copilotResponse.actionType === 'job_fit' && copilotResponse.fitReport) {
+          actionCard = {
+            type: 'job_fit',
+            title: 'Job Match Report',
+            data: {
+              fitReport: copilotResponse.fitReport,
+            },
+          };
+        } else if (copilotResponse.actionType === 'pitch') {
+          actionCard = {
+            type: 'pitch',
+            title: 'Recruiter Pitch',
+            data: {
+              pitch: copilotResponse.reply.replace(/\*\*/g, '').trim(),
+            },
+          };
+        } else if (copilotResponse.actionType === 'cover_letter' && copilotResponse.coverLetter) {
+          actionCard = {
+            type: 'cover_letter',
+            title: 'Tailored Cover Letter',
+            data: {
+              coverLetter: copilotResponse.coverLetter,
+            },
+          };
+        }
+
+        const assistantMsg: Message = {
+          actor: Actors.COPILOT,
+          content: copilotResponse.reply,
+          timestamp: Date.now(),
+          metadata: {
+            actionCard,
+            quickOptions: copilotResponse.quickOptions,
+          },
+        };
+
+        setCopilotMessages(prev => [...prev, assistantMsg]);
+      },
+    );
+  };
+
   const handleSendMessage = async (text: string, displayText?: string) => {
     console.log('handleSendMessage', text);
 
@@ -755,6 +944,11 @@ const SidePanel = () => {
     const trimmedText = text.trim();
 
     if (!trimmedText) return;
+
+    if (chatMode === 'copilot') {
+      await handleCopilotSendMessage(trimmedText);
+      return;
+    }
 
     // Check if user is authenticated before sending task (fresh check from storage)
     const session = await authStorage.getSession();
@@ -891,6 +1085,32 @@ const SidePanel = () => {
 
   const handleStartAutoApply = useCallback(
     async (platform: 'linkedin' | 'naukri' | 'indeed' = 'linkedin') => {
+      // PART 2: UI Gate - Session check and refresh
+      let currentSession = await authStorage.getSession();
+      if (!currentSession?.token && currentSession?.refreshToken) {
+        const refreshedToken = await backendApiClient.refreshAccessToken();
+        if (refreshedToken) {
+          currentSession = await authStorage.getSession();
+        }
+      }
+
+      if (!currentSession?.token) {
+        const authMsg = 'Authentication required. Please sign in to start applying.';
+        setActiveStatusText(authMsg);
+        setAppliedLogs(prev => [
+          {
+            id: String(Date.now()),
+            text: `🔒 ${authMsg}`,
+            status: 'fail',
+            timestamp: Date.now(),
+          },
+          ...prev,
+        ]);
+        setIsApplying(false);
+        setIsAuthModalOpen(true);
+        return;
+      }
+
       try {
         const brain = await careerBrainStore.getCareerBrain();
         const check = validateProfileCompleteness(brain);
@@ -911,11 +1131,31 @@ const SidePanel = () => {
         }
       } catch {}
 
+      try {
+        const pauseStatus = await queueSafetyStore.getPlatformPause(platform);
+        if (pauseStatus.isPaused) {
+          const pauseMsg =
+            pauseStatus.reason ||
+            `${platform === 'indeed' ? 'Indeed' : platform} auto-apply is paused for today to protect your account.`;
+          setActiveStatusText(pauseMsg);
+          setAppliedLogs(prev => [
+            {
+              id: String(Date.now()),
+              text: `⏸️ ${pauseMsg}`,
+              status: 'fail',
+              timestamp: Date.now(),
+            },
+            ...prev,
+          ]);
+          return;
+        }
+      } catch {}
+
       if (!portRef.current) {
         setupConnection();
       }
 
-      const platformName = platform === 'naukri' ? 'Naukri.com' : 'LinkedIn';
+      const platformName = platform === 'naukri' ? 'Naukri.com' : platform === 'indeed' ? 'Indeed' : 'LinkedIn';
       setIsApplying(true);
       setActiveStatusText(`Initializing autonomous search and apply loop on ${platformName}...`);
       setAppliedLogs(prev => [
@@ -944,15 +1184,18 @@ const SidePanel = () => {
     setActiveStatusText('Application stopped by user.');
     setPendingQuestion(null);
     setPendingBatch(null);
-    setAppliedLogs(prev => [
-      {
-        id: String(Date.now()),
-        text: '⏹️ Application stopped by user.',
-        status: 'info',
-        timestamp: Date.now(),
-      },
-      ...prev,
-    ]);
+    setAppliedLogs(prev => {
+      if (prev.some(item => item.text.includes('Application stopped by user'))) return prev;
+      return [
+        {
+          id: String(Date.now()),
+          text: '⏹️ Application stopped by user.',
+          status: 'info',
+          timestamp: Date.now(),
+        },
+        ...prev,
+      ];
+    });
     try {
       portRef.current?.postMessage({ type: 'STOP_AUTO_APPLY' });
     } catch {}
@@ -1349,12 +1592,22 @@ const SidePanel = () => {
                       {authSession.user.name.split(' ')[0]}
                     </span>
                     {userCredits && (
-                      <span
-                        className="rounded-full border border-amber-500/30 bg-amber-500/20 px-2 py-0.5 text-[10px] font-bold text-amber-300"
-                        title={`${userCredits.remainingCredits} credits available out of ${userCredits.allocatedCredits}`}>
+                      <button
+                        type="button"
+                        onClick={() => setIsPlansModalOpen(true)}
+                        className="rounded-full border border-amber-500/30 bg-amber-500/20 px-2 py-0.5 text-[10px] font-bold text-amber-300 hover:bg-amber-500/30 cursor-pointer transition-colors"
+                        title="View NanoBrowser Premium Commercial Plans">
                         ⚡ {userCredits.remainingCredits} credits
-                      </span>
+                      </button>
                     )}
+                    <button
+                      type="button"
+                      onClick={() => setIsPlansModalOpen(true)}
+                      className="inline-flex cursor-pointer items-center space-x-1 rounded-full bg-gradient-to-r from-amber-500 to-orange-500 px-2 py-0.5 text-[10px] font-bold text-white shadow transition-transform hover:scale-105"
+                      title="View NanoBrowser Premium Commercial Plans">
+                      <FiZap className="size-2.5" />
+                      <span>Plans</span>
+                    </button>
                     <button
                       type="button"
                       onClick={async () => {
@@ -1381,7 +1634,7 @@ const SidePanel = () => {
             )}
           </div>
           <div className="header-icons">
-            {!showHistory && (
+            {!showHistory && authSession?.token && (
               <>
                 <button
                   type="button"
@@ -1415,8 +1668,8 @@ const SidePanel = () => {
           </div>
         </header>
 
-        {/* Navigation Tabs */}
-        {!showHistory && (
+        {/* Navigation Tabs - ONLY SHOWN WHEN AUTHENTICATED */}
+        {!showHistory && authSession?.token && (
           <div
             className={`flex border-b text-xs font-semibold shrink-0 ${isDarkMode ? 'border-sky-900 bg-slate-800/90' : 'border-sky-100 bg-white/90 shadow-sm'}`}>
             <button
@@ -1452,7 +1705,20 @@ const SidePanel = () => {
           </div>
         )}
 
-        {showHistory ? (
+        {isAuthLoading ? (
+          <div className="flex flex-1 items-center justify-center p-8">
+            <div className="size-8 animate-spin rounded-full border-2 border-sky-400 border-t-transparent" />
+          </div>
+        ) : !authSession?.token ? (
+          <AuthGateView
+            isDarkMode={isDarkMode}
+            onSuccess={() => {
+              syncAuthFromStorage();
+              fetchCreditsBalance();
+              setIsPlansModalOpen(true);
+            }}
+          />
+        ) : showHistory ? (
           <div className="flex-1 overflow-hidden">
             <ChatHistoryList
               sessions={chatSessions}
@@ -1468,6 +1734,8 @@ const SidePanel = () => {
             isDarkMode={isDarkMode}
             onStartAutoApply={handleStartAutoApply}
             onStop={handleStopLinkedInApply}
+            onOpenAuthModal={() => setIsAuthModalOpen(true)}
+            onOpenPlansModal={() => setIsPlansModalOpen(true)}
             isApplying={isApplying}
             activeStatusText={activeStatusText}
             appliedLogs={appliedLogs}
@@ -1551,64 +1819,288 @@ const SidePanel = () => {
             {/* Show normal chat interface when models are configured */}
             {hasConfiguredModels === true && (
               <>
-                {messages.length === 0 && (
+                {/* DUAL MODE SELECTOR HEADER */}
+                <div
+                  className={`flex items-center justify-between border-b px-3 py-2 shrink-0 ${
+                    isDarkMode ? 'border-sky-900 bg-slate-800/80' : 'border-sky-100 bg-slate-50'
+                  }`}>
+                  <div className="flex items-center space-x-1 rounded-lg border border-slate-700/50 bg-slate-900/60 p-0.5">
+                    <button
+                      type="button"
+                      onClick={() => setChatMode('agent')}
+                      className={`flex cursor-pointer items-center space-x-1.5 rounded-md px-2.5 py-1 text-xs font-semibold transition-all ${
+                        chatMode === 'agent' ? 'bg-sky-500 text-white shadow-sm' : 'text-slate-400 hover:text-slate-200'
+                      }`}>
+                      <span>🌐 Web Agent</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setChatMode('copilot')}
+                      className={`flex cursor-pointer items-center space-x-1.5 rounded-md px-2.5 py-1 text-xs font-semibold transition-all ${
+                        chatMode === 'copilot'
+                          ? 'bg-gradient-to-r from-purple-600 to-indigo-600 text-white shadow-sm'
+                          : 'text-slate-400 hover:text-slate-200'
+                      }`}>
+                      <span>✨ 🧠 Career Copilot</span>
+                      <span className="rounded bg-purple-400/25 px-1 py-0.2 text-[9px] font-bold uppercase tracking-wider text-purple-200">
+                        Pro
+                      </span>
+                    </button>
+                  </div>
+
+                  {chatMode === 'copilot' && copilotAudit && (
+                    <div className="flex items-center space-x-1.5 text-[11px] font-semibold">
+                      <span className="opacity-70">Readiness:</span>
+                      <span
+                        className={`font-bold ${
+                          copilotAudit.score >= 80
+                            ? 'text-emerald-400'
+                            : copilotAudit.score >= 50
+                              ? 'text-amber-400'
+                              : 'text-rose-400'
+                        }`}>
+                        {copilotAudit.score}%
+                      </span>
+                    </div>
+                  )}
+                </div>
+
+                {chatMode === 'copilot' ? (
                   <>
+                    {/* Career Copilot Mode View */}
+                    {copilotMessages.length === 0 ? (
+                      <div className="flex-1 overflow-y-auto p-3.5 space-y-3">
+                        {/* Futuristic Hero Card */}
+                        <div
+                          className={`rounded-2xl border p-4 shadow-lg transition-all ${
+                            isDarkMode
+                              ? 'border-purple-500/30 bg-gradient-to-br from-purple-950/40 via-slate-900 to-slate-900 text-purple-100'
+                              : 'border-purple-200 bg-gradient-to-br from-purple-50 via-white to-indigo-50/50 text-purple-950'
+                          }`}>
+                          <div className="flex items-center space-x-2">
+                            <span className="text-xl">✨</span>
+                            <h3 className="font-extrabold text-sm tracking-wide bg-gradient-to-r from-purple-400 to-indigo-400 bg-clip-text text-transparent">
+                              AI Career Copilot Pro
+                            </h3>
+                          </div>
+                          <p className="mt-1 text-xs leading-relaxed opacity-85">
+                            Your personal AI career intelligence copilot. Audits missing profile details, evaluates live
+                            job fit on open tabs, and generates high-converting recruiter pitches.
+                          </p>
+
+                          {/* Live Readiness Meter */}
+                          <div className="mt-3.5 rounded-xl border border-purple-500/20 bg-purple-500/10 p-3">
+                            <div className="flex items-center justify-between text-xs font-bold">
+                              <span>Profile Readiness</span>
+                              <span className="text-purple-300">{copilotAudit?.score ?? 0}% Complete</span>
+                            </div>
+                            <div className="mt-1.5 h-2 w-full overflow-hidden rounded-full bg-slate-800/80">
+                              <div
+                                className="h-full rounded-full bg-gradient-to-r from-purple-500 to-indigo-400 transition-all duration-700"
+                                style={{ width: `${copilotAudit?.score ?? 0}%` }}
+                              />
+                            </div>
+                            {copilotAudit?.missingFields?.[0] && (
+                              <p className="mt-2 text-[11px] font-medium text-purple-200/90 flex items-center space-x-1">
+                                <span className="text-amber-400 font-bold">⚡ Priority:</span>
+                                <span>{copilotAudit.missingFields[0].promptQuestion}</span>
+                              </p>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Quick Action Prompt Cards */}
+                        <div className="space-y-1.5 pt-1">
+                          <span className="text-[10px] uppercase font-bold tracking-wider opacity-60">
+                            Quick Actions:
+                          </span>
+                          <div className="grid grid-cols-1 gap-2">
+                            <button
+                              type="button"
+                              onClick={() => handleSendMessage('Audit my profile')}
+                              className={`flex items-center justify-between p-2.5 rounded-xl border text-left text-xs font-semibold transition-all hover:scale-[1.01] active:scale-[0.99] cursor-pointer ${
+                                isDarkMode
+                                  ? 'border-slate-800 bg-slate-800/70 hover:border-purple-500/50 hover:bg-purple-950/20 text-slate-200'
+                                  : 'border-slate-200 bg-white hover:border-purple-300 hover:bg-purple-50/50 text-slate-800 shadow-sm'
+                              }`}>
+                              <div className="flex items-center space-x-2.5">
+                                <span className="text-base">🔍</span>
+                                <div>
+                                  <div className="font-bold">Audit Profile & Missing Info</div>
+                                  <div className="text-[10px] font-normal opacity-70">
+                                    Check completeness & fill missing screening fields
+                                  </div>
+                                </div>
+                              </div>
+                              <span className="text-purple-400">→</span>
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() => handleSendMessage('Check fit for open job page')}
+                              className={`flex items-center justify-between p-2.5 rounded-xl border text-left text-xs font-semibold transition-all hover:scale-[1.01] active:scale-[0.99] cursor-pointer ${
+                                isDarkMode
+                                  ? 'border-slate-800 bg-slate-800/70 hover:border-purple-500/50 hover:bg-purple-950/20 text-slate-200'
+                                  : 'border-slate-200 bg-white hover:border-purple-300 hover:bg-purple-50/50 text-slate-800 shadow-sm'
+                              }`}>
+                              <div className="flex items-center space-x-2.5">
+                                <span className="text-base">🎯</span>
+                                <div>
+                                  <div className="font-bold">Check Fit for Current Tab Job</div>
+                                  <div className="text-[10px] font-normal opacity-70">
+                                    Scrape active job tab & calculate skills match score
+                                  </div>
+                                </div>
+                              </div>
+                              <span className="text-purple-400">→</span>
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() => handleSendMessage('Draft tailored recruiter pitch')}
+                              className={`flex items-center justify-between p-2.5 rounded-xl border text-left text-xs font-semibold transition-all hover:scale-[1.01] active:scale-[0.99] cursor-pointer ${
+                                isDarkMode
+                                  ? 'border-slate-800 bg-slate-800/70 hover:border-purple-500/50 hover:bg-purple-950/20 text-slate-200'
+                                  : 'border-slate-200 bg-white hover:border-purple-300 hover:bg-purple-50/50 text-slate-800 shadow-sm'
+                              }`}>
+                              <div className="flex items-center space-x-2.5">
+                                <span className="text-base">📝</span>
+                                <div>
+                                  <div className="font-bold">Draft Tailored Recruiter Note</div>
+                                  <div className="text-[10px] font-normal opacity-70">
+                                    High-converting 3-sentence application pitch
+                                  </div>
+                                </div>
+                              </div>
+                              <span className="text-purple-400">→</span>
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() => handleSendMessage('Start mock screening interview')}
+                              className={`flex items-center justify-between p-2.5 rounded-xl border text-left text-xs font-semibold transition-all hover:scale-[1.01] active:scale-[0.99] cursor-pointer ${
+                                isDarkMode
+                                  ? 'border-slate-800 bg-slate-800/70 hover:border-purple-500/50 hover:bg-purple-950/20 text-slate-200'
+                                  : 'border-slate-200 bg-white hover:border-purple-300 hover:bg-purple-50/50 text-slate-800 shadow-sm'
+                              }`}>
+                              <div className="flex items-center space-x-2.5">
+                                <span className="text-base">🎙️</span>
+                                <div>
+                                  <div className="font-bold">Start Mock Recruiter Interview</div>
+                                  <div className="text-[10px] font-normal opacity-70">
+                                    Simulate screening questions with feedback
+                                  </div>
+                                </div>
+                              </div>
+                              <span className="text-purple-400">→</span>
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    ) : (
+                      <div
+                        className={`scrollbar-gutter-stable flex-1 overflow-x-hidden overflow-y-scroll scroll-smooth p-2 ${
+                          isDarkMode ? 'bg-slate-900/80' : ''
+                        }`}>
+                        <MessageList
+                          messages={copilotMessages}
+                          isDarkMode={isDarkMode}
+                          onSelectOption={handleSendMessage}
+                        />
+                        {isCopilotTyping && (
+                          <div className="flex items-center space-x-2 px-3 py-2 text-xs font-semibold text-purple-400 animate-pulse">
+                            <div className="size-2 rounded-full bg-purple-400" />
+                            <span>Career Copilot analyzing & formulating response...</span>
+                          </div>
+                        )}
+                        <div ref={messagesEndRef} />
+                      </div>
+                    )}
+
+                    {/* Copilot Input */}
                     <div
-                      className={`border-t ${isDarkMode ? 'border-sky-900' : 'border-sky-100'} mb-2 p-2 shadow-sm backdrop-blur-sm`}>
+                      className={`border-t ${
+                        isDarkMode ? 'border-sky-900' : 'border-sky-100'
+                      } p-2 shadow-sm backdrop-blur-sm`}>
                       <ChatInput
                         onSendMessage={handleSendMessage}
                         onStopTask={handleStopTask}
                         onMicClick={handleMicClick}
                         isRecording={isRecording}
                         isProcessingSpeech={isProcessingSpeech}
-                        disabled={!inputEnabled || isHistoricalSession}
-                        showStopButton={showStopButton}
+                        disabled={isCopilotTyping}
+                        showStopButton={false}
                         setContent={setter => {
                           setInputTextRef.current = setter;
                         }}
                         isDarkMode={isDarkMode}
-                        historicalSessionId={isHistoricalSession && replayEnabled ? currentSessionId : null}
-                        onReplay={handleReplay}
-                      />
-                    </div>
-                    <div className="flex-1 overflow-y-auto">
-                      <BookmarkList
-                        bookmarks={favoritePrompts}
-                        onBookmarkSelect={handleBookmarkSelect}
-                        onBookmarkUpdateTitle={handleBookmarkUpdateTitle}
-                        onBookmarkDelete={handleBookmarkDelete}
-                        onBookmarkReorder={handleBookmarkReorder}
-                        isDarkMode={isDarkMode}
+                        placeholder="Ask about your profile, update details (e.g. 15 days notice), check job fit..."
                       />
                     </div>
                   </>
-                )}
-                {messages.length > 0 && (
-                  <div
-                    className={`scrollbar-gutter-stable flex-1 overflow-x-hidden overflow-y-scroll scroll-smooth p-2 ${isDarkMode ? 'bg-slate-900/80' : ''}`}>
-                    <MessageList messages={messages} isDarkMode={isDarkMode} />
-                    <div ref={messagesEndRef} />
-                  </div>
-                )}
-                {messages.length > 0 && (
-                  <div
-                    className={`border-t ${isDarkMode ? 'border-sky-900' : 'border-sky-100'} p-2 shadow-sm backdrop-blur-sm`}>
-                    <ChatInput
-                      onSendMessage={handleSendMessage}
-                      onStopTask={handleStopTask}
-                      onMicClick={handleMicClick}
-                      isRecording={isRecording}
-                      isProcessingSpeech={isProcessingSpeech}
-                      disabled={!inputEnabled || isHistoricalSession}
-                      showStopButton={showStopButton}
-                      setContent={setter => {
-                        setInputTextRef.current = setter;
-                      }}
-                      isDarkMode={isDarkMode}
-                      historicalSessionId={isHistoricalSession && replayEnabled ? currentSessionId : null}
-                      onReplay={handleReplay}
-                    />
-                  </div>
+                ) : (
+                  /* Web Agent Mode View (Original & Untouched) */
+                  <>
+                    {messages.length === 0 && (
+                      <>
+                        <div
+                          className={`border-t ${isDarkMode ? 'border-sky-900' : 'border-sky-100'} mb-2 p-2 shadow-sm backdrop-blur-sm`}>
+                          <ChatInput
+                            onSendMessage={handleSendMessage}
+                            onStopTask={handleStopTask}
+                            onMicClick={handleMicClick}
+                            isRecording={isRecording}
+                            isProcessingSpeech={isProcessingSpeech}
+                            disabled={!inputEnabled || isHistoricalSession}
+                            showStopButton={showStopButton}
+                            setContent={setter => {
+                              setInputTextRef.current = setter;
+                            }}
+                            isDarkMode={isDarkMode}
+                            historicalSessionId={isHistoricalSession && replayEnabled ? currentSessionId : null}
+                            onReplay={handleReplay}
+                          />
+                        </div>
+                        <div className="flex-1 overflow-y-auto">
+                          <BookmarkList
+                            bookmarks={favoritePrompts}
+                            onBookmarkSelect={handleBookmarkSelect}
+                            onBookmarkUpdateTitle={handleBookmarkUpdateTitle}
+                            onBookmarkDelete={handleBookmarkDelete}
+                            onBookmarkReorder={handleBookmarkReorder}
+                            isDarkMode={isDarkMode}
+                          />
+                        </div>
+                      </>
+                    )}
+                    {messages.length > 0 && (
+                      <div
+                        className={`scrollbar-gutter-stable flex-1 overflow-x-hidden overflow-y-scroll scroll-smooth p-2 ${isDarkMode ? 'bg-slate-900/80' : ''}`}>
+                        <MessageList messages={messages} isDarkMode={isDarkMode} />
+                        <div ref={messagesEndRef} />
+                      </div>
+                    )}
+                    {messages.length > 0 && (
+                      <div
+                        className={`border-t ${isDarkMode ? 'border-sky-900' : 'border-sky-100'} p-2 shadow-sm backdrop-blur-sm`}>
+                        <ChatInput
+                          onSendMessage={handleSendMessage}
+                          onStopTask={handleStopTask}
+                          onMicClick={handleMicClick}
+                          isRecording={isRecording}
+                          isProcessingSpeech={isProcessingSpeech}
+                          disabled={!inputEnabled || isHistoricalSession}
+                          showStopButton={showStopButton}
+                          setContent={setter => {
+                            setInputTextRef.current = setter;
+                          }}
+                          isDarkMode={isDarkMode}
+                          historicalSessionId={isHistoricalSession && replayEnabled ? currentSessionId : null}
+                          onReplay={handleReplay}
+                        />
+                      </div>
+                    )}
+                  </>
                 )}
               </>
             )}
@@ -1622,7 +2114,15 @@ const SidePanel = () => {
         onSuccess={async () => {
           await syncAuthFromStorage();
           await fetchCreditsBalance();
+          setIsPlansModalOpen(true);
         }}
+      />
+
+      <PremiumPlansModal
+        isOpen={isPlansModalOpen}
+        onClose={() => setIsPlansModalOpen(false)}
+        isDarkMode={isDarkMode}
+        userCredits={userCredits}
       />
     </div>
   );

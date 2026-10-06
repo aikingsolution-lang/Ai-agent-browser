@@ -13,6 +13,7 @@ interface ChatInputProps {
   showStopButton: boolean;
   setContent?: (setter: (text: string) => void) => void;
   isDarkMode?: boolean;
+  placeholder?: string;
   // Historical session ID - if provided, shows replay button instead of send button
   historicalSessionId?: string | null;
   onReplay?: (sessionId: string) => void;
@@ -35,6 +36,7 @@ export default function ChatInput({
   showStopButton,
   setContent,
   isDarkMode = false,
+  placeholder,
   historicalSessionId,
   onReplay,
 }: ChatInputProps) {
@@ -233,7 +235,9 @@ export default function ChatInput({
                 ? 'bg-slate-800 text-gray-200'
                 : 'bg-white'
           }`}
-          placeholder={attachedFiles.length > 0 ? 'Add a message (optional)...' : t('chat_input_placeholder')}
+          placeholder={
+            attachedFiles.length > 0 ? 'Add a message (optional)...' : placeholder || t('chat_input_placeholder')
+          }
           aria-label={t('chat_input_editor')}
         />
 

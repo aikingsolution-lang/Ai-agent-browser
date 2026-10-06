@@ -1,5 +1,5 @@
-// chrome-extension/src/background/agent/platforms/naukri/naukriResolver.ts
-import type { ICareerBrain } from '@extension/storage';
+import { type ICareerBrain, parseLocationParts } from '@extension/storage';
+import { alignValueToOptions, matchQuestionSemantically } from '../../intelligence';
 
 export interface INaukriAnswerResult {
   value: string;
@@ -16,6 +16,21 @@ export function resolveNaukriQuestion(
   options: string[] = [],
   careerBrain: ICareerBrain,
 ): INaukriAnswerResult {
+  // 1. High-speed semantic matcher
+  const semantic = matchQuestionSemantically(questionText, careerBrain);
+  if (semantic && semantic.confidence >= 0.88 && semantic.matchedAnswer) {
+    let finalVal = semantic.matchedAnswer;
+    if (options.length > 0) {
+      const aligned = alignValueToOptions(finalVal, options, questionText);
+      if (aligned) finalVal = aligned.matchedOption;
+    }
+    return {
+      value: finalVal,
+      confidence: semantic.confidence,
+      source: semantic.source === 'golden_answer' ? 'golden_answer' : 'profile',
+    };
+  }
+
   const q = questionText.toLowerCase().trim();
 
   // 1. Notice Period
@@ -108,9 +123,41 @@ export function resolveNaukriQuestion(
     return { value: yoe, confidence: 0.95, source: 'profile' };
   }
 
-  // 5. Current Location / City
-  if (q.includes('current location') || q.includes('current city') || q.includes('where do you live')) {
-    const loc = careerBrain.currentLocation || careerBrain.preferredLocation || 'Bengaluru';
+  // 5. Current / Preferred Location (with Priority 1 > Priority 2 > Priority 3)
+  if (
+    q.includes('current location') ||
+    q.includes('preferred location') ||
+    q.includes('current city') ||
+    q.includes('where do you live') ||
+    q.includes('location')
+  ) {
+    const prefList =
+      Array.isArray(careerBrain.preferredLocations) && careerBrain.preferredLocations.length > 0
+        ? careerBrain.preferredLocations
+        : [careerBrain.preferredLocation || careerBrain.currentLocation || 'Bengaluru, Karnataka, India'];
+
+    if (options.length > 0) {
+      for (let pIdx = 0; pIdx < prefList.length; pIdx++) {
+        const pref = prefList[pIdx];
+        if (!pref) continue;
+        const prefLo = pref.toLowerCase();
+        const parts = parseLocationParts(pref);
+        const matched = options.find(opt => {
+          const oLo = opt.toLowerCase();
+          return (
+            prefLo.includes(oLo) ||
+            oLo.includes(prefLo) ||
+            (parts.city && oLo.includes(parts.city.toLowerCase())) ||
+            (parts.state && oLo.includes(parts.state.toLowerCase()))
+          );
+        });
+        if (matched) {
+          return { value: matched, confidence: 0.95 - pIdx * 0.05, source: 'profile' };
+        }
+      }
+      return { value: options[0], confidence: 0.5, source: 'profile' };
+    }
+    const loc = prefList[0] || 'Bengaluru, Karnataka, India';
     return { value: loc, confidence: 0.9, source: 'profile' };
   }
 
@@ -133,11 +180,14 @@ export function resolveNaukriQuestion(
   }
 
   // 8. Default fallback
-  if (fieldType === 'number') {
-    return { value: '0', confidence: 0.5, source: 'default' };
-  }
+  const fallbackVal = fieldType === 'number' ? '0' : 'Yes';
   if (options.length > 0) {
-    return { value: options[0], confidence: 0.5, source: 'default' };
+    const aligned = alignValueToOptions(fallbackVal, options, questionText);
+    return {
+      value: aligned ? aligned.matchedOption : options[0],
+      confidence: 0.5,
+      source: 'default',
+    };
   }
-  return { value: 'Yes', confidence: 0.5, source: 'default' };
+  return { value: fallbackVal, confidence: 0.5, source: 'default' };
 }
