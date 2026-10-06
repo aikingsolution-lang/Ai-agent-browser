@@ -19,6 +19,7 @@ Welcome to the NanoBrowser technical documentation library. This directory conta
 | Document | Purpose |
 | :--- | :--- |
 | [GOOGLE_CLOUD_DEPLOYMENT_GUIDE.md](file:///docs/GOOGLE_CLOUD_DEPLOYMENT_GUIDE.md) | Step-by-step Google Cloud Run, Secret Manager & Service Account deployment guide |
+| [GOOGLE_CLOUD_ARCHITECTURE_AND_RUNBOOK.md](file:///docs/GOOGLE_CLOUD_ARCHITECTURE_AND_RUNBOOK.md) | Comprehensive cloud infrastructure architecture, senior engineering deep-dive & account migration runbook |
 | [BACKEND.md](file:///docs/BACKEND.md) | Node.js Express & TypeScript backend architecture and services |
 | [DATABASE.md](file:///docs/DATABASE.md) | MongoDB Atlas schema design, models, indexes, and credit ledgers |
 | [API.md](file:///docs/API.md) | Complete REST API specification (Auth, Credits, Subscriptions, Resumes, LLM) |
