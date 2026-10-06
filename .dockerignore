@@ -1,11 +1,12 @@
-node_modules
+**/node_modules
+**/dist
 .git
 .github
-dist
 dist-zip
 .turbo
 *.log
 .env
 backend/.env
 chrome-extension
+pages
 packages
