@@ -242,6 +242,17 @@ Nanobrowser builds on top of other awesome open-source projects:
 
 Huge thanks to their creators and contributors!
 
+## 📚 Engineering Documentation
+
+Detailed architectural specifications, system diagrams, and deployment guides for engineers and reviewers are available in the [`docs/`](./docs/README.md) directory:
+- [Master Documentation Index](./docs/README.md)
+- [System Architecture](./docs/ARCHITECTURE.md)
+- [Google Cloud Deployment Guide](./docs/GOOGLE_CLOUD_DEPLOYMENT_GUIDE.md)
+- [Backend Specification](./docs/BACKEND.md)
+- [Database & MongoDB Schemas](./docs/DATABASE.md)
+- [Security Audit & Controls](./docs/SECURITY-AUDIT.md)
+- [Testing & QA Suite](./docs/TESTING.md)
+
 ## 📄 License
 
 This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
