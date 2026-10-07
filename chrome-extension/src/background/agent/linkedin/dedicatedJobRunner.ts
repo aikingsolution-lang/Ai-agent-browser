@@ -3066,8 +3066,12 @@ export class DedicatedJobRunner {
     // Ensure Indeed "Easily apply" filter is activated on search results
     const initialFilter = await indeedAdapter.ensureEasilyApplyFilterActive(currentPage);
     if (initialFilter.clicked) {
-      this.notifyStatus(portToSend, '✨ Activated "Easily apply" filter on Indeed!', 'info');
-      await this.interruptibleSleep(2500 + Math.floor(Math.random() * 1000));
+      this.notifyStatus(
+        portToSend,
+        '✨ Activated "Easily apply" filter on Indeed! Refreshing search results...',
+        'info',
+      );
+      await this.interruptibleSleep(3500 + Math.floor(Math.random() * 1000));
       await this.markRunnerTabVisually(currentPage);
     }
 

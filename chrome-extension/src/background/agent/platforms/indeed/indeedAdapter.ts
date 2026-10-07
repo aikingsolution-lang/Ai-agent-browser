@@ -470,71 +470,93 @@ export class IndeedAdapter implements IPlatformAdapter {
   public async ensureEasilyApplyFilterActive(page: Page): Promise<{ active: boolean; clicked: boolean }> {
     try {
       const evaluateFilterDOM = () => {
-        const isElementVisible = (el: HTMLElement | null): boolean => {
+        function isVisible(el: HTMLElement | null): boolean {
           if (!el) return false;
           const style = window.getComputedStyle(el);
           if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
           const rect = el.getBoundingClientRect();
           return rect.width > 0 && rect.height > 0;
-        };
+        }
 
-        const currentUrl = window.location.href.toLowerCase();
-        const hasUrlFilter = currentUrl.includes('iafilter') || currentUrl.includes('f_easilyapply');
-
-        // Look for filter pill elements (underneath the search bar)
-        // Usually buttons or anchors with text "Easily apply" or "Easy apply"
-        const candidates = Array.from(
+        // 1. Locate all candidate elements across the filter bar
+        // Indeed uses buttons, links, or div/li items in the horizontal filter carousel
+        const allCandidates = Array.from(
           document.querySelectorAll<HTMLElement>(
-            'button, a, div[role="button"], [data-testid*="filter" i], li[role="presentation"] button',
+            'button, a, [role="button"], li button, li a, [data-testid*="filter" i], div[class*="pill" i], div[class*="filter" i], span[role="button"]',
           ),
-        ).filter(el => {
-          if (!isElementVisible(el)) return false;
-          // Must NOT be inside a job card, job pane, or modal
+        );
+
+        let filterPill: HTMLElement | null = null;
+
+        for (const el of allCandidates) {
+          if (!isVisible(el)) continue;
+
+          // Exclude anything inside job card listings, job details pane, modal, or apply buttons
           if (
             el.closest('#jobsearch-ViewjobPaneWrapper') ||
             el.closest('.jobsearch-JobComponent') ||
             el.closest('.job_seen_beacon') ||
             el.closest('.cardOutline') ||
-            el.closest('#mosaic-provider-jobcards')
+            el.closest('#mosaic-provider-jobcards') ||
+            el.closest('#viewJobButtonContainer')
           ) {
-            return false;
+            continue;
           }
-          const text = (el.textContent || '').trim().toLowerCase();
-          const aria = (el.getAttribute('aria-label') || '').toLowerCase();
-          const testid = (el.getAttribute('data-testid') || '').toLowerCase();
-          return (
-            text === 'easily apply' ||
-            text.startsWith('easily apply') ||
-            aria === 'easily apply' ||
-            aria.startsWith('easily apply') ||
-            testid.includes('easily-apply') ||
-            text === 'easy apply' ||
-            aria === 'easy apply'
-          );
-        });
 
-        if (candidates.length === 0) {
-          return { active: hasUrlFilter, clicked: false, found: false };
+          const rawText = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
+          const aria = (el.getAttribute('aria-label') || '').toLowerCase();
+          const id = (el.id || '').toLowerCase();
+          const testid = (el.getAttribute('data-testid') || '').toLowerCase();
+
+          const isMatch =
+            rawText.includes('easily apply') ||
+            rawText.includes('easy apply') ||
+            aria.includes('easily apply') ||
+            aria.includes('easy apply') ||
+            id.includes('easily-apply') ||
+            id.includes('easilyapply') ||
+            testid.includes('easily-apply') ||
+            testid.includes('easilyapply');
+
+          if (isMatch) {
+            filterPill = el.closest('button, a, [role="button"]') || el;
+            break;
+          }
         }
 
-        const filterPill = candidates[0];
+        if (!filterPill) {
+          return { active: false, clicked: false, found: false };
+        }
 
-        // Check if filter pill is already selected/active
-        const isPressed =
+        // 2. Check if the pill is ALREADY selected/active
+        // Look at Distance 1 in Indeed: active pills have dark background, aria-pressed="true", or active classes
+        const style = window.getComputedStyle(filterPill);
+        const bg = style.backgroundColor;
+        const isDarkBg =
+          bg !== 'rgba(0, 0, 0, 0)' &&
+          bg !== 'transparent' &&
+          bg !== 'rgb(255, 255, 255)' &&
+          bg !== 'rgb(243, 242, 241)';
+        const isAriaPressed =
           filterPill.getAttribute('aria-pressed') === 'true' ||
           filterPill.getAttribute('aria-checked') === 'true' ||
-          filterPill.getAttribute('aria-selected') === 'true' ||
+          filterPill.getAttribute('aria-selected') === 'true';
+        const isClassSelected =
           filterPill.classList.contains('active') ||
           filterPill.classList.contains('selected') ||
           filterPill.classList.contains('is-active') ||
+          filterPill.classList.contains('yosegi-FilterPill-selected') ||
           filterPill.parentElement?.classList.contains('selected') ||
-          hasUrlFilter;
+          filterPill.parentElement?.classList.contains('active');
+        const hasNumberBadge = /\b\d+\b|✓|✔/.test(filterPill.textContent || '');
 
-        if (isPressed) {
+        const isActuallyActive = isAriaPressed || isClassSelected || (isDarkBg && hasNumberBadge);
+
+        if (isActuallyActive) {
           return { active: true, clicked: false, found: true };
         }
 
-        // Click the filter pill to activate "Easily apply"
+        // 3. Dispatch full human click on the filter pill
         filterPill.scrollIntoView({ behavior: 'instant', block: 'center' });
         filterPill.focus();
         const mouseOpts = { bubbles: true, cancelable: true, view: window };
@@ -544,7 +566,16 @@ export class IndeedAdapter implements IPlatformAdapter {
         filterPill.dispatchEvent(new MouseEvent('mouseup', mouseOpts));
         filterPill.click();
 
-        // If a popover / dropdown opens with an explicit checkbox or "Done"/"Show jobs" button
+        // If it's an anchor tag with href and didn't trigger, also follow href
+        if (filterPill instanceof HTMLAnchorElement && filterPill.href && filterPill.href.includes('indeed.com')) {
+          setTimeout(() => {
+            if (window.location.href !== filterPill.href) {
+              window.location.href = filterPill.href;
+            }
+          }, 600);
+        }
+
+        // 4. Handle popover/dialog if opened
         setTimeout(() => {
           const popover = document.querySelector(
             '[role="dialog"], [data-testid*="popover" i], div[class*="popover" i], div[class*="dropdown" i]',
@@ -600,6 +631,13 @@ export class IndeedAdapter implements IPlatformAdapter {
    */
   public async extractJobCards(page: Page): Promise<IJobQueueItem[]> {
     try {
+      // Proactively ensure Easily apply filter is activated on search results before extracting
+      const filterRes = await this.ensureEasilyApplyFilterActive(page).catch(() => ({ active: false, clicked: false }));
+      if (filterRes.clicked) {
+        logger.info('[IndeedAdapter] Activated "Easily apply" filter pill. Waiting for results to refresh...');
+        await new Promise(r => setTimeout(r, 3500));
+      }
+
       const evaluateJobCardsDOM = () => {
         // Guard against "No results found" banners
         const noResultsBanner = document.querySelector(
