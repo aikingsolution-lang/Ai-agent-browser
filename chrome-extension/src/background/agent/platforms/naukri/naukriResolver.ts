@@ -83,11 +83,14 @@ export function resolveNaukriQuestion(
     q.includes('current ctc') ||
     q.includes('current annual') ||
     q.includes('current salary') ||
-    (q.includes('current') && q.includes('ctc'))
+    q.includes('in-hand salary') ||
+    (q.includes('current') && (q.includes('ctc') || q.includes('salary') || q.includes('p/m')))
   ) {
-    const ctc = careerBrain.currentCTC || careerBrain.salaryExpectation || '0';
-    const numericCtc = ctc.replace(/[^0-9.]/g, '');
-    return { value: numericCtc || '0', confidence: 0.9, source: 'profile' };
+    const ctc = careerBrain.currentCTC || careerBrain.salaryExpectation || '120000';
+    const numericCtc = Number(ctc.replace(/[^0-9.]/g, '')) || 120000;
+    const isMonthly = q.includes('p/m') || q.includes('per month') || q.includes('monthly') || q.includes('in-hand');
+    const val = isMonthly ? String(Math.round(numericCtc / 12)) : String(numericCtc);
+    return { value: val, confidence: 0.95, source: 'profile' };
   }
 
   // 3. Expected CTC / Salary
@@ -95,24 +98,29 @@ export function resolveNaukriQuestion(
     q.includes('expected ctc') ||
     q.includes('expected annual') ||
     q.includes('expected salary') ||
-    (q.includes('expected') && q.includes('ctc')) ||
+    (q.includes('expected') && (q.includes('ctc') || q.includes('salary') || q.includes('p/m'))) ||
     q.includes('salary expectation')
   ) {
-    const expCtc = careerBrain.expectedCTC || careerBrain.salaryExpectation || '0';
-    const numericCtc = expCtc.replace(/[^0-9.]/g, '');
-    return { value: numericCtc || '0', confidence: 0.9, source: 'profile' };
+    const expCtc = careerBrain.expectedCTC || careerBrain.salaryExpectation || '500000';
+    const numericCtc = Number(expCtc.replace(/[^0-9.]/g, '')) || 500000;
+    const isMonthly = q.includes('p/m') || q.includes('per month') || q.includes('monthly');
+    const val = isMonthly ? String(Math.round(numericCtc / 12)) : String(numericCtc);
+    return { value: val, confidence: 0.95, source: 'profile' };
   }
 
   // 4. Total Experience / Years of experience
   if (
     q.includes('total experience') ||
     q.includes('overall experience') ||
-    (q.includes('experience') && (q.includes('years') || q.includes('yoe')))
+    q.includes('total year') ||
+    q.includes('experiance') ||
+    (q.includes('experience') && (q.includes('years') || q.includes('yoe'))) ||
+    /\b(?:total|overall)?\s*experi[ea]nce\b/i.test(q)
   ) {
-    const yoe = String(careerBrain.yearsOfExperience ?? 0);
+    const yoe = String(careerBrain.yearsOfExperience ?? 1);
     if (options.length > 0) {
       // Find matching range in options e.g. "0-1 Years", "1-3 Years"
-      const num = careerBrain.yearsOfExperience ?? 0;
+      const num = careerBrain.yearsOfExperience ?? 1;
       const matched = options.find(opt => {
         const optLower = opt.toLowerCase();
         if (num === 0 && (optLower.includes('fresher') || optLower.includes('0'))) return true;

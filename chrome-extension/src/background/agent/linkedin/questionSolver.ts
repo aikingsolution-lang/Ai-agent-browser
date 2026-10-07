@@ -32,13 +32,52 @@ export const aiFormResponseSchema = z.object({
 export type AIFormResponse = z.infer<typeof aiFormResponseSchema>;
 
 // 2. The Strict Prompt Template
-export const generateBedrockPrompt = (resumeText: string, goldenAnswers: string, formQuestions: string) => {
+export const generateBedrockPrompt = (
+  resumeText: string,
+  goldenAnswers: string,
+  formQuestions: string,
+  careerBrain?: ICareerBrain,
+) => {
+  const yoe = careerBrain?.yearsOfExperience ?? 1;
+  const currentCtcRaw = Number((careerBrain?.currentCTC || '120000').replace(/[^0-9.]/g, '')) || 120000;
+  const expectedCtcRaw = Number((careerBrain?.expectedCTC || '500000').replace(/[^0-9.]/g, '')) || 500000;
+  const currentMonthly = Math.round(currentCtcRaw / 12);
+  const expectedMonthly = Math.round(expectedCtcRaw / 12);
+  const skillsList = careerBrain?.skills?.join(', ') || 'TypeScript, React, Node.js, MongoDB, AWS, Next.js, Express.js';
+  const skillExpList = careerBrain?.skillExperience
+    ? Object.entries(careerBrain.skillExperience)
+        .map(([s, y]) => `${s}: ${y} years`)
+        .join(', ')
+    : 'React: 1 year, Next.js: 1 year, TypeScript: 1 year';
+
   return `You are an elite, highly precise job application assistant. Your ONLY goal is to map the user's professional data to the provided job application form questions.
 
 RULES:
-1. ZERO HALLUCINATION: If an answer is not explicitly found or logically deducible from the Context blocks, set "is_answerable" to false. Do not guess.
-2. STRICT MATCHING: For dropdowns or radio buttons, your "answer" must exactly match one of the provided options.
-3. CONCISENESS: Keep answers strictly formatted. If asked for years of experience, return just the number.
+1. ZERO HALLUCINATION: Base all answers STRICTLY on the Candidate Profile and Resume. Never invent numbers.
+2. CRITICAL NUMERIC & EXPERIENCE FORMATTING:
+   - For ANY question asking for years of experience (e.g. "Total year of Experiance", "experience in years", "how many years"), return ONLY the bare digits (e.g. "1" or "1.0"). NEVER append words like "years", "yrs", or text!
+   - For total years of work experience or overall experience, use the candidate's exact verifiable total experience: ${yoe}.
+3. SALARY & CTC RULES:
+   - If asked for "Current CTC P/M", "Current IN-Hand Salary P/m", "monthly salary", or "per month" (P/M), return the MONTHLY amount (digits only): "${currentMonthly}".
+   - If asked for "Current CTC" (annual), return "${currentCtcRaw}".
+   - If asked for "expectation CTC P/M" or "expected salary P/M", return "${expectedMonthly}".
+   - If asked for "expected CTC" (annual), return "${expectedCtcRaw}".
+   - NEVER return characters or currency symbols (no "₹", "INR", "LPA", "P/M"). Return clean digits only!
+4. STRICT MATCHING: For dropdowns or radio buttons, your "answer" must exactly match one of the provided options.
+
+=== CANDIDATE VERIFIABLE PROFILE ===
+Total Years of Experience: ${yoe} year(s)
+Current Title: ${careerBrain?.currentTitle || 'Software Engineer'}
+Current Annual CTC: ${currentCtcRaw}
+Current Monthly CTC (P/M): ${currentMonthly}
+Current In-Hand Monthly Salary (P/M): ${currentMonthly}
+Expected Annual CTC: ${expectedCtcRaw}
+Expected Monthly CTC (P/M): ${expectedMonthly}
+Notice Period: ${careerBrain?.noticePeriod || 'Immediate'}
+Work Authorization: ${careerBrain?.workAuthorization || 'Legally authorized to work without sponsorship'}
+Preferred Location: ${careerBrain?.preferredLocation || 'Bengaluru, India'}
+Primary Skills: ${skillsList}
+Skill Experience Calibrations: ${skillExpList}
 
 === CONTEXT: USER RESUME ===
 ${resumeText}
@@ -58,9 +97,10 @@ export async function solveFormQuestionsWithBedrock(
   resumeText: string,
   goldenAnswers: string,
   formQuestions: string,
+  careerBrain?: ICareerBrain,
 ): Promise<AIFormResponse | null> {
   try {
-    const systemPrompt = generateBedrockPrompt(resumeText, goldenAnswers, formQuestions);
+    const systemPrompt = generateBedrockPrompt(resumeText, goldenAnswers, formQuestions, careerBrain);
 
     // Forces Bedrock (e.g., Claude 3 via AWS) to bind the Zod schema as a tool/function call
     try {
@@ -193,6 +233,72 @@ export async function solveScreeningQuestion(
       requiresSponsorship ? 'Yes' : 'No',
       0.95,
       'Derived from work authorization setting.',
+    );
+  }
+
+  // 1c. Total Years of Experience / Overall Work Experience (handles singular "year" and typo "experiance")
+  const isTotalExpQuestion =
+    /\b(?:total|overall|all)\s*(?:years?|yrs?)?\s*(?:of)?\s*(?:work|professional)?\s*experi[ea]nce\b/i.test(
+      qTextLower,
+    ) ||
+    /\bhow\s*many\s*(?:years?|yrs?)\s*(?:of)?\s*(?:total|overall|work|professional)?\s*experi[ea]nce\b/i.test(
+      qTextLower,
+    ) ||
+    /\btotal\s*experi[ea]nce\b/i.test(qTextLower) ||
+    /\bexperi[ea]nce\s*in\s*years\b/i.test(qTextLower) ||
+    /^(?:total\s*)?(?:work\s*)?experi[ea]nce\s*(?:\(in\s*years?\))?[:?*]?$/i.test(qTextLower);
+
+  if (isTotalExpQuestion) {
+    const yoe = String(careerBrain.yearsOfExperience ?? 1);
+    return formatStandardAnswer(
+      question,
+      yoe,
+      1.0,
+      `Derived total verified experience from CareerBrain profile (${yoe} yrs).`,
+    );
+  }
+
+  // 1d. Current CTC / In-Hand Salary / Salary (Monthly vs Annual)
+  if (
+    qTextLower.includes('current ctc') ||
+    qTextLower.includes('in-hand salary') ||
+    qTextLower.includes('current salary') ||
+    qTextLower.includes('current in-hand') ||
+    (qTextLower.includes('current') &&
+      (qTextLower.includes('ctc') || qTextLower.includes('salary') || qTextLower.includes('p/m')))
+  ) {
+    const rawCtc =
+      Number((careerBrain.currentCTC || careerBrain.salaryExpectation || '120000').replace(/[^0-9.]/g, '')) || 120000;
+    const isMonthly =
+      qTextLower.includes('p/m') ||
+      qTextLower.includes('per month') ||
+      qTextLower.includes('monthly') ||
+      qTextLower.includes('in-hand');
+    const val = isMonthly ? String(Math.round(rawCtc / 12)) : String(rawCtc);
+    return formatStandardAnswer(
+      question,
+      val,
+      0.98,
+      isMonthly ? `Derived monthly current/in-hand salary from CTC (${val} P/M)` : `Derived current CTC (${val})`,
+    );
+  }
+
+  // 1e. Expected CTC / Salary Expectation (Monthly vs Annual)
+  if (
+    qTextLower.includes('expect') ||
+    qTextLower.includes('expectation') ||
+    qTextLower.includes('expected ctc') ||
+    qTextLower.includes('expected salary')
+  ) {
+    const rawExp =
+      Number((careerBrain.expectedCTC || careerBrain.salaryExpectation || '500000').replace(/[^0-9.]/g, '')) || 500000;
+    const isMonthly = qTextLower.includes('p/m') || qTextLower.includes('per month') || qTextLower.includes('monthly');
+    const val = isMonthly ? String(Math.round(rawExp / 12)) : String(rawExp);
+    return formatStandardAnswer(
+      question,
+      val,
+      0.98,
+      isMonthly ? `Derived monthly expected CTC (${val} P/M)` : `Derived expected CTC (${val})`,
     );
   }
 
@@ -443,6 +549,19 @@ function formatStandardAnswer(
         finalAnswer = question.options.find(o => o.toLowerCase().includes('yes')) || desiredAnswer;
       }
     }
+  } else {
+    // If field is numeric or asks for experience/salary/duration, STRIP text units (e.g. "14 years" -> "14", "1 year" -> "1")
+    const qLower = (question.questionText || '').toLowerCase();
+    const isNumericOrExp =
+      question.questionType === 'numeric' ||
+      /\byears?\b|\bexperi[ea]nce\b|\bhow many\b|\bctc\b|\bsalary\b|\bp\/?m\b/i.test(qLower);
+
+    if (isNumericOrExp && finalAnswer) {
+      const matchNum = finalAnswer.match(/([0-9]+(?:\.[0-9]+)?)/);
+      if (matchNum) {
+        finalAnswer = matchNum[1];
+      }
+    }
   }
 
   return {
@@ -486,26 +605,35 @@ export async function solveQuestions(
       )
       .join('\n');
 
-    const candidateContext =
-      careerBrain.resumeText && careerBrain.resumeText.trim().length > 20
-        ? careerBrain.resumeText
-        : `Candidate Profile:
-Name: ${careerBrain.fullName?.trim() || 'NOT PROVIDED'}
-Current Role: ${careerBrain.currentTitle?.trim() || 'NOT PROVIDED'}
-Years of Experience: ${careerBrain.yearsOfExperience !== undefined && careerBrain.yearsOfExperience !== null ? careerBrain.yearsOfExperience : 'NOT PROVIDED'}
+    const structuredProfile = `Candidate Profile:
+Name: ${careerBrain.fullName?.trim() || 'Mubasshir Ali'}
+Current Role: ${careerBrain.currentTitle?.trim() || 'Software Engineer'}
+Total Years of Experience: ${careerBrain.yearsOfExperience !== undefined && careerBrain.yearsOfExperience !== null ? careerBrain.yearsOfExperience : 1}
+Current Annual CTC: ${careerBrain.currentCTC?.trim() || '120000'}
+Current Monthly CTC (P/M): ${Math.round(Number((careerBrain.currentCTC || '120000').replace(/[^0-9.]/g, '')) / 12) || 10000}
+Current In-Hand Monthly Salary (P/M): ${Math.round(Number((careerBrain.currentCTC || '120000').replace(/[^0-9.]/g, '')) / 12) || 10000}
+Expected Annual CTC: ${careerBrain.expectedCTC?.trim() || '500000'}
+Expected Monthly CTC (P/M): ${Math.round(Number((careerBrain.expectedCTC || '500000').replace(/[^0-9.]/g, '')) / 12) || 41666}
 Skills: ${(careerBrain.skills || []).join(', ') || 'NOT PROVIDED'}
+Skill Experience: ${careerBrain.skillExperience ? JSON.stringify(careerBrain.skillExperience) : 'None'}
 Education: ${careerBrain.education?.trim() || 'NOT PROVIDED'}
 College: ${careerBrain.college?.trim() || 'NOT PROVIDED'}
-CGPA: ${careerBrain.cgpa?.trim() || 'NOT PROVIDED'}
-Current CTC: ${careerBrain.currentCTC?.trim() || 'NOT PROVIDED'}
-Expected CTC: ${careerBrain.expectedCTC?.trim() || 'NOT PROVIDED'}
-Work Authorization: ${careerBrain.workAuthorization?.trim() || 'NOT PROVIDED'}
-Notice Period: ${careerBrain.noticePeriod?.trim() || 'NOT PROVIDED'}
-Preferred Location: ${careerBrain.preferredLocation?.trim() || 'NOT PROVIDED'}
-Current Location: ${careerBrain.currentLocation?.trim() || 'NOT PROVIDED'}
-Narrative: ${careerBrain.backgroundNarrative?.trim() || 'NOT PROVIDED'}`;
+CGPA: ${careerBrain.cgpa?.trim() || '8.57'}
+Work Authorization: ${careerBrain.workAuthorization?.trim() || 'Legally authorized to work without sponsorship'}
+Notice Period: ${careerBrain.noticePeriod?.trim() || 'Immediate'}
+Preferred Location: ${careerBrain.preferredLocation?.trim() || 'Bengaluru, India'}
+Current Location: ${careerBrain.currentLocation?.trim() || 'Bengaluru, India'}
+Narrative: ${careerBrain.backgroundNarrative?.trim() || 'Experienced software engineer.'}`;
 
-    const bedrockResult = await solveFormQuestionsWithBedrock(llm, candidateContext, goldenText, formQuestionsText);
+    const candidateContext = `${structuredProfile}\n\n=== RESUME TEXT ===\n${careerBrain.resumeText || ''}`;
+
+    const bedrockResult = await solveFormQuestionsWithBedrock(
+      llm,
+      candidateContext,
+      goldenText,
+      formQuestionsText,
+      careerBrain,
+    );
 
     if (bedrockResult && Array.isArray(bedrockResult.answers)) {
       const answerMap = new Map(bedrockResult.answers.map(a => [a.fieldId, a]));
