@@ -469,7 +469,9 @@ export class IndeedAdapter implements IPlatformAdapter {
    */
   public async ensureEasilyApplyFilterActive(page: Page): Promise<{ active: boolean; clicked: boolean }> {
     try {
-      const evaluateFilterDOM = () => {
+      const evaluateFilterDOM = async () => {
+        const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+
         function isVisible(el: HTMLElement | null): boolean {
           if (!el) return false;
           const style = window.getComputedStyle(el);
@@ -478,8 +480,116 @@ export class IndeedAdapter implements IPlatformAdapter {
           return rect.width > 0 && rect.height > 0;
         }
 
-        // 1. Locate all candidate elements across the filter bar
-        // Indeed uses buttons, links, or div/li items in the horizontal filter carousel
+        function dispatchHumanClick(el: HTMLElement) {
+          el.scrollIntoView({ behavior: 'instant', block: 'center' });
+          if (typeof el.focus === 'function') el.focus();
+          const mouseOpts = { bubbles: true, cancelable: true, view: window };
+          el.dispatchEvent(new PointerEvent('pointerdown', mouseOpts));
+          el.dispatchEvent(new MouseEvent('mousedown', mouseOpts));
+          el.dispatchEvent(new PointerEvent('pointerup', mouseOpts));
+          el.dispatchEvent(new MouseEvent('mouseup', mouseOpts));
+          el.click();
+        }
+
+        // Helper: Find active Indeed filter popover / dropdown if already open
+        const findOpenPopover = (): HTMLElement | null => {
+          const dialogCandidates = Array.from(
+            document.querySelectorAll<HTMLElement>(
+              '[role="dialog"], [role="listbox"], [role="menu"], [data-testid*="popover" i], div[class*="popover" i], div[class*="dropdown" i], div[id*="popover" i], div[class*="yosegi-FilterDialog" i]',
+            ),
+          );
+          for (const d of dialogCandidates) {
+            if (!isVisible(d)) continue;
+            const text = (d.innerText || d.textContent || '').toLowerCase();
+            if (
+              text.includes('easily apply on indeed') ||
+              (text.includes('easily apply') && (text.includes('update') || text.includes('reset')))
+            ) {
+              return d;
+            }
+          }
+          return null;
+        };
+
+        // Helper: Handle popover selection and confirmation
+        const handlePopover = async (pop: HTMLElement): Promise<boolean> => {
+          // 1. Locate the "Easily apply on Indeed" option
+          const optionCandidates = Array.from(
+            pop.querySelectorAll<HTMLElement>(
+              'li, [role="option"], [role="menuitem"], [role="checkbox"], [role="radio"], label, div, a, button, span',
+            ),
+          );
+
+          let targetOption: HTMLElement | null = null;
+          for (const opt of optionCandidates) {
+            if (!isVisible(opt)) continue;
+            const text = (opt.innerText || opt.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
+            if (text === 'easily apply on indeed' || (text.includes('easily apply on indeed') && text.length < 50)) {
+              targetOption = opt;
+              break;
+            }
+          }
+
+          if (!targetOption) {
+            for (const opt of optionCandidates) {
+              if (!isVisible(opt)) continue;
+              const text = (opt.innerText || opt.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
+              if (
+                (text.includes('easily apply') || text.includes('easy apply')) &&
+                !text.includes('all jobs') &&
+                text.length < 50
+              ) {
+                targetOption = opt;
+                break;
+              }
+            }
+          }
+
+          if (targetOption) {
+            const input =
+              targetOption.querySelector<HTMLInputElement>('input') ||
+              pop.querySelector<HTMLInputElement>('input[value*="iafilter" i], input[id*="easily-apply" i]');
+            if (input && !input.checked) {
+              dispatchHumanClick(input);
+            } else {
+              dispatchHumanClick(targetOption);
+            }
+            await sleep(400);
+          }
+
+          // 2. Click the "Update" button
+          const actionButtons = Array.from(
+            pop.querySelectorAll<HTMLElement>('button, [role="button"], input[type="submit"], a'),
+          );
+          const updateBtn = actionButtons.find(b => {
+            if (!isVisible(b)) return false;
+            const bText = (b.innerText || b.textContent || '').trim().toLowerCase();
+            return (
+              bText === 'update' ||
+              bText.includes('update') ||
+              bText === 'done' ||
+              bText === 'apply' ||
+              bText.includes('show jobs')
+            );
+          });
+
+          if (updateBtn) {
+            dispatchHumanClick(updateBtn);
+            await sleep(600);
+            return true;
+          }
+
+          return Boolean(targetOption);
+        };
+
+        // Step 1: Check if popover is ALREADY open (e.g. from previous action)
+        let popover = findOpenPopover();
+        if (popover) {
+          const success = await handlePopover(popover);
+          return { active: true, clicked: success, found: true };
+        }
+
+        // Step 2: Locate the filter pill in the filter carousel/toolbar
         const allCandidates = Array.from(
           document.querySelectorAll<HTMLElement>(
             'button, a, [role="button"], li button, li a, [data-testid*="filter" i], div[class*="pill" i], div[class*="filter" i], span[role="button"]',
@@ -487,11 +597,10 @@ export class IndeedAdapter implements IPlatformAdapter {
         );
 
         let filterPill: HTMLElement | null = null;
-
         for (const el of allCandidates) {
           if (!isVisible(el)) continue;
 
-          // Exclude anything inside job card listings, job details pane, modal, or apply buttons
+          // Exclude anything inside job cards, job preview, or apply buttons
           if (
             el.closest('#jobsearch-ViewjobPaneWrapper') ||
             el.closest('.jobsearch-JobComponent') ||
@@ -528,8 +637,7 @@ export class IndeedAdapter implements IPlatformAdapter {
           return { active: false, clicked: false, found: false };
         }
 
-        // 2. Check if the pill is ALREADY selected/active
-        // Look at Distance 1 in Indeed: active pills have dark background, aria-pressed="true", or active classes
+        // Step 3: Check if already active
         const style = window.getComputedStyle(filterPill);
         const bg = style.backgroundColor;
         const isDarkBg =
@@ -551,62 +659,38 @@ export class IndeedAdapter implements IPlatformAdapter {
         const hasNumberBadge = /\b\d+\b|✓|✔/.test(filterPill.textContent || '');
 
         const isActuallyActive = isAriaPressed || isClassSelected || (isDarkBg && hasNumberBadge);
+        const isAriaExpanded = filterPill.getAttribute('aria-expanded') === 'true';
 
-        if (isActuallyActive) {
+        if (isActuallyActive && !isAriaExpanded) {
           return { active: true, clicked: false, found: true };
         }
 
-        // 3. Dispatch full human click on the filter pill
-        filterPill.scrollIntoView({ behavior: 'instant', block: 'center' });
-        filterPill.focus();
-        const mouseOpts = { bubbles: true, cancelable: true, view: window };
-        filterPill.dispatchEvent(new PointerEvent('pointerdown', mouseOpts));
-        filterPill.dispatchEvent(new MouseEvent('mousedown', mouseOpts));
-        filterPill.dispatchEvent(new PointerEvent('pointerup', mouseOpts));
-        filterPill.dispatchEvent(new MouseEvent('mouseup', mouseOpts));
-        filterPill.click();
+        // Step 4: Click the filter pill to open the popover or toggle
+        dispatchHumanClick(filterPill);
+        await sleep(600);
 
-        // If it's an anchor tag with href and didn't trigger, also follow href
-        if (filterPill instanceof HTMLAnchorElement && filterPill.href && filterPill.href.includes('indeed.com')) {
-          setTimeout(() => {
-            if (window.location.href !== filterPill.href) {
-              window.location.href = filterPill.href;
-            }
-          }, 600);
+        // Check if popover opened after clicking
+        popover = findOpenPopover();
+        if (popover) {
+          const success = await handlePopover(popover);
+          return { active: true, clicked: success, found: true };
         }
 
-        // 4. Handle popover/dialog if opened
-        setTimeout(() => {
-          const popover = document.querySelector(
-            '[role="dialog"], [data-testid*="popover" i], div[class*="popover" i], div[class*="dropdown" i]',
-          );
-          if (popover) {
-            const checkbox = popover.querySelector<HTMLInputElement>(
-              'input[type="checkbox"]:not(:checked), input[type="radio"]:not(:checked)',
-            );
-            if (checkbox) checkbox.click();
-
-            const confirmBtn = Array.from(
-              popover.querySelectorAll<HTMLElement>('button, [role="button"], input[type="submit"]'),
-            ).find(b => {
-              const bText = (b.textContent || '').trim().toLowerCase();
-              return (
-                bText.includes('done') ||
-                bText.includes('apply') ||
-                bText.includes('show') ||
-                bText.includes('update') ||
-                bText.includes('view')
-              );
-            });
-            if (confirmBtn) confirmBtn.click();
+        // If it was a direct anchor navigation
+        if (filterPill instanceof HTMLAnchorElement && filterPill.href && filterPill.href.includes('indeed.com')) {
+          if (window.location.href !== filterPill.href) {
+            window.location.href = filterPill.href;
           }
-        }, 300);
+        }
 
         return { active: true, clicked: true, found: true };
       };
 
       if (page.puppeteerPage) {
-        const res = await page.puppeteerPage.evaluate(evaluateFilterDOM);
+        const res = (await page.puppeteerPage.evaluate(evaluateFilterDOM)) as {
+          active?: boolean;
+          clicked?: boolean;
+        } | null;
         return { active: Boolean(res?.active), clicked: Boolean(res?.clicked) };
       }
 
@@ -614,7 +698,7 @@ export class IndeedAdapter implements IPlatformAdapter {
         const execRes = await chrome.scripting
           .executeScript({ target: { tabId: page.tabId }, func: evaluateFilterDOM })
           .catch(() => []);
-        const r = execRes?.[0]?.result;
+        const r = execRes?.[0]?.result as { active?: boolean; clicked?: boolean } | null;
         return { active: Boolean(r?.active), clicked: Boolean(r?.clicked) };
       }
 
