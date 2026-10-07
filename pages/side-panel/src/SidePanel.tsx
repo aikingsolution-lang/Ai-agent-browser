@@ -1587,8 +1587,10 @@ const SidePanel = () => {
                 <img src="/icon-128.png" alt="Extension Logo" className="size-6" />
                 {authSession?.token && authSession.user ? (
                   <div className="flex items-center gap-1.5 text-xs">
-                    <span className="flex items-center gap-1 font-medium text-slate-800 dark:text-slate-200">
-                      <FiUser className="size-3.5 text-slate-500" />
+                    <span
+                      className="flex items-center gap-1 font-semibold text-sky-600 dark:text-sky-400"
+                      title={`${authSession.user.name} (${authSession.user.email})`}>
+                      <FiUser className="size-3.5 text-sky-500 dark:text-sky-400" />
                       {authSession.user.name.split(' ')[0]}
                     </span>
                     {userCredits && (
