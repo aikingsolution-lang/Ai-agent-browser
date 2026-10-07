@@ -722,57 +722,164 @@ export class IndeedAdapter implements IPlatformAdapter {
 
         // Helper: Handle popover selection and confirmation
         const handlePopover = async (pop: HTMLElement): Promise<boolean> => {
-          // 1. Locate the "Easily apply on Indeed" option
+          // 1. Find all radio/checkbox inputs inside popover
+          const radioInputs = Array.from(
+            pop.querySelectorAll<HTMLInputElement>('input[type="radio"], input[type="checkbox"], input'),
+          );
+
+          let targetInput: HTMLInputElement | null = null;
+          let allJobsInput: HTMLInputElement | null = null;
+
+          for (const inp of radioInputs) {
+            const val = (inp.value || '').toLowerCase();
+            const id = (inp.id || '').toLowerCase();
+            const aria = (inp.getAttribute('aria-label') || '').toLowerCase();
+            const parentText = (inp.parentElement?.innerText || inp.parentElement?.textContent || '')
+              .replace(/\s+/g, ' ')
+              .trim()
+              .toLowerCase();
+
+            const isEasilyApply =
+              val.includes('iafilter') ||
+              id.includes('easily') ||
+              aria.includes('easily apply') ||
+              (parentText.includes('easily apply') && !parentText.includes('all jobs'));
+
+            const isAllJobs =
+              val.includes('all') || id.includes('all') || aria.includes('all jobs') || parentText.includes('all jobs');
+
+            if (isEasilyApply && !targetInput) targetInput = inp;
+            if (isAllJobs && !allJobsInput) allJobsInput = inp;
+          }
+
+          // 2. Locate interactive option elements (li, role="radio", label, button, div, span)
+          // CRITICAL: Exclude containers that have "all jobs", "reset", or "update" in text to avoid matching outer wrapper!
           const optionCandidates = Array.from(
             pop.querySelectorAll<HTMLElement>(
-              'li, [role="option"], [role="menuitem"], [role="checkbox"], [role="radio"], label, div, a, button, span',
+              'li, [role="radio"], [role="option"], [role="menuitem"], label, button, div, span',
             ),
           );
 
-          let targetOption: HTMLElement | null = null;
-          for (const opt of optionCandidates) {
-            if (!isVisible(opt)) continue;
+          const easilyApplyCandidates = optionCandidates.filter(opt => {
+            if (!isVisible(opt)) return false;
             const text = (opt.innerText || opt.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
-            if (text === 'easily apply on indeed' || (text.includes('easily apply on indeed') && text.length < 50)) {
-              targetOption = opt;
-              break;
-            }
-          }
+            if (text.includes('all jobs') || text.includes('reset') || text.includes('update')) return false;
+            return text.includes('easily apply') || text.includes('easy apply');
+          });
 
-          if (!targetOption) {
-            for (const opt of optionCandidates) {
-              if (!isVisible(opt)) continue;
-              const text = (opt.innerText || opt.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
-              if (
-                (text.includes('easily apply') || text.includes('easy apply')) &&
-                !text.includes('all jobs') &&
-                text.length < 50
-              ) {
-                targetOption = opt;
-                break;
-              }
-            }
-          }
+          // Sort candidates: prefer role="radio", label, li, and shortest text length (deepest leaf element)
+          easilyApplyCandidates.sort((a, b) => {
+            const aBonus = (a.getAttribute('role') === 'radio' ? -20 : 0) + (a.tagName === 'LABEL' ? -10 : 0);
+            const bBonus = (b.getAttribute('role') === 'radio' ? -20 : 0) + (b.tagName === 'LABEL' ? -10 : 0);
+            const aLen = (a.innerText || a.textContent || '').trim().length;
+            const bLen = (b.innerText || b.textContent || '').trim().length;
+            return aBonus + aLen - (bBonus + bLen);
+          });
 
-          if (targetOption) {
-            const input =
+          const targetOption: HTMLElement | null = easilyApplyCandidates[0] || null;
+
+          if (!targetInput && targetOption) {
+            targetInput =
               targetOption.querySelector<HTMLInputElement>('input') ||
-              pop.querySelector<HTMLInputElement>('input[value*="iafilter" i], input[id*="easily-apply" i]');
-            if (input && !input.checked) {
-              dispatchHumanClick(input);
-            } else {
-              dispatchHumanClick(targetOption);
-            }
-            await sleep(400);
+              (targetOption.getAttribute('for')
+                ? pop.querySelector<HTMLInputElement>(`input#${targetOption.getAttribute('for')}`)
+                : null);
           }
 
-          // 2. Click the "Update" button
+          // 3. Helper to verify if "Easily apply on Indeed" is actively selected
+          const isEasilyApplySelected = (): boolean => {
+            if (targetInput && targetInput.checked) return true;
+            if (targetOption) {
+              const ariaChecked = targetOption.getAttribute('aria-checked');
+              const ariaSelected = targetOption.getAttribute('aria-selected');
+              if (ariaChecked === 'true' || ariaSelected === 'true') return true;
+
+              const optInp = targetOption.querySelector<HTMLInputElement>('input');
+              if (optInp && optInp.checked) return true;
+
+              const classNames = [
+                targetOption.className,
+                targetOption.parentElement?.className,
+                targetOption.closest('li, [role="radio"], label')?.className,
+              ]
+                .filter(Boolean)
+                .join(' ')
+                .toLowerCase();
+
+              if (
+                classNames.includes('selected') ||
+                classNames.includes('checked') ||
+                classNames.includes('active') ||
+                classNames.includes('is-selected')
+              ) {
+                return true;
+              }
+
+              const hasCheckmark = Boolean(
+                targetOption.querySelector('svg[class*="check" i], [class*="checkmark" i], [data-testid*="check" i]') ||
+                  /✓|✔/.test(targetOption.textContent || ''),
+              );
+              if (hasCheckmark) return true;
+            }
+            if (allJobsInput && !allJobsInput.checked && targetInput && targetInput.checked) {
+              return true;
+            }
+            return false;
+          };
+
+          // 4. Perform robust selection with multi-strategy click & verification loop
+          if (!isEasilyApplySelected()) {
+            for (let attempt = 0; attempt < 3; attempt++) {
+              if (isEasilyApplySelected()) break;
+
+              // Strategy A: Direct native input click and change event
+              if (targetInput) {
+                try {
+                  if (typeof targetInput.focus === 'function') targetInput.focus();
+                  dispatchHumanClick(targetInput);
+                  if (!targetInput.checked) {
+                    targetInput.checked = true;
+                    targetInput.dispatchEvent(new Event('change', { bubbles: true }));
+                    targetInput.dispatchEvent(new Event('input', { bubbles: true }));
+                  }
+                } catch {}
+              }
+
+              // Strategy B: Click target option element + dispatch Space/Enter keys
+              if (targetOption) {
+                try {
+                  dispatchHumanClick(targetOption);
+                  targetOption.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', code: 'Space', bubbles: true }));
+                  targetOption.dispatchEvent(new KeyboardEvent('keyup', { key: ' ', code: 'Space', bubbles: true }));
+                } catch {}
+
+                // Strategy C: Click closest label if targetOption is child of label
+                const parentLabel: HTMLElement | null = targetOption.closest('label');
+                if (parentLabel && parentLabel !== targetOption) {
+                  try {
+                    dispatchHumanClick(parentLabel);
+                  } catch {}
+                }
+              }
+
+              // Poll briefly to see if selection registered
+              for (let poll = 0; poll < 4; poll++) {
+                await sleep(100);
+                if (isEasilyApplySelected()) break;
+              }
+
+              if (isEasilyApplySelected()) break;
+            }
+          }
+
+          // 5. Click the "Update" button ONLY after selection has been executed
           const actionButtons = Array.from(
             pop.querySelectorAll<HTMLElement>('button, [role="button"], input[type="submit"], a'),
           );
           const updateBtn = actionButtons.find(b => {
             if (!isVisible(b)) return false;
             const bText = (b.innerText || b.textContent || '').trim().toLowerCase();
+            if (bText.includes('reset') || bText.includes('clear')) return false;
             return (
               bText === 'update' ||
               bText.includes('update') ||
@@ -788,7 +895,7 @@ export class IndeedAdapter implements IPlatformAdapter {
             return true;
           }
 
-          return Boolean(targetOption);
+          return Boolean(targetOption && isEasilyApplySelected());
         };
 
         // Step 1: Check if popover is ALREADY open (e.g. from previous action)
@@ -865,9 +972,13 @@ export class IndeedAdapter implements IPlatformAdapter {
           filterPill.classList.contains('yosegi-FilterPill-selected') ||
           filterPill.parentElement?.classList.contains('selected') ||
           filterPill.parentElement?.classList.contains('active');
-        const hasNumberBadge = /\b\d+\b|✓|✔/.test(filterPill.textContent || '');
+        const hasNumberBadge = Boolean(
+          filterPill.querySelector(
+            '[class*="badge" i], [class*="count" i], [data-testid*="badge" i], [aria-label*="1" i]',
+          ) || /\b[1-9]\d*\b|✓|✔/.test(filterPill.textContent || ''),
+        );
 
-        const isActuallyActive = isAriaPressed || isClassSelected || (isDarkBg && hasNumberBadge);
+        const isActuallyActive = isAriaPressed || isClassSelected || hasNumberBadge || (isDarkBg && hasNumberBadge);
         const isAriaExpanded = filterPill.getAttribute('aria-expanded') === 'true';
 
         if (isActuallyActive && !isAriaExpanded) {
@@ -882,7 +993,20 @@ export class IndeedAdapter implements IPlatformAdapter {
         popover = findOpenPopover();
         if (popover) {
           const success = await handlePopover(popover);
-          return { active: true, clicked: success, found: true };
+          // Wait briefly for popover to close and pill badge / state to reflect
+          await sleep(400);
+          const postHasBadge = Boolean(
+            filterPill.querySelector(
+              '[class*="badge" i], [class*="count" i], [data-testid*="badge" i], [aria-label*="1" i]',
+            ) || /\b[1-9]\d*\b|✓|✔/.test(filterPill.textContent || ''),
+          );
+          const postActive =
+            postHasBadge ||
+            filterPill.getAttribute('aria-pressed') === 'true' ||
+            filterPill.classList.contains('selected') ||
+            filterPill.classList.contains('active');
+
+          return { active: postActive || success, clicked: success, found: true };
         }
 
         // If it was a direct anchor navigation
