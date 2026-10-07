@@ -2334,23 +2334,9 @@ export class DedicatedJobRunner {
           });
         }
 
-        // 4e. Anti-Ban Pacing Delay (5s - 10s) between jobs
-        if (i < queue.length - 1 && this.isRunning) {
-          const minDelay = 5_000;
-          const maxDelay = 10_000;
-          const delayTime = Math.floor(Math.random() * (maxDelay - minDelay + 1)) + minDelay;
-          const delaySec = Math.round(delayTime / 1000);
-
-          this.notifyStatus(
-            portToSend,
-            `☕ Quick safety pause: Waiting ${delaySec}s before opening the next job...`,
-            'info',
-          );
-          const aborted = await this.interruptibleSleep(delayTime);
-          if (aborted || !this.isRunning) {
-            logger.info('[DedicatedJobRunner] Pacing delay aborted by user.');
-            break;
-          }
+        if (!this.isRunning) {
+          logger.info('[DedicatedJobRunner] Application flow stopped by user.');
+          break;
         }
       }
 
@@ -3562,17 +3548,9 @@ export class DedicatedJobRunner {
         });
       }
 
-      // Human-like anti-bot pacing delay (5-12s randomized) between Indeed applications
-      if (i < queue.length - 1 && this.isRunning) {
-        const delayMs = indeedAdapter.pacing.getJobToJobDelay();
-        const delaySec = (delayMs / 1000).toFixed(0);
-        this.notifyStatus(
-          portToSend,
-          `⏳ Quick safety pause: Waiting ${delaySec}s before opening the next job...`,
-          'info',
-        );
-        const aborted = await this.interruptibleSleep(delayMs);
-        if (aborted) break;
+      if (!this.isRunning) {
+        logger.info('[DedicatedJobRunner] Application flow stopped by user.');
+        break;
       }
     }
 

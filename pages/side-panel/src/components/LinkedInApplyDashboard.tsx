@@ -457,9 +457,21 @@ export function LinkedInApplyDashboard({
                   : `Start Auto Apply (${selectedPlatform === 'naukri' ? 'Naukri' : selectedPlatform === 'indeed' ? 'Indeed' : 'LinkedIn'})`}
               </span>
             </button>
+            {platformPauseInfo.isPaused && (
+              <button
+                type="button"
+                onClick={async () => {
+                  await queueSafetyStore.clearPlatformPause(selectedPlatform);
+                  setPlatformPauseInfo({ isPaused: false });
+                }}
+                className="w-full flex items-center justify-center space-x-1.5 rounded-xl py-2 px-3 font-semibold text-xs bg-amber-500/20 text-amber-300 hover:bg-amber-500/30 border border-amber-500/40 transition-all cursor-pointer">
+                <FiPlay className="size-3.5" />
+                <span>Remove Safety Pause & Resume</span>
+              </button>
+            )}
             <p className="text-[11px] text-center opacity-60">
               {platformPauseInfo.isPaused
-                ? `${selectedPlatform === 'indeed' ? 'Indeed' : selectedPlatform} auto-apply is paused for today to protect your account. You can solve verification directly on the site.`
+                ? `${selectedPlatform === 'indeed' ? 'Indeed' : selectedPlatform} auto-apply is paused for today to protect your account. You can click 'Remove Safety Pause' above to resume.`
                 : `Autonomous end-to-end ${selectedPlatform === 'naukri' ? 'Naukri.com' : selectedPlatform === 'indeed' ? 'Indeed' : 'LinkedIn'} application flow`}
             </p>
           </>
