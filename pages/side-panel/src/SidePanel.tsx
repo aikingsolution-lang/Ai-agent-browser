@@ -1586,27 +1586,27 @@ const SidePanel = () => {
               <>
                 <img src="/icon-128.png" alt="Extension Logo" className="size-6" />
                 {authSession?.token && authSession.user ? (
-                  <div className="flex items-center space-x-2 text-xs">
-                    <span className="flex items-center gap-1 font-semibold text-sky-400">
-                      <FiUser className="size-3.5 text-sky-400" />
+                  <div className="flex items-center gap-1.5 text-xs">
+                    <span className="flex items-center gap-1 font-medium text-slate-800 dark:text-slate-200">
+                      <FiUser className="size-3.5 text-slate-500" />
                       {authSession.user.name.split(' ')[0]}
                     </span>
                     {userCredits && (
                       <button
                         type="button"
                         onClick={() => setIsPlansModalOpen(true)}
-                        className="rounded-full border border-amber-500/30 bg-amber-500/20 px-2 py-0.5 text-[10px] font-bold text-amber-300 hover:bg-amber-500/30 cursor-pointer transition-colors"
-                        title="View NanoBrowser Premium Commercial Plans">
-                        ⚡ {userCredits.remainingCredits} credits
+                        className="inline-flex items-center gap-1 rounded-md border border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-slate-800 px-2 py-0.5 text-[11px] font-semibold text-slate-700 dark:text-slate-300 hover:border-blue-500/50 hover:text-blue-600 dark:hover:text-blue-400 cursor-pointer transition-colors"
+                        title="View NanoBrowser Subscription & Credits">
+                        <FiZap className="size-2.5 text-indigo-500" />
+                        <span>{userCredits.remainingCredits.toLocaleString()}</span>
                       </button>
                     )}
                     <button
                       type="button"
                       onClick={() => setIsPlansModalOpen(true)}
-                      className="inline-flex cursor-pointer items-center space-x-1 rounded-full bg-gradient-to-r from-amber-500 to-orange-500 px-2 py-0.5 text-[10px] font-bold text-white shadow transition-transform hover:scale-105"
-                      title="View NanoBrowser Premium Commercial Plans">
-                      <FiZap className="size-2.5" />
-                      <span>Plans</span>
+                      className="inline-flex cursor-pointer items-center gap-1 rounded-md bg-blue-600 hover:bg-blue-700 px-2 py-0.5 text-[11px] font-semibold text-white shadow-xs transition-colors"
+                      title="View NanoBrowser Subscription Plans">
+                      <span>Upgrade</span>
                     </button>
                     <button
                       type="button"
@@ -1617,7 +1617,7 @@ const SidePanel = () => {
                         setUserCredits(null);
                       }}
                       title="Sign Out"
-                      className="cursor-pointer p-1 text-gray-400 transition-colors hover:text-red-400">
+                      className="cursor-pointer p-1 text-slate-400 transition-colors hover:text-red-500 rounded-md">
                       <FiLogOut className="size-3.5" />
                     </button>
                   </div>
@@ -1625,8 +1625,8 @@ const SidePanel = () => {
                   <button
                     type="button"
                     onClick={() => setIsAuthModalOpen(true)}
-                    className="inline-flex cursor-pointer items-center space-x-1 rounded-full bg-gradient-to-r from-sky-500 to-indigo-600 px-2.5 py-0.5 text-[10px] font-bold text-white shadow transition-transform hover:scale-105">
-                    <FiUser className="size-3" />
+                    className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 px-3 py-1 text-xs font-semibold text-white shadow-xs transition-colors">
+                    <FiUser className="size-3.5" />
                     <span>Sign In</span>
                   </button>
                 )}
