@@ -18,6 +18,28 @@ const logger = createLogger('IndeedAdapter');
 
 export const CAPTCHA_MANUAL_SOLVE_TIMEOUT_MS = 60_000; // 60s total window for manual verification
 export const CAPTCHA_POLL_INTERVAL_MS = 3_000; // 3s polling interval
+export const OTP_MANUAL_SOLVE_TIMEOUT_MS = 90_000; // 90s total window for SMS/phone verification
+export const OTP_POLL_INTERVAL_MS = 2_500; // 2.5s polling interval
+
+export interface IManualUserActionOptions {
+  tabId?: number;
+  puppeteerPage?: any;
+  context?: IPlatformExecutionContext;
+  jobTitle?: string;
+  userMessage: string;
+  actionType: 'captcha' | 'otp' | 'login';
+  statusLabel?: string;
+  timeoutMs: number;
+  pollIntervalMs: number;
+  isStillPresent: () => Promise<boolean>;
+  onSuccessMessage?: string;
+}
+
+export interface IManualUserActionResult {
+  solved: boolean;
+  aborted: boolean;
+  timedOut: boolean;
+}
 
 export class IndeedAdapter implements IPlatformAdapter {
   public readonly platformId: SupportedPlatform = 'indeed';
@@ -26,6 +48,8 @@ export class IndeedAdapter implements IPlatformAdapter {
   public readonly pacing: IndeedPacing = indeedPacing;
   public captchaManualSolveTimeoutMs: number = CAPTCHA_MANUAL_SOLVE_TIMEOUT_MS;
   public captchaPollIntervalMs: number = CAPTCHA_POLL_INTERVAL_MS;
+  public otpManualSolveTimeoutMs: number = OTP_MANUAL_SOLVE_TIMEOUT_MS;
+  public otpPollIntervalMs: number = OTP_POLL_INTERVAL_MS;
 
   /**
    * Matches any Indeed domain URL (e.g., indeed.com, in.indeed.com, uk.indeed.com)
@@ -245,24 +269,33 @@ export class IndeedAdapter implements IPlatformAdapter {
   }
 
   /**
-   * Waits for manual CAPTCHA / Cloudflare challenge resolution by the user in the runner window.
-   * Gives the user a short window (e.g. 60 seconds) to solve it manually before falling back
-   * to a platform pause.
+   * Shared helper for waiting on manual user actions in the runner tab
+   * (e.g., CAPTCHA/Cloudflare challenges, SMS/OTP phone verification).
    *
-   * CRITICAL GUARANTEE: Zero programmatic interaction with any challenge elements.
-   * Only passive detection polling.
+   * Reuses the tested pattern:
+   * 1. Focuses the runner window if tabId is provided
+   * 2. Broadcasts Live Activity & port updates with actionable user messaging
+   * 3. Non-blocking polling with pacing delay
+   * 4. Immediate abort signal checking
+   * 5. Resumes cleanly when condition clears or times out
    */
-  public async waitForManualCaptchaResolution(
-    tabId?: number,
-    puppeteerPage?: any,
-    context?: IPlatformExecutionContext,
-    jobTitle?: string,
-  ): Promise<{ solved: boolean; aborted: boolean }> {
-    const userMessage =
-      "Indeed needs you to verify you're human — click the runner tab and complete the check. We'll check automatically every few seconds.";
+  public async waitForManualUserAction(options: IManualUserActionOptions): Promise<IManualUserActionResult> {
+    const {
+      tabId,
+      puppeteerPage,
+      context,
+      jobTitle,
+      userMessage,
+      statusLabel = 'needs_verification',
+      timeoutMs,
+      pollIntervalMs,
+      isStillPresent,
+      onSuccessMessage,
+    } = options;
+
     logger.info(`[IndeedAdapter] ${userMessage}`);
 
-    // Focus runner window if Chrome tabs/windows API is available so user sees challenge
+    // Focus runner window if Chrome tabs/windows API is available so user sees prompt
     if (typeof chrome !== 'undefined' && chrome.windows) {
       try {
         if (tabId && chrome.tabs) {
@@ -282,7 +315,7 @@ export class IndeedAdapter implements IPlatformAdapter {
       url: (puppeteerPage?.url?.() as string) || '',
       title: jobTitle || 'Indeed Job',
       company: 'Indeed',
-      status: 'needs_verification',
+      status: statusLabel as any,
       reason: userMessage,
       creditsUsed: 0,
     });
@@ -298,45 +331,35 @@ export class IndeedAdapter implements IPlatformAdapter {
     }
 
     const startTime = Date.now();
-    while (Date.now() - startTime < this.captchaManualSolveTimeoutMs) {
+    while (Date.now() - startTime < timeoutMs) {
       // Check immediately for Stop button / cancellation
       if (context?.signal?.aborted) {
-        logger.info('[IndeedAdapter] Stop requested during verification wait window.');
-        return { solved: false, aborted: true };
+        logger.info('[IndeedAdapter] Stop requested during manual action wait window.');
+        return { solved: false, aborted: true, timedOut: false };
       }
 
       // Interruptible passive wait
-      const waitResult = await this.pacing.waitFieldInteraction(
-        context?.signal,
-        this.captchaPollIntervalMs,
-        this.captchaPollIntervalMs,
-      );
+      const waitResult = await this.pacing.waitFieldInteraction(context?.signal, pollIntervalMs, pollIntervalMs);
       if (waitResult.wasAborted || context?.signal?.aborted) {
-        logger.info('[IndeedAdapter] Verification wait cancelled by user.');
-        return { solved: false, aborted: true };
+        logger.info('[IndeedAdapter] Manual action wait cancelled by user.');
+        return { solved: false, aborted: true, timedOut: false };
       }
 
-      // Check if challenge cleared (PASSIVE CHECK ONLY — zero programmatic interaction)
-      let isStillPresent = false;
-      if (tabId && (await this.checkCaptchaPresentOnTab(tabId))) {
-        isStillPresent = true;
-      } else if (puppeteerPage && (await this.checkCaptchaPresent(puppeteerPage, tabId))) {
-        isStillPresent = true;
-      } else if (!tabId && !puppeteerPage) {
-        isStillPresent = await this.checkCaptchaPresent();
-      }
+      // Check if requirement cleared (PASSIVE CHECK ONLY — zero programmatic interaction)
+      const stillPresent = await isStillPresent().catch(() => false);
 
       await new Promise(r => setTimeout(r, 2));
 
-      if (!isStillPresent) {
-        logger.info('[IndeedAdapter] Verification solved — resuming application.');
+      if (!stillPresent) {
+        const successMsg = onSuccessMessage || 'Verification solved — resuming application...';
+        logger.info(`[IndeedAdapter] ${successMsg}`);
         context?.onLiveActivity?.({
           jobId: context.runId || 'indeed_job',
           url: (puppeteerPage?.url?.() as string) || '',
           title: jobTitle || 'Indeed Job',
           company: 'Indeed',
           status: 'running',
-          reason: 'Verification solved — resuming application...',
+          reason: successMsg,
           creditsUsed: 0,
         });
 
@@ -344,18 +367,204 @@ export class IndeedAdapter implements IPlatformAdapter {
           try {
             context.portToSend.postMessage({
               type: 'LINKEDIN_STATUS_UPDATE',
-              text: '✅ Verification solved — resuming application...',
+              text: `✅ ${successMsg}`,
               status: 'ok',
             });
           } catch {}
         }
 
-        return { solved: true, aborted: false };
+        return { solved: true, aborted: false, timedOut: false };
       }
     }
 
-    logger.warning(`[IndeedAdapter] Manual verification window (${this.captchaManualSolveTimeoutMs / 1000}s) expired.`);
-    return { solved: false, aborted: false };
+    logger.warning(`[IndeedAdapter] Manual action window (${timeoutMs / 1000}s) expired.`);
+    return { solved: false, aborted: false, timedOut: true };
+  }
+
+  /**
+   * Waits for manual CAPTCHA / Cloudflare challenge resolution by the user in the runner window.
+   * Gives the user a short window (e.g. 60 seconds) to solve it manually before falling back
+   * to a platform pause.
+   *
+   * CRITICAL GUARANTEE: Zero programmatic interaction with any challenge elements.
+   * Only passive detection polling.
+   */
+  public async waitForManualCaptchaResolution(
+    tabId?: number,
+    puppeteerPage?: any,
+    context?: IPlatformExecutionContext,
+    jobTitle?: string,
+  ): Promise<{ solved: boolean; aborted: boolean }> {
+    const res = await this.waitForManualUserAction({
+      tabId,
+      puppeteerPage,
+      context,
+      jobTitle,
+      actionType: 'captcha',
+      userMessage:
+        "Indeed needs you to verify you're human — click the runner tab and complete the check. We'll check automatically every few seconds.",
+      statusLabel: 'needs_verification',
+      timeoutMs: this.captchaManualSolveTimeoutMs,
+      pollIntervalMs: this.captchaPollIntervalMs,
+      isStillPresent: async () => {
+        if (tabId && (await this.checkCaptchaPresentOnTab(tabId))) return true;
+        if (puppeteerPage && (await this.checkCaptchaPresent(puppeteerPage, tabId))) return true;
+        if (!tabId && !puppeteerPage) return await this.checkCaptchaPresent();
+        return false;
+      },
+      onSuccessMessage: 'Verification solved — resuming application...',
+    });
+    return { solved: res.solved, aborted: res.aborted };
+  }
+
+  /**
+   * Checks whether the current page or tab presents an SMS / Phone OTP verification challenge.
+   * Strictly passive inspection — zero programmatic interaction.
+   *
+   * Detects:
+   * 1. Phone / SMS verification containers or headings ("verify your phone", "enter the code sent to")
+   * 2. OTP / verification code inputs (autocomplete="one-time-code", name="verificationCode", etc.)
+   * 3. Distinct from normal contact phone number questions (requires "code" / "sent to" / "verify" signals).
+   */
+  public async checkOtpVerificationPresent(puppeteerPage?: any, tabId?: number): Promise<boolean> {
+    const evaluateOtpDOM = () => {
+      // Helper: check if element is attached and rendered visibly
+      const isVisible = (el: Element | null): boolean => {
+        if (!el) return false;
+        const htmlEl = el as HTMLElement;
+        const style = window.getComputedStyle ? window.getComputedStyle(htmlEl) : (htmlEl as any).style;
+        if (
+          style &&
+          (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity || '1') === 0)
+        ) {
+          return false;
+        }
+        const rect = htmlEl.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      };
+
+      // 1. Text signal checks across the page or modal
+      // We look for specific SMS / phone code verification phrases
+      const bodyText = (document.body ? document.body.innerText : '').toLowerCase();
+
+      const hasVerificationPhrase =
+        bodyText.includes('verify your phone') ||
+        bodyText.includes('verify phone number') ||
+        bodyText.includes('enter the code sent to') ||
+        bodyText.includes('enter the code we sent') ||
+        bodyText.includes('enter verification code') ||
+        bodyText.includes('we sent a verification code') ||
+        bodyText.includes('we sent a code to') ||
+        bodyText.includes('we texted a code to') ||
+        bodyText.includes('enter the 6-digit code') ||
+        bodyText.includes('enter 6-digit code') ||
+        bodyText.includes('6-digit verification code') ||
+        bodyText.includes('phone verification') ||
+        bodyText.includes('sms verification') ||
+        (bodyText.includes('verification code') &&
+          (bodyText.includes('phone') ||
+            bodyText.includes('text') ||
+            bodyText.includes('sms') ||
+            bodyText.includes('resend')));
+
+      // 2. Specific OTP / One-Time-Code inputs
+      const otpInputs = Array.from(
+        document.querySelectorAll<HTMLInputElement>(
+          'input[autocomplete="one-time-code"], input[name*="verificationCode" i], input[name*="phoneCode" i], input[name*="smsCode" i], input[name*="otp" i], input[id*="verification-code" i], input[id*="otp" i], input[id*="phone-verify" i], input[data-testid*="otp" i], input[data-testid*="verification-code" i], input[data-testid*="phone-verify" i]',
+        ),
+      );
+
+      const hasVisibleOtpInput = otpInputs.some(inp => isVisible(inp));
+
+      // 3. Cluster of single-digit inputs (common in OTP / verification UIs)
+      const singleDigitInputs = Array.from(
+        document.querySelectorAll<HTMLInputElement>(
+          'input[maxlength="1"], input[data-index], input[class*="pin" i], input[class*="digit" i]',
+        ),
+      ).filter(inp => isVisible(inp));
+      const hasDigitCluster =
+        singleDigitInputs.length >= 4 &&
+        (bodyText.includes('code') || bodyText.includes('verify') || hasVerificationPhrase);
+
+      // 4. Combined signal:
+      if (hasVisibleOtpInput) {
+        return true;
+      }
+
+      if (hasDigitCluster) {
+        return true;
+      }
+
+      if (hasVerificationPhrase) {
+        // Confirm there is an active visible text/number input in the same view or modal
+        const anyInput = Array.from(
+          document.querySelectorAll<HTMLInputElement>(
+            'input[type="text"], input[type="tel"], input[type="number"], input:not([type])',
+          ),
+        ).some(inp => isVisible(inp));
+
+        if (anyInput) {
+          return true;
+        }
+      }
+
+      return false;
+    };
+
+    if (puppeteerPage) {
+      try {
+        const isPresent = await puppeteerPage.evaluate(evaluateOtpDOM);
+        if (isPresent) return true;
+      } catch {
+        // Non-critical evaluation failure
+      }
+    }
+
+    if (typeof chrome !== 'undefined' && chrome.scripting && tabId) {
+      try {
+        const results = await chrome.scripting.executeScript({
+          target: { tabId, allFrames: true },
+          func: evaluateOtpDOM,
+        });
+        if (results && results.some(r => r.result === true)) {
+          return true;
+        }
+      } catch {
+        // Non-critical execution failure
+      }
+    }
+
+    return false;
+  }
+
+  /**
+   * Waits for manual SMS / Phone OTP verification by the user in the runner window.
+   * Gives the user a generous window (e.g. 90 seconds) to receive SMS and enter the code.
+   * If the timeout expires without user action, skips the job cleanly rather than failing the platform.
+   */
+  public async waitForManualOtpResolution(
+    tabId?: number,
+    puppeteerPage?: any,
+    context?: IPlatformExecutionContext,
+    jobTitle?: string,
+  ): Promise<{ solved: boolean; aborted: boolean; timedOut: boolean }> {
+    const userMessage =
+      'Indeed needs SMS verification for this application — please check your phone and enter the code in the runner tab.';
+    return this.waitForManualUserAction({
+      tabId,
+      puppeteerPage,
+      context,
+      jobTitle,
+      actionType: 'otp',
+      userMessage,
+      statusLabel: 'needs_verification',
+      timeoutMs: this.otpManualSolveTimeoutMs,
+      pollIntervalMs: this.otpPollIntervalMs,
+      isStillPresent: async () => {
+        return await this.checkOtpVerificationPresent(puppeteerPage, tabId);
+      },
+      onSuccessMessage: 'SMS verification completed — resuming application...',
+    });
   }
 
   /**
@@ -1446,6 +1655,28 @@ export class IndeedAdapter implements IPlatformAdapter {
         await this.pacing.waitPageSettle(context.signal);
       }
 
+      // CHECKPOINT 4b: Form Step Transition SMS / Phone OTP check
+      if (await this.checkOtpVerificationPresent(puppeteerPage, activeTabId)) {
+        logger.info(
+          `[IndeedAdapter] SMS/Phone OTP verification detected on step ${step} for "${job.title}". Pausing for user manual input.`,
+        );
+        const waitResult = await this.waitForManualOtpResolution(activeTabId, puppeteerPage, context, job.title);
+        if (waitResult.aborted) {
+          if (activeTabId !== page.tabId && typeof chrome !== 'undefined' && chrome.tabs) {
+            await chrome.tabs.remove(activeTabId).catch(() => {});
+          }
+          return { status: 'skipped', reason: 'Stopped by user' };
+        }
+        if (!waitResult.solved) {
+          logger.warning(`[IndeedAdapter] SMS verification window timed out for "${job.title}". Skipping job cleanly.`);
+          if (activeTabId !== page.tabId && typeof chrome !== 'undefined' && chrome.tabs) {
+            await chrome.tabs.remove(activeTabId).catch(() => {});
+          }
+          return { status: 'skipped', reason: 'Indeed SMS/phone verification timed out.' };
+        }
+        await this.pacing.waitPageSettle(context.signal);
+      }
+
       // Check if application was already submitted / completed
       const isSuccess = await this.checkApplicationSubmitted(activeTabId, puppeteerPage);
       if (isSuccess) {
@@ -1500,6 +1731,31 @@ export class IndeedAdapter implements IPlatformAdapter {
       const currentFingerprint = `${stepAction.text}:${stepAction.inputCount || 0}`;
       if (currentFingerprint === previousFingerprint) {
         consecutiveSameStepCount++;
+
+        // Check if we are stuck because an SMS / Phone OTP verification appeared on this step
+        if (await this.checkOtpVerificationPresent(puppeteerPage, activeTabId)) {
+          logger.info(
+            `[IndeedAdapter] SMS verification wall detected during repeated step for "${job.title}". Pausing for user input.`,
+          );
+          const waitResult = await this.waitForManualOtpResolution(activeTabId, puppeteerPage, context, job.title);
+          if (waitResult.aborted) {
+            if (activeTabId !== page.tabId && typeof chrome !== 'undefined' && chrome.tabs) {
+              await chrome.tabs.remove(activeTabId).catch(() => {});
+            }
+            return { status: 'skipped', reason: 'Stopped by user' };
+          }
+          if (!waitResult.solved) {
+            logger.warning(`[IndeedAdapter] SMS verification window timed out for "${job.title}". Skipping cleanly.`);
+            if (activeTabId !== page.tabId && typeof chrome !== 'undefined' && chrome.tabs) {
+              await chrome.tabs.remove(activeTabId).catch(() => {});
+            }
+            return { status: 'skipped', reason: 'Indeed SMS/phone verification timed out.' };
+          }
+          consecutiveSameStepCount = 0;
+          await this.pacing.waitPageSettle(context.signal);
+          continue;
+        }
+
         if (consecutiveSameStepCount >= 2) {
           // Attempt auto-healing validation errors before aborting
           logger.info(`[IndeedAdapter] Step ${step}: Detected repeated step; attempting validation error auto-heal...`);
@@ -1540,6 +1796,29 @@ export class IndeedAdapter implements IPlatformAdapter {
 
           submissionConfirmed = await this.checkApplicationSubmitted(activeTabId, puppeteerPage);
           if (submissionConfirmed) break;
+
+          // Check if SMS / Phone OTP verification appeared post-submit
+          if (await this.checkOtpVerificationPresent(puppeteerPage, activeTabId)) {
+            logger.info(
+              `[IndeedAdapter] Post-submit SMS OTP verification detected for "${job.title}". Pausing for user input.`,
+            );
+            const waitResult = await this.waitForManualOtpResolution(activeTabId, puppeteerPage, context, job.title);
+            if (waitResult.aborted) {
+              if (activeTabId !== page.tabId && typeof chrome !== 'undefined' && chrome.tabs) {
+                await chrome.tabs.remove(activeTabId).catch(() => {});
+              }
+              return { status: 'skipped', reason: 'Stopped by user' };
+            }
+            if (!waitResult.solved) {
+              if (activeTabId !== page.tabId && typeof chrome !== 'undefined' && chrome.tabs) {
+                await chrome.tabs.remove(activeTabId).catch(() => {});
+              }
+              return { status: 'skipped', reason: 'Indeed SMS/phone verification timed out.' };
+            }
+            await this.pacing.waitPageSettle(context.signal);
+            submissionConfirmed = await this.checkApplicationSubmitted(activeTabId, puppeteerPage);
+            if (submissionConfirmed) break;
+          }
 
           // Check if validation errors appeared after submit attempt
           const hasErrors = await this.autoHealValidationErrors(activeTabId, puppeteerPage, context, job);
@@ -2119,6 +2398,16 @@ export class IndeedAdapter implements IPlatformAdapter {
         let fieldType: 'text' | 'number' | 'radio' | 'dropdown' | 'select' | 'checkbox' | 'date' = 'text';
 
         const labelLower = labelText.toLowerCase();
+
+        // Guard: Do NOT fill SMS / Phone OTP verification inputs with candidate answers
+        const isOtpInput =
+          el.getAttribute('autocomplete') === 'one-time-code' ||
+          /verification[-_ ]?code|phone[-_ ]?code|sms[-_ ]?code|\botp\b/i.test(name || '') ||
+          /verification[-_ ]?code|phone[-_ ]?code|sms[-_ ]?code|\botp\b/i.test(el.id || '') ||
+          /enter (?:the )?(?:6-digit )?code|verification code/i.test(labelLower);
+        if (isOtpInput) {
+          return;
+        }
         const hasCalendar =
           inputType === 'date' ||
           Boolean(

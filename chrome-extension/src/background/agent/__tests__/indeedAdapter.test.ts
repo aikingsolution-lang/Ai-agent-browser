@@ -496,6 +496,9 @@ describe('IndeedAdapter - Phase 1', () => {
     beforeEach(() => {
       indeedAdapter.captchaManualSolveTimeoutMs = 15;
       indeedAdapter.captchaPollIntervalMs = 5;
+      indeedAdapter.otpManualSolveTimeoutMs = 15;
+      indeedAdapter.otpPollIntervalMs = 5;
+      vi.spyOn(indeedAdapter, 'checkOtpVerificationPresent').mockResolvedValue(false);
     });
 
     const mockJob = {
@@ -1302,6 +1305,183 @@ describe('IndeedAdapter - Phase 1', () => {
       expect(primary).toBe('Full Stack Developer');
       expect(alternate).toBe('Software Engineer');
       expect(mockLLM.invoke).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('Phase 8 - SMS / Phone OTP Verification Wall Detection & Shared Manual User Action Helper', () => {
+    beforeEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it('checkOtpVerificationPresent evaluates DOM signals correctly for phone verification code', async () => {
+      const evaluateFnSpy = vi.fn();
+      const mockPage: any = {
+        evaluate: evaluateFnSpy,
+      };
+
+      // Case 1: evaluate returns true when OTP input is present
+      evaluateFnSpy.mockResolvedValueOnce(true);
+      const isPresent1 = await indeedAdapter.checkOtpVerificationPresent(mockPage);
+      expect(isPresent1).toBe(true);
+      expect(evaluateFnSpy).toHaveBeenCalledTimes(1);
+
+      // Case 2: evaluate returns false on standard form
+      evaluateFnSpy.mockResolvedValueOnce(false);
+      const isPresent2 = await indeedAdapter.checkOtpVerificationPresent(mockPage);
+      expect(isPresent2).toBe(false);
+    });
+
+    it('waitForManualOtpResolution prompts the user with Live Activity and resolves when completed', async () => {
+      indeedAdapter.otpManualSolveTimeoutMs = 1000;
+      indeedAdapter.otpPollIntervalMs = 5;
+
+      const liveActivitySpy = vi.fn();
+      const portSpy = { postMessage: vi.fn() };
+      let pollCount = 0;
+      vi.spyOn(indeedAdapter, 'checkOtpVerificationPresent').mockImplementation(async () => {
+        pollCount++;
+        return pollCount === 1; // first check true, second check false (cleared)
+      });
+
+      const res = await indeedAdapter.waitForManualOtpResolution(
+        102,
+        { url: () => 'https://smartapply.indeed.com' },
+        { onLiveActivity: liveActivitySpy, portToSend: portSpy as any, runId: 'otp-run-1' } as any,
+        'Senior Backend Developer',
+      );
+
+      expect(res.solved).toBe(true);
+      expect(res.aborted).toBe(false);
+      expect(res.timedOut).toBe(false);
+
+      // Verify the prompt message
+      expect(liveActivitySpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          status: 'needs_verification',
+          reason:
+            'Indeed needs SMS verification for this application — please check your phone and enter the code in the runner tab.',
+        }),
+      );
+
+      // Verify success notification
+      expect(liveActivitySpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          status: 'running',
+          reason: 'SMS verification completed — resuming application...',
+        }),
+      );
+
+      expect(portSpy.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          status: 'ok',
+          text: '✅ SMS verification completed — resuming application...',
+        }),
+      );
+    });
+
+    it('waitForManualOtpResolution times out cleanly when user does not enter code within window', async () => {
+      indeedAdapter.otpManualSolveTimeoutMs = 30; // 30ms timeout for test speed
+      indeedAdapter.otpPollIntervalMs = 5;
+
+      const liveActivitySpy = vi.fn();
+      // Always present / not solved
+      vi.spyOn(indeedAdapter, 'checkOtpVerificationPresent').mockResolvedValue(true);
+
+      const res = await indeedAdapter.waitForManualOtpResolution(
+        102,
+        { url: () => 'https://smartapply.indeed.com' },
+        { onLiveActivity: liveActivitySpy, runId: 'otp-run-timeout' } as any,
+        'Frontend Developer',
+      );
+
+      expect(res.solved).toBe(false);
+      expect(res.aborted).toBe(false);
+      expect(res.timedOut).toBe(true);
+    });
+
+    it('waitForManualUserAction aborts immediately when signal is cancelled by user', async () => {
+      const abortController = new AbortController();
+      abortController.abort(); // already aborted
+
+      const isStillPresentSpy = vi.fn().mockResolvedValue(true);
+
+      const res = await indeedAdapter.waitForManualUserAction({
+        actionType: 'otp',
+        userMessage: 'Test prompt',
+        timeoutMs: 5000,
+        pollIntervalMs: 10,
+        isStillPresent: isStillPresentSpy,
+        context: { signal: abortController.signal } as any,
+      });
+
+      expect(res.solved).toBe(false);
+      expect(res.aborted).toBe(true);
+      expect(res.timedOut).toBe(false);
+      expect(isStillPresentSpy).not.toHaveBeenCalled();
+    });
+
+    it('applyToJob skips cleanly without platform pause when OTP verification times out', async () => {
+      const pauseSpy = vi.spyOn(queueSafetyStore, 'pausePlatformForToday');
+
+      const mockJob: any = {
+        jobId: 'indeed-otp-job-1',
+        title: 'Full Stack Engineer',
+        company: 'InnovateCorp',
+        url: 'https://in.indeed.com/viewjob?jk=otp123',
+        isQuickApply: true,
+      };
+
+      const mockPage: any = {
+        tabId: 201,
+        puppeteerPage: {
+          goto: vi.fn().mockResolvedValue(undefined),
+          evaluate: vi.fn().mockImplementation(async () => {
+            return false; // already applied check returns false
+          }),
+        },
+      };
+
+      // Spy on findApplyButton or mock apply button
+      let evalCallCount = 0;
+      mockPage.puppeteerPage.evaluate = vi.fn().mockImplementation(async () => {
+        evalCallCount++;
+        if (evalCallCount === 1) return false; // already applied check: false
+        return { found: true, isExternal: false, strategy: 'selector', text: 'Apply now' };
+      });
+
+      // Mock pacing
+      vi.spyOn(indeedAdapter.pacing, 'waitPageSettle').mockResolvedValue(undefined as any);
+      vi.spyOn(indeedAdapter.pacing, 'waitFieldInteraction').mockResolvedValue({ delayMs: 10, wasAborted: false });
+      vi.spyOn(indeedAdapter.pacing, 'waitStepTransition').mockResolvedValue(undefined as any);
+
+      // No captcha present
+      vi.spyOn(indeedAdapter, 'checkCaptchaPresent').mockResolvedValue(false);
+      vi.spyOn(indeedAdapter, 'checkCaptchaPresentOnTab').mockResolvedValue(false);
+
+      // OTP verification detected on step transition, and times out!
+      vi.spyOn(indeedAdapter, 'checkOtpVerificationPresent').mockResolvedValue(true);
+      vi.spyOn(indeedAdapter, 'waitForManualOtpResolution').mockResolvedValue({
+        solved: false,
+        aborted: false,
+        timedOut: true,
+      });
+
+      const context: any = {
+        page: mockPage,
+        careerBrain: { fullName: 'Test Candidate' },
+        onLiveActivity: vi.fn(),
+      };
+
+      const result = await indeedAdapter.applyToJob(mockJob, context);
+
+      expect(result.status).toBe('skipped');
+      expect(result.reason).toBe('Indeed SMS/phone verification timed out.');
+      // Crucial: ensure platform was NOT paused for today!
+      expect(pauseSpy).not.toHaveBeenCalled();
     });
   });
 });
