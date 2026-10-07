@@ -2861,7 +2861,7 @@ export class DedicatedJobRunner {
     const locationsDisplay = targetLocations.map((loc, idx) => `#${idx + 1} ${loc}`).join(', ');
     this.notifyStatus(
       portToSend,
-      `🎯 [Indeed] Search Criteria: Role="${cleanRole}" | Location(s): ${locationsDisplay}`,
+      `🎯 [Indeed] Search Criteria: Role="${cleanRole}" | Location(s): ${locationsDisplay} | Easily Apply=true`,
       'info',
     );
 
@@ -3063,6 +3063,14 @@ export class DedicatedJobRunner {
       }
     };
 
+    // Ensure Indeed "Easily apply" filter is activated on search results
+    const initialFilter = await indeedAdapter.ensureEasilyApplyFilterActive(currentPage);
+    if (initialFilter.clicked) {
+      this.notifyStatus(portToSend, '✨ Activated "Easily apply" filter on Indeed!', 'info');
+      await this.interruptibleSleep(2500 + Math.floor(Math.random() * 1000));
+      await this.markRunnerTabVisually(currentPage);
+    }
+
     // Scan jobs across prioritized locations in strict priority order until BATCH_CAP is met
     const queue: IJobQueueItem[] = [];
     const seenJobIds = new Set<string>();
@@ -3093,6 +3101,11 @@ export class DedicatedJobRunner {
 
         const locCaptchaExit = await checkAndHandleSearchCaptcha(`Indeed Search (Location #${locRank}: ${currentLoc})`);
         if (locCaptchaExit) return locCaptchaExit;
+
+        const locFilter = await indeedAdapter.ensureEasilyApplyFilterActive(currentPage);
+        if (locFilter.clicked) {
+          await this.interruptibleSleep(2000 + Math.floor(Math.random() * 1000));
+        }
       }
 
       for (let searchPageIndex = 0; searchPageIndex < maxSearchPagesPerLocation; searchPageIndex++) {
@@ -3114,6 +3127,11 @@ export class DedicatedJobRunner {
           const pageWaitAborted = await this.interruptibleSleep(3500 + Math.floor(Math.random() * 2000));
           if (pageWaitAborted || !this.isRunning) break;
           await this.markRunnerTabVisually(currentPage);
+
+          const pageFilter = await indeedAdapter.ensureEasilyApplyFilterActive(currentPage);
+          if (pageFilter.clicked) {
+            await this.interruptibleSleep(2000 + Math.floor(Math.random() * 1000));
+          }
         }
 
         let pageJobs: IJobQueueItem[] = [];
@@ -3238,6 +3256,11 @@ export class DedicatedJobRunner {
       if (!fbWaitAborted && this.isRunning) {
         await this.markRunnerTabVisually(currentPage);
 
+        const fbFilter = await indeedAdapter.ensureEasilyApplyFilterActive(currentPage);
+        if (fbFilter.clicked) {
+          await this.interruptibleSleep(2000 + Math.floor(Math.random() * 1000));
+        }
+
         // Scan up to 2 pages for fallback role to reach BATCH_CAP
         for (let fbPageIndex = 0; fbPageIndex < 2 && queue.length < BATCH_CAP; fbPageIndex++) {
           if (!this.isRunning || this.abortController?.signal?.aborted) break;
@@ -3253,6 +3276,11 @@ export class DedicatedJobRunner {
             const pWait = await this.interruptibleSleep(3500 + Math.floor(Math.random() * 1500));
             if (pWait || !this.isRunning) break;
             await this.markRunnerTabVisually(currentPage);
+
+            const fbPageFilter = await indeedAdapter.ensureEasilyApplyFilterActive(currentPage);
+            if (fbPageFilter.clicked) {
+              await this.interruptibleSleep(2000 + Math.floor(Math.random() * 1000));
+            }
           }
 
           let fbJobs: IJobQueueItem[] = [];

@@ -58,6 +58,11 @@ describe('IndeedAdapter - Phase 1', () => {
       expect(url).toContain('start=20');
       expect(url).toContain('https://in.indeed.com/jobs');
     });
+
+    it('injects Easily apply composite filter parameter by default', () => {
+      const url = indeedAdapter.buildSearchUrl('Software Engineer', 'Bengaluru, India');
+      expect(url).toContain('iafilter');
+    });
   });
 
   describe('validateSession', () => {

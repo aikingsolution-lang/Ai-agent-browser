@@ -44,6 +44,7 @@ export class IndeedAdapter implements IPlatformAdapter {
     location: string,
     start?: number,
     candidateName?: string | (string | undefined | null)[],
+    easyApplyOnly: boolean = true,
   ): string {
     const cleanRole = sanitizeRoleSearchQuery(role, candidateName, 'Software Engineer');
     let cleanLoc = (location || '').trim();
@@ -72,6 +73,10 @@ export class IndeedAdapter implements IPlatformAdapter {
     }
     if (typeof start === 'number' && start > 0) {
       params.set('start', String(start));
+    }
+    if (easyApplyOnly) {
+      // Indeed's composite filter slot for "Easily apply" (iafilter)
+      params.set('sc', '0kf:iafilter();');
     }
 
     return `${baseUrl}?${params.toString()}`;
@@ -455,6 +460,141 @@ export class IndeedAdapter implements IPlatformAdapter {
   }
 
   /**
+   * Ensures the "Easily apply" filter is activated on the Indeed search results page.
+   * If not already active:
+   * 1. Checks if 'iafilter' is present in page URL or if the filter pill is already active.
+   * 2. Finds the "Easily apply" pill in the filter bar (as shown underneath search inputs).
+   * 3. Dispatches mouse click events to activate it.
+   * 4. Handles any popover confirmation dialog if rendered.
+   */
+  public async ensureEasilyApplyFilterActive(page: Page): Promise<{ active: boolean; clicked: boolean }> {
+    try {
+      const evaluateFilterDOM = () => {
+        const isElementVisible = (el: HTMLElement | null): boolean => {
+          if (!el) return false;
+          const style = window.getComputedStyle(el);
+          if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+          const rect = el.getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0;
+        };
+
+        const currentUrl = window.location.href.toLowerCase();
+        const hasUrlFilter = currentUrl.includes('iafilter') || currentUrl.includes('f_easilyapply');
+
+        // Look for filter pill elements (underneath the search bar)
+        // Usually buttons or anchors with text "Easily apply" or "Easy apply"
+        const candidates = Array.from(
+          document.querySelectorAll<HTMLElement>(
+            'button, a, div[role="button"], [data-testid*="filter" i], li[role="presentation"] button',
+          ),
+        ).filter(el => {
+          if (!isElementVisible(el)) return false;
+          // Must NOT be inside a job card, job pane, or modal
+          if (
+            el.closest('#jobsearch-ViewjobPaneWrapper') ||
+            el.closest('.jobsearch-JobComponent') ||
+            el.closest('.job_seen_beacon') ||
+            el.closest('.cardOutline') ||
+            el.closest('#mosaic-provider-jobcards')
+          ) {
+            return false;
+          }
+          const text = (el.textContent || '').trim().toLowerCase();
+          const aria = (el.getAttribute('aria-label') || '').toLowerCase();
+          const testid = (el.getAttribute('data-testid') || '').toLowerCase();
+          return (
+            text === 'easily apply' ||
+            text.startsWith('easily apply') ||
+            aria === 'easily apply' ||
+            aria.startsWith('easily apply') ||
+            testid.includes('easily-apply') ||
+            text === 'easy apply' ||
+            aria === 'easy apply'
+          );
+        });
+
+        if (candidates.length === 0) {
+          return { active: hasUrlFilter, clicked: false, found: false };
+        }
+
+        const filterPill = candidates[0];
+
+        // Check if filter pill is already selected/active
+        const isPressed =
+          filterPill.getAttribute('aria-pressed') === 'true' ||
+          filterPill.getAttribute('aria-checked') === 'true' ||
+          filterPill.getAttribute('aria-selected') === 'true' ||
+          filterPill.classList.contains('active') ||
+          filterPill.classList.contains('selected') ||
+          filterPill.classList.contains('is-active') ||
+          filterPill.parentElement?.classList.contains('selected') ||
+          hasUrlFilter;
+
+        if (isPressed) {
+          return { active: true, clicked: false, found: true };
+        }
+
+        // Click the filter pill to activate "Easily apply"
+        filterPill.scrollIntoView({ behavior: 'instant', block: 'center' });
+        filterPill.focus();
+        const mouseOpts = { bubbles: true, cancelable: true, view: window };
+        filterPill.dispatchEvent(new PointerEvent('pointerdown', mouseOpts));
+        filterPill.dispatchEvent(new MouseEvent('mousedown', mouseOpts));
+        filterPill.dispatchEvent(new PointerEvent('pointerup', mouseOpts));
+        filterPill.dispatchEvent(new MouseEvent('mouseup', mouseOpts));
+        filterPill.click();
+
+        // If a popover / dropdown opens with an explicit checkbox or "Done"/"Show jobs" button
+        setTimeout(() => {
+          const popover = document.querySelector(
+            '[role="dialog"], [data-testid*="popover" i], div[class*="popover" i], div[class*="dropdown" i]',
+          );
+          if (popover) {
+            const checkbox = popover.querySelector<HTMLInputElement>(
+              'input[type="checkbox"]:not(:checked), input[type="radio"]:not(:checked)',
+            );
+            if (checkbox) checkbox.click();
+
+            const confirmBtn = Array.from(
+              popover.querySelectorAll<HTMLElement>('button, [role="button"], input[type="submit"]'),
+            ).find(b => {
+              const bText = (b.textContent || '').trim().toLowerCase();
+              return (
+                bText.includes('done') ||
+                bText.includes('apply') ||
+                bText.includes('show') ||
+                bText.includes('update') ||
+                bText.includes('view')
+              );
+            });
+            if (confirmBtn) confirmBtn.click();
+          }
+        }, 300);
+
+        return { active: true, clicked: true, found: true };
+      };
+
+      if (page.puppeteerPage) {
+        const res = await page.puppeteerPage.evaluate(evaluateFilterDOM);
+        return { active: Boolean(res?.active), clicked: Boolean(res?.clicked) };
+      }
+
+      if (typeof chrome !== 'undefined' && chrome.scripting && page.tabId) {
+        const execRes = await chrome.scripting
+          .executeScript({ target: { tabId: page.tabId }, func: evaluateFilterDOM })
+          .catch(() => []);
+        const r = execRes?.[0]?.result;
+        return { active: Boolean(r?.active), clicked: Boolean(r?.clicked) };
+      }
+
+      return { active: false, clicked: false };
+    } catch (err) {
+      logger.warning('[IndeedAdapter] Error activating Easily apply filter:', err);
+      return { active: false, clicked: false };
+    }
+  }
+
+  /**
    * Extracts job cards from Indeed search results with strict two-signal Quick Apply detection.
    * Confirms both leaf badge element AND text line confirmation, excluding any external indicators.
    */
@@ -620,8 +760,19 @@ export class IndeedAdapter implements IPlatformAdapter {
               cardText.includes('apply via company') ||
               textLines.some((l: string) => l.includes('company site') || l.includes('apply directly'));
 
-            // Strict Two-Signal requirement: BOTH Signal 1 and Signal 2 MUST be true, AND NOT external
-            const isQuickApply = hasBadgeElement && hasEasilyApplyLine && !isExternal;
+            const isFilterActiveOnPage =
+              window.location.search.includes('iafilter') || window.location.href.includes('iafilter');
+
+            // Quick Apply Detection:
+            // 1. If Easily apply filter is active on page, non-external cards are Indeed Apply.
+            // 2. Otherwise, require badge element, text line, or card text explicitly containing "easily apply".
+            // 3. In all cases, strictly exclude external redirect indicators.
+            const isQuickApply =
+              !isExternal &&
+              (isFilterActiveOnPage ||
+                (hasBadgeElement && hasEasilyApplyLine) ||
+                cardText.includes('easily apply') ||
+                cardText.includes('apply with indeed'));
 
             const domain = window.location.hostname.includes('in.indeed.com') ? 'in.indeed.com' : 'www.indeed.com';
             const fullUrl = `https://${domain}/viewjob?jk=${jk}`;
