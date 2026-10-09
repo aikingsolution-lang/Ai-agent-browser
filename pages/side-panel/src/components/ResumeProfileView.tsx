@@ -48,6 +48,7 @@ import {
 } from 'react-icons/fi';
 import { AiOutlineLoading3Quarters } from 'react-icons/ai';
 import { SkillAutocompleteInput } from './SkillAutocompleteInput';
+import { JobTitleAutocompleteInput } from './JobTitleAutocompleteInput';
 import { LocationAutocompleteInput } from './LocationAutocompleteInput';
 import { PrioritizedLocationsInput } from './PrioritizedLocationsInput';
 
@@ -982,14 +983,14 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
             </div>
             <div>
               <label className="block text-[11px] font-semibold opacity-70 mb-1">Target Job Title</label>
-              <input
-                type="text"
+              <JobTitleAutocompleteInput
                 value={editForm.currentTitle}
-                onChange={e => setEditForm(prev => ({ ...prev, currentTitle: e.target.value }))}
+                onChange={val => setEditForm(prev => ({ ...prev, currentTitle: val }))}
+                isDarkMode={isDarkMode}
+                placeholder="e.g. AWS DevOps Engineer, Full Stack Developer"
                 className={`w-full rounded-lg border px-3 py-1.5 text-xs outline-none ${
                   isDarkMode ? 'border-sky-800 bg-slate-900 text-white' : 'border-sky-200 bg-white text-gray-900'
                 }`}
-                placeholder="Full Stack Developer"
               />
             </div>
             <div className="grid grid-cols-2 gap-2">
@@ -1403,11 +1404,11 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
                     </div>
                     <div>
                       <label className="block text-[10px] font-semibold text-gray-400 mb-0.5">Job Title *</label>
-                      <input
-                        type="text"
+                      <JobTitleAutocompleteInput
                         placeholder="e.g. Software Engineer"
                         value={workExpTitle}
-                        onChange={e => setWorkExpTitle(e.target.value)}
+                        onChange={val => setWorkExpTitle(val)}
+                        isDarkMode={isDarkMode}
                         className={`w-full rounded-lg border px-2.5 py-1 text-xs outline-none ${
                           isDarkMode
                             ? 'border-sky-900 bg-slate-800 text-white focus:border-sky-500'
