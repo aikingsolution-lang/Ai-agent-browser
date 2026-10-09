@@ -19,6 +19,11 @@
 
 ---
 
+> **Update (October 2026): MongoDB was replaced by Firebase Realtime Database.** The backend now stores
+> all data in the JobForm Automator Firebase project's Realtime Database under the `nanobrowser/`
+> namespace (see [FIREBASE_RTDB_MIGRATION.md](./FIREBASE_RTDB_MIGRATION.md)). Sections 2, 5 and 6 below
+> reflect the new setup; the rest of this document is the original deployment log.
+
 ## 1. Executive Summary
 
 Today, we successfully migrated the NanoBrowser backend from a local development server to an **enterprise-grade, autoscaling Google Cloud Run production infrastructure**.
@@ -42,12 +47,12 @@ flowchart TD
 
     subgraph GCP["Google Cloud Platform (GCP) - asia-south1"]
         CR["Google Cloud Run<br/>nanobrowser-backend<br/>Auto-scaling (0 to N instances)"]
-        SM["Google Secret Manager<br/>- MONGO_URI<br/>- JWT_SECRET<br/>- RAZORPAY_KEY_SECRET<br/>- RAZORPAY_WEBHOOK_SECRET<br/>- AWS_BEDROCK_API_KEY"]
+        SM["Google Secret Manager<br/>- FIREBASE_ADMIN_PRIVATE_KEY<br/>- JWT_SECRET<br/>- RAZORPAY_KEY_SECRET<br/>- RAZORPAY_WEBHOOK_SECRET<br/>- AWS_BEDROCK_API_KEY"]
         SA["Service Account<br/>nanobrowser-backend@nanobrowser-saas...<br/>Role: secretmanager.secretAccessor"]
     end
 
     subgraph External["External Cloud Dependencies"]
-        Mongo["MongoDB Atlas Cluster<br/>(Database & Ledgers)"]
+        RTDB["Firebase Realtime Database<br/>(JobForm Automator project, /nanobrowser namespace)"]
         AWS["AWS Bedrock Runtime<br/>(Claude 3.5 / Amazon Nova Lite)"]
         RP["Razorpay Gateway<br/>(Subscription Payments)"]
         OAuth["Google OAuth 2.0<br/>(Identity Provider)"]
@@ -57,7 +62,7 @@ flowchart TD
     Ext -->|"OAuth ID Token"| OAuth
     CR -->|"IAM Secure Read"| SM
     SA -.->|"Authorizes Access"| SM
-    CR -->|"Mongoose TLS Conn"| Mongo
+    CR -->|"Firebase Admin SDK"| RTDB
     CR -->|"Bearer Auth SDK"| AWS
     CR -->|"Payment Verification"| RP
 ```
@@ -135,8 +140,12 @@ curl https://nanobrowser-backend-336340854879.asia-south1.run.app/ready
     "service": "nanobrowser-backend",
     "version": "0.1.0",
     "database": {
+      "provider": "firebase-rtdb",
+      "namespace": "nanobrowser",
       "isConnected": true,
-      "state": "connected"
+      "state": "connected",
+      "latencyMs": 42,
+      "hasServiceAccount": true
     }
   }
 }
@@ -170,7 +179,8 @@ If you ever need to switch to a **different Google Cloud account or new project*
 
 4. Create Secrets in Secret Manager:
    ```bash
-   echo -n "YOUR_MONGO_URI" | gcloud secrets create MONGO_URI --data-file=-
+   # Firebase Admin private key of the JobForm Automator Firebase project (from the service-account JSON)
+   jq -r .private_key service-account.json | gcloud secrets create FIREBASE_ADMIN_PRIVATE_KEY --data-file=-
    echo -n "YOUR_JWT_SECRET" | gcloud secrets create JWT_SECRET --data-file=-
    echo -n "YOUR_RAZORPAY_KEY_SECRET" | gcloud secrets create RAZORPAY_KEY_SECRET --data-file=-
    echo -n "YOUR_RAZORPAY_WEBHOOK_SECRET" | gcloud secrets create RAZORPAY_WEBHOOK_SECRET --data-file=-
@@ -180,7 +190,7 @@ If you ever need to switch to a **different Google Cloud account or new project*
    PROJECT_ID=$(gcloud config get-value project)
    SA_EMAIL="nanobrowser-backend@${PROJECT_ID}.iam.gserviceaccount.com"
 
-   for SECRET in MONGO_URI JWT_SECRET RAZORPAY_KEY_SECRET RAZORPAY_WEBHOOK_SECRET AWS_BEDROCK_API_KEY; do
+   for SECRET in FIREBASE_ADMIN_PRIVATE_KEY JWT_SECRET RAZORPAY_KEY_SECRET RAZORPAY_WEBHOOK_SECRET AWS_BEDROCK_API_KEY; do
      gcloud secrets add-iam-policy-binding "$SECRET" \
        --member="serviceAccount:${SA_EMAIL}" \
        --role="roles/secretmanager.secretAccessor"
@@ -201,9 +211,12 @@ If you ever need to switch to a **different Google Cloud account or new project*
      --platform managed \
      --allow-unauthenticated \
      --service-account="${SA_EMAIL}" \
-     --set-env-vars="NODE_ENV=production,CORS_ORIGIN=*,GOOGLE_CLIENT_ID=YOUR_CLIENT_ID,RAZORPAY_KEY_ID=YOUR_KEY_ID,AWS_BEDROCK_REGION=us-east-1,LLM_DEFAULT_MODEL=amazon.nova-lite-v1:0" \
-     --set-secrets="MONGO_URI=MONGO_URI:latest,JWT_SECRET=JWT_SECRET:latest,RAZORPAY_KEY_SECRET=RAZORPAY_KEY_SECRET:latest,RAZORPAY_WEBHOOK_SECRET=RAZORPAY_WEBHOOK_SECRET:latest,AWS_BEDROCK_API_KEY=AWS_BEDROCK_API_KEY:latest"
+     --set-env-vars="NODE_ENV=production,CORS_ORIGIN=*,GOOGLE_CLIENT_ID=YOUR_CLIENT_ID,RAZORPAY_KEY_ID=YOUR_KEY_ID,AWS_BEDROCK_REGION=us-east-1,LLM_DEFAULT_MODEL=amazon.nova-lite-v1:0,FIREBASE_PROJECT_ID=jobform-automator-website,FIREBASE_DATABASE_URL=https://jobform-automator-website-default-rtdb.firebaseio.com,FIREBASE_ADMIN_CLIENT_EMAIL=YOUR_SERVICE_ACCOUNT_CLIENT_EMAIL,NANOBROWSER_RTDB_ROOT=nanobrowser" \
+     --set-secrets="FIREBASE_ADMIN_PRIVATE_KEY=FIREBASE_ADMIN_PRIVATE_KEY:latest,JWT_SECRET=JWT_SECRET:latest,RAZORPAY_KEY_SECRET=RAZORPAY_KEY_SECRET:latest,RAZORPAY_WEBHOOK_SECRET=RAZORPAY_WEBHOOK_SECRET:latest,AWS_BEDROCK_API_KEY=AWS_BEDROCK_API_KEY:latest"
    ```
+
+   > Keep the old `MONGO_URI` secret in Secret Manager (unmounted) until the MongoDB → RTDB data
+   > migration has been verified; the server no longer reads it.
 
 ---
 

@@ -1,5 +1,7 @@
 # Authentication & Authorization Architecture
 
+> Website sign-in / sign-out sync with JobForm Automator, token refresh and account isolation: see [JOBFORM_WEBSITE_SESSION.md](./JOBFORM_WEBSITE_SESSION.md).
+
 ## 1. Authentication Mechanisms
 The application employs a secure, stateless **JWT (JSON Web Token)** architecture with cryptographically hashed, rotating refresh tokens and Google OAuth v3 integration.
 

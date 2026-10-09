@@ -1,5 +1,7 @@
 # Payment & Subscription Architecture (Razorpay)
 
+> JobForm Automator premium status (read-only, server-side) and the removal of the local pre-payment plan grant: see [JOBFORM_WEBSITE_SESSION.md](./JOBFORM_WEBSITE_SESSION.md).
+
 ## 1. Monetization Model
 The platform operates on a freemium SaaS model with commercial billing powered by **Razorpay**:
 - **Free Trial**: 7 days, 50 credits, 10 job applications/day limit.

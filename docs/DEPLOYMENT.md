@@ -51,4 +51,4 @@ CMD ["node", "dist/server.js"]
 - Ensure `NODE_ENV=production`.
 - Set strong random `JWT_SECRET` and `JWT_REFRESH_SECRET`.
 - Provide live `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, and `RAZORPAY_WEBHOOK_SECRET`.
-- Connect production MongoDB Atlas cluster URI.
+- Provide the Firebase service account (`FIREBASE_PROJECT_ID`, `FIREBASE_ADMIN_CLIENT_EMAIL`, `FIREBASE_ADMIN_PRIVATE_KEY`, `FIREBASE_DATABASE_URL`) and merge the `nanobrowser` index rules — see [FIREBASE_RTDB_MIGRATION.md](./FIREBASE_RTDB_MIGRATION.md).

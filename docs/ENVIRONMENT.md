@@ -12,7 +12,12 @@ Environment variables for the backend are validated at startup in `backend/src/c
 | `PORT` | No | `5000` | Number | HTTP listening port for Express backend. |
 | `NODE_ENV` | No | `development` | Enum (`development`, `production`, `test`) | Node runtime mode. Suppresses logs in test. |
 | `CORS_ORIGIN` | No | `*` | String (Comma-separated) | Allowed origins for browser CORS headers. |
-| `MONGO_URI` | No | `mongodb://127.0.0.1:27017/nanobrowser_saas` | String | MongoDB connection URI string. |
+| `FIREBASE_PROJECT_ID` | **Yes** | — (`NEXT_PUBLIC_FIREBASE_PROJECT_ID` also accepted) | String | Firebase project that hosts the Realtime Database (the JobForm Automator project). |
+| `FIREBASE_ADMIN_CLIENT_EMAIL` | **Yes** | — | String | Service-account client email (same name as JobForm Automator). Without it, database routes return 503. |
+| `FIREBASE_ADMIN_PRIVATE_KEY` | **Yes** (secret) | — | String (PEM, `\n` escapes allowed) | Service-account private key. Store in Secret Manager, never in the extension build. |
+| `FIREBASE_DATABASE_URL` | **Yes** | — (`NEXT_PUBLIC_FIREBASE_DATABASE_URL` also accepted) | URL | Realtime Database URL. |
+| `NANOBROWSER_RTDB_ROOT` | No | `nanobrowser` | String | Namespace node every backend path lives under (keeps the data apart from JobForm Automator's nodes). |
+| `MIGRATION_MONGO_URI` | Migration only | — | String | Read-only MongoDB URI used only by `src/scripts/migrate-mongo-to-rtdb`. The server never reads it. |
 | `LOG_LEVEL` | No | `info` | Enum (`error`, `warn`, `info`, `http`, `debug`) | Winston logging verbosity level. |
 | `JWT_SECRET` | **Yes** (Prod) | `super_secret_jwt_key_must_be_changed...` | String (Min 16 chars) | Secret key for signing HS256 access tokens. |
 | `JWT_EXPIRES_IN` | No | `15m` | String | Access token expiration duration. |

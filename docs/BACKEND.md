@@ -1,7 +1,7 @@
 # Backend Architecture & Services Documentation
 
 ## 1. Overview
-The backend application located in `backend/` is a production-ready RESTful SaaS backend built with **Node.js (>= 20)**, **Express 4.21**, **TypeScript 5.5**, and **Mongoose 8.7 (MongoDB)**. It handles identity management, multi-tier subscriptions with Razorpay, metered credit ledgering, managed LLM proxying, resume extraction, and job application auditing.
+The backend application located in `backend/` is a production-ready RESTful SaaS backend built with **Node.js (>= 20)**, **Express 4.21**, **TypeScript 5.5**, and **Firebase Realtime Database via the Firebase Admin SDK** (MongoDB was removed — see [DATABASE.md](./DATABASE.md)). It handles identity management, multi-tier subscriptions with Razorpay, metered credit ledgering, managed LLM proxying, resume extraction, and job application auditing.
 
 ---
 
@@ -10,7 +10,7 @@ The backend application located in `backend/` is a production-ready RESTful SaaS
 - **Application Factory**: `backend/src/app.ts` (`createApp()`)
 - **Lifecycle Sequence**:
   1. `env` schema validated via Zod (`backend/src/config/env.ts`). If invalid, process terminates immediately with validation error.
-  2. `connectToDatabase()` establishes connection with MongoDB (`backend/src/config/database.ts`).
+  2. Firebase Admin is initialised on import (`backend/src/config/firebase-admin.ts`); RTDB connects lazily on first use. Without credentials the server still starts and database routes return 503.
   3. `PlanSeedService.seedDefaultPlans()` ensures default plans (`free-trial`, `pro-monthly`, `enterprise-monthly`) exist in DB.
   4. `TrialExpirationWorker.start()` starts the 15-minute cron job.
   5. HTTP server listens on configured `PORT` (default `5000`).
@@ -29,7 +29,7 @@ The middleware in `backend/src/middleware/` executes in the following strict ord
 7. **Global Rate Limiter** (`baseRateLimiter` in `rateLimiter.ts`) - 100 requests per 15 minutes window.
 8. **Route Dispatcher** - Dispatches to `/api/v1` router (`backend/src/routes/index.ts`).
 9. **404 Handler** (`notFoundHandler` in `notFound.ts`) - Catches unrouted requests, returns JSON 404.
-10. **Global Error Handler** (`errorHandler` in `errorHandler.ts`) - Centralizes error formatting, maps `AppError`, handles Zod validation errors and Mongoose duplicate keys.
+10. **Global Error Handler** (`errorHandler` in `errorHandler.ts`) - Centralizes error formatting, maps `AppError` and handles Zod validation errors.
 
 ---
 

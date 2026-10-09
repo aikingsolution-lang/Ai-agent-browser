@@ -249,7 +249,8 @@ Detailed architectural specifications, system diagrams, and deployment guides fo
 - [System Architecture](./docs/ARCHITECTURE.md)
 - [Google Cloud Deployment Guide](./docs/GOOGLE_CLOUD_DEPLOYMENT_GUIDE.md)
 - [Backend Specification](./docs/BACKEND.md)
-- [Database & MongoDB Schemas](./docs/DATABASE.md)
+- [Database (Firebase Realtime Database)](./docs/DATABASE.md)
+- [MongoDB → Firebase RTDB Migration](./docs/FIREBASE_RTDB_MIGRATION.md)
 - [Security Audit & Controls](./docs/SECURITY-AUDIT.md)
 - [Testing & QA Suite](./docs/TESTING.md)
 

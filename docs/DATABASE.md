@@ -1,121 +1,81 @@
-# Database Architecture & Data Contracts (MongoDB / Mongoose)
+# Database Architecture & Data Contracts (Firebase Realtime Database)
 
-The backend uses **Mongoose 8.7.0** on **MongoDB**. All collections use schema-level validations, immutable audit records where appropriate, and compound indexes to support high-throughput read/write operations.
+The backend stores all of its data in **Firebase Realtime Database (RTDB)** — the same database and
+access pattern as JobForm Automator — through the **Firebase Admin SDK**. MongoDB/Mongoose has been
+removed. How the move was done, and how to migrate existing MongoDB data, is in
+[FIREBASE_RTDB_MIGRATION.md](./FIREBASE_RTDB_MIGRATION.md).
 
----
-
-## Complete Model Inventory (10 Collections)
-
-### 1. `User` (`backend/src/models/user.model.ts`)
-- **Collection**: `users`
-- **Fields**:
-  - `name`: String (required, trimmed)
-  - `email`: String (required, unique, lowercased, trimmed)
-  - `passwordHash`: String (select: false)
-  - `role`: String (enum: `'user'`, `'admin'`, default: `'user'`)
-  - `status`: String (enum: `'active'`, `'suspended'`, default: `'active'`)
-  - `googleLinked`: Boolean (default: false)
-  - `googleId`: String (optional)
-  - `hasUsedTrial`: Boolean (default: false)
-  - `timestamps`: createdAt, updatedAt
-- **Indexes**:
-  - `email: 1` (Unique)
+- **Database:** the JobForm Automator Firebase project's RTDB (`FIREBASE_DATABASE_URL`).
+- **Namespace:** every path is under one root node, `nanobrowser/` (`NANOBROWSER_RTDB_ROOT`), so this
+  backend never touches JobForm Automator's own nodes (`user`, `users`, `hr`, `payment_records`, …).
+- **Access:** server-only. The extension never talks to RTDB directly; the security rules deny all
+  client access to `nanobrowser/` and only declare indexes (`backend/firebase/nanobrowser.rtdb-rules.fragment.json`).
+- **Code layout:** `backend/src/services/rtdb/` — `client.ts` (the only DB handle + every path),
+  `repositories.ts` (the only raw RTDB calls), `records.ts` (stored shapes), `serializers.ts` (API
+  shapes), `rtdbUtils.ts` / `mappers.ts` (safety helpers). Domain services (`credit.service.ts`,
+  `trial.service.ts`, …) use the repositories; controllers use the services.
 
 ---
 
-### 2. `UserCreditBalance` (`backend/src/models/userCreditBalance.model.ts`)
-- **Collection**: `usercreditbalances`
-- **Fields**:
-  - `userId`: ObjectId (ref: User, required, unique)
-  - `subscriptionId`: ObjectId (ref: Subscription, required)
-  - `allocatedCredits`: Number (min: 0)
-  - `usedCredits`: Number (min: 0, default: 0)
-  - `remainingCredits`: Number (min: 0)
-  - `periodStart`: Date
-  - `periodEnd`: Date
-- **Indexes**:
-  - `userId: 1` (Unique)
-  - `userId: 1, remainingCredits: 1` (Compound index for balance checking)
+## Data layout
 
----
+All timestamps are stored as Unix milliseconds and returned by the API as ISO-8601 strings (as with
+MongoDB). Every per-user node is keyed by the Firebase uid.
 
-### 3. `CreditLedger` (`backend/src/models/creditLedger.model.ts`)
-- **Collection**: `creditledgers`
-- **Purpose**: Append-only, immutable financial and usage transaction audit log.
-- **Fields**:
-  - `userId`: ObjectId (ref: User, required)
-  - `subscriptionId`: ObjectId (ref: Subscription, required)
-  - `amount`: Number (negative for deductions, positive for allocations/refunds)
-  - `balanceBefore`: Number
-  - `balanceAfter`: Number
-  - `type`: Enum (`'TRIAL_ALLOCATION'`, `'SUBSCRIPTION_RENEWAL'`, `'USAGE_DEDUCTION'`, `'REFUND'`, `'MANUAL_ADJUSTMENT'`)
-  - `description`: String
-  - `idempotencyKey`: String (sparse, unique partial index)
-  - `metadata`: Mixed ({ runId, requestId, model, ... })
-- **Indexes**:
-  - `idempotencyKey: 1` (Unique, partial filter: `{ idempotencyKey: { $type: "string" } }`)
-  - `userId: 1, createdAt: -1` (Fast transaction history sorting)
-  - `userId: 1, 'metadata.runId': 1` (Fast run refund aggregation)
+| Path (under `nanobrowser/`) | Contents | Replaces (Mongo) |
+|---|---|---|
+| `users/{uid}/profile` | name, email, role, status, googleLinked, googleId, picture, legacyId | `users` (non-auth fields; passwords live in Firebase Auth) |
+| `trial_flags/{uid}` | `{ hasUsedTrial, trialUsedAt }` | `User.hasUsedTrial / trialUsedAt` |
+| `subscription_plans/{code}` | plan config | `plans` |
+| `subscriptions/{uid}` | current subscription (Mongo field names: `planCodeSnapshot`, …) | `subscriptions` (+ "one active per user" index) |
+| `subscription_history/{uid}/{subscriptionId}` | older subscriptions (migrated data) | `subscriptions` |
+| `provider_subscriptions/{razorpaySubId}` | `{ uid, subscriptionId }` | unique `providerSubscriptionId` index |
+| `credit_balances/{uid}` | allocated / used / remaining credits, period | `usercreditbalances` |
+| `credit_ledger/{uid}/{entryId}` | append-only audit entries (`runId` copied to top level) | `creditledgers` |
+| `credit_ledger_meta/{uid}/count` | ledger size for paginated totals | `countDocuments` |
+| `credit_idempotency/{uid}/{sha256(key)}` | `{ status: PENDING \| COMPLETED, entryId }` | unique `idempotencyKey` index |
+| `career_brains/{uid}` | Career Brain profile + `tier` + `dailyQuota` | `careerbrains` |
+| `job_applications/{uid}/{appId}` | job applications | `jobapplications` |
+| `job_application_keys/{uid}/{sha256(jobId)}` | appId owning that jobId | unique `{userId, jobId}` index |
+| `job_applications_meta/{uid}/count` | total for pagination | `countDocuments` |
+| `llm_usage/{uid}/{usageId}` | LLM usage logs | `llmusagelogs` |
+| `llm_usage_meta/{uid}/count` | total for pagination | `countDocuments` |
+| `processed_webhooks/{eventKey}` | webhook idempotency ledger (payload stored as JSON text) | `webhookledgers` |
+| `_migrations/mongo_to_rtdb/…` | migration markers and run summaries | — |
+| `_health/ping` | read by the readiness probe | — |
 
----
+`refreshtokens` has no equivalent: sessions are managed by Firebase Auth.
 
-### 4. `Subscription` (`backend/src/models/subscription.model.ts`)
-- **Collection**: `subscriptions`
-- **Fields**:
-  - `userId`: ObjectId (ref: User, required)
-  - `planId`: ObjectId (ref: Plan, required)
-  - `planCodeSnapshot`: String
-  - `planNameSnapshot`: String
-  - `amountSnapshot`: Number
-  - `currencySnapshot`: String
-  - `billingIntervalSnapshot`: Enum (`'monthly'`, `'yearly'`, `'none'`)
-  - `creditsSnapshot`: Number
-  - `status`: Enum (`'TRIALING'`, `'ACTIVE'`, `'PAST_DUE'`, `'CANCELLED'`, `'EXPIRED'`)
-  - `isTrial`: Boolean (default: false)
-  - `trialStartDate`, `trialEndDate`: Date
-  - `provider`: Enum (`'none'`, `'razorpay'`)
-  - `providerSubscriptionId`: String (sparse)
-  - `currentPeriodStart`, `currentPeriodEnd`: Date
-  - `cancelAtPeriodEnd`: Boolean (default: false)
-  - `lastEventTimestamp`: Date (for stale webhook protection)
-- **Indexes**:
-  - `userId: 1` (Unique for active/trialing states)
-  - `userId: 1, isTrial: 1` (Unique partial index)
-  - `status: 1, isTrial: 1, trialEndDate: 1` (Worker cron index)
+### Stored-shape notes
+- `career_brains/{uid}`: the API fields `skillExperience` (`Record<skill, years>`) and `customAnswers`
+  (`Record<question, answer>`) are stored as `skillExperienceList` / `customAnswersList` entry lists,
+  because user text such as `Node.js`, `C#` or `Pune/Delhi?` cannot be an RTDB key. The API rebuilds the maps.
+- Arrays are stored by RTDB as index-keyed objects and empty arrays/objects are not stored at all;
+  serializers always return arrays/objects with the old Mongoose defaults.
 
----
+## Indexes
 
-### 5. `Plan` (`backend/src/models/plan.model.ts`)
-- **Collection**: `plans`
-- **Fields**: `code` (unique), `name`, `description`, `amount`, `currency`, `billingInterval`, `creditsPerBillingPeriod`, `razorpayPlanId`, `isActive`, `features`.
+Declared in `backend/firebase/nanobrowser.rtdb-rules.fragment.json` (the test suite fails any query
+that isn't covered):
 
----
+| Path | `.indexOn` | Used by |
+|---|---|---|
+| `nanobrowser/subscriptions` | `status` | bulk expiry reconciliation (cron) |
+| `nanobrowser/credit_ledger/$uid` | `createdAt`, `runId` | history pagination, refunds per agent run |
+| `nanobrowser/job_applications/$uid` | `updatedAt`, `status` | listing, status filter |
+| `nanobrowser/llm_usage/$uid` | `createdAt`, `idempotencyKey` | usage history, LLM idempotency |
 
-### 6. `RefreshToken` (`backend/src/models/refreshToken.model.ts`)
-- **Collection**: `refreshtokens`
-- **Fields**: `userId`, `tokenHash` (SHA-256 hash of raw token, unique), `expiresAt` (TTL index: `{ expires: 0 }`), `revokedAt`, `replacedByTokenHash`.
+## Integrity guarantees
 
----
-
-### 7. `WebhookLedger` (`backend/src/models/webhookLedger.model.ts`)
-- **Collection**: `webhookledgers`
-- **Fields**: `eventId` (unique), `eventType`, `providerPaymentId`, `status` (`'PROCESSING'`, `'PROCESSED'`, `'FAILED'`), `payload`, `errorMessage`, `processedAt`.
-
----
-
-### 8. `LlmUsageLog` (`backend/src/models/llmUsageLog.model.ts`)
-- **Collection**: `llmusagelogs`
-- **Fields**: `requestId`, `userId`, `provider`, `model`, `promptTokens`, `completionTokens`, `totalTokens`, `creditsDeducted`, `latencyMs`, `status`, `errorMessage`, `idempotencyKey`, `metadata`.
-
----
-
-### 9. `JobApplication` (`backend/src/models/jobApplication.model.ts`)
-- **Collection**: `jobapplications`
-- **Fields**: `userId`, `jobId`, `title`, `company`, `location`, `salaryRange`, `fitScore`, `platform`, `status`, `appliedAt`.
-- **Indexes**: `userId: 1, jobId: 1` (Unique).
-
----
-
-### 10. `CareerBrain` (`backend/src/models/careerBrain.model.ts`)
-- **Collection**: `careerbrains`
-- **Fields**: `userId` (unique), `fullName`, `email`, `phone`, `currentLocation`, `totalExperienceYears`, `skills`, `skillExperience`, `workExperience`, `goldenAnswers`, `dailyApplicationLimit`, `appliedCountToday`, `lastApplicationDate`, `tier`.
+| Guarantee | How |
+|---|---|
+| Credits never go negative; concurrent deductions are safe | transaction on `credit_balances/{uid}` |
+| An idempotency key deducts/refunds once | transaction claim on `credit_idempotency/{uid}/…` before the balance changes |
+| One trial per user, ever | transaction claim on `trial_flags/{uid}` |
+| One current subscription per user | single node `subscriptions/{uid}` |
+| A Razorpay subscription belongs to one user | transaction claim on `provider_subscriptions/{id}` |
+| One application per `{user, jobId}` | transaction claim on `job_application_keys/{uid}/{hash}` |
+| A webhook event is processed once (stuck events reclaimed after 2 min) | transaction claim on `processed_webhooks/{eventKey}` |
+| Subscription change + credit allocation + ledger entry land together | one multi-location `update()` |
+| Daily quota never exceeds the plan limit | transaction on `career_brains/{uid}/dailyQuota` |
+| User isolation | every path is built from the authenticated uid and validated (`assertSafeUid`) |

@@ -2,10 +2,11 @@
 
 ## 1. Common Issues & Solutions
 
-### A. MongoDB Connection Failure
-- **Symptom**: Backend crashes on startup with `MongooseServerSelectionError`.
-- **Cause**: MongoDB is not running locally on port 27017 or `MONGO_URI` is incorrect.
-- **Fix**: Ensure MongoDB service is running (`net start MongoDB` or `docker run -p 27017:27017 mongo`) or verify connection string in `backend/.env`.
+### A. Database Unavailable (Firebase Realtime Database)
+- **Symptom**: `/ready` returns 503 and API routes return `503 SERVICE_UNAVAILABLE`; the startup log says "Firebase Realtime Database not configured" or "Database initialisation deferred".
+- **Cause**: `FIREBASE_ADMIN_CLIENT_EMAIL`, `FIREBASE_ADMIN_PRIVATE_KEY` or `FIREBASE_DATABASE_URL` is missing or wrong (the private key must keep its `\n` line breaks).
+- **Fix**: Set the four `FIREBASE_*` variables in `backend/.env` (or Cloud Run secrets) — see [ENVIRONMENT.md](./ENVIRONMENT.md). `GET /ready` reports `database.state`, `latencyMs` and whether a service account is configured.
+- **Queries slow / "Using an unspecified index" warnings**: the `nanobrowser` `.indexOn` rules are missing — see [FIREBASE_RTDB_MIGRATION.md](./FIREBASE_RTDB_MIGRATION.md#2-security-rules-and-indexes-manual-not-deployed-automatically).
 
 ### B. Chrome Debugger Detached Banner Appears
 - **Symptom**: User clicks "Cancel" on Chrome's native debugger notification at the top of the browser.

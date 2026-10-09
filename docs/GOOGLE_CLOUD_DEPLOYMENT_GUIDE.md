@@ -58,17 +58,22 @@ Apne sensitive credentials ko Google Cloud Secret Manager me store karein:
 
 ```bash
 # 1. Secrets create karein (apni actual values se replace karein):
-echo -n "YOUR_MONGODB_URI" | gcloud secrets create MONGO_URI --data-file=-
+# Firebase Admin private key (JobForm Automator Firebase project ka service-account JSON se):
+jq -r .private_key service-account.json | gcloud secrets create FIREBASE_ADMIN_PRIVATE_KEY --data-file=-
 echo -n "YOUR_JWT_SECRET_MIN_32_CHARS" | gcloud secrets create JWT_SECRET --data-file=-
 echo -n "YOUR_RAZORPAY_KEY_SECRET" | gcloud secrets create RAZORPAY_KEY_SECRET --data-file=-
 echo -n "YOUR_RAZORPAY_WEBHOOK_SECRET" | gcloud secrets create RAZORPAY_WEBHOOK_SECRET --data-file=-
 echo -n "YOUR_AWS_BEDROCK_BEARER_TOKEN" | gcloud secrets create AWS_BEDROCK_API_KEY --data-file=-
 
+# NOTE: Backend ab MongoDB use nahi karta (data Firebase Realtime Database me hai).
+# Purana MONGO_URI secret DELETE mat karein jab tak Mongo → RTDB data migration verify na ho jaye
+# (docs/FIREBASE_RTDB_MIGRATION.md). Bas deploy command me use mount karna band kar diya gaya hai.
+
 # 2. Service Account ko in Secrets ko read karne ki permission dein:
 PROJECT_ID=$(gcloud config get-value project)
 SA_EMAIL="nanobrowser-backend@${PROJECT_ID}.iam.gserviceaccount.com"
 
-for SECRET in MONGO_URI JWT_SECRET RAZORPAY_KEY_SECRET RAZORPAY_WEBHOOK_SECRET AWS_BEDROCK_API_KEY; do
+for SECRET in FIREBASE_ADMIN_PRIVATE_KEY JWT_SECRET RAZORPAY_KEY_SECRET RAZORPAY_WEBHOOK_SECRET AWS_BEDROCK_API_KEY; do
   gcloud secrets add-iam-policy-binding "$SECRET" \
     --member="serviceAccount:${SA_EMAIL}" \
     --role="roles/secretmanager.secretAccessor"
@@ -97,8 +102,8 @@ gcloud run deploy nanobrowser-backend \
   --platform managed \
   --allow-unauthenticated \
   --service-account="${SA_EMAIL}" \
-  --set-env-vars="NODE_ENV=production,CORS_ORIGIN=*,GOOGLE_CLIENT_ID=336340854879-i6hj15oe17se379u6k377slo7pvbvh3v.apps.googleusercontent.com,RAZORPAY_KEY_ID=rzp_test_TZudy51Zrf7t8w,AWS_BEDROCK_REGION=us-east-1,LLM_DEFAULT_MODEL=amazon.nova-lite-v1:0" \
-  --set-secrets="MONGO_URI=MONGO_URI:latest,JWT_SECRET=JWT_SECRET:latest,RAZORPAY_KEY_SECRET=RAZORPAY_KEY_SECRET:latest,RAZORPAY_WEBHOOK_SECRET=RAZORPAY_WEBHOOK_SECRET:latest,AWS_BEDROCK_API_KEY=AWS_BEDROCK_API_KEY:latest"
+  --set-env-vars="NODE_ENV=production,CORS_ORIGIN=*,GOOGLE_CLIENT_ID=336340854879-i6hj15oe17se379u6k377slo7pvbvh3v.apps.googleusercontent.com,RAZORPAY_KEY_ID=rzp_test_TZudy51Zrf7t8w,AWS_BEDROCK_REGION=us-east-1,LLM_DEFAULT_MODEL=amazon.nova-lite-v1:0,FIREBASE_PROJECT_ID=jobform-automator-website,FIREBASE_DATABASE_URL=https://jobform-automator-website-default-rtdb.firebaseio.com,FIREBASE_ADMIN_CLIENT_EMAIL=YOUR_SERVICE_ACCOUNT_CLIENT_EMAIL,NANOBROWSER_RTDB_ROOT=nanobrowser" \
+  --set-secrets="FIREBASE_ADMIN_PRIVATE_KEY=FIREBASE_ADMIN_PRIVATE_KEY:latest,JWT_SECRET=JWT_SECRET:latest,RAZORPAY_KEY_SECRET=RAZORPAY_KEY_SECRET:latest,RAZORPAY_WEBHOOK_SECRET=RAZORPAY_WEBHOOK_SECRET:latest,AWS_BEDROCK_API_KEY=AWS_BEDROCK_API_KEY:latest"
 ```
 
 Deployment complete hone ke baad terminal me **Service URL** dikhega:
@@ -129,8 +134,8 @@ gcloud run deploy nanobrowser-backend \
   --platform managed \
   --allow-unauthenticated \
   --service-account="${SA_EMAIL}" \
-  --set-env-vars="NODE_ENV=production,CORS_ORIGIN=*,GOOGLE_CLIENT_ID=336340854879-i6hj15oe17se379u6k377slo7pvbvh3v.apps.googleusercontent.com,RAZORPAY_KEY_ID=rzp_test_TZudy51Zrf7t8w,AWS_BEDROCK_REGION=us-east-1,LLM_DEFAULT_MODEL=amazon.nova-lite-v1:0" \
-  --set-secrets="MONGO_URI=MONGO_URI:latest,JWT_SECRET=JWT_SECRET:latest,RAZORPAY_KEY_SECRET=RAZORPAY_KEY_SECRET:latest,RAZORPAY_WEBHOOK_SECRET=RAZORPAY_WEBHOOK_SECRET:latest,AWS_BEDROCK_API_KEY=AWS_BEDROCK_API_KEY:latest"
+  --set-env-vars="NODE_ENV=production,CORS_ORIGIN=*,GOOGLE_CLIENT_ID=336340854879-i6hj15oe17se379u6k377slo7pvbvh3v.apps.googleusercontent.com,RAZORPAY_KEY_ID=rzp_test_TZudy51Zrf7t8w,AWS_BEDROCK_REGION=us-east-1,LLM_DEFAULT_MODEL=amazon.nova-lite-v1:0,FIREBASE_PROJECT_ID=jobform-automator-website,FIREBASE_DATABASE_URL=https://jobform-automator-website-default-rtdb.firebaseio.com,FIREBASE_ADMIN_CLIENT_EMAIL=YOUR_SERVICE_ACCOUNT_CLIENT_EMAIL,NANOBROWSER_RTDB_ROOT=nanobrowser" \
+  --set-secrets="FIREBASE_ADMIN_PRIVATE_KEY=FIREBASE_ADMIN_PRIVATE_KEY:latest,JWT_SECRET=JWT_SECRET:latest,RAZORPAY_KEY_SECRET=RAZORPAY_KEY_SECRET:latest,RAZORPAY_WEBHOOK_SECRET=RAZORPAY_WEBHOOK_SECRET:latest,AWS_BEDROCK_API_KEY=AWS_BEDROCK_API_KEY:latest"
 ```
 
 ---

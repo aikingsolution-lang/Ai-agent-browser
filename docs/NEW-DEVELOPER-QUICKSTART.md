@@ -8,7 +8,7 @@ Welcome to the **NanoBrowser / JobPilot** repository! This document will get you
 Ensure you have the following installed on your workstation:
 - **Node.js**: Version `>= 20.0.0` (Node 20 or 22 LTS recommended).
 - **PNPM**: Version `>= 9.0.0` (`npm install -g pnpm`).
-- **MongoDB**: Version `>= 6.0` running locally on port `27017` OR a MongoDB Atlas connection string.
+- **Firebase**: a service account for the JobForm Automator Firebase project (or a test project) with Realtime Database access. No local database server is needed.
 - **Google Chrome**: Modern version supporting Manifest V3 SidePanel API.
 
 ---
@@ -38,7 +38,12 @@ Edit `backend/.env` with minimum local defaults:
 ```ini
 PORT=5000
 NODE_ENV=development
-MONGO_URI=mongodb://127.0.0.1:27017/nanobrowser_saas
+FIREBASE_PROJECT_ID=your-firebase-project-id
+FIREBASE_ADMIN_CLIENT_EMAIL=firebase-adminsdk-xxxxx@your-project.iam.gserviceaccount.com
+FIREBASE_ADMIN_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
+FIREBASE_DATABASE_URL=https://your-project-default-rtdb.firebaseio.com
+# Use your own namespace for local development so you never touch shared data:
+NANOBROWSER_RTDB_ROOT=dev_yourname_nanobrowser
 JWT_SECRET=development_super_secret_jwt_key_min_32_chars_12345
 JWT_EXPIRES_IN=15m
 JWT_REFRESH_SECRET=development_super_secret_jwt_refresh_key_min_32_chars_12345
@@ -64,10 +69,12 @@ pnpm dev
 You will see:
 ```
 [INFO] Server running in development mode on port 5000
-[INFO] Connected to MongoDB database: nanobrowser_saas
+[INFO] Firebase Realtime Database namespace: /dev_yourname_nanobrowser
 [INFO] ⏰ Trial expiration background cron worker initialized (schedule: every 15m)
 [INFO] Default plans verified and seeded.
 ```
+
+The backend tests need no Firebase project or database (they use an in-memory RTDB): `pnpm test`.
 
 Verify health check in your browser or terminal:
 ```bash
