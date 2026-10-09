@@ -12,6 +12,8 @@ import {
   type ILinkedInAutomationConfig,
   DEFAULT_LINKEDIN_CONFIG,
   careerBrainStore,
+  getPlanLimitDetails,
+  type PlanLimitDetails,
 } from '@extension/storage';
 import { backendApiClient } from '@extension/shared';
 import {
@@ -113,15 +115,21 @@ export function LinkedInApplyDashboard({
     currentTitle: '',
     roles: [],
   });
+  const [planDetails, setPlanDetails] = useState<PlanLimitDetails | null>(null);
 
-  // Sync automationConfig and Career Brain info
+  // Sync automationConfig, Career Brain info, and Plan Details
   useEffect(() => {
     let isMounted = true;
     const syncConfig = async () => {
       try {
-        const [cfg, brain] = await Promise.all([linkedInConfigStore.getConfig(), careerBrainStore.getCareerBrain()]);
+        const [cfg, brain, plan] = await Promise.all([
+          linkedInConfigStore.getConfig(),
+          careerBrainStore.getCareerBrain(),
+          getPlanLimitDetails(),
+        ]);
         if (isMounted) {
           setAutomationConfig(cfg);
+          setPlanDetails(plan);
           setCareerBrainInfo({
             currentTitle: brain.currentTitle || '',
             roles: Array.isArray(brain.predefinedRoles) ? brain.predefinedRoles : [],
@@ -438,7 +446,17 @@ export function LinkedInApplyDashboard({
       <div
         className={`rounded-xl border p-3 flex items-center justify-between text-xs ${isDarkMode ? 'border-sky-900 bg-slate-800/60' : 'border-sky-100 bg-white/80 shadow-sm'}`}>
         <div>
-          <p className="text-[11px] opacity-70 font-medium">Daily Application Limit</p>
+          <div className="flex items-center gap-1.5 mb-0.5">
+            <p className="text-[11px] opacity-70 font-medium">Daily Application Limit</p>
+            <span
+              className={`text-[9px] px-1.5 py-0.2 rounded font-bold uppercase tracking-wider ${
+                (planDetails?.isFreeTrial ?? true)
+                  ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
+                  : 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
+              }`}>
+              {planDetails?.planDisplayName || 'Free Trial'}
+            </span>
+          </div>
           <div className="flex items-center space-x-2">
             <p className="text-sm font-bold text-sky-400">
               {quota ? `${quota.appliedCount} / ${quota.maxDailyQuota}` : '0 / 15'} Applied Today
@@ -465,7 +483,7 @@ export function LinkedInApplyDashboard({
               type="button"
               onClick={onOpenPlansModal}
               className="rounded-full bg-gradient-to-r from-amber-500 to-orange-500 px-2.5 py-1 text-[10px] font-bold text-white hover:from-amber-600 hover:to-orange-600 transition-all cursor-pointer shadow-sm">
-              Upgrade
+              {(planDetails?.isFreeTrial ?? true) ? 'Upgrade to Pro' : 'Change Plan'}
             </button>
           )}
         </div>
@@ -577,6 +595,27 @@ export function LinkedInApplyDashboard({
                   <span className="text-[9px] text-emerald-400 font-medium">Safe</span>
                 </div>
               </div>
+            </div>
+
+            {/* Plan Quota & Subscription Enforced Cap */}
+            <div
+              className={`p-2 rounded-lg border text-[11px] flex items-center justify-between ${
+                isDarkMode ? 'border-sky-900/60 bg-slate-900/80' : 'border-sky-100 bg-sky-50/60'
+              }`}>
+              <div>
+                <span className="font-semibold block text-[10px] opacity-80">Subscription Daily Quota</span>
+                <span className="text-[10px] text-sky-400 font-bold">
+                  {planDetails?.planDisplayName || 'Free Trial'}: {planDetails?.maxDailyApplications ?? 15} jobs / day
+                </span>
+              </div>
+              {planDetails?.isFreeTrial && onOpenPlansModal && (
+                <button
+                  type="button"
+                  onClick={onOpenPlansModal}
+                  className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/20 text-amber-400 border border-amber-500/40 hover:bg-amber-500/30 transition-colors cursor-pointer">
+                  Upgrade (up to 75/day)
+                </button>
+              )}
             </div>
 
             {/* Link to Full Options Page */}

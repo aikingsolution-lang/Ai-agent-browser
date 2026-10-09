@@ -1,6 +1,7 @@
 import { createStorage } from '../base/base';
 import { StorageEnum } from '../base/enums';
 import type { BaseStorage } from '../base/types';
+import { getPlanLimitDetails } from '../subscription/copilotTier';
 
 export interface DailyQuotaData {
   dateString: string;
@@ -8,6 +9,7 @@ export interface DailyQuotaData {
   maxDailyQuota: number;
   isPausedDueToQuota: boolean;
   nextResumeTimestamp: number | null;
+  activePlanCode?: string;
 }
 
 export const DEFAULT_DAILY_QUOTA: DailyQuotaData = {
@@ -16,6 +18,7 @@ export const DEFAULT_DAILY_QUOTA: DailyQuotaData = {
   maxDailyQuota: 15,
   isPausedDueToQuota: false,
   nextResumeTimestamp: null,
+  activePlanCode: 'free-trial',
 };
 
 const storage = createStorage<DailyQuotaData>('linkedin_daily_quota', DEFAULT_DAILY_QUOTA, {
@@ -37,17 +40,38 @@ export const dailyQuotaStore: DailyQuotaStorageType = {
   async getQuotaData(): Promise<DailyQuotaData> {
     const today = new Date().toISOString().split('T')[0];
     const data = (await storage.get()) || DEFAULT_DAILY_QUOTA;
+    const planDetails = await getPlanLimitDetails().catch(() => ({
+      maxDailyApplications: 15,
+      planCode: 'free-trial',
+    }));
+
+    const planCap = planDetails.maxDailyApplications;
+    const planCode = planDetails.planCode;
 
     if (data.dateString !== today) {
       const freshData: DailyQuotaData = {
         ...data,
         dateString: today,
         appliedCount: 0,
+        maxDailyQuota: planCap,
+        activePlanCode: planCode,
         isPausedDueToQuota: false,
         nextResumeTimestamp: null,
       };
       await storage.set(freshData);
       return freshData;
+    }
+
+    // Keep maxDailyQuota updated if the user's subscription upgraded or downgraded
+    if (data.maxDailyQuota !== planCap || data.activePlanCode !== planCode) {
+      const syncedData: DailyQuotaData = {
+        ...data,
+        maxDailyQuota: planCap,
+        activePlanCode: planCode,
+        isPausedDueToQuota: data.appliedCount >= planCap,
+      };
+      await storage.set(syncedData);
+      return syncedData;
     }
 
     return data;

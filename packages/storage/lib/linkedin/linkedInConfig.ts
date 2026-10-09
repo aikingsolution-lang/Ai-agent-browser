@@ -62,19 +62,45 @@ export type LinkedInConfigStorage = BaseStorage<ILinkedInAutomationConfig> & {
   updateConfig: (updates: Partial<ILinkedInAutomationConfig>) => Promise<ILinkedInAutomationConfig>;
 };
 
+import { getPlanLimitDetails } from '../subscription/copilotTier';
+
 export const linkedInConfigStore: LinkedInConfigStorage = {
   ...storage,
 
   async getConfig(): Promise<ILinkedInAutomationConfig> {
     const data = await storage.get();
-    return data || DEFAULT_LINKEDIN_CONFIG;
+    const config = data || DEFAULT_LINKEDIN_CONFIG;
+
+    try {
+      const planDetails = await getPlanLimitDetails();
+      const planCap = planDetails.maxDailyApplications;
+
+      // If user is on free trial or config dailyApplicationLimit exceeds plan cap, clamp to planCap
+      if (planDetails.isFreeTrial || config.dailyApplicationLimit > planCap) {
+        config.dailyApplicationLimit = planCap;
+      }
+    } catch {}
+
+    return config;
   },
 
   async updateConfig(updates: Partial<ILinkedInAutomationConfig>): Promise<ILinkedInAutomationConfig> {
     const current = await this.getConfig();
+    let validatedDailyLimit = updates.dailyApplicationLimit ?? current.dailyApplicationLimit;
+
+    try {
+      const planDetails = await getPlanLimitDetails();
+      const planCap = planDetails.maxDailyApplications;
+      // Clamp to plan cap so trial users cannot bypass limits via direct settings update
+      if (planDetails.isFreeTrial || validatedDailyLimit > planCap) {
+        validatedDailyLimit = Math.min(validatedDailyLimit, planCap);
+      }
+    } catch {}
+
     const updated: ILinkedInAutomationConfig = {
       ...current,
       ...updates,
+      dailyApplicationLimit: validatedDailyLimit,
     };
     await storage.set(updated);
     return updated;
