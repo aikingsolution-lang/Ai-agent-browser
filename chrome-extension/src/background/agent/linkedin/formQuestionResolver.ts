@@ -816,13 +816,11 @@ export function adaptAnswerToFieldFormat(
     labelLower,
   );
 
-  const expectsDaysOrNumber =
-    isNoticePeriod &&
-    (/\bin\s*days\b|\bdays\b/i.test(combinedContext) ||
-      /\bin\s*months?\b|\bmonths?\b/i.test(combinedContext) ||
-      isNumericField ||
-      /larger\s*than|greater\s*than|decimal|number/i.test(combinedContext) ||
-      /example:\s*\d+/i.test(hintLower));
+  // In Easy Apply, if the field is an input (text/number) that reached here,
+  // recruiters almost universally configure it as numeric (days, months, or decimal number).
+  // Therefore, we ALWAYS format notice period into digits first.
+  const isInputField = field.fieldType === 'text' || field.fieldType === 'number';
+  const expectsDaysOrNumber = isNoticePeriod && (isInputField || isNumericField);
 
   if (expectsDaysOrNumber) {
     // Check if 0 is forbidden by min attribute, error message, or hint text (e.g. "larger than 0.0")
@@ -855,35 +853,46 @@ export function adaptAnswerToFieldFormat(
     // b) X days (e.g. "15 days", "30 days")
     const daysMatch = answer.match(/^(\d+)\s*days?$/i);
     if (daysMatch) {
+      const val = daysMatch[1] === '0' && requiresGreaterThanZero ? '1' : daysMatch[1];
       return {
         valid: true,
-        value: daysMatch[1],
+        value: val,
         wasConverted: true,
-        sourceNote: `[MATCHED] notice period '${answer}' -> ${daysMatch[1]} days`,
+        sourceNote: `[MATCHED] notice period '${answer}' -> ${val} days`,
       };
     }
 
-    // c) X months (e.g. "1 month" -> 30, "2 months" -> 60, "3 months" -> 90)
+    // c) X months (e.g. "1 month" -> 30, "2 months" -> 60, "3 months" -> 90 or decimal month if expecting decimal)
     const monthMatch = answer.match(/^(\d+(?:\.\d+)?)\s*months?$/i);
     if (monthMatch) {
-      const days = Math.round(parseFloat(monthMatch[1]) * 30).toString();
+      // If the field explicitly specifies months in label or hint, keep month count (e.g. 1 or 2)
+      // Otherwise convert to days (e.g. 30 or 60)
+      const numMonths = parseFloat(monthMatch[1]);
+      let numVal: string;
+      if (/\bin\s*months?\b|\bmonths?\b/i.test(combinedContext) && !/\bdays\b/i.test(combinedContext)) {
+        numVal = numMonths <= 0 && requiresGreaterThanZero ? '1' : monthMatch[1];
+      } else {
+        const days = Math.round(numMonths * 30);
+        numVal = days <= 0 && requiresGreaterThanZero ? '1' : days.toString();
+      }
       return {
         valid: true,
-        value: days,
+        value: numVal,
         wasConverted: true,
-        sourceNote: `[MATCHED] notice period '${answer}' -> ${days} days`,
+        sourceNote: `[MATCHED] notice period '${answer}' -> ${numVal}`,
       };
     }
 
     // d) X weeks (e.g. "2 weeks" -> 14)
     const weekMatch = answer.match(/^(\d+)\s*weeks?$/i);
     if (weekMatch) {
-      const days = (parseInt(weekMatch[1], 10) * 7).toString();
+      const days = parseInt(weekMatch[1], 10) * 7;
+      const val = days <= 0 && requiresGreaterThanZero ? '1' : days.toString();
       return {
         valid: true,
-        value: days,
+        value: val,
         wasConverted: true,
-        sourceNote: `[MATCHED] notice period '${answer}' -> ${days} days`,
+        sourceNote: `[MATCHED] notice period '${answer}' -> ${val} days`,
       };
     }
 
@@ -900,18 +909,29 @@ export function adaptAnswerToFieldFormat(
       return { valid: true, value: answer, wasConverted: false };
     }
 
-    // Fallback: If numeric constraint is required, default to 1 (if > 0) or 0
-    if (isNumericField || requiresGreaterThanZero) {
-      const fallback = requiresGreaterThanZero ? '1' : '0';
+    // f) Extract any numbers from string (e.g. "Serving notice, 15 days left" -> 15)
+    const extractedNum = answer.match(/\d+(?:\.\d+)?/);
+    if (extractedNum) {
+      let val = extractedNum[0];
+      if ((val === '0' || val === '0.0') && requiresGreaterThanZero) {
+        val = '1';
+      }
       return {
         valid: true,
-        value: fallback,
+        value: val,
         wasConverted: true,
-        sourceNote: `[MATCHED] notice period '${answer}' -> ${fallback} (safe numeric fallback)`,
+        sourceNote: `[MATCHED] notice period '${answer}' -> ${val} (extracted digits)`,
       };
     }
 
-    return { valid: false, value: answer, wasConverted: false };
+    // Fallback: If in an input field, default to 1 (if > 0) or 0 (immediate)
+    const fallback = requiresGreaterThanZero ? '1' : '0';
+    return {
+      valid: true,
+      value: fallback,
+      wasConverted: true,
+      sourceNote: `[MATCHED] notice period '${answer}' -> ${fallback} (digits fallback)`,
+    };
   }
 
   // 2. CTC / Salary in INR or LPA

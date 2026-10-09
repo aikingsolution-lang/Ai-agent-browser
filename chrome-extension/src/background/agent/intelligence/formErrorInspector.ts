@@ -157,11 +157,16 @@ export async function inspectAndHealFormErrors(page: any, containerSelector?: st
             errL.includes('number') ||
             errL.includes('numeric') ||
             errL.includes('digits') ||
-            errL.includes('larger than')
+            errL.includes('larger than') ||
+            errL.includes('greater than')
           ) {
-            const raw = (inputEl as HTMLInputElement).value || '1';
-            let cleanNum = raw.replace(/[^0-9.]/g, '') || '1';
-            if (errL.includes('larger than 0') && (cleanNum === '0' || cleanNum === '0.0')) {
+            const raw = (inputEl as HTMLInputElement).value || '';
+            let cleanNum = raw.replace(/[^0-9.]/g, '');
+            // If field had text (like "Immediate") or empty, cleanNum is empty -> default to '1'
+            if (!cleanNum || isNaN(Number(cleanNum))) {
+              cleanNum = '1';
+            }
+            if ((errL.includes('larger than 0') || errL.includes('greater than 0')) && Number(cleanNum) <= 0) {
               cleanNum = '1';
             }
             setNativeVal(inputEl, cleanNum);

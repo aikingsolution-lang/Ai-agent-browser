@@ -4654,7 +4654,7 @@ export default class Page {
             const isTextArea = input.tagName.toLowerCase() === 'textarea';
             const combinedHint = (placeholder + ' ' + hintText).toLowerCase();
             const isSkillOrNumeric =
-              /how many years|experience|years|\bdays\b|\bmonths\b|whole\s*number|only\s*(?:whole\s*)?numbers|in\s*inr|in\s*lpa|ctc|decimal\s*number|larger\s*than|greater\s*than/i.test(
+              /how many years|experience|years|\bdays\b|\bmonths\b|whole\s*number|only\s*(?:whole\s*)?numbers|in\s*inr|in\s*lpa|ctc|decimal\s*number|larger\s*than|greater\s*than|notice\s*period|how\s*soon\s*can\s*you\s*start|availability\s*to\s*join|joining\s*time/i.test(
                 label + ' ' + combinedHint,
               ) ||
               input.type === 'number' ||
