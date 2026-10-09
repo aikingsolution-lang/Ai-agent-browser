@@ -1,6 +1,6 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { openJobformSignIn } from '@extension/shared';
-import { FiExternalLink, FiLogIn } from 'react-icons/fi';
+import { FiExternalLink, FiLogIn, FiLoader } from 'react-icons/fi';
 
 interface AuthGateViewProps {
   isDarkMode?: boolean;
@@ -13,8 +13,29 @@ interface AuthGateViewProps {
  */
 export const AuthGateView: React.FC<AuthGateViewProps> = ({ isDarkMode = false }) => {
   const [opened, setOpened] = useState(false);
+  const [checking, setChecking] = useState(false);
 
-  const handleLogin = () => {
+  useEffect(() => {
+    // Proactively check if any open JobForm Automator tab already has a candidate session
+    if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
+      chrome.runtime.sendMessage({ type: 'SYNC_JOBFORM_SESSION' }).catch(() => undefined);
+    }
+  }, []);
+
+  const handleLogin = async () => {
+    setChecking(true);
+    try {
+      if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
+        const res = await chrome.runtime.sendMessage({ type: 'SYNC_JOBFORM_SESSION' });
+        if (res?.ok) {
+          setChecking(false);
+          return;
+        }
+      }
+    } catch {
+      // Proceed to opening the sign-in page if query fails
+    }
+    setChecking(false);
     openJobformSignIn();
     setOpened(true);
   };
@@ -37,10 +58,20 @@ export const AuthGateView: React.FC<AuthGateViewProps> = ({ isDarkMode = false }
         <button
           type="button"
           onClick={handleLogin}
-          className="flex w-full cursor-pointer items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-sky-500 to-indigo-600 px-4 py-2.5 text-xs font-bold text-white shadow-md shadow-sky-500/20 transition-all hover:from-sky-600 hover:to-indigo-700 active:scale-[0.99]">
-          <FiLogIn className="size-4" />
-          <span>Login with JobForm Automator</span>
-          <FiExternalLink className="size-3.5 opacity-80" />
+          disabled={checking}
+          className="flex w-full cursor-pointer items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-sky-500 to-indigo-600 px-4 py-2.5 text-xs font-bold text-white shadow-md shadow-sky-500/20 transition-all hover:from-sky-600 hover:to-indigo-700 active:scale-[0.99] disabled:opacity-70">
+          {checking ? (
+            <>
+              <FiLoader className="size-4 animate-spin" />
+              <span>Checking session...</span>
+            </>
+          ) : (
+            <>
+              <FiLogIn className="size-4" />
+              <span>Login with JobForm Automator</span>
+              <FiExternalLink className="size-3.5 opacity-80" />
+            </>
+          )}
         </button>
 
         {opened && (

@@ -147,8 +147,99 @@ export async function handleWebsiteMessage(
   }
 }
 
+/**
+ * Actively checks open JobForm Automator tabs in the browser, reads their Firebase session
+ * via scripting, and syncs it immediately into the extension.
+ */
+export async function syncSessionFromOpenJobformTabs(): Promise<{ ok: boolean; reason?: string; uid?: string }> {
+  try {
+    if (typeof chrome === 'undefined' || !chrome.tabs?.query || !chrome.scripting?.executeScript) {
+      return { ok: false, reason: 'unsupported' };
+    }
+    const tabs = await chrome.tabs.query({
+      url: ['https://www.jobformautomator.com/*', 'https://jobformautomator.com/*'],
+    });
+    if (!tabs || tabs.length === 0) {
+      return { ok: false, reason: 'no-tabs' };
+    }
+
+    for (const tab of tabs) {
+      if (!tab.id) continue;
+      try {
+        const results = await chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          func: () => {
+            try {
+              const storage = window.localStorage;
+              let authRecord: string | null = null;
+              for (let i = 0; i < storage.length; i++) {
+                const key = storage.key(i);
+                if (key && key.startsWith('firebase:authUser:') && key.endsWith(':[DEFAULT]')) {
+                  authRecord = storage.getItem(key);
+                  break;
+                }
+              }
+              const flag = storage.getItem('IsLogin') ?? storage.getItem('isLogin') ?? storage.getItem('is_login');
+              return { authRecord, flag };
+            } catch {
+              return null;
+            }
+          },
+        });
+
+        const data = results?.[0]?.result;
+        if (!data || !data.authRecord) continue;
+
+        const flagNorm = data.flag ? data.flag.toLowerCase().trim() : null;
+        if (flagNorm === 'false' || flagNorm === '0') continue;
+
+        let user: { uid?: string; stsTokenManager?: { accessToken?: string; refreshToken?: string } } | null = null;
+        try {
+          user = JSON.parse(data.authRecord);
+        } catch {
+          continue;
+        }
+
+        const tokens = user?.stsTokenManager;
+        if (
+          typeof user?.uid === 'string' &&
+          typeof tokens?.accessToken === 'string' &&
+          typeof tokens?.refreshToken === 'string'
+        ) {
+          const res = await handleWebsiteMessage({
+            type: JOBFORM_WEBSITE_MESSAGES.login,
+            trigger: 'page-load',
+            uid: user.uid,
+            idToken: tokens.accessToken,
+            refreshToken: tokens.refreshToken,
+          });
+          if (res.ok) {
+            logger.info(`Synced session from active JobForm Automator tab ${tab.id}`);
+            return { ok: true, uid: user.uid };
+          }
+        }
+      } catch (e) {
+        logger.warning(`Failed to inspect tab ${tab.id}:`, e);
+      }
+    }
+    return { ok: false, reason: 'no-session-found' };
+  } catch (error) {
+    logger.error('syncSessionFromOpenJobformTabs error:', error);
+    return { ok: false, reason: 'error' };
+  }
+}
+
 export function registerWebsiteSessionSync(): void {
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (message?.type === 'SYNC_JOBFORM_SESSION') {
+      syncSessionFromOpenJobformTabs()
+        .then(sendResponse)
+        .catch(error => {
+          logger.error('SYNC_JOBFORM_SESSION failed:', error);
+          sendResponse({ ok: false, reason: 'error' });
+        });
+      return true;
+    }
     if (!message || typeof message.type !== 'string' || !HANDLED_TYPES.has(message.type)) return false;
     if (!isTrustedWebsiteSender(sender)) {
       logger.warning(`Ignored ${message.type} from an untrusted sender`);

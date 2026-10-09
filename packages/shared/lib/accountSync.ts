@@ -194,6 +194,19 @@ export async function acceptWebsiteSession(input: WebsiteSessionInput): Promise<
 
 function openTab(url: string): void {
   if (typeof chrome !== 'undefined' && chrome?.tabs?.create) {
+    if (chrome.tabs.query && chrome.tabs.update) {
+      chrome.tabs.query({ url: ['https://www.jobformautomator.com/*', 'https://jobformautomator.com/*'] }, tabs => {
+        if (tabs && tabs.length > 0 && tabs[0]?.id) {
+          chrome.tabs.update(tabs[0].id, { active: true });
+          if (tabs[0].windowId && chrome.windows?.update) {
+            chrome.windows.update(tabs[0].windowId, { focused: true }).catch(() => undefined);
+          }
+          return;
+        }
+        chrome.tabs.create({ url });
+      });
+      return;
+    }
     chrome.tabs.create({ url });
   } else {
     window.open(url, '_blank', 'noopener');

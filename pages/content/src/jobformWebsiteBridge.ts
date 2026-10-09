@@ -54,10 +54,10 @@ export interface KeyValueStorage {
  *   unknown    — anything in between (recruiter-only session, partial state): nothing is done.
  */
 export function readWebsiteSessionState(storage: KeyValueStorage): WebsiteSessionState {
-  let loginFlag: string | null;
+  let loginFlag: string | null = null;
   let authRecord: string | null = null;
   try {
-    loginFlag = storage.getItem(WEBSITE_LOGIN_FLAG);
+    loginFlag = storage.getItem(WEBSITE_LOGIN_FLAG) ?? storage.getItem('isLogin') ?? storage.getItem('is_login');
     for (let index = 0; index < storage.length; index++) {
       const key = storage.key(index);
       if (key && key.startsWith(FIREBASE_AUTH_USER_PREFIX) && key.endsWith(FIREBASE_DEFAULT_APP_SUFFIX)) {
@@ -70,7 +70,9 @@ export function readWebsiteSessionState(storage: KeyValueStorage): WebsiteSessio
   }
 
   if (loginFlag === null && authRecord === null) return { state: 'signed-out' };
-  if (loginFlag !== 'true' || !authRecord) return { state: 'unknown' };
+  const flagNormalized = loginFlag ? loginFlag.toLowerCase().trim() : null;
+  const isLoginTrue = flagNormalized === 'true' || flagNormalized === '1';
+  if (!isLoginTrue || !authRecord) return { state: 'unknown' };
 
   try {
     const user = JSON.parse(authRecord);
@@ -114,6 +116,21 @@ export function initJobformWebsiteBridge(): void {
   if (scope[STARTED_FLAG]) return;
   scope[STARTED_FLAG] = true;
 
+  const reportStoredSession = (trigger: 'page-load' | 'storage' | 'focus') => {
+    const stored = readWebsiteSessionState(window.localStorage);
+    if (stored.state === 'signed-in') {
+      send({
+        type: JOBFORM_WEBSITE_MESSAGES.login,
+        trigger,
+        uid: stored.uid,
+        idToken: stored.idToken,
+        refreshToken: stored.refreshToken,
+      });
+    } else if (stored.state === 'signed-out') {
+      send({ type: JOBFORM_WEBSITE_MESSAGES.logout, trigger });
+    }
+  };
+
   document.addEventListener('userLoggedIn', event => {
     const detail = (event as CustomEvent).detail;
     if (!detail || typeof detail !== 'object') return;
@@ -136,17 +153,45 @@ export function initJobformWebsiteBridge(): void {
     send({ type: JOBFORM_WEBSITE_MESSAGES.paymentCompleted });
   });
 
-  // The website's stored state when this page loads (runs at document_start, before its scripts)
-  const stored = readWebsiteSessionState(window.localStorage);
-  if (stored.state === 'signed-in') {
-    send({
-      type: JOBFORM_WEBSITE_MESSAGES.login,
-      trigger: 'page-load',
-      uid: stored.uid,
-      idToken: stored.idToken,
-      refreshToken: stored.refreshToken,
+  // Cross-tab storage updates
+  window.addEventListener('storage', () => {
+    reportStoredSession('storage');
+  });
+
+  // When user returns to this tab
+  window.addEventListener('focus', () => {
+    reportStoredSession('focus');
+  });
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+      reportStoredSession('focus');
+    }
+  });
+
+  // Listen for sync queries from the extension background or side-panel
+  if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
+    chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
+      if (request?.type === 'REQUEST_JOBFORM_SESSION') {
+        const stored = readWebsiteSessionState(window.localStorage);
+        if (stored.state === 'signed-in') {
+          reportStoredSession('page-load');
+          sendResponse({ ok: true, session: stored });
+        } else {
+          sendResponse({ ok: false, state: stored.state });
+        }
+        return true;
+      }
+      return false;
     });
-  } else if (stored.state === 'signed-out') {
-    send({ type: JOBFORM_WEBSITE_MESSAGES.logout, trigger: 'page-load' });
   }
+
+  // Initial check at document_start
+  reportStoredSession('page-load');
+
+  // Follow-up checks after DOM loads and short delays for async Firebase init
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => reportStoredSession('page-load'), { once: true });
+  }
+  setTimeout(() => reportStoredSession('page-load'), 1000);
+  setTimeout(() => reportStoredSession('page-load'), 3000);
 }
