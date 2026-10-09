@@ -351,7 +351,10 @@ export function checkJobSkillRelevance(
   }
 
   // 5. Stem / Token Overlap Fallback (e.g. "development" <-> "developer")
-  const combinedTarget = [targetRole || '', careerBrain.currentTitle || ''].filter(Boolean).join(' ').toLowerCase();
+  const combinedTarget = [targetRole || '', careerBrain.currentTitle || '', ...(careerBrain.predefinedRoles || [])]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
   const targetTokens = combinedTarget
     .split(/[\s,/-]+/)
     .map(w => stemWord(w))

@@ -49,6 +49,7 @@ import {
 import { AiOutlineLoading3Quarters } from 'react-icons/ai';
 import { SkillAutocompleteInput } from './SkillAutocompleteInput';
 import { JobTitleAutocompleteInput } from './JobTitleAutocompleteInput';
+import { MultipleJobRolesInput } from './MultipleJobRolesInput';
 import { LocationAutocompleteInput } from './LocationAutocompleteInput';
 import { PrioritizedLocationsInput } from './PrioritizedLocationsInput';
 
@@ -982,15 +983,24 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
               </div>
             </div>
             <div>
-              <label className="block text-[11px] font-semibold opacity-70 mb-1">Target Job Title</label>
-              <JobTitleAutocompleteInput
-                value={editForm.currentTitle}
-                onChange={val => setEditForm(prev => ({ ...prev, currentTitle: val }))}
+              <MultipleJobRolesInput
+                roles={
+                  Array.isArray(editForm.predefinedRoles) && editForm.predefinedRoles.length > 0
+                    ? editForm.predefinedRoles
+                    : editForm.currentTitle
+                      ? [editForm.currentTitle]
+                      : []
+                }
+                primaryRole={editForm.currentTitle}
+                onChange={(roles, primary) => {
+                  setEditForm(prev => ({
+                    ...prev,
+                    predefinedRoles: roles,
+                    currentTitle: primary || roles[0] || '',
+                  }));
+                }}
                 isDarkMode={isDarkMode}
-                placeholder="e.g. AWS DevOps Engineer, Full Stack Developer"
-                className={`w-full rounded-lg border px-3 py-1.5 text-xs outline-none ${
-                  isDarkMode ? 'border-sky-800 bg-slate-900 text-white' : 'border-sky-200 bg-white text-gray-900'
-                }`}
+                careerBrain={editForm}
               />
             </div>
             <div className="grid grid-cols-2 gap-2">
@@ -1187,9 +1197,35 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
         ) : (
           /* View Mode */
           <div className="grid grid-cols-1 gap-2 text-xs opacity-90">
-            <div className="flex items-center space-x-2">
-              <FiBriefcase className="size-3.5 shrink-0 text-sky-400" />
-              <span className="font-semibold">{profile.currentTitle || 'Full Stack Developer'}</span>
+            <div className="flex items-start space-x-2">
+              <FiBriefcase className="size-3.5 shrink-0 text-sky-400 mt-0.5" />
+              <div className="min-w-0 flex-1">
+                {Array.isArray(profile.predefinedRoles) && profile.predefinedRoles.length > 1 ? (
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    {profile.predefinedRoles.map((r, idx) => {
+                      const isPrimary = r === (profile.currentTitle || profile.predefinedRoles![0]);
+                      return (
+                        <span
+                          key={idx}
+                          className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-medium border ${
+                            isPrimary
+                              ? isDarkMode
+                                ? 'bg-emerald-950/40 text-emerald-300 border-emerald-600/40 font-semibold'
+                                : 'bg-emerald-50 text-emerald-800 border-emerald-300 font-semibold'
+                              : isDarkMode
+                                ? 'bg-slate-900 text-sky-300 border-sky-800'
+                                : 'bg-sky-50 text-sky-700 border-sky-200'
+                          }`}>
+                          {isPrimary && <span>⭐</span>}
+                          <span>{r}</span>
+                        </span>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <span className="font-semibold">{profile.currentTitle || 'Full Stack Developer'}</span>
+                )}
+              </div>
             </div>
             <div className="flex items-center space-x-2">
               <FiUser className="size-3.5 shrink-0 text-sky-400" />

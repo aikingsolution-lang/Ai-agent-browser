@@ -916,7 +916,88 @@ ${resumeText.slice(0, 12000)}
     return true;
   }
 
-  // 0d. CAREER COPILOT CHAT: Conversational Profile Q&A, Auto-Fill, Job Fit & Pitch Engine
+  // 0d. SUGGEST TARGET ROLES: AI-powered job role suggestions grounded in resume & skills
+  if (request.type === 'SUGGEST_TARGET_ROLES') {
+    (async () => {
+      try {
+        const careerBrain = await careerBrainStore.getCareerBrain();
+        const llm = await getActiveChatModel();
+        if (!llm) {
+          sendResponse({ success: false, error: 'No active LLM model available' });
+          return;
+        }
+
+        const resumeSnippet = (careerBrain.resumeText || request.resumeText || '').slice(0, 8000);
+        const currentTitle = careerBrain.currentTitle || request.currentTitle || '';
+        const skillsList =
+          Array.isArray(careerBrain.skills) && careerBrain.skills.length > 0
+            ? careerBrain.skills
+            : Array.isArray(request.skills)
+              ? request.skills
+              : [];
+        const skills = skillsList.join(', ');
+        const yoe = careerBrain.yearsOfExperience ?? request.yearsOfExperience ?? 0;
+        const workHistory = (careerBrain.workExperience || [])
+          .map((w: any) => `${w.title || ''} at ${w.company || ''}`)
+          .filter(Boolean)
+          .join('; ');
+
+        logger.info('[background] Generating AI suggested target job roles grounded in profile...');
+        const prompt = `You are an expert tech recruitment strategist.
+Analyze the candidate's verified skills, experience tenure, and work history to recommend 3 to 5 realistic, industry-standard target job titles (e.g. "DevOps Engineer", "AWS Cloud Engineer", "Site Reliability Engineer (SRE)").
+
+CRITICAL RULES:
+1. STRICT ZERO HALLUCINATION: Every suggested title MUST directly align with their core tech stack (${skills || 'software engineering'}), work history (${workHistory || 'none'}), and experience (${yoe} years).
+2. NEVER MISMATCH DOMAIN: If they are a DevOps/Cloud engineer, do NOT suggest unrelated titles like "Data Scientist", "UI/UX Designer", or "Salesforce Consultant". If they are Junior/Fresher, do not suggest "VP of Engineering", "Principal Architect", or "Director".
+3. STANDARD JOB BOARD TITLES: Suggest clear, high-demand titles commonly used on job boards like Naukri, Indeed, and LinkedIn.
+4. VARIATIONS: Provide 3 to 5 distinct complementary roles the candidate is qualified for.
+5. JSON ARRAY ONLY: Return ONLY a valid JSON array of strings (e.g. ["AWS DevOps Engineer", "Cloud Infrastructure Engineer", "DevOps Engineer", "Site Reliability Engineer"]). Do not include markdown or explanations.
+
+=== CANDIDATE PROFILE ===
+Current Title / Role: ${currentTitle}
+Years of Experience: ${yoe}
+Skills: ${skills}
+Work History: ${workHistory}
+Resume Highlights:
+${resumeSnippet}
+`;
+
+        const res = await llm.invoke([
+          new SystemMessage(
+            'You are a professional IT recruitment specialist. Output valid JSON array of strings only.',
+          ),
+          new HumanMessage(prompt),
+        ]);
+
+        let raw = typeof res.content === 'string' ? res.content : String(res.content);
+        raw = raw.replace(/<(?:think|thought)>[\s\S]*?<\/(?:think|thought)>/gi, '').trim();
+        raw = raw
+          .replace(/```(?:json)?/gi, '')
+          .replace(/```/g, '')
+          .trim();
+
+        const firstBracket = raw.indexOf('[');
+        const lastBracket = raw.lastIndexOf(']');
+        if (firstBracket !== -1 && lastBracket !== -1) {
+          raw = raw.substring(firstBracket, lastBracket + 1);
+        }
+
+        const suggestedRoles: string[] = JSON.parse(raw);
+        if (Array.isArray(suggestedRoles) && suggestedRoles.length > 0) {
+          const cleaned = suggestedRoles.map(r => String(r).trim()).filter(r => r.length > 1 && r.length < 80);
+          sendResponse({ success: true, roles: cleaned });
+        } else {
+          sendResponse({ success: false, error: 'Could not parse roles list from AI response' });
+        }
+      } catch (err) {
+        logger.warning('[background] Failed to suggest target roles:', err);
+        sendResponse({ success: false, error: String(err) });
+      }
+    })();
+    return true;
+  }
+
+  // 0e. CAREER COPILOT CHAT: Conversational Profile Q&A, Auto-Fill, Job Fit & Pitch Engine
   if (request.type === 'CAREER_COPILOT_CHAT') {
     (async () => {
       try {
