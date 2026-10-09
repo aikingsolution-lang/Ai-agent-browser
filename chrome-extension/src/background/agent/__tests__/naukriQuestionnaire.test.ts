@@ -202,4 +202,20 @@ describe('Naukri Questionnaire & Drawer Resolvers', () => {
       expect(res.value).toBe('6+');
     });
   });
+
+  describe('Naukri Red Error Alert Selectors & Healing', () => {
+    it('has comprehensive inline red error indicators defined in NAUKRI_SELECTORS', () => {
+      expect(NAUKRI_SELECTORS.ERROR_INDICATORS).toContain('.err-msg');
+      expect(NAUKRI_SELECTORS.ERROR_INDICATORS).toContain('.err');
+      expect(NAUKRI_SELECTORS.ERROR_INDICATORS).toContain('[class*="field-error" i]');
+      expect(NAUKRI_SELECTORS.ERROR_INDICATORS).toContain('[class*="validation-err" i]');
+    });
+
+    it('has drawer save and skip buttons in selectors', () => {
+      expect(NAUKRI_SELECTORS.SUBMIT_BUTTON).toContain('button.drawer-save');
+      expect(NAUKRI_SELECTORS.SUBMIT_BUTTON).toContain('button.send-btn');
+      expect(NAUKRI_SELECTORS.SKIP_QUESTION_BUTTON).toContain('button[class*="skip" i]');
+      expect(NAUKRI_SELECTORS.SKIP_QUESTION_BUTTON).toContain('.skip-btn');
+    });
+  });
 });

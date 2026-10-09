@@ -563,6 +563,7 @@ export class NaukriAdapter implements IPlatformAdapter {
     try {
       const MAX_STEPS = 6;
       let lastQuestionHandled = '';
+      let consecutiveRepeats = 0;
 
       for (let step = 1; step <= MAX_STEPS; step++) {
         logger.info(`[NaukriAdapter] Handling questionnaire step ${step}/${MAX_STEPS}...`);
@@ -841,11 +842,13 @@ export class NaukriAdapter implements IPlatformAdapter {
           }
 
           // D. Extract standard inputs
-          const inputs = Array.from(
+          const rawInputs = Array.from(
             modal.querySelectorAll(
               'input:not([type="hidden"]):not([type="file"]):not([type="submit"]):not([type="button"]):not([type="reset"]):not([type="image"]), select, textarea',
             ),
           ) as HTMLElement[];
+
+          const inputs = rawInputs.filter(el => isVisible(el));
 
           const fields = inputs.map((el, idx) => {
             const placeholder = el.getAttribute('placeholder') || '';
@@ -893,6 +896,43 @@ export class NaukriAdapter implements IPlatformAdapter {
                 const t = (o.textContent || '').trim();
                 if (t && !t.toLowerCase().includes('select')) options.push(t);
               }
+            } else if (fieldType === 'radio') {
+              // Extract all options in this radio group
+              const radioName = (el as HTMLInputElement).name;
+              const radioGroup = radioName
+                ? (Array.from(modal.querySelectorAll(`input[type="radio"][name="${radioName}"]`)) as HTMLInputElement[])
+                : [el as HTMLInputElement];
+              for (const r of radioGroup) {
+                const rLabel =
+                  r.closest('label')?.textContent?.trim() ||
+                  modal.querySelector(`label[for="${r.id}"]`)?.textContent?.trim() ||
+                  r.parentElement?.textContent?.trim() ||
+                  r.value;
+                if (rLabel && !options.includes(rLabel)) options.push(rLabel);
+              }
+            }
+
+            // Extract inline red error text if currently visible near this field
+            let errorMessage = '';
+            const container =
+              el.closest(
+                '.form-group, .input-container, .drawer-field, div[class*="field" i], div[class*="group" i], div[class*="wrap" i]',
+              ) || el.parentElement;
+            if (container) {
+              const errEls = Array.from(
+                container.querySelectorAll(
+                  '.err-msg, .err, span.err, p.err, div.err, [class*="err-msg" i], [class*="field-error" i], [class*="error-msg" i], [class*="validation-err" i], [class*="validation-error" i], [class*="invalid" i], [class*="errorText" i]',
+                ),
+              ) as HTMLElement[];
+              for (const er of errEls) {
+                if (er !== el && !er.contains(el) && isVisible(er)) {
+                  const et = (er.textContent || '').trim();
+                  if (et && et.length >= 3 && !et.toLowerCase().includes('select')) {
+                    errorMessage = et;
+                    break;
+                  }
+                }
+              }
             }
 
             const currentValue = (el as HTMLInputElement).value || '';
@@ -904,6 +944,7 @@ export class NaukriAdapter implements IPlatformAdapter {
               fieldType,
               options,
               currentValue,
+              errorMessage,
             };
           });
 
@@ -917,7 +958,36 @@ export class NaukriAdapter implements IPlatformAdapter {
           };
         }, NAUKRI_SELECTORS);
 
-        lastQuestionHandled = stepData.activeQuestion || stepData.modalHeading || 'Unknown Question';
+        const currentQuestion = stepData.activeQuestion || stepData.modalHeading || 'Unknown Question';
+        if (currentQuestion === lastQuestionHandled && step > 1) {
+          consecutiveRepeats++;
+          logger.warning(
+            `[NaukriAdapter] ⚠️ Stuck on question: "${currentQuestion}" (repeat count: ${consecutiveRepeats})`,
+          );
+        } else {
+          consecutiveRepeats = 0;
+          lastQuestionHandled = currentQuestion;
+        }
+
+        // Circuit breaker: If repeated step on same question and Skip is available, click Skip immediately
+        if (consecutiveRepeats >= 1 && stepData.hasSkipBtn) {
+          logger.info(
+            `[NaukriAdapter] ⏭️ Repeated step on "${lastQuestionHandled}". Clicking "Skip this question" to advance...`,
+          );
+          await puppeteerPage.evaluate((selectors: typeof NAUKRI_SELECTORS) => {
+            const skipEls = Array.from(document.querySelectorAll('button, a, span, div')) as HTMLElement[];
+            for (const s of skipEls) {
+              const st = (s.textContent || '').trim().toLowerCase();
+              if (st.includes('skip this question') || st === 'skip question' || st === 'skip') {
+                s.click();
+                return;
+              }
+            }
+          }, NAUKRI_SELECTORS);
+          await new Promise(r => setTimeout(r, 2000));
+          continue;
+        }
+
         logger.info(
           `[NaukriAdapter] Step ${step}: Question: "${lastQuestionHandled}" | Options: ${stepData.choiceOptions.length} | Fields: ${stepData.fields.length} | Skip: ${stepData.hasSkipBtn}`,
         );
@@ -982,6 +1052,10 @@ export class NaukriAdapter implements IPlatformAdapter {
                   }
 
                   if (bestEl) {
+                    bestEl.focus?.();
+                    bestEl.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }));
+                    bestEl.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+                    bestEl.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
                     bestEl.click();
                     bestEl.dispatchEvent(new Event('click', { bubbles: true }));
                     bestEl.dispatchEvent(new Event('change', { bubbles: true }));
@@ -1008,11 +1082,16 @@ export class NaukriAdapter implements IPlatformAdapter {
             let answer = resolveNaukriQuestion(qText, f.fieldType as any, f.options, careerBrain, f.placeholder);
             const isLakhsQ = qText.toLowerCase().includes('lac') || qText.toLowerCase().includes('lakh');
 
-            // Consult LLM for concise one-word / one-line answer
+            // Consult LLM if field has error, is low confidence, is CTC/Lakhs, or radio group
             try {
               const llm = context?.scopedLLM || (await getActiveChatModel(context?.runId)) || undefined;
-              if (llm && (!answer.value || answer.confidence < 0.95 || isLakhsQ)) {
-                logger.info(`[NaukriAdapter] 🧠 Asking LLM for concise answer: "${qText}"`);
+              if (
+                llm &&
+                (!answer.value || answer.confidence < 0.95 || isLakhsQ || f.errorMessage || f.fieldType === 'radio')
+              ) {
+                logger.info(
+                  `[NaukriAdapter] 🧠 Asking LLM for concise answer: "${qText}" ${f.errorMessage ? `(Error Hint: "${f.errorMessage}")` : ''}`,
+                );
                 const llmRes = await resolveNaukriWithLLM(
                   qText,
                   f.fieldType as any,
@@ -1020,6 +1099,8 @@ export class NaukriAdapter implements IPlatformAdapter {
                   careerBrain,
                   llm,
                   f.placeholder,
+                  f.errorMessage,
+                  f.currentValue,
                 );
                 if (llmRes.success && llmRes.answer) {
                   answer = { value: llmRes.answer, confidence: 0.99, source: 'profile' };
@@ -1069,7 +1150,7 @@ export class NaukriAdapter implements IPlatformAdapter {
               break;
             }
 
-            // Fallback if field is empty and skip is unavailable, so modal never gets stuck
+            // Fallback if field is empty and skip is unavailable
             if (!answer.value) {
               if (isLakhsQ) {
                 const yoe = careerBrain.yearsOfExperience ?? 3;
@@ -1083,29 +1164,55 @@ export class NaukriAdapter implements IPlatformAdapter {
 
             logger.info(`[NaukriAdapter] Field "${qText}" -> Answering: "${answer.value}"`);
 
-            await puppeteerPage.evaluate(
+            const fillResult = await puppeteerPage.evaluate(
               (idx: number, val: string, fType: string, selectors: typeof NAUKRI_SELECTORS) => {
+                function isVisible(el: HTMLElement): boolean {
+                  if (!el || el.offsetParent === null) return false;
+                  const style = window.getComputedStyle(el);
+                  return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
+                }
+
                 let modal: HTMLElement | null = null;
                 for (const sel of selectors.MODAL_CONTAINER) {
                   const el = document.querySelector(sel) as HTMLElement | null;
-                  if (el && (el.offsetParent !== null || window.getComputedStyle(el).display !== 'none')) {
+                  if (el && isVisible(el)) {
                     modal = el;
                     break;
                   }
                 }
                 if (!modal) modal = document.body;
 
-                const inputs = Array.from(
+                const rawInputs = Array.from(
                   modal.querySelectorAll(
                     'input:not([type="hidden"]):not([type="file"]):not([type="submit"]):not([type="button"]):not([type="reset"]):not([type="image"]), select, textarea',
                   ),
                 ) as HTMLElement[];
+                const inputs = rawInputs.filter(el => isVisible(el));
                 const el = inputs[idx] as any;
-                if (!el) return;
+                if (!el) return { filled: false, error: 'element_not_found' };
 
-                if (el.tagName.toLowerCase() === 'input' && el.type === 'file') return;
+                if (el.tagName.toLowerCase() === 'input' && el.type === 'file')
+                  return { filled: false, error: 'file_input' };
 
                 el.focus?.();
+
+                function setNative(element: any, value: string) {
+                  try {
+                    const proto =
+                      element instanceof HTMLTextAreaElement
+                        ? window.HTMLTextAreaElement.prototype
+                        : window.HTMLInputElement.prototype;
+                    const desc = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+                    if (desc) desc.call(element, value);
+                    else element.value = value;
+                    const tracker = element._valueTracker;
+                    if (tracker) tracker.setValue(value);
+                  } catch {
+                    try {
+                      element.value = value;
+                    } catch {}
+                  }
+                }
 
                 if (fType === 'select') {
                   let matchedIdx = -1;
@@ -1126,31 +1233,98 @@ export class NaukriAdapter implements IPlatformAdapter {
                     el.dispatchEvent(new Event('change', { bubbles: true }));
                   }
                 } else if (fType === 'radio' || fType === 'checkbox') {
-                  el.checked = true;
-                  el.dispatchEvent(new Event('click', { bubbles: true }));
-                  el.dispatchEvent(new Event('change', { bubbles: true }));
-                } else {
-                  try {
-                    const nativeSetter = Object.getOwnPropertyDescriptor(
-                      window.HTMLInputElement.prototype,
-                      'value',
-                    )?.set;
-                    if (nativeSetter) {
-                      nativeSetter.call(el, val);
-                    } else {
-                      el.value = val;
+                  let targetRadio = el;
+                  const radioName = el.name;
+                  if (radioName) {
+                    const allRadios = Array.from(
+                      modal.querySelectorAll(`input[type="radio"][name="${radioName}"]`),
+                    ) as HTMLInputElement[];
+                    const vLower = val.toLowerCase().trim();
+                    for (const r of allRadios) {
+                      const rLabel = (
+                        r.closest('label')?.textContent ||
+                        modal.querySelector(`label[for="${r.id}"]`)?.textContent ||
+                        r.parentElement?.textContent ||
+                        r.value ||
+                        ''
+                      )
+                        .toLowerCase()
+                        .trim();
+                      if (rLabel === vLower || rLabel.includes(vLower) || vLower.includes(rLabel)) {
+                        targetRadio = r;
+                        break;
+                      }
                     }
-                  } catch {
-                    try {
-                      el.value = val;
-                    } catch {}
                   }
+                  targetRadio.checked = true;
+                  targetRadio.focus?.();
+                  targetRadio.click?.();
+                  targetRadio.dispatchEvent(new Event('click', { bubbles: true }));
+                  targetRadio.dispatchEvent(new Event('change', { bubbles: true }));
+                } else {
+                  // Text / Number / Textarea
+                  setNative(el, '');
                   el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
                   el.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
-                  el.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: '0' }));
-                  el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: '0' }));
+
+                  setNative(el, val);
+                  el.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, data: val }));
+                  el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+                  el.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+                  el.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: val.slice(-1) || '0' }));
+                  el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: val.slice(-1) || '0' }));
                   el.dispatchEvent(new Event('blur', { bubbles: true, composed: true }));
+
+                  // If this is a chatbot input, also dispatch Enter
+                  const isChatInput =
+                    (el.placeholder || '').toLowerCase().includes('type message') ||
+                    (el.className || '').toLowerCase().includes('chat');
+                  if (isChatInput) {
+                    el.dispatchEvent(
+                      new KeyboardEvent('keydown', {
+                        key: 'Enter',
+                        code: 'Enter',
+                        keyCode: 13,
+                        which: 13,
+                        bubbles: true,
+                      }),
+                    );
+                    el.dispatchEvent(
+                      new KeyboardEvent('keyup', {
+                        key: 'Enter',
+                        code: 'Enter',
+                        keyCode: 13,
+                        which: 13,
+                        bubbles: true,
+                      }),
+                    );
+                  }
                 }
+
+                // Check if inline red error alert is triggered
+                let postFillError = '';
+                const container =
+                  el.closest(
+                    '.form-group, .input-container, .drawer-field, div[class*="field" i], div[class*="group" i], div[class*="wrap" i]',
+                  ) || el.parentElement;
+                if (container) {
+                  const errEls = Array.from(
+                    container.querySelectorAll(
+                      '.err-msg, .err, span.err, p.err, div.err, [class*="err-msg" i], [class*="field-error" i], [class*="error-msg" i], [class*="validation-err" i], [class*="validation-error" i], [class*="invalid" i], [class*="errorText" i]',
+                    ),
+                  ) as HTMLElement[];
+                  for (const er of errEls) {
+                    if (er !== el && !er.contains(el) && isVisible(er)) {
+                      const et = (er.textContent || '').trim();
+                      if (et && et.length >= 3 && !et.toLowerCase().includes('select')) {
+                        postFillError = et;
+                        break;
+                      }
+                    }
+                  }
+                }
+
+                return { filled: true, postFillError };
               },
               f.index,
               answer.value,
@@ -1158,18 +1332,76 @@ export class NaukriAdapter implements IPlatformAdapter {
               NAUKRI_SELECTORS,
             );
 
+            // Self-heal via LLM if an inline red error alert appeared
+            if (fillResult?.postFillError) {
+              logger.warning(
+                `[NaukriAdapter] ⚠️ Inline red error alert detected: "${fillResult.postFillError}" for field "${qText}"`,
+              );
+              try {
+                const llm = context?.scopedLLM || (await getActiveChatModel(context?.runId)) || undefined;
+                if (llm) {
+                  const healedRes = await resolveNaukriWithLLM(
+                    qText,
+                    f.fieldType as any,
+                    f.options,
+                    careerBrain,
+                    llm,
+                    f.placeholder,
+                    fillResult.postFillError,
+                    answer.value,
+                  );
+                  if (healedRes.success && healedRes.answer && healedRes.answer !== answer.value) {
+                    logger.info(
+                      `[NaukriAdapter] 🩺 LLM healed answer from "${answer.value}" -> "${healedRes.answer}" based on red alert hint.`,
+                    );
+                    answer.value = healedRes.answer;
+                    await puppeteerPage.evaluate(
+                      (idx: number, val: string) => {
+                        const rawInputs = Array.from(
+                          document.querySelectorAll(
+                            'input:not([type="hidden"]):not([type="file"]):not([type="submit"]):not([type="button"]):not([type="reset"]):not([type="image"]), select, textarea',
+                          ),
+                        ) as HTMLElement[];
+                        const el = rawInputs.filter(e => e.offsetParent !== null)[idx] as any;
+                        if (!el) return;
+                        el.focus?.();
+                        try {
+                          const proto =
+                            el instanceof HTMLTextAreaElement
+                              ? window.HTMLTextAreaElement.prototype
+                              : window.HTMLInputElement.prototype;
+                          const desc = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+                          if (desc) desc.call(el, val);
+                          else el.value = val;
+                          el._valueTracker?.setValue(val);
+                        } catch {}
+                        el.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, data: val }));
+                        el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+                        el.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+                        el.dispatchEvent(new Event('blur', { bubbles: true, composed: true }));
+                      },
+                      f.index,
+                      answer.value,
+                    );
+                  }
+                }
+              } catch (healErr) {
+                logger.warning('[NaukriAdapter] Error during inline error self-healing:', healErr);
+              }
+            }
+
             didAnswer = true;
             await new Promise(r => setTimeout(r, 400));
           }
         }
 
-        // 4. Heal any validation errors before submitting
+        // 4. Heal any remaining validation errors across the modal
         const preHealing = await inspectAndHealFormErrors({ puppeteerPage });
         if (preHealing.correctedCount > 0) {
           logger.info(`[NaukriAdapter] Self-healed ${preHealing.correctedCount} validation errors before submit.`);
         }
 
-        // 5. Click Save / Submit / Next button (or fallback to Skip if disabled)
+        // 5. Click Save / Submit / Next button (or fallback to Skip if disabled or blocked)
         const submitAction = await puppeteerPage.evaluate((selectors: typeof NAUKRI_SELECTORS) => {
           function isVisible(el: HTMLElement): boolean {
             if (!el || el.offsetParent === null) return false;
@@ -1187,6 +1419,10 @@ export class NaukriAdapter implements IPlatformAdapter {
           }
           if (!modal) modal = document.body;
 
+          // Check if any visible error message exists
+          const errEls = Array.from(modal.querySelectorAll(selectors.ERROR_INDICATORS.join(', '))) as HTMLElement[];
+          const hasActiveError = errEls.some(e => isVisible(e) && (e.textContent || '').trim().length >= 3);
+
           let actionBtn: HTMLElement | null = null;
           for (const sel of selectors.SUBMIT_BUTTON) {
             const btn = modal.querySelector(sel) as HTMLElement | null;
@@ -1197,17 +1433,22 @@ export class NaukriAdapter implements IPlatformAdapter {
           }
 
           if (!actionBtn) {
-            const allBtns = Array.from(modal.querySelectorAll('button, a')) as HTMLElement[];
+            const allBtns = Array.from(modal.querySelectorAll('button, a, [role="button"]')) as HTMLElement[];
             for (const b of allBtns) {
               const t = (b.textContent || '').trim().toLowerCase();
               if (
                 t === 'save' ||
                 t === 'save & next' ||
                 t === 'save and next' ||
+                t === 'save and apply' ||
+                t === 'save & continue' ||
+                t === 'save details' ||
                 t === 'next' ||
                 t === 'submit' ||
                 t === 'apply' ||
-                t === 'continue'
+                t === 'continue' ||
+                t === 'send' ||
+                t === 'done'
               ) {
                 actionBtn = b;
                 break;
@@ -1221,6 +1462,18 @@ export class NaukriAdapter implements IPlatformAdapter {
               actionBtn.classList.contains('disabled') ||
               actionBtn.getAttribute('aria-disabled') === 'true');
 
+          // If button is disabled OR an error is still present, prioritize Skip this question if available!
+          if (isBtnDisabled || hasActiveError || !actionBtn) {
+            const skipEls = Array.from(modal.querySelectorAll('button, a, span, div')) as HTMLElement[];
+            for (const s of skipEls) {
+              const st = (s.textContent || '').trim().toLowerCase();
+              if (st.includes('skip this question') || st === 'skip question' || st === 'skip') {
+                s.click();
+                return { clicked: true, action: 'skip_due_to_validation_or_disabled' };
+              }
+            }
+          }
+
           if (actionBtn) {
             if (isBtnDisabled) {
               try {
@@ -1229,21 +1482,15 @@ export class NaukriAdapter implements IPlatformAdapter {
                 actionBtn.removeAttribute('aria-disabled');
               } catch {}
             }
+            actionBtn.focus?.();
+            actionBtn.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }));
+            actionBtn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+            actionBtn.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
             actionBtn.click();
             return { clicked: true, action: 'save' };
           }
 
-          // Fallback to Skip this question if Save is missing
-          const skipEls = Array.from(modal.querySelectorAll('button, a, span, div')) as HTMLElement[];
-          for (const s of skipEls) {
-            const st = (s.textContent || '').trim().toLowerCase();
-            if (st.includes('skip this question') || st === 'skip question' || st === 'skip') {
-              s.click();
-              return { clicked: true, action: 'skip_fallback' };
-            }
-          }
-
-          return { clicked: false, reason: 'button_disabled_no_skip' };
+          return { clicked: false, reason: 'no_action_button' };
         }, NAUKRI_SELECTORS);
 
         logger.info(`[NaukriAdapter] Step ${step} submit result: ${JSON.stringify(submitAction)}`);

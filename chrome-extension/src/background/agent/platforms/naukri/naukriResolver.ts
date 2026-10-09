@@ -429,6 +429,8 @@ export async function resolveNaukriWithLLM(
   careerBrain: ICareerBrain,
   llm: BaseChatModel,
   placeholder: string = '',
+  errorHint: string = '',
+  previousValue: string = '',
 ): Promise<{ success: boolean; answer: string }> {
   try {
     const qLower = questionText.toLowerCase();
@@ -448,29 +450,37 @@ export async function resolveNaukriWithLLM(
       careerBrain.expectedCTC || careerBrain.salaryExpectation || `${Math.round(defaultCtcLakhs * 1.5) * 100000}`;
 
     const systemPrompt = `You are an expert autonomous job application AI applying on Naukri.com.
-Answer the recruiter's question accurately based on the candidate's profile.
+Answer the recruiter's question accurately based strictly on the candidate's verified profile and resume.
 
-RULES FOR THE OUTPUT:
-1. OUTPUT FORMAT: Output ONLY the concise final answer — exactly ONE WORD, ONE NUMBER, or ONE EXACT OPTION from the options list.
-   - NEVER output sentences, explanations, conversational filler, quotes, or markdown.
-   - For radio / checkbox / dropdown options: Pick the EXACT matching option text from the provided OPTIONS list that qualifies the candidate best.
-2. CTC / SALARY IN LAKHS:
-   - If the question asks for CTC "in Lacs" or "in Lakhs" (e.g. "What is your current CTC in Lacs per annum?"):
-     Output strictly the single numeric figure in Lakhs (e.g. "7" or "8" or "6.5"). NEVER output 700000 or full currency numbers!
-3. EXPERIENCE:
-   - For years of experience (total or skill-specific like AWS, DevOps), output only the numeric years (e.g. "${yoe}").
-   - If options exist (e.g. ["6+", "Less than 6"]), choose the option matching the candidate.
-4. NOTICE PERIOD:
-   - If asking for days, output digits (e.g. "15" or "0"). Otherwise output "15 Days" or "Immediate".
-5. QUALIFYING COMMITMENT:
-   - For willingness to relocate, background check, shift flexibility, or mandatory requirements, always pick "Yes" or favorable choice.`;
+STRICT ACCURACY RULES:
+- NEVER FABRICATE OR GUESS RANDOM FACTS. Use ONLY verified facts from candidate's profile, resume, and experience.
+- OUTPUT FORMAT: Output ONLY the concise final answer — exactly ONE WORD, ONE NUMBER, or ONE EXACT OPTION from the options list.
+  - NEVER output sentences, explanations, conversational filler, quotes, or markdown.
+  - For radio / checkbox / dropdown options: Pick the EXACT matching option text from the provided OPTIONS list that qualifies the candidate best.
+- CTC / SALARY IN LAKHS:
+  - If the question asks for CTC "in Lacs" or "in Lakhs" (e.g. "What is your current CTC in Lacs per annum?"):
+    Output strictly the single numeric figure in Lakhs (e.g. "7" or "8" or "7.5"). NEVER output 700000 or full currency numbers!
+- EXPERIENCE:
+  - For years of experience (total or skill-specific like AWS, DevOps), output only the numeric years (e.g. "${yoe}").
+  - If options exist (e.g. ["6+", "Less than 6"]), choose the option matching the candidate.
+- NOTICE PERIOD:
+  - If asking for days, output digits (e.g. "15" or "0"). Otherwise output "15 Days" or "Immediate".
+- QUALIFYING COMMITMENT:
+  - For willingness to relocate, background check, shift flexibility, or mandatory requirements, pick favorable choice ("Yes").
+${
+  errorHint
+    ? `- PLATFORM ERROR HEALING (CRITICAL):
+  The platform rejected the previous answer with this inline red alert error: "${errorHint}".
+  You MUST format your answer strictly to satisfy this error requirement!`
+    : ''
+}`;
 
     const userPrompt = `QUESTION: "${questionText}"
 FIELD TYPE: ${fieldType}
 OPTIONS: ${options.length > 0 ? JSON.stringify(options) : 'None (free text / number)'}
 PLACEHOLDER: "${placeholder}"
-
-CANDIDATE PROFILE:
+${errorHint ? `PLATFORM ERROR MESSAGE / FORMAT HINT: "${errorHint}"\nPREVIOUS ATTEMPT THAT FAILED: "${previousValue}"\n` : ''}
+CANDIDATE PROFILE (Use ONLY these facts):
 - Full Name: ${careerBrain.fullName || 'Candidate'}
 - Current Title: ${careerBrain.currentTitle || 'DevOps Engineer / Software Engineer'}
 - Years of Experience: ${yoe}
@@ -481,9 +491,12 @@ CANDIDATE PROFILE:
 - Preferred Locations: ${careerBrain.preferredLocations?.join(', ') || careerBrain.preferredLocation || 'Bengaluru, Hyderabad, Remote'}
 - Skills: ${(careerBrain.skills || []).join(', ') || 'AWS, DevOps, Docker, Kubernetes, CI/CD, Python'}
 - Skill Experience: ${careerBrain.skillExperience ? JSON.stringify(careerBrain.skillExperience) : 'N/A'}
+- Work Experience: ${(careerBrain.workExperience || []).map(w => `${w.title || ''} at ${w.company || ''} (${w.startYear || ''} - ${w.isCurrent ? 'Present' : w.endYear || ''})`).join('; ') || 'N/A'}
+- Projects: ${((careerBrain as any).projects || []).map((p: any) => `${p.name || ''}: ${p.description || ''}`).join('; ') || 'N/A'}
+- Education: ${careerBrain.education || 'Bachelor Degree'}
 - Resume Summary: ${(careerBrain.resumeText || '').slice(0, 1500)}
 
-FINAL ANSWER (one word, one number, or exact option):`;
+FINAL ANSWER (strictly one word, one number, or exact option):`;
 
     const response = await llm.invoke([new SystemMessage(systemPrompt), new HumanMessage(userPrompt)]);
 
