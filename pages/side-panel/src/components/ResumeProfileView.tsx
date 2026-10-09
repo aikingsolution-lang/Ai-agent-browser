@@ -466,10 +466,10 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
             finalGoldenAnswers = [...DEFAULT_GOLDEN_ANSWERS];
           }
 
-          const resolvedCandidateName = parsed.fullName?.trim() || profile.fullName || 'Candidate';
+          const resolvedCandidateName = parsed.fullName?.trim() || profile.fullName || '';
           const safeTitle = sanitizeRoleSearchQuery(
             parsed.currentTitle || profile.currentTitle,
-            resolvedCandidateName,
+            resolvedCandidateName || 'Candidate',
             'Full Stack Developer',
           );
 
@@ -500,7 +500,7 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
             ...DEFAULT_CAREER_BRAIN,
             fullName: resolvedCandidateName,
             email: parsed.email?.trim() || profile.email || '',
-            phoneNumber: parsed.phoneNumber?.trim() || '',
+            phoneNumber: parsed.phoneNumber?.trim() || profile.phoneNumber || '',
             currentTitle: safeTitle,
             skills: finalSkills,
             yearsOfExperience: extractedYoe !== undefined && extractedYoe >= 0 ? extractedYoe : 0,

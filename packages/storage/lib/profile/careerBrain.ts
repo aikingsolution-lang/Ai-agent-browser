@@ -559,13 +559,13 @@ export type IResumeProfileItem = z.infer<typeof resumeProfileItemSchema>;
  */
 export const careerBrainSchema = z.object({
   /** Full candidate name */
-  fullName: z.string().trim().min(1, 'Full name is required'),
+  fullName: z.string().trim().default(''),
   /** Primary contact email address */
-  email: z.string().trim().email('Valid email address is required'),
+  email: z.string().trim().default(''),
   /** Primary contact phone number */
-  phoneNumber: z.string().trim().min(5, 'Phone number must be at least 5 digits'),
+  phoneNumber: z.string().trim().default(''),
   /** Current or target job title */
-  currentTitle: z.string().trim().min(1, 'Job title is required'),
+  currentTitle: z.string().trim().default(''),
   /** Full raw text of the candidate resume */
   resumeText: z.string().default(''),
   /** Freeform narrative describing candidate strengths & work history */
@@ -1064,31 +1064,6 @@ export async function getCareerBrainData(): Promise<ICareerBrain> {
       data = merged;
     }
 
-    // Seamless auto-migration: Purge any hardcoded legacy developer personal data from old default state
-    let purgedHardcodedDefaults = false;
-    if (
-      data.email?.toLowerCase() === 'mubasshirali0710@gmail.com' ||
-      data.phoneNumber === '+91 70031 51313' ||
-      (data.fullName?.toLowerCase() === 'mubasshir ali' &&
-        (data.college?.toLowerCase().includes('maulana') ||
-          data.workExperience?.[0]?.company?.toLowerCase().includes('ai-king')))
-    ) {
-      data.fullName = '';
-      data.email = '';
-      data.phoneNumber = '';
-      data.resumeText = '';
-      data.backgroundNarrative = '';
-      data.college = '';
-      data.cgpa = '';
-      data.education = '';
-      data.currentTitle = '';
-      data.skills = [];
-      data.workExperience = [];
-      data.skillExperience = {};
-      data.autoExtractedSkills = [];
-      purgedHardcodedDefaults = true;
-    }
-
     // Seamless auto-migration: Purge any stale generic work-experience date fields and social media (Facebook, X, etc.) from goldenAnswers
     let purgedStaleGolden = false;
     if (Array.isArray(data.goldenAnswers) && data.goldenAnswers.length > 0) {
@@ -1228,8 +1203,7 @@ export async function getCareerBrainData(): Promise<ICareerBrain> {
       sanitizedSkillExp ||
       migratedSkillExp ||
       cleanedLocation ||
-      migratedResumes ||
-      purgedHardcodedDefaults
+      migratedResumes
     ) {
       if (missingDefaults.length > 0) {
         data.goldenAnswers = [...(data.goldenAnswers || []), ...missingDefaults];
