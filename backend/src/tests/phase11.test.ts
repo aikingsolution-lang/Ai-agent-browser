@@ -1,49 +1,29 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import request from 'supertest';
-import mongoose from 'mongoose';
 import { createApp } from '../app.js';
-import { User } from '../models/user.model.js';
-import { Subscription } from '../models/subscription.model.js';
-import { UserCreditBalance } from '../models/userCreditBalance.model.js';
-import { CreditLedger } from '../models/creditLedger.model.js';
-import { WebhookLedger } from '../models/webhookLedger.model.js';
-import { LlmUsageLog } from '../models/llmUsageLog.model.js';
 import { PlanSeedService } from '../services/planSeed.service.js';
 import { LlmProviderFactory } from '../services/llm/llmProviderFactory.js';
-import { env } from '../config/env.js';
+import { setFirebaseAdminForTesting } from '../config/firebase-admin.js';
+import { RTDB_ROOT } from '../services/rtdb/client.js';
+import { memoryAuth, resetFirebase, testDb } from './helpers/firebaseTestEnv.js';
+import { registerViaApi, rtdb } from './helpers/testApi.js';
 
 const app = createApp();
-import { setupTestDatabase, type TestDbInstance } from './setupTestDb.js';
 
-let testDb: TestDbInstance;
-
-describe('Phase 11: Production Hardening, Observability & Readiness Audit Tests', () => {
-  beforeAll(async () => {
-    testDb = await setupTestDatabase();
-  });
-
-  afterAll(async () => {
-    await testDb.stop();
-  });
-
+describe('Phase 11: Production Hardening, Observability & Readiness Audit Tests (Firebase RTDB)', () => {
   beforeEach(async () => {
     LlmProviderFactory.reset();
-    await testDb.clearCollections();
+    await resetFirebase();
     await PlanSeedService.seedDefaultPlans();
   });
 
+  afterEach(() => {
+    setFirebaseAdminForTesting({ db: testDb, auth: memoryAuth as any });
+  });
+
   async function registerUser(emailPrefix: string) {
-    const res = await request(app)
-      .post('/api/v1/auth/register')
-      .send({
-        name: `${emailPrefix} User`,
-        email: `${emailPrefix}@phase11test.com`,
-        password: 'Password123!',
-      });
-    return {
-      token: res.body.data.token,
-      userId: res.body.data.user._id || res.body.data.user.id,
-    };
+    const user = await registerViaApi(app, { name: `${emailPrefix} User`, email: `${emailPrefix}@phase11test.com` });
+    return { token: user.token, userId: user.uid };
   }
 
   it('1. Correlation ID (x-request-id) is attached to response headers', async () => {
@@ -70,7 +50,7 @@ describe('Phase 11: Production Hardening, Observability & Readiness Audit Tests'
     expect(res2.body.data.status).toBe('ok');
   });
 
-  it('4. Readiness probes (/ready & /health/ready) return 200 OK when DB is connected', async () => {
+  it('4. Readiness probes (/ready & /health/ready) return 200 OK when the database is reachable', async () => {
     const res1 = await request(app).get('/ready');
     expect(res1.status).toBe(200);
     expect(res1.body.data.status).toBe('ready');
@@ -78,6 +58,28 @@ describe('Phase 11: Production Hardening, Observability & Readiness Audit Tests'
     const res2 = await request(app).get('/health/ready');
     expect(res2.status).toBe(200);
     expect(res2.body.data.database.isConnected).toBe(true);
+    expect(res2.body.data.database.provider).toBe('firebase-rtdb');
+    expect(res2.body.data.database.namespace).toBe(RTDB_ROOT);
+    // No fake Mongo status any more
+    expect(res2.body.data.mongo).toBeUndefined();
+  });
+
+  it('4b. Readiness returns 503 and database-backed routes fail closed when Firebase is not configured', async () => {
+    const { token } = await registerUser('failclosed');
+    setFirebaseAdminForTesting({ db: null });
+
+    const ready = await request(app).get('/ready');
+    expect(ready.status).toBe(503);
+    expect(ready.body.error.code).toBe('SERVICE_UNAVAILABLE');
+
+    const balance = await request(app).get('/api/v1/credits/balance').set('Authorization', `Bearer ${token}`);
+    expect(balance.status).toBe(503);
+
+    const llm = await request(app)
+      .post('/api/v1/llm/chat')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ model: 'anthropic.claude-3-haiku-20240307-v1:0', messages: [{ role: 'user', content: 'x' }] });
+    expect(llm.status).toBe(503);
   });
 
   it('5. Global error handling formats errors consistently without stack traces', async () => {
@@ -98,18 +100,17 @@ describe('Phase 11: Production Hardening, Observability & Readiness Audit Tests'
     expect(JSON.stringify(meRes.body)).not.toContain('passwordHash');
   });
 
-  it('7. CreditLedger entries record balanceBefore and balanceAfter', async () => {
+  it('7. Credit ledger entries record balanceBefore and balanceAfter', async () => {
     const { userId } = await registerUser('ledgeraudit');
 
-    const ledger = await CreditLedger.findOne({ userId, type: 'TRIAL_ALLOCATION' });
-    expect(ledger).not.toBeNull();
-    expect(ledger?.balanceBefore).toBe(0);
-    expect(ledger?.balanceAfter).toBe(100);
+    const ledger = (await rtdb.ledger(userId)).find(entry => entry.type === 'TRIAL_ALLOCATION');
+    expect(ledger).toBeDefined();
+    expect(ledger.balanceBefore).toBe(0);
+    expect(ledger.balanceAfter).toBe(100);
   });
 
-  it('8. LLM TIMEOUT error status is logged in LlmUsageLog with 0 credits deducted', async () => {
+  it('8. LLM TIMEOUT error status is logged in the usage log with 0 credits deducted', async () => {
     const { token, userId } = await registerUser('timeoutaudit');
-
     LlmProviderFactory.setMockOptions({ shouldTimeout: true });
 
     const res = await request(app)
@@ -123,9 +124,9 @@ describe('Phase 11: Production Hardening, Observability & Readiness Audit Tests'
     expect(res.status).toBe(504);
     expect(res.body.error.code).toBe('PROVIDER_TIMEOUT');
 
-    const log = await LlmUsageLog.findOne({ userId, status: 'TIMEOUT' });
-    expect(log).not.toBeNull();
-    expect(log?.creditsDeducted).toBe(0);
+    const log = (await rtdb.llmUsage(userId)).find(entry => entry.status === 'TIMEOUT');
+    expect(log).toBeDefined();
+    expect(log.creditsDeducted).toBe(0);
   });
 
   it('9. CORS header dynamically allows any chrome-extension:// origin', async () => {

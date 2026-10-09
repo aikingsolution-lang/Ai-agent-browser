@@ -1,76 +1,52 @@
 import crypto from 'node:crypto';
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import request from 'supertest';
-import mongoose from 'mongoose';
 import { createApp } from '../app.js';
-import { User } from '../models/user.model.js';
-import { Subscription } from '../models/subscription.model.js';
-import { UserCreditBalance } from '../models/userCreditBalance.model.js';
-import { CreditLedger } from '../models/creditLedger.model.js';
-import { LlmUsageLog } from '../models/llmUsageLog.model.js';
 import { PlanSeedService } from '../services/planSeed.service.js';
 import { LlmProviderFactory } from '../services/llm/llmProviderFactory.js';
 import { env } from '../config/env.js';
+import { resetFirebase } from './helpers/firebaseTestEnv.js';
+import { registerViaApi, rtdb } from './helpers/testApi.js';
 
 const app = createApp();
-import { setupTestDatabase, type TestDbInstance } from './setupTestDb.js';
 
-let testDb: TestDbInstance;
-
-describe('Phase 10: End-to-End Client & Extension Integration Test Suite', () => {
-  beforeAll(async () => {
-    testDb = await setupTestDatabase();
-  });
-
-  afterAll(async () => {
-    await testDb.stop();
-  });
-
+describe('Phase 10: End-to-End Client & Extension Integration Test Suite (Firebase RTDB)', () => {
   beforeEach(async () => {
     LlmProviderFactory.reset();
-    await testDb.clearCollections();
+    await resetFirebase();
     await PlanSeedService.seedDefaultPlans();
   });
 
   it('1. Complete User Lifecycle: Register -> Check Me -> View Credits -> Checkout -> Verify -> Use LLM -> Check Usage', async () => {
     // A. Register
-    const regRes = await request(app).post('/api/v1/auth/register').send({
-      name: 'E2E User',
-      email: 'user@e2etest.com',
-      password: 'Password123!',
-    });
-
-    expect(regRes.status).toBe(201);
-    const token = regRes.body.data.token;
-    const userId = regRes.body.data.user._id || regRes.body.data.user.id;
+    const { uid: userId, auth } = await registerViaApi(app, { name: 'E2E User', email: 'user@e2etest.com' });
 
     // B. Check Me & Subscription Me
-    const meRes = await request(app).get('/api/v1/auth/me').set('Authorization', `Bearer ${token}`);
+    const meRes = await request(app).get('/api/v1/auth/me').set('Authorization', auth);
     expect(meRes.status).toBe(200);
     expect(meRes.body.data.user.email).toBe('user@e2etest.com');
 
-    const subRes = await request(app).get('/api/v1/subscription/me').set('Authorization', `Bearer ${token}`);
+    const subRes = await request(app).get('/api/v1/subscription/me').set('Authorization', auth);
     expect(subRes.status).toBe(200);
     expect(subRes.body.data.subscription.status).toBe('TRIALING');
 
     // C. View Credits Balance
-    const creditRes = await request(app).get('/api/v1/credits/balance').set('Authorization', `Bearer ${token}`);
+    const creditRes = await request(app).get('/api/v1/credits/balance').set('Authorization', auth);
     expect(creditRes.status).toBe(200);
     expect(creditRes.body.data.remainingCredits).toBe(100);
 
     // D. Fetch Subscription Plans
-    const plansRes = await request(app).get('/api/v1/subscription/plans').set('Authorization', `Bearer ${token}`);
+    const plansRes = await request(app).get('/api/v1/subscription/plans').set('Authorization', auth);
     expect(plansRes.status).toBe(200);
     expect(plansRes.body.data.plans.length).toBeGreaterThan(0);
 
     // E. Create Checkout Session for Pro plan
     const checkoutRes = await request(app)
       .post('/api/v1/subscription/checkout')
-      .set('Authorization', `Bearer ${token}`)
+      .set('Authorization', auth)
       .send({ planCode: 'pro', idempotencyKey: 'e2e-checkout-key-1' });
-
     expect(checkoutRes.status).toBe(200);
-    const razorpaySubId = checkoutRes.body.data.subscriptionId || checkoutRes.body.data.razorpaySubscriptionId;
+    const razorpaySubId = checkoutRes.body.data.subscriptionId;
     expect(razorpaySubId).toBeDefined();
 
     // F. Verify Payment
@@ -79,65 +55,50 @@ describe('Phase 10: End-to-End Client & Extension Integration Test Suite', () =>
       .createHmac('sha256', env.RAZORPAY_KEY_SECRET)
       .update(`${e2ePaymentId}|${razorpaySubId}`)
       .digest('hex');
-
     const verifyRes = await request(app)
       .post('/api/v1/subscription/verify-payment')
-      .set('Authorization', `Bearer ${token}`)
+      .set('Authorization', auth)
       .send({
         razorpaySubscriptionId: razorpaySubId,
         razorpayPaymentId: e2ePaymentId,
         razorpaySignature: e2eSignature,
       });
-
     expect(verifyRes.status).toBe(200);
     expect(verifyRes.body.data.subscription.status).toBe('ACTIVE');
 
     // G. Send LLM Chat Request through Gateway Proxy
     const llmRes = await request(app)
       .post('/api/v1/llm/chat')
-      .set('Authorization', `Bearer ${token}`)
+      .set('Authorization', auth)
       .send({
         model: 'anthropic.claude-3-haiku-20240307-v1:0',
         messages: [{ role: 'user', content: 'Run web automation task.' }],
         idempotencyKey: 'e2e-llm-chat-key-1',
       });
-
     expect(llmRes.status).toBe(200);
     expect(llmRes.body.data.content).toBeDefined();
     expect(llmRes.body.data.creditsDeducted).toBeGreaterThan(0);
 
     // H. View Usage History
-    const usageRes = await request(app).get('/api/v1/llm/usage').set('Authorization', `Bearer ${token}`);
+    const usageRes = await request(app).get('/api/v1/llm/usage').set('Authorization', auth);
     expect(usageRes.status).toBe(200);
     expect(usageRes.body.data.items.length).toBe(1);
     expect(usageRes.body.data.items[0].userId).toBe(userId);
   });
 
   it('2. 401 Session Handling & Expired Token Rejection', async () => {
-    const invalidToken = 'bearer.invalid.token.str';
-
-    const res = await request(app).get('/api/v1/auth/me').set('Authorization', `Bearer ${invalidToken}`);
-
+    const res = await request(app).get('/api/v1/auth/me').set('Authorization', 'Bearer bearer.invalid.token.str');
     expect(res.status).toBe(401);
     expect(res.body.error.code).toBe('INVALID_TOKEN');
   });
 
   it('3. 402 Insufficient Credits handling on LLM Request', async () => {
-    const regRes = await request(app).post('/api/v1/auth/register').send({
-      name: 'Low Credit User',
-      email: 'lowcredit@e2etest.com',
-      password: 'Password123!',
-    });
-
-    const token = regRes.body.data.token;
-    const userId = regRes.body.data.user._id || regRes.body.data.user.id;
-
-    // Set remaining credits to 0
-    await UserCreditBalance.updateOne({ userId }, { $set: { remainingCredits: 0, usedCredits: 100 } });
+    const { uid, auth } = await registerViaApi(app, { name: 'Low Credit User', email: 'lowcredit@e2etest.com' });
+    await rtdb.patchBalance(uid, { remainingCredits: 0, usedCredits: 100 });
 
     const res = await request(app)
       .post('/api/v1/llm/chat')
-      .set('Authorization', `Bearer ${token}`)
+      .set('Authorization', auth)
       .send({
         model: 'anthropic.claude-3-haiku-20240307-v1:0',
         messages: [{ role: 'user', content: 'Low credit check' }],

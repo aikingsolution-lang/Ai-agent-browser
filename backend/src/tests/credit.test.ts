@@ -1,94 +1,39 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import request from 'supertest';
-import mongoose from 'mongoose';
 import { createApp } from '../app.js';
-import { User } from '../models/user.model.js';
-import { Subscription } from '../models/subscription.model.js';
-import { Plan } from '../models/plan.model.js';
-import { UserCreditBalance } from '../models/userCreditBalance.model.js';
-import { CreditLedger } from '../models/creditLedger.model.js';
 import { PlanSeedService } from '../services/planSeed.service.js';
 import { CreditService } from '../services/credit.service.js';
-import { checkCredits } from '../middleware/credit.middleware.js';
-import { env } from '../config/env.js';
+import { resetFirebase, createTestUser } from './helpers/firebaseTestEnv.js';
+import { registerViaApi, rtdb } from './helpers/testApi.js';
 
 const app = createApp();
 
-// Setup protected dummy route using checkCredits middleware
-app.get(
-  '/api/v1/test-metered-feature',
-  (req, res, next) => {
-    const authHeader = req.headers.authorization;
-    if (authHeader && authHeader.startsWith('Bearer ')) {
-      const token = authHeader.split(' ')[1];
-      try {
-        const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64').toString());
-        (req as any).user = { _id: payload.sub, id: payload.sub, role: payload.role };
-      } catch {
-        // ignore for test harness
-      }
-    }
-    next();
-  },
-  checkCredits(5) as any,
-  (_req, res) => {
-    res.status(200).json({ success: true, message: 'Metered action executed' });
-  },
-);
-
-import { setupTestDatabase, type TestDbInstance } from './setupTestDb.js';
-
-let testDb: TestDbInstance;
-
-describe('Phase 7: Server-Side Credit & Usage Metering Engine Integration & Unit Tests', () => {
-  beforeAll(async () => {
-    testDb = await setupTestDatabase();
-  });
-
-  afterAll(async () => {
-    await testDb.stop();
-  });
-
+describe('Phase 7: Server-Side Credit & Usage Metering Engine (Firebase RTDB)', () => {
   beforeEach(async () => {
-    await testDb.clearCollections();
+    await resetFirebase();
     await PlanSeedService.seedDefaultPlans();
   });
 
   it('1. Registration initializes credit balance from plan snapshot (100 credits)', async () => {
-    const res = await request(app).post('/api/v1/auth/register').send({
-      name: 'Credit User',
-      email: 'user1@credittest.com',
-      password: 'Password123!',
-    });
+    const { uid } = await registerViaApi(app, { name: 'Credit User', email: 'user1@credittest.com' });
 
-    expect(res.status).toBe(201);
-    const userId = res.body.data.user._id || res.body.data.user.id;
-
-    // Verify UserCreditBalance
-    const balance = await UserCreditBalance.findOne({ userId });
+    const balance = await rtdb.balance(uid);
     expect(balance).not.toBeNull();
-    expect(balance?.allocatedCredits).toBe(100);
-    expect(balance?.usedCredits).toBe(0);
-    expect(balance?.remainingCredits).toBe(100);
+    expect(balance.allocatedCredits).toBe(100);
+    expect(balance.usedCredits).toBe(0);
+    expect(balance.remainingCredits).toBe(100);
 
-    // Verify CreditLedger initial entry
-    const ledger = await CreditLedger.findOne({ userId, type: 'TRIAL_ALLOCATION' });
-    expect(ledger).not.toBeNull();
-    expect(ledger?.amount).toBe(100);
-    expect(ledger?.balanceAfter).toBe(100);
+    const ledger = (await rtdb.ledger(uid)).filter(entry => entry.type === 'TRIAL_ALLOCATION');
+    expect(ledger).toHaveLength(1);
+    expect(ledger[0].amount).toBe(100);
+    expect(ledger[0].balanceAfter).toBe(100);
   });
 
   it('2. Credit deduction via Service updates balance and logs ledger entry', async () => {
-    const regRes = await request(app).post('/api/v1/auth/register').send({
-      name: 'Deduct User',
-      email: 'deduct@credittest.com',
-      password: 'Password123!',
-    });
-
-    const userId = regRes.body.data.user._id || regRes.body.data.user.id;
+    const { uid } = await registerViaApi(app, { email: 'deduct@credittest.com' });
 
     const result = await CreditService.deductCredits({
-      userId,
+      userId: uid,
       amount: 10,
       description: 'Test browser automation task',
     });
@@ -96,230 +41,266 @@ describe('Phase 7: Server-Side Credit & Usage Metering Engine Integration & Unit
     expect(result.balance.remainingCredits).toBe(90);
     expect(result.balance.usedCredits).toBe(10);
     expect(result.ledgerEntry.amount).toBe(-10);
+    expect(result.ledgerEntry.balanceBefore).toBe(100);
     expect(result.ledgerEntry.balanceAfter).toBe(90);
     expect(result.isIdempotentRetry).toBe(false);
+    // API shape matches the Mongo document (ISO dates, _id, userId)
+    expect(result.ledgerEntry.userId).toBe(uid);
+    expect(typeof result.ledgerEntry._id).toBe('string');
+    expect(new Date(result.ledgerEntry.createdAt!).toISOString()).toBe(result.ledgerEntry.createdAt);
   });
 
   it('3. Deducting more credits than available fails with 402 INSUFFICIENT_CREDITS', async () => {
-    const regRes = await request(app).post('/api/v1/auth/register').send({
-      name: 'Exceed User',
-      email: 'exceed@credittest.com',
-      password: 'Password123!',
-    });
-
-    const userId = regRes.body.data.user._id || regRes.body.data.user.id;
+    const { uid } = await registerViaApi(app, { email: 'exceed@credittest.com' });
 
     await expect(
-      CreditService.deductCredits({
-        userId,
-        amount: 150,
-        description: 'Excessive consumption attempt',
-      }),
+      CreditService.deductCredits({ userId: uid, amount: 150, description: 'Excessive consumption attempt' }),
     ).rejects.toThrow('Insufficient credit balance');
 
-    // Balance remains unchanged
-    const balance = await UserCreditBalance.findOne({ userId });
-    expect(balance?.remainingCredits).toBe(100);
-    expect(balance?.usedCredits).toBe(0);
+    const balance = await rtdb.balance(uid);
+    expect(balance.remainingCredits).toBe(100);
+    expect(balance.usedCredits).toBe(0);
+  });
+
+  it('3b. Deducting from a user with no balance node fails with 402 (no balance), never a negative balance', async () => {
+    const { uid } = await createTestUser({ email: 'nobalance@credittest.com' });
+    await expect(CreditService.deductCredits({ userId: uid, amount: 1, description: 'x' })).rejects.toMatchObject({
+      statusCode: 402,
+      code: 'INSUFFICIENT_CREDITS',
+    });
+    expect(await rtdb.balance(uid)).toBeNull();
   });
 
   it('4. Concurrent credit deductions with different keys prevent negative balance and enforce atomicity', async () => {
-    const regRes = await request(app).post('/api/v1/auth/register').send({
-      name: 'Concurrent User',
-      email: 'concurrent@credittest.com',
-      password: 'Password123!',
-    });
+    const { uid } = await registerViaApi(app, { email: 'concurrent@credittest.com' });
 
-    const userId = regRes.body.data.user._id || regRes.body.data.user.id;
-
-    // Perform 10 parallel deductions of 15 credits each (Total requested = 150, Available = 100)
-    const deductionPromises = Array.from({ length: 10 }).map((_, i) =>
-      CreditService.deductCredits({
-        userId,
-        amount: 15,
-        description: `Parallel task ${i + 1}`,
-      }).catch(err => err),
+    // 10 parallel deductions of 15 credits each (requested 150, available 100)
+    const results = await Promise.all(
+      Array.from({ length: 10 }).map((_, i) =>
+        CreditService.deductCredits({ userId: uid, amount: 15, description: `Parallel task ${i + 1}` }).catch(
+          err => err,
+        ),
+      ),
     );
-
-    const results = await Promise.all(deductionPromises);
 
     const successful = results.filter(r => !(r instanceof Error));
     const failed = results.filter(r => r instanceof Error);
-
-    // 100 / 15 = 6 successful deductions (90 credits spent), 4 failed
     expect(successful.length).toBe(6);
     expect(failed.length).toBe(4);
 
-    const finalBalance = await UserCreditBalance.findOne({ userId });
-    expect(finalBalance?.remainingCredits).toBe(10);
-    expect(finalBalance?.usedCredits).toBe(90);
+    const finalBalance = await rtdb.balance(uid);
+    expect(finalBalance.remainingCredits).toBe(10);
+    expect(finalBalance.usedCredits).toBe(90);
+    expect((await rtdb.ledger(uid)).filter(entry => entry.type === 'USAGE_DEDUCTION')).toHaveLength(6);
   });
 
   it('5. Truly concurrent requests with SAME idempotencyKey deduct credits exactly ONCE without divergence', async () => {
-    const regRes = await request(app).post('/api/v1/auth/register').send({
-      name: 'Concurrent Same Key User',
-      email: 'concurrentsamekey@credittest.com',
-      password: 'Password123!',
-    });
-
-    const userId = regRes.body.data.user._id || regRes.body.data.user.id;
+    const { uid } = await registerViaApi(app, { email: 'concurrentsamekey@credittest.com' });
     const sameKey = 'concurrent-same-key-001';
 
-    // Fire 10 parallel requests with the exact SAME idempotencyKey requesting 10 credits each
-    const promises = Array.from({ length: 10 }).map(() =>
-      CreditService.deductCredits({
-        userId,
-        amount: 10,
-        description: 'Concurrent same key execution',
-        idempotencyKey: sameKey,
-      }),
+    const results = await Promise.all(
+      Array.from({ length: 10 }).map(() =>
+        CreditService.deductCredits({
+          userId: uid,
+          amount: 10,
+          description: 'Concurrent same key execution',
+          idempotencyKey: sameKey,
+        }),
+      ),
     );
 
-    const results = await Promise.all(promises);
+    expect(results.filter(r => !r.isIdempotentRetry)).toHaveLength(1);
+    expect(results.filter(r => r.isIdempotentRetry)).toHaveLength(9);
 
-    // Exactly 1 request creates new entry (isIdempotentRetry: false), 9 return idempotent retries
-    const primaryOps = results.filter(r => !r.isIdempotentRetry);
-    const retryOps = results.filter(r => r.isIdempotentRetry);
+    const finalBalance = await rtdb.balance(uid);
+    expect(finalBalance.remainingCredits).toBe(90);
+    expect(finalBalance.usedCredits).toBe(10);
 
-    expect(primaryOps.length).toBe(1);
-    expect(retryOps.length).toBe(9);
-
-    // Database verification: Exactly 10 credits deducted total (100 -> 90)
-    const finalBalance = await UserCreditBalance.findOne({ userId });
-    expect(finalBalance?.remainingCredits).toBe(90);
-    expect(finalBalance?.usedCredits).toBe(10);
-
-    // Ledger verification: Exactly ONE entry created for this idempotencyKey
-    const ledgerEntries = await CreditLedger.find({ idempotencyKey: sameKey });
-    expect(ledgerEntries.length).toBe(1);
+    const ledgerEntries = (await rtdb.ledger(uid)).filter(entry => entry.idempotencyKey === sameKey);
+    expect(ledgerEntries).toHaveLength(1);
     expect(ledgerEntries[0].amount).toBe(-10);
-    expect(ledgerEntries[0].balanceAfter).toBeLessThanOrEqual(90);
-    expect(ledgerEntries[0].balanceAfter).toBeGreaterThanOrEqual(80);
+    expect(ledgerEntries[0].balanceAfter).toBe(90);
+    // Every caller sees the same ledger entry
+    expect(new Set(results.map(r => r.ledgerEntry._id)).size).toBe(1);
   });
 
   it('6. Sequential idempotency key retry returns cached response without duplicate deduction', async () => {
-    const regRes = await request(app).post('/api/v1/auth/register').send({
-      name: 'Idempotent User',
-      email: 'idempotent@credittest.com',
-      password: 'Password123!',
-    });
-
-    const userId = regRes.body.data.user._id || regRes.body.data.user.id;
+    const { uid } = await registerViaApi(app, { email: 'idempotent@credittest.com' });
     const idempotencyKey = 'seq-task-key-001';
 
-    // First deduction
     const res1 = await CreditService.deductCredits({
-      userId,
+      userId: uid,
       amount: 25,
       description: 'Idempotent Task Execution',
       idempotencyKey,
     });
-
     expect(res1.balance.remainingCredits).toBe(75);
     expect(res1.isIdempotentRetry).toBe(false);
 
-    // Duplicate deduction with same idempotencyKey
     const res2 = await CreditService.deductCredits({
-      userId,
+      userId: uid,
       amount: 25,
       description: 'Idempotent Task Execution Retry',
       idempotencyKey,
     });
-
     expect(res2.isIdempotentRetry).toBe(true);
-    expect(res2.balance.remainingCredits).toBe(75); // Unchanged!
+    expect(res2.balance.remainingCredits).toBe(75);
 
-    // Verify ledger has only 1 entry for this key
-    const ledgerEntries = await CreditLedger.find({ idempotencyKey });
-    expect(ledgerEntries.length).toBe(1);
+    expect((await rtdb.ledger(uid)).filter(entry => entry.idempotencyKey === idempotencyKey)).toHaveLength(1);
+  });
+
+  it('6b. A failed (insufficient) deduction releases its idempotency key so a later retry can succeed', async () => {
+    const { uid } = await registerViaApi(app, { email: 'retryafterfail@credittest.com' });
+    await rtdb.patchBalance(uid, { remainingCredits: 3, usedCredits: 97 });
+
+    await expect(
+      CreditService.deductCredits({ userId: uid, amount: 5, description: 'too much', idempotencyKey: 'k-1' }),
+    ).rejects.toMatchObject({ code: 'INSUFFICIENT_CREDITS' });
+
+    await rtdb.patchBalance(uid, { remainingCredits: 50 });
+    const retry = await CreditService.deductCredits({
+      userId: uid,
+      amount: 5,
+      description: 'retry',
+      idempotencyKey: 'k-1',
+    });
+    expect(retry.isIdempotentRetry).toBe(false);
+    expect(retry.balance.remainingCredits).toBe(45);
+  });
+
+  it('6c. Idempotency keys are isolated per user (the same key on two accounts deducts from each)', async () => {
+    const a = await registerViaApi(app, { email: 'keyA@credittest.com' });
+    const b = await registerViaApi(app, { email: 'keyB@credittest.com' });
+
+    const ra = await CreditService.deductCredits({
+      userId: a.uid,
+      amount: 7,
+      description: 'a',
+      idempotencyKey: 'shared-key',
+    });
+    const rb = await CreditService.deductCredits({
+      userId: b.uid,
+      amount: 7,
+      description: 'b',
+      idempotencyKey: 'shared-key',
+    });
+
+    expect(ra.isIdempotentRetry).toBe(false);
+    expect(rb.isIdempotentRetry).toBe(false);
+    expect(rb.ledgerEntry.userId).toBe(b.uid);
+    expect((await rtdb.balance(a.uid)).remainingCredits).toBe(93);
+    expect((await rtdb.balance(b.uid)).remainingCredits).toBe(93);
   });
 
   it('7. checkCredits middleware allows access when balance >= required and rejects 402 when low', async () => {
-    const regRes = await request(app).post('/api/v1/auth/register').send({
-      name: 'Middleware User',
-      email: 'middleware@credittest.com',
-      password: 'Password123!',
-    });
+    const { uid, auth } = await registerViaApi(app, { email: 'middleware@credittest.com' });
 
-    const token = regRes.body.data.token;
-    const userId = regRes.body.data.user._id || regRes.body.data.user.id;
-
-    // 1. Initial balance = 100, requires 5 -> 200 OK
-    const accessRes1 = await request(app).get('/api/v1/test-metered-feature').set('Authorization', `Bearer ${token}`);
+    const accessRes1 = await request(app).get('/api/v1/test-metered-feature').set('Authorization', auth);
     expect(accessRes1.status).toBe(200);
 
-    // 2. Set remaining credits to 2
-    await UserCreditBalance.updateOne({ userId }, { $set: { remainingCredits: 2, usedCredits: 98 } });
+    await rtdb.patchBalance(uid, { remainingCredits: 2, usedCredits: 98 });
 
-    // 3. Requires 5 -> 402 Payment Required
-    const accessRes2 = await request(app).get('/api/v1/test-metered-feature').set('Authorization', `Bearer ${token}`);
+    const accessRes2 = await request(app).get('/api/v1/test-metered-feature').set('Authorization', auth);
     expect(accessRes2.status).toBe(402);
     expect(accessRes2.body.error.code).toBe('INSUFFICIENT_CREDITS');
   });
 
   it('8. GET /api/v1/credits/balance returns credit info and low balance warning', async () => {
-    const regRes = await request(app).post('/api/v1/auth/register').send({
-      name: 'Balance API User',
-      email: 'balanceapi@credittest.com',
-      password: 'Password123!',
-    });
+    const { uid, auth } = await registerViaApi(app, { email: 'balanceapi@credittest.com' });
 
-    const token = regRes.body.data.token;
-    const userId = regRes.body.data.user._id || regRes.body.data.user.id;
-
-    const res1 = await request(app).get('/api/v1/credits/balance').set('Authorization', `Bearer ${token}`);
+    const res1 = await request(app).get('/api/v1/credits/balance').set('Authorization', auth);
     expect(res1.status).toBe(200);
     expect(res1.body.data.allocatedCredits).toBe(100);
     expect(res1.body.data.remainingCredits).toBe(100);
     expect(res1.body.data.isLowBalance).toBe(false);
+    // ISO date strings, as the Mongo version returned
+    expect(res1.body.data.periodStart).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect(res1.body.data.periodEnd).toMatch(/^\d{4}-\d{2}-\d{2}T/);
 
-    // Set remaining credits to 5 (<= 10% of 100)
-    await UserCreditBalance.updateOne({ userId }, { $set: { remainingCredits: 5, usedCredits: 95 } });
+    await rtdb.patchBalance(uid, { remainingCredits: 5, usedCredits: 95 });
 
-    const res2 = await request(app).get('/api/v1/credits/balance').set('Authorization', `Bearer ${token}`);
+    const res2 = await request(app).get('/api/v1/credits/balance').set('Authorization', auth);
     expect(res2.status).toBe(200);
     expect(res2.body.data.remainingCredits).toBe(5);
     expect(res2.body.data.isLowBalance).toBe(true);
   });
 
   it('9. GET /api/v1/credits/history returns paginated audit entries in reverse chronological order', async () => {
-    const regRes = await request(app).post('/api/v1/auth/register').send({
-      name: 'History API User',
-      email: 'historyapi@credittest.com',
-      password: 'Password123!',
-    });
+    const { uid, auth } = await registerViaApi(app, { email: 'historyapi@credittest.com' });
 
-    const token = regRes.body.data.token;
-    const userId = regRes.body.data.user._id || regRes.body.data.user.id;
+    await CreditService.deductCredits({ userId: uid, amount: 5, description: 'Action 1' });
+    await new Promise(resolve => setTimeout(resolve, 5));
+    await CreditService.deductCredits({ userId: uid, amount: 10, description: 'Action 2' });
 
-    // Deduct twice
-    await CreditService.deductCredits({ userId, amount: 5, description: 'Action 1' });
-    await CreditService.deductCredits({ userId, amount: 10, description: 'Action 2' });
-
-    const res = await request(app)
-      .get('/api/v1/credits/history?page=1&limit=2')
-      .set('Authorization', `Bearer ${token}`);
-
+    const res = await request(app).get('/api/v1/credits/history?page=1&limit=2').set('Authorization', auth);
     expect(res.status).toBe(200);
     expect(res.body.data.items.length).toBe(2);
     expect(res.body.data.pagination.total).toBe(3); // 1 allocation + 2 deductions
+    expect(res.body.data.pagination.totalPages).toBe(2);
     expect(res.body.data.items[0].description).toBe('Action 2');
+
+    const page2 = await request(app).get('/api/v1/credits/history?page=2&limit=2').set('Authorization', auth);
+    expect(page2.body.data.items).toHaveLength(1);
+    expect(page2.body.data.items[0].type).toBe('TRIAL_ALLOCATION');
   });
 
   it('10. POST /api/v1/credits/deduct is removed from public API surface (returns 404)', async () => {
-    const regRes = await request(app).post('/api/v1/auth/register').send({
-      name: 'Removed Endpoint User',
-      email: 'removedep@credittest.com',
-      password: 'Password123!',
-    });
-
-    const token = regRes.body.data.token;
+    const { auth } = await registerViaApi(app, { email: 'removedep@credittest.com' });
 
     const res = await request(app)
       .post('/api/v1/credits/deduct')
-      .set('Authorization', `Bearer ${token}`)
+      .set('Authorization', auth)
       .send({ amount: 10, description: 'Direct deduction attempt' });
 
     expect(res.status).toBe(404);
+  });
+
+  it('11. Refund for an agent run returns the deducted credits exactly once (also under concurrency)', async () => {
+    const { uid, auth } = await registerViaApi(app, { email: 'refund@credittest.com' });
+
+    await CreditService.deductCredits({ userId: uid, amount: 4, description: 'step 1', metadata: { runId: 'run-42' } });
+    await CreditService.deductCredits({ userId: uid, amount: 6, description: 'step 2', metadata: { runId: 'run-42' } });
+    await CreditService.deductCredits({
+      userId: uid,
+      amount: 3,
+      description: 'other run',
+      metadata: { runId: 'run-7' },
+    });
+    expect((await rtdb.balance(uid)).remainingCredits).toBe(87);
+
+    const responses = await Promise.all(
+      Array.from({ length: 4 }).map(() =>
+        request(app).post('/api/v1/credits/refund').set('Authorization', auth).send({ runId: 'run-42' }),
+      ),
+    );
+    for (const res of responses) {
+      expect(res.status).toBe(200);
+      expect(res.body.data.refundedAmount).toBe(10);
+    }
+
+    const balance = await rtdb.balance(uid);
+    expect(balance.remainingCredits).toBe(97);
+    expect(balance.usedCredits).toBe(3);
+    expect((await rtdb.ledger(uid)).filter(entry => entry.type === 'REFUND')).toHaveLength(1);
+
+    const missing = await request(app)
+      .post('/api/v1/credits/refund')
+      .set('Authorization', auth)
+      .send({ runId: 'run-unknown' });
+    expect(missing.status).toBe(404);
+    expect(missing.body.error.code).toBe('RUN_NOT_FOUND');
+  });
+
+  it('12. Admin top-up (scripts/topup_credits.ts) sets allocated = remaining and records an ADMIN_ADJUSTMENT', async () => {
+    const { uid } = await registerViaApi(app, { email: 'topup@credittest.com' });
+    await CreditService.deductCredits({ userId: uid, amount: 30, description: 'use' });
+
+    const balance = await CreditService.adminSetBalance(uid, 500, 'Admin top-up');
+    expect(balance).toMatchObject({ allocatedCredits: 500, remainingCredits: 500, usedCredits: 30 });
+    const adjustment = (await rtdb.ledger(uid)).find(entry => entry.type === 'ADMIN_ADJUSTMENT');
+    expect(adjustment).toMatchObject({ amount: 430, balanceBefore: 70, balanceAfter: 500 });
+
+    const { uid: fresh } = await createTestUser({ email: 'nobalance-topup@credittest.com' });
+    expect((await CreditService.adminSetBalance(fresh, 200, 'Admin top-up')).remainingCredits).toBe(200);
   });
 });

@@ -11,8 +11,17 @@ services:
         value: production
       - key: PORT
         value: 10000
-      - key: MONGODB_URI
+      # Firebase Realtime Database (shared JobForm Automator project; data lives under NANOBROWSER_RTDB_ROOT)
+      - key: FIREBASE_PROJECT_ID
         sync: false
+      - key: FIREBASE_ADMIN_CLIENT_EMAIL
+        sync: false
+      - key: FIREBASE_ADMIN_PRIVATE_KEY
+        sync: false
+      - key: FIREBASE_DATABASE_URL
+        sync: false
+      - key: NANOBROWSER_RTDB_ROOT
+        value: nanobrowser
       - key: JWT_SECRET
         generateValue: true
       - key: JWT_EXPIRES_IN

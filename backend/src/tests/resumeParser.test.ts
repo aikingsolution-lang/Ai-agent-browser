@@ -1,41 +1,28 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import request from 'supertest';
 import { createApp } from '../app.js';
-import { setupTestDatabase, type TestDbInstance } from './setupTestDb.js';
 import { LlmProviderFactory } from '../services/llm/llmProviderFactory.js';
 import { ResumeParserService } from '../services/resumeParser.service.js';
-import { CareerBrain } from '../models/careerBrain.model.js';
+import { PlanSeedService } from '../services/planSeed.service.js';
 import { cleanLocationForCityField } from '../utils/skillValidator.js';
+import { resetFirebase } from './helpers/firebaseTestEnv.js';
+import { registerViaApi, rtdb } from './helpers/testApi.js';
 
 const app = createApp();
-let testDb: TestDbInstance;
 
-describe('Phase 1: Resume Parsing & Career Brain Intelligence Tests', () => {
-  beforeAll(async () => {
-    testDb = await setupTestDatabase();
-  });
-
-  afterAll(async () => {
-    await testDb.stop();
-  });
-
+describe('Phase 1: Resume Parsing & Career Brain Intelligence Tests (Firebase RTDB)', () => {
   beforeEach(async () => {
     LlmProviderFactory.reset();
-    await testDb.clearCollections();
+    await resetFirebase();
+    await PlanSeedService.seedDefaultPlans();
   });
 
   async function registerUser(emailPrefix: string) {
-    const res = await request(app)
-      .post('/api/v1/auth/register')
-      .send({
-        name: `${emailPrefix} Developer`,
-        email: `${emailPrefix}@resumetest.com`,
-        password: 'Password123!',
-      });
-    return {
-      token: res.body.data.token,
-      userId: res.body.data.user._id || res.body.data.user.id,
-    };
+    const user = await registerViaApi(app, {
+      name: `${emailPrefix} Developer`,
+      email: `${emailPrefix}@resumetest.com`,
+    });
+    return { token: user.token, userId: user.uid };
   }
 
   it('1. Extracts structured data and strips markdown blocks returned by Bedrock LLM', async () => {
@@ -127,7 +114,7 @@ GitHub: https://github.com/bobjohnson`;
     expect(res.body.success).toBe(false);
   });
 
-  it('5. POST /api/v1/resume/upload-and-parse successfully parses file and updates CareerBrain in MongoDB', async () => {
+  it('5. POST /api/v1/resume/upload-and-parse successfully parses file and updates the CareerBrain in RTDB', async () => {
     const { token, userId } = await registerUser('carol');
 
     const mockAiJson = JSON.stringify({
@@ -172,14 +159,28 @@ GitHub: https://github.com/bobjohnson`;
     expect(res.body.data.parsedData.fullName).toBe('Carol Danvers');
     expect(res.body.data.parsedData.skills).toContain('AWS Bedrock');
 
-    // Verify MongoDB persistence
-    const savedCareerBrain = await CareerBrain.findOne({ userId });
+    // Verify RTDB persistence (nanobrowser/career_brains/{uid})
+    const savedCareerBrain = await rtdb.careerBrain(userId);
     expect(savedCareerBrain).not.toBeNull();
-    expect(savedCareerBrain?.fullName).toBe('Carol Danvers');
-    expect(savedCareerBrain?.currentTitle).toBe('Staff AI Engineer');
-    expect(savedCareerBrain?.skills).toContain('AWS Bedrock');
-    expect(savedCareerBrain?.workHistory).toHaveLength(1);
-    expect(savedCareerBrain?.resumeFileName).toBe('carol_resume.doc');
+    expect(savedCareerBrain.fullName).toBe('Carol Danvers');
+    expect(savedCareerBrain.currentTitle).toBe('Staff AI Engineer');
+    expect(savedCareerBrain.skills).toContain('AWS Bedrock');
+    expect(savedCareerBrain.workHistory).toHaveLength(1);
+    expect(savedCareerBrain.resumeFileName).toBe('carol_resume.doc');
+
+    // API response keeps the Mongo-era shape, including skillExperience as a map
+    expect(res.body.data.careerBrain.userId).toBe(userId);
+    expect(res.body.data.careerBrain.skillExperience).toBeTypeOf('object');
+    expect(Array.isArray(res.body.data.careerBrain.skillExperience)).toBe(false);
+    expect(res.body.data.careerBrain.dailyQuota.dailyLimit).toBe(15);
+
+    // A profile fetch returns the same data
+    const profileRes = await request(app).get('/api/v1/profile').set('Authorization', `Bearer ${token}`);
+    expect(profileRes.status).toBe(200);
+    expect(profileRes.body.data.fullName).toBe('Carol Danvers');
+    expect(Object.keys(profileRes.body.data.skillExperience)).toEqual(
+      Object.keys(res.body.data.careerBrain.skillExperience),
+    );
   });
 
   it('6. Regression: purges fabricated "5 years" across skills when candidate is an intern with no explicit durations', async () => {

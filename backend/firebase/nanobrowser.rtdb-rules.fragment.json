@@ -1,0 +1,24 @@
+{
+  "nanobrowser": {
+    ".read": false,
+    ".write": false,
+    "subscriptions": {
+      ".indexOn": ["status"]
+    },
+    "credit_ledger": {
+      "$uid": {
+        ".indexOn": ["createdAt", "runId"]
+      }
+    },
+    "job_applications": {
+      "$uid": {
+        ".indexOn": ["updatedAt", "status"]
+      }
+    },
+    "llm_usage": {
+      "$uid": {
+        ".indexOn": ["createdAt", "idempotencyKey"]
+      }
+    }
+  }
+}
