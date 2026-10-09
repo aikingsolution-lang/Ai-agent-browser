@@ -8,6 +8,77 @@ export interface INaukriAnswerResult {
 }
 
 /**
+ * Matches a numeric value (e.g. years of experience, CTC) against option strings,
+ * supporting ranges ("3-5"), thresholds ("6+", "more than 6"), and bounds ("Less than 6", "up to 5").
+ */
+export function matchNumericRangeOption(num: number, options: string[]): string | undefined {
+  if (!options || options.length === 0) return undefined;
+
+  // 1. Fresher / 0 check
+  if (num === 0) {
+    const fresherOpt = options.find(o => {
+      const lo = o.toLowerCase();
+      return lo.includes('fresher') || lo.includes('0 year') || lo === '0' || lo.includes('< 1');
+    });
+    if (fresherOpt) return fresherOpt;
+  }
+
+  // 2. Range match: "1-3", "3 - 5", "3 to 5"
+  for (const opt of options) {
+    const rangeMatch = opt.match(/(\d+(?:\.\d+)?)\s*(?:-|to)\s*(\d+(?:\.\d+)?)/i);
+    if (rangeMatch) {
+      const min = parseFloat(rangeMatch[1]);
+      const max = parseFloat(rangeMatch[2]);
+      if (!isNaN(min) && !isNaN(max) && num >= min && num <= max) {
+        return opt;
+      }
+    }
+  }
+
+  // 3. Less than / Under / Below / Up to: "Less than 6", "< 6", "under 5"
+  for (const opt of options) {
+    const lessMatch = opt.match(/(?:less\s+than|under|below|fewer\s+than|upto|up\s+to|<)\s*(\d+(?:\.\d+)?)/i);
+    if (lessMatch) {
+      const limit = parseFloat(lessMatch[1]);
+      if (!isNaN(limit)) {
+        const isUpTo = /upto|up\s+to|<=\s*/i.test(opt);
+        if (isUpTo ? num <= limit : num < limit) {
+          return opt;
+        }
+      }
+    }
+  }
+
+  // 4. Greater than / Plus: "6+", "6 +", "more than 6", "above 5"
+  for (const opt of options) {
+    const plusMatch = opt.match(/(\d+(?:\.\d+)?)\s*\+/);
+    if (plusMatch) {
+      const min = parseFloat(plusMatch[1]);
+      if (!isNaN(min) && num >= min) {
+        return opt;
+      }
+    }
+    const greaterMatch = opt.match(/(?:more\s+than|greater\s+than|above|>)\s*(\d+(?:\.\d+)?)/i);
+    if (greaterMatch) {
+      const min = parseFloat(greaterMatch[1]);
+      if (!isNaN(min) && num > min) {
+        return opt;
+      }
+    }
+  }
+
+  // 5. Exact word match e.g. "3", "3 years"
+  for (const opt of options) {
+    const regex = new RegExp(`\\b${num}\\b`);
+    if (regex.test(opt)) {
+      return opt;
+    }
+  }
+
+  return undefined;
+}
+
+/**
  * Resolves a field or question on Naukri using candidate's Career Brain.
  */
 export function resolveNaukriQuestion(
@@ -220,27 +291,42 @@ export function resolveNaukriQuestion(
     return { value: val, confidence: 0.95, source: 'profile' };
   }
 
-  // 4. Total Experience / Years of experience
+  // 4. Total Experience / Years of experience / Skill experience (e.g. "How many years of experience do you have in Aws Devops?")
   if (
     q.includes('total experience') ||
     q.includes('overall experience') ||
     q.includes('total year') ||
     q.includes('experiance') ||
-    (q.includes('experience') && (q.includes('years') || q.includes('yoe'))) ||
+    (q.includes('experience') && (q.includes('years') || q.includes('yoe') || q.includes('how many'))) ||
     /\b(?:total|overall)?\s*experi[ea]nce\b/i.test(q)
   ) {
-    const yoe = String(careerBrain.yearsOfExperience ?? 1);
-    if (options.length > 0) {
-      // Find matching range in options e.g. "0-1 Years", "1-3 Years"
-      const num = careerBrain.yearsOfExperience ?? 1;
-      const matched = options.find(opt => {
-        const optLower = opt.toLowerCase();
-        if (num === 0 && (optLower.includes('fresher') || optLower.includes('0'))) return true;
-        return optLower.includes(String(num));
-      });
-      return { value: matched || options[0], confidence: 0.9, source: 'profile' };
+    let expYears = careerBrain.yearsOfExperience ?? 1;
+
+    // Check if question asks about a specific skill in skillExperience
+    if (careerBrain.skillExperience) {
+      for (const [skill, yrs] of Object.entries(careerBrain.skillExperience)) {
+        const sLower = skill.toLowerCase();
+        if (
+          q.includes(sLower) ||
+          (sLower.includes('aws') && q.includes('aws')) ||
+          (sLower.includes('devops') && q.includes('devops'))
+        ) {
+          expYears = Number(yrs);
+          break;
+        }
+      }
     }
-    return { value: yoe, confidence: 0.95, source: 'profile' };
+
+    if (options.length > 0) {
+      const matched = matchNumericRangeOption(expYears, options);
+      if (matched) {
+        return { value: matched, confidence: 0.95, source: 'profile' };
+      }
+      const aligned = alignValueToOptions(String(expYears), options, questionText);
+      return { value: aligned ? aligned.matchedOption : options[0], confidence: 0.85, source: 'profile' };
+    }
+
+    return { value: String(expYears), confidence: 0.95, source: 'profile' };
   }
 
   // 5. Current / Preferred Location (with Priority 1 > Priority 2 > Priority 3)
@@ -285,6 +371,13 @@ export function resolveNaukriQuestion(
   if (careerBrain.skillExperience) {
     for (const [skill, yrs] of Object.entries(careerBrain.skillExperience)) {
       if (q.includes(skill.toLowerCase())) {
+        const numYrs = Number(yrs);
+        if (options.length > 0) {
+          const matched = matchNumericRangeOption(numYrs, options);
+          if (matched) return { value: matched, confidence: 0.95, source: 'profile' };
+          const aligned = alignValueToOptions(String(yrs), options, questionText);
+          return { value: aligned ? aligned.matchedOption : options[0], confidence: 0.85, source: 'profile' };
+        }
         return { value: String(yrs), confidence: 0.9, source: 'profile' };
       }
     }

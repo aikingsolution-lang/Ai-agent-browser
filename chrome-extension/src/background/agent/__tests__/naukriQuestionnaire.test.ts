@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import type { ICareerBrain } from '@extension/storage';
-import { resolveNaukriQuestion } from '../platforms/naukri/naukriResolver';
+import { resolveNaukriQuestion, matchNumericRangeOption } from '../platforms/naukri/naukriResolver';
 import { NAUKRI_SELECTORS } from '../platforms/naukri/selectors';
 
 describe('Naukri Questionnaire & Drawer Resolvers', () => {
@@ -119,15 +119,87 @@ describe('Naukri Questionnaire & Drawer Resolvers', () => {
     });
   });
 
-  describe('Naukri Selectors for Drawer and Skip Button', () => {
+  describe('Naukri Selectors for Drawer, Modal and Chatbot', () => {
     it('includes drawer-wrapper and modern drawer selectors in MODAL_CONTAINER', () => {
       expect(NAUKRI_SELECTORS.MODAL_CONTAINER).toContain('div.drawer-wrapper');
       expect(NAUKRI_SELECTORS.MODAL_CONTAINER.some(s => s.includes('drawer'))).toBe(true);
+      expect(NAUKRI_SELECTORS.MODAL_CONTAINER.some(s => s.includes('chatbot'))).toBe(true);
     });
 
     it('includes skip question buttons in SKIP_QUESTION_BUTTON', () => {
       expect(NAUKRI_SELECTORS.SKIP_QUESTION_BUTTON.length).toBeGreaterThan(0);
       expect(NAUKRI_SELECTORS.SKIP_QUESTION_BUTTON.some(s => s.includes('skip'))).toBe(true);
+    });
+
+    it('includes chatbot bubbles and options selectors', () => {
+      expect(NAUKRI_SELECTORS.CHATBOT_QUESTION_BUBBLE.length).toBeGreaterThan(0);
+      expect(NAUKRI_SELECTORS.CHATBOT_OPTIONS.length).toBeGreaterThan(0);
+    });
+  });
+
+  describe('Numeric Range Option Matching (matchNumericRangeOption)', () => {
+    const binaryOptions = ['6+', 'Less than 6'];
+
+    it('matches "Less than 6" when candidate experience is 3 years', () => {
+      expect(matchNumericRangeOption(3, binaryOptions)).toBe('Less than 6');
+    });
+
+    it('matches "6+" when candidate experience is 6 years or more', () => {
+      expect(matchNumericRangeOption(6, binaryOptions)).toBe('6+');
+      expect(matchNumericRangeOption(8, binaryOptions)).toBe('6+');
+    });
+
+    it('matches interval ranges correctly (e.g. "3-5 Years")', () => {
+      const ranges = ['0-1 Years', '1-3 Years', '3-5 Years', '5+ Years'];
+      expect(matchNumericRangeOption(4, ranges)).toBe('3-5 Years');
+      expect(matchNumericRangeOption(2, ranges)).toBe('1-3 Years');
+      expect(matchNumericRangeOption(7, ranges)).toBe('5+ Years');
+    });
+
+    it('matches Fresher when experience is 0', () => {
+      const ranges = ['Fresher', '1-3 Years', '3+ Years'];
+      expect(matchNumericRangeOption(0, ranges)).toBe('Fresher');
+    });
+  });
+
+  describe('Naukri Chatbot Screening Questions', () => {
+    it('correctly resolves chatbot choice options "6+" vs "Less than 6" for candidate with 3 years experience', () => {
+      const res = resolveNaukriQuestion(
+        'How many years of experience do you have in Aws Devops?',
+        'radio',
+        ['6+', 'Less than 6'],
+        baseCareerBrain as ICareerBrain,
+      );
+      expect(res.value).toBe('Less than 6');
+      expect(res.confidence).toBeGreaterThanOrEqual(0.9);
+    });
+
+    it('correctly resolves chatbot text input when placeholder is "Type message here..."', () => {
+      const res = resolveNaukriQuestion(
+        'How many years of experience do you have in AWS Devops?',
+        'text',
+        [],
+        baseCareerBrain as ICareerBrain,
+        'Type message here...',
+      );
+      expect(res.value).toBe('3');
+      expect(res.confidence).toBeGreaterThanOrEqual(0.9);
+    });
+
+    it('uses skillExperience when specific skill is registered in Career Brain', () => {
+      const brainWithSkillExp: ICareerBrain = {
+        ...(baseCareerBrain as ICareerBrain),
+        skillExperience: {
+          'aws devops': 7,
+        },
+      };
+      const res = resolveNaukriQuestion(
+        'How many years of experience do you have in Aws Devops?',
+        'radio',
+        ['6+', 'Less than 6'],
+        brainWithSkillExp,
+      );
+      expect(res.value).toBe('6+');
     });
   });
 });
