@@ -4,15 +4,13 @@ import { backendApiClient } from '@extension/shared';
 import {
   FiCheck,
   FiZap,
-  FiStar,
   FiShield,
   FiCpu,
   FiTrendingUp,
   FiCreditCard,
-  FiX,
   FiCheckCircle,
   FiLock,
-  FiRefreshCw,
+  FiClock,
 } from 'react-icons/fi';
 
 interface PremiumPlansProps {
@@ -27,8 +25,8 @@ export const PremiumPlans: React.FC<PremiumPlansProps> = ({ isDarkMode }) => {
     Array<{ code: string; name: string; amount: number; creditsPerBillingPeriod: number }>
   >([
     { code: 'starter', name: 'Starter Plan', amount: 49900, creditsPerBillingPeriod: 1000 },
-    { code: 'pro', name: 'Pro Plan', amount: 149900, creditsPerBillingPeriod: 5000 },
-    { code: 'power', name: 'Power Plan', amount: 499900, creditsPerBillingPeriod: 25000 },
+    { code: 'pro', name: 'Pro Automation Plan', amount: 149900, creditsPerBillingPeriod: 5000 },
+    { code: 'power', name: 'Power Enterprise Plan', amount: 499900, creditsPerBillingPeriod: 25000 },
   ]);
 
   useEffect(() => {
@@ -74,13 +72,6 @@ export const PremiumPlans: React.FC<PremiumPlansProps> = ({ isDarkMode }) => {
 
       if (res.data?.shortUrl) {
         window.open(res.data.shortUrl, '_blank');
-        alert(
-          `Razorpay checkout initiated! Opening payment page for ${res.data.planName || planCode.toUpperCase()} plan.`,
-        );
-      } else {
-        alert(
-          `Checkout session created for plan ${planCode.toUpperCase()}! (Subscription ID: ${res.data?.subscriptionId})`,
-        );
       }
 
       // Nothing is unlocked here: the plan becomes active only after the backend has verified the
@@ -90,20 +81,6 @@ export const PremiumPlans: React.FC<PremiumPlansProps> = ({ isDarkMode }) => {
       alert(error.message || 'Checkout failed. Please ensure you are logged in and backend is running.');
     } finally {
       setIsProcessingPayment(false);
-    }
-  };
-
-  const handleDowngradeToFree = async () => {
-    try {
-      await backendApiClient.cancelSubscription();
-      await cloudApiSettingsStore.updateSubscription({
-        planId: 'free',
-        status: 'cancelled',
-        billingInterval,
-      });
-      await cloudApiSettingsStore.setApiMode('free');
-    } catch (error) {
-      console.error('Failed to cancel/downgrade subscription:', error);
     }
   };
 
@@ -124,83 +101,105 @@ export const PremiumPlans: React.FC<PremiumPlansProps> = ({ isDarkMode }) => {
   return (
     <section className="space-y-6">
       <div
-        className={`rounded-lg border ${isDarkMode ? 'border-slate-700 bg-slate-800' : 'border-blue-100 bg-gray-50'} p-6 text-left shadow-sm`}>
+        className={`rounded-2xl border p-8 text-left shadow-xs ${
+          isDarkMode ? 'border-slate-800 bg-slate-900' : 'border-slate-200 bg-white'
+        }`}>
         {/* Header & Toggle */}
-        <div className="mx-auto mb-8 max-w-2xl text-center">
-          <div className="mb-3 inline-flex items-center space-x-2 rounded-full bg-indigo-500/10 px-4 py-1.5 text-xs font-semibold text-indigo-500">
-            <FiStar className="size-4" />
-            <span>NanoBrowser Premium Commercial Plans</span>
+        <div className="mx-auto mb-10 max-w-2xl text-center">
+          <div className="mb-2.5 inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/40 border border-indigo-200 dark:border-indigo-800">
+            <span>✦</span>
+            <span>COMMERCIAL SUBSCRIPTION</span>
           </div>
-          <h2 className={`text-3xl font-extrabold ${isDarkMode ? 'text-gray-100' : 'text-gray-900'}`}>
-            Supercharge Your AI Web Automation
+
+          <h2 className="text-2xl font-bold text-slate-900 dark:text-slate-100 sm:text-3xl">
+            Choose Your AI Automation Capacity
           </h2>
-          <p className={`mt-2 text-sm ${isDarkMode ? 'text-gray-400' : 'text-gray-600'}`}>
-            Built-in AWS Bedrock Nova LLM proxy access, automated credit allocation, and secure Razorpay payment
-            processing.
+          <p className="mt-2 text-sm text-slate-600 dark:text-slate-400">
+            Managed AWS Bedrock LLM proxy access, automatic credit allocation, and seamless LinkedIn/Indeed auto-apply.
           </p>
 
           {/* Billing Switcher */}
-          <div className="mt-6 inline-flex items-center rounded-full border border-slate-700/30 bg-slate-900/20 p-1 backdrop-blur-sm">
+          <div className="mt-6 inline-flex items-center p-1 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-100 dark:bg-slate-800/80">
             <button
               onClick={() => setBillingInterval('monthly')}
-              className={`rounded-full px-4 py-1.5 text-xs font-semibold transition-all ${
+              className={`rounded-md px-4 py-1.5 text-xs font-semibold transition-all cursor-pointer ${
                 billingInterval === 'monthly'
-                  ? 'bg-sky-500 text-white shadow'
-                  : isDarkMode
-                    ? 'text-gray-400 hover:text-gray-200'
-                    : 'text-gray-600 hover:text-gray-900'
+                  ? 'bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100 shadow-xs'
+                  : 'text-slate-500 dark:text-slate-400 hover:text-slate-900'
               }`}>
-              Monthly Billing (INR)
+              Monthly Billing
+            </button>
+            <button
+              onClick={() => setBillingInterval('yearly')}
+              className={`rounded-md px-4 py-1.5 text-xs font-semibold transition-all cursor-pointer flex items-center gap-1.5 ${
+                billingInterval === 'yearly'
+                  ? 'bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100 shadow-xs'
+                  : 'text-slate-500 dark:text-slate-400 hover:text-slate-900'
+              }`}>
+              <span>Annual Billing</span>
+              <span className="text-[10px] font-bold text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/40 px-1.5 py-0.2 rounded-full border border-emerald-200 dark:border-emerald-800">
+                Save 20%
+              </span>
             </button>
           </div>
         </div>
 
-        {/* Pricing Cards */}
+        {/* Pricing Cards Grid */}
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
-          {/* Starter Plan */}
+          {/* 1. Starter Plan */}
           <div
-            className={`relative flex flex-col justify-between rounded-2xl border p-6 transition-all ${
+            className={`relative flex flex-col justify-between rounded-xl border p-6 transition-all ${
               currentPlan === 'starter'
-                ? 'border-sky-500 ring-2 ring-sky-500/20'
+                ? 'border-emerald-500 bg-emerald-50/20 dark:bg-emerald-950/20 ring-1 ring-emerald-500'
                 : isDarkMode
-                  ? 'border-slate-700 bg-slate-700/40'
-                  : 'border-gray-200 bg-white'
+                  ? 'border-slate-800 bg-slate-900/60'
+                  : 'border-slate-200 bg-white shadow-xs'
             }`}>
             <div>
               <div className="flex items-center justify-between">
-                <h3 className={`text-lg font-bold ${isDarkMode ? 'text-gray-200' : 'text-gray-800'}`}>Starter Plan</h3>
+                <h3 className="text-base font-semibold text-slate-900 dark:text-slate-100">Starter</h3>
                 {currentPlan === 'starter' && (
-                  <span className="rounded-full bg-sky-500/20 px-2.5 py-0.5 text-xs font-semibold text-sky-500">
-                    Current Plan
+                  <span className="rounded-full bg-emerald-50 dark:bg-emerald-950/50 px-2.5 py-0.5 text-xs font-semibold text-emerald-600 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-800">
+                    Active Plan
                   </span>
                 )}
               </div>
-              <p className={`mt-1 text-xs ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>
-                Ideal for individual automation
+              <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                Ideal for active job seekers & daily applications
               </p>
-              <div className="mt-4 flex items-baseline">
-                <span className={`text-3xl font-extrabold ${isDarkMode ? 'text-gray-100' : 'text-gray-900'}`}>
-                  ₹{starter.price}
-                </span>
-                <span className={`ml-1 text-xs ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>/ month</span>
+
+              <div className="mt-4 flex items-baseline gap-1">
+                <span className="text-3xl font-bold text-slate-900 dark:text-slate-100">₹{starter.price}</span>
+                <span className="text-xs text-slate-500 dark:text-slate-400">/ month</span>
               </div>
 
-              <ul className={`mt-6 space-y-3 text-xs ${isDarkMode ? 'text-gray-300' : 'text-gray-600'}`}>
-                <li className="flex items-center space-x-2 font-medium text-sky-500">
-                  <FiZap className="size-4 shrink-0" />
-                  <span>{starter.credits.toLocaleString()} AI Credits / month included</span>
+              <div className="mt-4 flex items-center gap-1.5 text-xs font-medium text-slate-700 dark:text-slate-300">
+                <span className="inline-flex items-center gap-1 rounded-md border border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-slate-800 px-2 py-0.5">
+                  <FiZap className="size-3 text-indigo-500" />
+                  <span>{starter.credits.toLocaleString()} Credits / mo</span>
+                </span>
+                <span className="inline-flex items-center gap-1 rounded-md border border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-slate-800 px-2 py-0.5">
+                  <FiClock className="size-3 text-slate-400" />
+                  <span>120 req/min</span>
+                </span>
+              </div>
+
+              <ul className="mt-6 space-y-3 text-xs text-slate-600 dark:text-slate-300 border-t border-slate-100 dark:border-slate-800 pt-4">
+                <li className="flex items-center gap-2">
+                  <FiCheck className="size-4 shrink-0 text-emerald-600 dark:text-emerald-500" />
+                  <span>Autonomous LinkedIn, Indeed & Naukri apply</span>
                 </li>
-                <li className="flex items-center space-x-2">
-                  <FiCheck className="size-4 shrink-0 text-emerald-500" />
-                  <span>AWS Bedrock Nova Lite (`amazon.nova-lite-v1:0`)</span>
+                <li className="flex items-center gap-2">
+                  <FiCheck className="size-4 shrink-0 text-emerald-600 dark:text-emerald-500" />
+                  <span>Smart AI CareerBrain profile parser</span>
                 </li>
-                <li className="flex items-center space-x-2">
-                  <FiCheck className="size-4 shrink-0 text-emerald-500" />
-                  <span>120 tasks / minute rate limit</span>
+                <li className="flex items-center gap-2">
+                  <FiCheck className="size-4 shrink-0 text-emerald-600 dark:text-emerald-500" />
+                  <span>Screening question auto-solver</span>
                 </li>
-                <li className="flex items-center space-x-2">
-                  <FiCheck className="size-4 shrink-0 text-emerald-500" />
-                  <span>Razorpay Instant Checkout</span>
+                <li className="flex items-center gap-2">
+                  <FiCheck className="size-4 shrink-0 text-emerald-600 dark:text-emerald-500" />
+                  <span>Standard email & community support</span>
                 </li>
               </ul>
             </div>
@@ -208,60 +207,73 @@ export const PremiumPlans: React.FC<PremiumPlansProps> = ({ isDarkMode }) => {
             <button
               onClick={() => handleOpenCheckout('starter')}
               disabled={isProcessingPayment || currentPlan === 'starter'}
-              className="mt-8 w-full cursor-pointer rounded-xl bg-sky-600 py-2.5 text-xs font-semibold text-white shadow-md transition-all hover:bg-sky-500 disabled:opacity-50">
-              {currentPlan === 'starter' ? 'Active Plan' : `Subscribe to Starter (₹${starter.price}/mo)`}
+              className="mt-8 w-full cursor-pointer rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 py-2.5 text-xs font-semibold text-slate-800 dark:text-slate-200 shadow-xs transition-colors hover:bg-slate-50 dark:hover:bg-slate-700 disabled:opacity-50">
+              {currentPlan === 'starter' ? 'Current Active Plan' : 'Select Starter Plan'}
             </button>
           </div>
 
-          {/* Pro Plan (Recommended) */}
+          {/* 2. Pro Automation Plan (Recommended CTA) */}
           <div
-            className={`relative flex flex-col justify-between rounded-2xl border p-6 shadow-xl transition-all ${
+            className={`relative flex flex-col justify-between rounded-xl border p-6 transition-all ${
               currentPlan === 'pro'
-                ? 'border-indigo-500 bg-indigo-500/10 ring-2 ring-indigo-500/30'
+                ? 'border-emerald-500 bg-emerald-50/20 dark:bg-emerald-950/20 ring-1 ring-emerald-500'
                 : isDarkMode
-                  ? 'border-indigo-500/50 bg-slate-800/80'
-                  : 'border-indigo-200 bg-gradient-to-b from-indigo-50/50 to-white'
+                  ? 'border-blue-500/80 bg-blue-950/10 shadow-xs ring-1 ring-blue-500/50'
+                  : 'border-blue-600 bg-blue-50/20 shadow-xs ring-1 ring-blue-600'
             }`}>
-            <div className="absolute -top-3 left-1/2 -translate-x-1/2 rounded-full bg-gradient-to-r from-sky-500 to-indigo-500 px-3 py-0.5 text-[11px] font-bold text-white shadow-md">
-              MOST POPULAR
-            </div>
+            <span className="absolute -top-3 left-1/2 -translate-x-1/2 rounded-full bg-blue-600 px-3 py-0.5 text-[10px] font-semibold text-white shadow-xs">
+              ✦ RECOMMENDED
+            </span>
 
             <div>
               <div className="flex items-center justify-between">
-                <h3 className={`text-lg font-bold ${isDarkMode ? 'text-gray-100' : 'text-gray-900'}`}>Pro Plan</h3>
+                <h3 className="text-base font-semibold text-slate-900 dark:text-slate-100">Pro Automation</h3>
                 {currentPlan === 'pro' && (
-                  <span className="rounded-full bg-indigo-500/20 px-2.5 py-0.5 text-xs font-semibold text-indigo-400">
-                    Current Plan
+                  <span className="rounded-full bg-emerald-50 dark:bg-emerald-950/50 px-2.5 py-0.5 text-xs font-semibold text-emerald-600 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-800">
+                    Active Plan
                   </span>
                 )}
               </div>
-              <p className={`mt-1 text-xs ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>
-                High-volume power users
+              <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                High-volume applications & multiple target roles
               </p>
 
-              <div className="mt-4 flex items-baseline">
-                <span className={`text-3xl font-extrabold ${isDarkMode ? 'text-gray-100' : 'text-gray-900'}`}>
-                  ₹{pro.price.toLocaleString()}
-                </span>
-                <span className={`ml-1 text-xs ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>/ month</span>
+              <div className="mt-4 flex items-baseline gap-1">
+                <span className="text-3xl font-bold text-slate-900 dark:text-slate-100">₹{pro.price}</span>
+                <span className="text-xs text-slate-500 dark:text-slate-400">/ month</span>
               </div>
 
-              <ul className={`mt-6 space-y-3 text-xs ${isDarkMode ? 'text-gray-300' : 'text-gray-600'}`}>
-                <li className="flex items-center space-x-2 font-medium text-indigo-500 dark:text-indigo-400">
-                  <FiZap className="size-4 shrink-0" />
-                  <span>{pro.credits.toLocaleString()} AI Credits / month included</span>
+              <div className="mt-4 flex items-center gap-1.5 text-xs font-medium text-slate-700 dark:text-slate-300">
+                <span className="inline-flex items-center gap-1 rounded-md border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-950/40 px-2 py-0.5 text-blue-700 dark:text-blue-300">
+                  <FiZap className="size-3 text-indigo-500" />
+                  <span>{pro.credits.toLocaleString()} Credits / mo</span>
+                </span>
+                <span className="inline-flex items-center gap-1 rounded-md border border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-slate-800 px-2 py-0.5">
+                  <FiClock className="size-3 text-slate-400" />
+                  <span>300 req/min</span>
+                </span>
+              </div>
+
+              <ul className="mt-6 space-y-3 text-xs text-slate-600 dark:text-slate-300 border-t border-slate-100 dark:border-slate-800 pt-4">
+                <li className="flex items-center gap-2">
+                  <FiCheck className="size-4 shrink-0 text-emerald-600 dark:text-emerald-500" />
+                  <span>All AI Models: Claude 3.5 Sonnet & Nova</span>
                 </li>
-                <li className="flex items-center space-x-2">
-                  <FiCheck className="size-4 shrink-0 text-emerald-500" />
-                  <span>AWS Bedrock Nova Lite & Pro Models</span>
+                <li className="flex items-center gap-2">
+                  <FiCheck className="size-4 shrink-0 text-emerald-600 dark:text-emerald-500" />
+                  <span>Priority screening question solver</span>
                 </li>
-                <li className="flex items-center space-x-2">
-                  <FiCheck className="size-4 shrink-0 text-emerald-500" />
-                  <span>300 tasks / minute rate limit</span>
+                <li className="flex items-center gap-2">
+                  <FiCheck className="size-4 shrink-0 text-emerald-600 dark:text-emerald-500" />
+                  <span>Deep keyword matching & JD analysis</span>
                 </li>
-                <li className="flex items-center space-x-2">
-                  <FiCheck className="size-4 shrink-0 text-emerald-500" />
-                  <span>Priority task execution & SSE streaming</span>
+                <li className="flex items-center gap-2">
+                  <FiCheck className="size-4 shrink-0 text-emerald-600 dark:text-emerald-500" />
+                  <span>Batch multi-job background processing</span>
+                </li>
+                <li className="flex items-center gap-2">
+                  <FiCheck className="size-4 shrink-0 text-emerald-600 dark:text-emerald-500" />
+                  <span>Priority chat & email support</span>
                 </li>
               </ul>
             </div>
@@ -269,55 +281,65 @@ export const PremiumPlans: React.FC<PremiumPlansProps> = ({ isDarkMode }) => {
             <button
               onClick={() => handleOpenCheckout('pro')}
               disabled={isProcessingPayment || currentPlan === 'pro'}
-              className={`mt-8 w-full cursor-pointer rounded-xl py-2.5 text-xs font-semibold shadow-md transition-all ${
-                currentPlan === 'pro'
-                  ? 'cursor-default bg-indigo-500/20 text-indigo-400'
-                  : 'bg-gradient-to-r from-sky-500 to-indigo-600 text-white hover:from-sky-600 hover:to-indigo-700'
-              }`}>
-              {currentPlan === 'pro' ? 'Active Plan' : `Subscribe to Pro (₹${pro.price.toLocaleString()}/mo)`}
+              className="mt-8 w-full cursor-pointer rounded-lg bg-blue-600 py-2.5 text-xs font-semibold text-white shadow-xs transition-colors hover:bg-blue-700 disabled:opacity-50">
+              {currentPlan === 'pro' ? 'Current Active Plan' : 'Upgrade to Pro Plan'}
             </button>
           </div>
 
-          {/* Power Plan */}
+          {/* 3. Power Enterprise Plan */}
           <div
-            className={`relative flex flex-col justify-between rounded-2xl border p-6 transition-all ${
+            className={`relative flex flex-col justify-between rounded-xl border p-6 transition-all ${
               currentPlan === 'power'
-                ? 'border-purple-500 ring-2 ring-purple-500/20'
+                ? 'border-emerald-500 bg-emerald-50/20 dark:bg-emerald-950/20 ring-1 ring-emerald-500'
                 : isDarkMode
-                  ? 'border-slate-700 bg-slate-700/40'
-                  : 'border-gray-200 bg-white'
+                  ? 'border-slate-800 bg-slate-900/60'
+                  : 'border-slate-200 bg-white shadow-xs'
             }`}>
             <div>
               <div className="flex items-center justify-between">
-                <h3 className={`text-lg font-bold ${isDarkMode ? 'text-gray-200' : 'text-gray-800'}`}>Power Plan</h3>
+                <h3 className="text-base font-semibold text-slate-900 dark:text-slate-100">Power Enterprise</h3>
                 {currentPlan === 'power' && (
-                  <span className="rounded-full bg-purple-500/20 px-2.5 py-0.5 text-xs font-semibold text-purple-400">
-                    Current Plan
+                  <span className="rounded-full bg-emerald-50 dark:bg-emerald-950/50 px-2.5 py-0.5 text-xs font-semibold text-emerald-600 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-800">
+                    Active Plan
                   </span>
                 )}
               </div>
-              <p className={`mt-1 text-xs ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>
-                Maximum performance & credits
+              <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                Ultra-fast throughput for power job seekers & teams
               </p>
-              <div className="mt-4 flex items-baseline">
-                <span className={`text-3xl font-extrabold ${isDarkMode ? 'text-gray-100' : 'text-gray-900'}`}>
-                  ₹{power.price.toLocaleString()}
-                </span>
-                <span className={`ml-1 text-xs ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>/ month</span>
+
+              <div className="mt-4 flex items-baseline gap-1">
+                <span className="text-3xl font-bold text-slate-900 dark:text-slate-100">₹{power.price}</span>
+                <span className="text-xs text-slate-500 dark:text-slate-400">/ month</span>
               </div>
 
-              <ul className={`mt-6 space-y-3 text-xs ${isDarkMode ? 'text-gray-300' : 'text-gray-600'}`}>
-                <li className="flex items-center space-x-2 font-medium text-purple-400">
-                  <FiZap className="size-4 shrink-0" />
-                  <span>{power.credits.toLocaleString()} AI Credits / month included</span>
+              <div className="mt-4 flex items-center gap-1.5 text-xs font-medium text-slate-700 dark:text-slate-300">
+                <span className="inline-flex items-center gap-1 rounded-md border border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-slate-800 px-2 py-0.5">
+                  <FiZap className="size-3 text-indigo-500" />
+                  <span>{power.credits.toLocaleString()} Credits / mo</span>
+                </span>
+                <span className="inline-flex items-center gap-1 rounded-md border border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-slate-800 px-2 py-0.5">
+                  <FiClock className="size-3 text-slate-400" />
+                  <span>600 req/min</span>
+                </span>
+              </div>
+
+              <ul className="mt-6 space-y-3 text-xs text-slate-600 dark:text-slate-300 border-t border-slate-100 dark:border-slate-800 pt-4">
+                <li className="flex items-center gap-2">
+                  <FiCheck className="size-4 shrink-0 text-emerald-600 dark:text-emerald-500" />
+                  <span>Unlimited concurrent background apply loops</span>
                 </li>
-                <li className="flex items-center space-x-2">
-                  <FiCheck className="size-4 shrink-0 text-emerald-500" />
-                  <span>600 tasks / minute rate limit</span>
+                <li className="flex items-center gap-2">
+                  <FiCheck className="size-4 shrink-0 text-emerald-600 dark:text-emerald-500" />
+                  <span>Custom screening answers & rules engine</span>
                 </li>
-                <li className="flex items-center space-x-2">
-                  <FiCheck className="size-4 shrink-0 text-emerald-500" />
-                  <span>Dedicated priority concurrency pool</span>
+                <li className="flex items-center gap-2">
+                  <FiCheck className="size-4 shrink-0 text-emerald-600 dark:text-emerald-500" />
+                  <span>Instant credit top-ups without cooldowns</span>
+                </li>
+                <li className="flex items-center gap-2">
+                  <FiCheck className="size-4 shrink-0 text-emerald-600 dark:text-emerald-500" />
+                  <span>Dedicated 24/7 priority SLA support</span>
                 </li>
               </ul>
             </div>
@@ -325,44 +347,38 @@ export const PremiumPlans: React.FC<PremiumPlansProps> = ({ isDarkMode }) => {
             <button
               onClick={() => handleOpenCheckout('power')}
               disabled={isProcessingPayment || currentPlan === 'power'}
-              className="mt-8 w-full cursor-pointer rounded-xl bg-purple-600 py-2.5 text-xs font-semibold text-white shadow-md transition-all hover:bg-purple-500">
-              {currentPlan === 'power' ? 'Active Plan' : `Subscribe to Power (₹${power.price.toLocaleString()}/mo)`}
+              className="mt-8 w-full cursor-pointer rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 py-2.5 text-xs font-semibold text-slate-800 dark:text-slate-200 shadow-xs transition-colors hover:bg-slate-50 dark:hover:bg-slate-700 disabled:opacity-50">
+              {currentPlan === 'power' ? 'Current Active Plan' : 'Select Power Plan'}
             </button>
           </div>
         </div>
 
-        {/* Value Proposition Highlights */}
-        <div className="mt-12 grid grid-cols-1 gap-4 border-t border-slate-700/30 pt-6 md:grid-cols-3">
-          <div className="flex items-center space-x-3">
-            <FiShield className="size-6 shrink-0 text-sky-500" />
+        {/* Reassurance & Value Props Footer */}
+        <div className="mt-12 grid grid-cols-1 gap-4 border-t border-slate-100 dark:border-slate-800 pt-6 md:grid-cols-3">
+          <div className="flex items-center gap-3">
+            <FiShield className="size-5 shrink-0 text-blue-600 dark:text-blue-500" />
             <div>
-              <h4 className={`text-xs font-bold ${isDarkMode ? 'text-gray-200' : 'text-gray-800'}`}>
-                Monetization & Revenue
-              </h4>
-              <p className={`text-[11px] ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>
-                Sustainable funding for continuous agent features
+              <h4 className="text-xs font-semibold text-slate-900 dark:text-slate-100">Secure Razorpay Checkout</h4>
+              <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                256-bit encrypted transactions via UPI, Cards, NetBanking
               </p>
             </div>
           </div>
-          <div className="flex items-center space-x-3">
-            <FiCpu className="size-6 shrink-0 text-indigo-500" />
+          <div className="flex items-center gap-3">
+            <FiCpu className="size-5 shrink-0 text-indigo-500" />
             <div>
-              <h4 className={`text-xs font-bold ${isDarkMode ? 'text-gray-200' : 'text-gray-800'}`}>
-                User Convenience
-              </h4>
-              <p className={`text-[11px] ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>
-                No complex API key creation or setup required
+              <h4 className="text-xs font-semibold text-slate-900 dark:text-slate-100">Direct Managed AI</h4>
+              <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                Zero API keys setup required — powered by cloud runtime
               </p>
             </div>
           </div>
-          <div className="flex items-center space-x-3">
-            <FiTrendingUp className="size-6 shrink-0 text-emerald-500" />
+          <div className="flex items-center gap-3">
+            <FiTrendingUp className="size-5 shrink-0 text-emerald-600 dark:text-emerald-500" />
             <div>
-              <h4 className={`text-xs font-bold ${isDarkMode ? 'text-gray-200' : 'text-gray-800'}`}>
-                Ultimate Flexibility
-              </h4>
-              <p className={`text-[11px] ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>
-                Switch between your keys or built-in API anytime
+              <h4 className="text-xs font-semibold text-slate-900 dark:text-slate-100">Cancel or Switch Anytime</h4>
+              <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                No locked-in contracts. Upgrade, downgrade, or pause anytime
               </p>
             </div>
           </div>

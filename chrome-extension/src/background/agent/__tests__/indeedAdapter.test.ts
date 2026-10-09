@@ -58,6 +58,11 @@ describe('IndeedAdapter - Phase 1', () => {
       expect(url).toContain('start=20');
       expect(url).toContain('https://in.indeed.com/jobs');
     });
+
+    it('injects Easily apply composite filter parameter by default', () => {
+      const url = indeedAdapter.buildSearchUrl('Software Engineer', 'Bengaluru, India');
+      expect(url).toContain('iafilter');
+    });
   });
 
   describe('validateSession', () => {
@@ -491,6 +496,9 @@ describe('IndeedAdapter - Phase 1', () => {
     beforeEach(() => {
       indeedAdapter.captchaManualSolveTimeoutMs = 15;
       indeedAdapter.captchaPollIntervalMs = 5;
+      indeedAdapter.otpManualSolveTimeoutMs = 15;
+      indeedAdapter.otpPollIntervalMs = 5;
+      vi.spyOn(indeedAdapter, 'checkOtpVerificationPresent').mockResolvedValue(false);
     });
 
     const mockJob = {
@@ -1297,6 +1305,602 @@ describe('IndeedAdapter - Phase 1', () => {
       expect(primary).toBe('Full Stack Developer');
       expect(alternate).toBe('Software Engineer');
       expect(mockLLM.invoke).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('Phase 8 - SMS / Phone OTP Verification Wall Detection & Shared Manual User Action Helper', () => {
+    beforeEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it('checkOtpVerificationPresent evaluates DOM signals correctly for phone verification code', async () => {
+      const evaluateFnSpy = vi.fn();
+      const mockPage: any = {
+        evaluate: evaluateFnSpy,
+      };
+
+      // Case 1: evaluate returns true when OTP input is present
+      evaluateFnSpy.mockResolvedValueOnce(true);
+      const isPresent1 = await indeedAdapter.checkOtpVerificationPresent(mockPage);
+      expect(isPresent1).toBe(true);
+      expect(evaluateFnSpy).toHaveBeenCalledTimes(1);
+
+      // Case 2: evaluate returns false on standard form
+      evaluateFnSpy.mockResolvedValueOnce(false);
+      const isPresent2 = await indeedAdapter.checkOtpVerificationPresent(mockPage);
+      expect(isPresent2).toBe(false);
+    });
+
+    it('waitForManualOtpResolution prompts the user with Live Activity and resolves when completed', async () => {
+      indeedAdapter.otpManualSolveTimeoutMs = 1000;
+      indeedAdapter.otpPollIntervalMs = 5;
+
+      const liveActivitySpy = vi.fn();
+      const portSpy = { postMessage: vi.fn() };
+      let pollCount = 0;
+      vi.spyOn(indeedAdapter, 'checkOtpVerificationPresent').mockImplementation(async () => {
+        pollCount++;
+        return pollCount === 1; // first check true, second check false (cleared)
+      });
+
+      const res = await indeedAdapter.waitForManualOtpResolution(
+        102,
+        { url: () => 'https://smartapply.indeed.com' },
+        { onLiveActivity: liveActivitySpy, portToSend: portSpy as any, runId: 'otp-run-1' } as any,
+        'Senior Backend Developer',
+      );
+
+      expect(res.solved).toBe(true);
+      expect(res.aborted).toBe(false);
+      expect(res.timedOut).toBe(false);
+
+      // Verify the prompt message
+      expect(liveActivitySpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          status: 'needs_verification',
+          reason:
+            'Indeed needs SMS verification for this application — please check your phone and enter the code in the runner tab.',
+        }),
+      );
+
+      // Verify success notification
+      expect(liveActivitySpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          status: 'running',
+          reason: 'SMS verification completed — resuming application...',
+        }),
+      );
+
+      expect(portSpy.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          status: 'ok',
+          text: '✅ SMS verification completed — resuming application...',
+        }),
+      );
+    });
+
+    it('waitForManualOtpResolution times out cleanly when user does not enter code within window', async () => {
+      indeedAdapter.otpManualSolveTimeoutMs = 30; // 30ms timeout for test speed
+      indeedAdapter.otpPollIntervalMs = 5;
+
+      const liveActivitySpy = vi.fn();
+      // Always present / not solved
+      vi.spyOn(indeedAdapter, 'checkOtpVerificationPresent').mockResolvedValue(true);
+
+      const res = await indeedAdapter.waitForManualOtpResolution(
+        102,
+        { url: () => 'https://smartapply.indeed.com' },
+        { onLiveActivity: liveActivitySpy, runId: 'otp-run-timeout' } as any,
+        'Frontend Developer',
+      );
+
+      expect(res.solved).toBe(false);
+      expect(res.aborted).toBe(false);
+      expect(res.timedOut).toBe(true);
+    });
+
+    it('waitForManualUserAction aborts immediately when signal is cancelled by user', async () => {
+      const abortController = new AbortController();
+      abortController.abort(); // already aborted
+
+      const isStillPresentSpy = vi.fn().mockResolvedValue(true);
+
+      const res = await indeedAdapter.waitForManualUserAction({
+        actionType: 'otp',
+        userMessage: 'Test prompt',
+        timeoutMs: 5000,
+        pollIntervalMs: 10,
+        isStillPresent: isStillPresentSpy,
+        context: { signal: abortController.signal } as any,
+      });
+
+      expect(res.solved).toBe(false);
+      expect(res.aborted).toBe(true);
+      expect(res.timedOut).toBe(false);
+      expect(isStillPresentSpy).not.toHaveBeenCalled();
+    });
+
+    it('applyToJob skips cleanly without platform pause when OTP verification times out', async () => {
+      const pauseSpy = vi.spyOn(queueSafetyStore, 'pausePlatformForToday');
+
+      const mockJob: any = {
+        jobId: 'indeed-otp-job-1',
+        title: 'Full Stack Engineer',
+        company: 'InnovateCorp',
+        url: 'https://in.indeed.com/viewjob?jk=otp123',
+        isQuickApply: true,
+      };
+
+      const mockPage: any = {
+        tabId: 201,
+        puppeteerPage: {
+          goto: vi.fn().mockResolvedValue(undefined),
+          evaluate: vi.fn().mockImplementation(async () => {
+            return false; // already applied check returns false
+          }),
+        },
+      };
+
+      // Spy on findApplyButton or mock apply button
+      let evalCallCount = 0;
+      mockPage.puppeteerPage.evaluate = vi.fn().mockImplementation(async () => {
+        evalCallCount++;
+        if (evalCallCount === 1) return false; // already applied check: false
+        return { found: true, isExternal: false, strategy: 'selector', text: 'Apply now' };
+      });
+
+      // Mock pacing
+      vi.spyOn(indeedAdapter.pacing, 'waitPageSettle').mockResolvedValue(undefined as any);
+      vi.spyOn(indeedAdapter.pacing, 'waitFieldInteraction').mockResolvedValue({ delayMs: 10, wasAborted: false });
+      vi.spyOn(indeedAdapter.pacing, 'waitStepTransition').mockResolvedValue(undefined as any);
+
+      // No captcha present
+      vi.spyOn(indeedAdapter, 'checkCaptchaPresent').mockResolvedValue(false);
+      vi.spyOn(indeedAdapter, 'checkCaptchaPresentOnTab').mockResolvedValue(false);
+
+      // OTP verification detected on step transition, and times out!
+      vi.spyOn(indeedAdapter, 'checkOtpVerificationPresent').mockResolvedValue(true);
+      vi.spyOn(indeedAdapter, 'waitForManualOtpResolution').mockResolvedValue({
+        solved: false,
+        aborted: false,
+        timedOut: true,
+      });
+
+      const context: any = {
+        page: mockPage,
+        careerBrain: { fullName: 'Test Candidate' },
+        onLiveActivity: vi.fn(),
+      };
+
+      const result = await indeedAdapter.applyToJob(mockJob, context);
+
+      expect(result.status).toBe('skipped');
+      expect(result.reason).toBe('Indeed SMS/phone verification timed out.');
+      // Crucial: ensure platform was NOT paused for today!
+      expect(pauseSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('ensureEasilyApplyFilterActive', () => {
+    let origWindow: any;
+    let origDocument: any;
+    let origHTMLElement: any;
+    let origHTMLInputElement: any;
+    let origHTMLAnchorElement: any;
+    let origPointerEvent: any;
+    let origMouseEvent: any;
+    let origKeyboardEvent: any;
+
+    beforeEach(() => {
+      origWindow = (globalThis as any).window;
+      origDocument = (globalThis as any).document;
+      origHTMLElement = (globalThis as any).HTMLElement;
+      origHTMLInputElement = (globalThis as any).HTMLInputElement;
+      origHTMLAnchorElement = (globalThis as any).HTMLAnchorElement;
+      origPointerEvent = (globalThis as any).PointerEvent;
+      origMouseEvent = (globalThis as any).MouseEvent;
+      origKeyboardEvent = (globalThis as any).KeyboardEvent;
+
+      class MockHTMLElement {}
+      class MockHTMLInputElement extends MockHTMLElement {
+        checked: boolean = false;
+        value: string = '';
+      }
+      class MockHTMLAnchorElement extends MockHTMLElement {
+        href: string = '';
+      }
+      class MockEvent {
+        type: string;
+        constructor(type: string) {
+          this.type = type;
+        }
+      }
+
+      (globalThis as any).HTMLElement = MockHTMLElement;
+      (globalThis as any).HTMLInputElement = MockHTMLInputElement;
+      (globalThis as any).HTMLAnchorElement = MockHTMLAnchorElement;
+      (globalThis as any).PointerEvent = MockEvent;
+      (globalThis as any).MouseEvent = MockEvent;
+      (globalThis as any).KeyboardEvent = MockEvent;
+    });
+
+    afterEach(() => {
+      (globalThis as any).window = origWindow;
+      (globalThis as any).document = origDocument;
+      (globalThis as any).HTMLElement = origHTMLElement;
+      (globalThis as any).HTMLInputElement = origHTMLInputElement;
+      (globalThis as any).HTMLAnchorElement = origHTMLAnchorElement;
+      (globalThis as any).PointerEvent = origPointerEvent;
+      (globalThis as any).MouseEvent = origMouseEvent;
+      (globalThis as any).KeyboardEvent = origKeyboardEvent;
+    });
+
+    function matchesSelector(node: any, selString: string): boolean {
+      const parts = selString.split(',').map(s => s.trim().toLowerCase());
+      const tag = (node.tagName || '').toLowerCase();
+      const role = (node.getAttribute?.('role') || '').toLowerCase();
+      const id = (node.id || '').toLowerCase();
+      const cls = (node.className || '').toLowerCase();
+      const testid = (node.getAttribute?.('data-testid') || '').toLowerCase();
+      const aria = (node.getAttribute?.('aria-label') || '').toLowerCase();
+
+      return parts.some(p => {
+        if (p === 'button' && tag === 'button') return true;
+        if (p === 'a' && tag === 'a') return true;
+        if (p === 'label' && tag === 'label') return true;
+        if (p === 'div' && tag === 'div') return true;
+        if (p === 'span' && tag === 'span') return true;
+        if (p === 'li' && tag === 'li') return true;
+        if (p.includes('input') && tag === 'input') return true;
+        if (p.includes('[role="dialog"]') && role === 'dialog') return true;
+        if (p.includes('[role="radio"]') && role === 'radio') return true;
+        if (p.includes('[role="button"]') && (role === 'button' || tag === 'button')) return true;
+        if (p.includes('[role="option"]') && role === 'option') return true;
+        if (p.includes('yosegi-filterdialog') && cls.includes('yosegi-filterdialog')) return true;
+        if (p.includes('popover') && (cls.includes('popover') || id.includes('popover'))) return true;
+        if (p.includes('badge') && (cls.includes('badge') || testid.includes('badge'))) return true;
+        if (p.includes('pill') && (cls.includes('pill') || tag === 'button')) return true;
+        return false;
+      });
+    }
+
+    function createMockNode(spec: {
+      tag?: string;
+      id?: string;
+      text?: string;
+      className?: string;
+      role?: string;
+      attrs?: Record<string, string>;
+      checked?: boolean;
+      value?: string;
+      children?: any[];
+      isInput?: boolean;
+      isAnchor?: boolean;
+    }) {
+      const isInput = spec.isInput || spec.tag === 'input';
+      const isAnchor = spec.isAnchor || spec.tag === 'a';
+      const BaseClass = isInput
+        ? (globalThis as any).HTMLInputElement
+        : isAnchor
+          ? (globalThis as any).HTMLAnchorElement
+          : (globalThis as any).HTMLElement;
+
+      const node: any = new BaseClass();
+      node.tagName = (spec.tag || 'div').toUpperCase();
+      node.id = spec.id || '';
+      node.innerText = spec.text || '';
+      node.textContent = spec.text || '';
+      node.className = spec.className || '';
+      node.checked = Boolean(spec.checked);
+      node.value = spec.value || '';
+      node.attributes = { ...(spec.attrs || {}) };
+      if (spec.role) node.attributes['role'] = spec.role;
+      if (spec.id) node.attributes['id'] = spec.id;
+
+      node.classList = {
+        contains: (c: string) => (node.className || '').split(/\s+/).includes(c),
+        add: (c: string) => {
+          node.className = `${node.className} ${c}`.trim();
+        },
+        remove: (c: string) => {
+          node.className = (node.className || '').replace(new RegExp(`\\b${c}\\b`), '').trim();
+        },
+      };
+
+      node.getAttribute = (attr: string) => node.attributes[attr] ?? null;
+      node.setAttribute = (attr: string, val: string) => {
+        node.attributes[attr] = String(val);
+        if (attr === 'aria-checked') {
+          node.ariaChecked = String(val);
+        }
+      };
+
+      node.getBoundingClientRect = () => ({ width: 100, height: 30, top: 0, left: 0, bottom: 30, right: 100 });
+      node.scrollIntoView = vi.fn();
+      node.focus = vi.fn();
+
+      const listeners: Record<string, Function[]> = {};
+      node.addEventListener = (evt: string, cb: Function) => {
+        listeners[evt] = listeners[evt] || [];
+        listeners[evt].push(cb);
+      };
+      node.dispatchEvent = (evt: any) => {
+        const type = evt?.type || 'click';
+        (listeners[type] || []).forEach(cb => cb(evt));
+        return true;
+      };
+
+      node.click = () => {
+        node.dispatchEvent({ type: 'click' });
+      };
+
+      node.children = spec.children || [];
+      node.children.forEach((c: any) => {
+        c.parentElement = node;
+      });
+
+      node.closest = (sel: string) => {
+        if (sel.includes('#jobsearch') || sel.includes('mosaic') || sel.includes('cardOutline')) return null;
+        if (sel.includes('label') && node.tagName === 'LABEL') return node;
+        if (sel.includes('button') && node.tagName === 'BUTTON') return node;
+        return null;
+      };
+
+      node.querySelector = (sel: string) => {
+        const all = node.querySelectorAll(sel);
+        return all[0] || null;
+      };
+
+      node.querySelectorAll = (sel: string) => {
+        const results: any[] = [];
+        const check = (n: any) => {
+          for (const ch of n.children || []) {
+            if (matchesSelector(ch, sel)) results.push(ch);
+            check(ch);
+          }
+        };
+        check(node);
+        return results;
+      };
+
+      return node;
+    }
+
+    function setupMockEnvironment(allNodes: any[]) {
+      (globalThis as any).window = {
+        getComputedStyle: () => ({
+          display: 'block',
+          visibility: 'visible',
+          opacity: '1',
+          backgroundColor: 'rgb(255, 255, 255)',
+        }),
+        location: { href: 'https://in.indeed.com/jobs?q=engineer' },
+      };
+
+      (globalThis as any).document = {
+        querySelectorAll: (sel: string) => {
+          return allNodes.filter(n => matchesSelector(n, sel));
+        },
+        querySelector: (sel: string) => {
+          return allNodes.find(n => matchesSelector(n, sel)) || null;
+        },
+      };
+    }
+
+    it('identifies and selects the "Easily apply on Indeed" option (avoiding outer wrapper match) and clicks Update', async () => {
+      // Create option elements
+      const radioAll = createMockNode({
+        tag: 'input',
+        id: 'radio-all-jobs',
+        checked: true,
+        attrs: { type: 'radio', name: 'iafilter' },
+      });
+      const labelAll = createMockNode({
+        tag: 'label',
+        text: 'All jobs',
+        attrs: { role: 'radio', 'aria-checked': 'true' },
+        children: [radioAll],
+      });
+
+      const radioEasily = createMockNode({
+        tag: 'input',
+        id: 'radio-easily-apply',
+        checked: false,
+        value: 'iafilter',
+        attrs: { type: 'radio', name: 'iafilter', id: 'radio-easily-apply' },
+      });
+      const labelEasily = createMockNode({
+        tag: 'label',
+        text: 'Easily apply on Indeed',
+        attrs: { role: 'radio', 'aria-checked': 'false' },
+        children: [radioEasily],
+      });
+
+      let updateClicked = false;
+      const updateBtn = createMockNode({
+        tag: 'button',
+        text: 'Update',
+      });
+      updateBtn.addEventListener('click', () => {
+        updateClicked = true;
+      });
+
+      const resetBtn = createMockNode({
+        tag: 'button',
+        text: 'Reset',
+      });
+
+      // When radioEasily is clicked, update checked state
+      radioEasily.addEventListener('click', () => {
+        radioEasily.checked = true;
+        labelEasily.setAttribute('aria-checked', 'true');
+        radioAll.checked = false;
+        labelAll.setAttribute('aria-checked', 'false');
+      });
+      labelEasily.addEventListener('click', () => {
+        radioEasily.checked = true;
+        labelEasily.setAttribute('aria-checked', 'true');
+        radioAll.checked = false;
+        labelAll.setAttribute('aria-checked', 'false');
+      });
+
+      // Outer popover container whose combined text contains "all jobs easily apply on indeed reset update"
+      const popover = createMockNode({
+        tag: 'div',
+        id: 'filter-easily-apply-popover',
+        role: 'dialog',
+        className: 'yosegi-FilterDialog',
+        text: 'All jobs Easily apply on Indeed Reset Update',
+        children: [labelAll, labelEasily, resetBtn, updateBtn],
+      });
+
+      // Flatten list of all nodes for document querySelectorAll
+      const allNodes = [popover, labelAll, radioAll, labelEasily, radioEasily, resetBtn, updateBtn];
+      setupMockEnvironment(allNodes);
+
+      const mockPage: any = {
+        puppeteerPage: {
+          evaluate: vi.fn().mockImplementation(async (fn: any) => fn()),
+        },
+      };
+
+      const result = await indeedAdapter.ensureEasilyApplyFilterActive(mockPage);
+
+      expect(result.active).toBe(true);
+      expect(result.clicked).toBe(true);
+      expect(radioEasily.checked).toBe(true);
+      expect(updateClicked).toBe(true);
+    });
+
+    it('returns active: true without opening popover if filter pill already has active count badge', async () => {
+      let pillClicked = false;
+      const badgeNode = createMockNode({
+        tag: 'span',
+        className: 'badge',
+        text: '1',
+      });
+      const pillNode = createMockNode({
+        tag: 'button',
+        text: 'Easily apply 1',
+        attrs: { 'aria-label': 'Easily apply' },
+        children: [badgeNode],
+      });
+      pillNode.addEventListener('click', () => {
+        pillClicked = true;
+      });
+
+      setupMockEnvironment([pillNode, badgeNode]);
+
+      const mockPage: any = {
+        puppeteerPage: {
+          evaluate: vi.fn().mockImplementation(async (fn: any) => fn()),
+        },
+      };
+
+      const result = await indeedAdapter.ensureEasilyApplyFilterActive(mockPage);
+
+      expect(result.active).toBe(true);
+      expect(result.clicked).toBe(false);
+      expect(pillClicked).toBe(false);
+    });
+
+    it('clicks filter pill to open popover, selects role="radio" option, and clicks Update', async () => {
+      const radioAll = createMockNode({
+        tag: 'div',
+        id: 'radio-all',
+        text: 'All jobs',
+        role: 'radio',
+        attrs: { 'aria-checked': 'true' },
+      });
+      const radioEasily = createMockNode({
+        tag: 'div',
+        id: 'radio-easily',
+        text: 'Easily apply on Indeed',
+        role: 'radio',
+        attrs: { 'aria-checked': 'false' },
+      });
+
+      let updateClicked = false;
+      const updateBtn = createMockNode({
+        tag: 'button',
+        text: 'Update',
+      });
+
+      const popover = createMockNode({
+        tag: 'div',
+        id: 'popover-dialog',
+        role: 'dialog',
+        text: 'All jobs Easily apply on Indeed Update',
+        children: [radioAll, radioEasily, updateBtn],
+      });
+
+      let popoverVisible = false;
+      const pillNode = createMockNode({
+        tag: 'button',
+        text: 'Easily apply',
+        attrs: { 'aria-label': 'Easily apply' },
+      });
+
+      pillNode.addEventListener('click', () => {
+        popoverVisible = true;
+      });
+
+      radioEasily.addEventListener('click', () => {
+        radioEasily.setAttribute('aria-checked', 'true');
+        radioAll.setAttribute('aria-checked', 'false');
+      });
+
+      updateBtn.addEventListener('click', () => {
+        updateClicked = true;
+        pillNode.innerText = 'Easily apply 1';
+        pillNode.textContent = 'Easily apply 1';
+      });
+
+      // Environment before pill click has pillNode; popover becomes queried when visible
+      (globalThis as any).window = {
+        getComputedStyle: (node: any) => ({
+          display: node === popover && !popoverVisible ? 'none' : 'block',
+          visibility: 'visible',
+          opacity: '1',
+          backgroundColor: 'rgb(255, 255, 255)',
+        }),
+        location: { href: 'https://in.indeed.com/jobs?q=engineer' },
+      };
+
+      const allNodes = [pillNode, popover, radioAll, radioEasily, updateBtn];
+      (globalThis as any).document = {
+        querySelectorAll: (sel: string) => {
+          return allNodes.filter(n => {
+            if (n === popover && !popoverVisible) return false;
+            return matchesSelector(n, sel);
+          });
+        },
+        querySelector: (sel: string) => {
+          return (
+            allNodes.find(n => {
+              if (n === popover && !popoverVisible) return false;
+              return matchesSelector(n, sel);
+            }) || null
+          );
+        },
+      };
+
+      const mockPage: any = {
+        puppeteerPage: {
+          evaluate: vi.fn().mockImplementation(async (fn: any) => fn()),
+        },
+      };
+
+      const result = await indeedAdapter.ensureEasilyApplyFilterActive(mockPage);
+
+      expect(result.active).toBe(true);
+      expect(result.clicked).toBe(true);
+      expect(radioEasily.getAttribute('aria-checked')).toBe('true');
+      expect(updateClicked).toBe(true);
     });
   });
 });

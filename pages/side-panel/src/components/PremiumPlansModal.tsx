@@ -4,13 +4,15 @@ import type { PremiumStatus } from '@extension/storage';
 import {
   FiCheck,
   FiZap,
-  FiStar,
   FiShield,
   FiX,
-  FiLock,
   FiCheckCircle,
   FiArrowRight,
   FiCreditCard,
+  FiClock,
+  FiLock,
+  FiHelpCircle,
+  FiStar,
 } from 'react-icons/fi';
 import { AiOutlineLoading3Quarters } from 'react-icons/ai';
 
@@ -31,6 +33,7 @@ export const PremiumPlansModal: React.FC<PremiumPlansModalProps> = ({
   const [jobformPremium, setJobformPremium] = useState<PremiumStatus | null>(null);
   const [loadingPlanCode, setLoadingPlanCode] = useState<string | null>(null);
   const [selectedPlanCode, setSelectedPlanCode] = useState<'starter' | 'pro' | 'power'>('pro');
+  const [billingInterval, setBillingInterval] = useState<'monthly' | 'yearly'>('monthly');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
@@ -51,7 +54,7 @@ export const PremiumPlansModal: React.FC<PremiumPlansModalProps> = ({
             setSelectedPlanCode(status.subscription.planCodeSnapshot as any);
           }
         }
-      } catch (err) {
+      } catch {
         // Fallback gracefully
       }
     }
@@ -62,66 +65,66 @@ export const PremiumPlansModal: React.FC<PremiumPlansModalProps> = ({
     };
   }, [isOpen]);
 
+  if (!isOpen) return null;
+
   const plans = [
     {
-      code: 'starter',
-      name: 'Starter Plan',
-      tagline: 'Ideal for active job seekers & daily applications',
-      amountPaise: 49900,
-      priceFormatted: '₹499',
-      credits: '1,000 Credits / mo',
+      code: 'starter' as const,
+      name: 'Starter',
+      badge: null,
+      tagline: 'Essential automation for active job hunters',
+      monthlyPrice: '₹499',
+      annualPrice: '₹399',
+      credits: '1,000',
       rateLimit: '120 req / min',
       features: [
         '1,000 monthly automation credits',
-        'Autonomous LinkedIn, Naukri & Indeed apply',
-        'Smart AI Resume Parsing',
-        'Standard screening question solver',
-        'Standard support',
+        'Auto-apply on LinkedIn, Indeed & Naukri',
+        'AI CareerBrain profile extraction',
+        'Screening question auto-fill',
+        'Standard email support',
       ],
-      popular: false,
-      color: 'from-blue-500 to-sky-600',
+      recommended: false,
     },
     {
-      code: 'pro',
-      name: 'Pro Automation Plan',
-      tagline: 'Best value for high-volume applications & multiple roles',
-      amountPaise: 149900,
-      priceFormatted: '₹1,499',
-      credits: '5,000 Credits / mo',
+      code: 'pro' as const,
+      name: 'Pro Automation',
+      badge: '✦ Most Popular',
+      tagline: 'High volume applying with premium AI models',
+      monthlyPrice: '₹1,499',
+      annualPrice: '₹1,199',
+      credits: '5,000',
       rateLimit: '300 req / min',
       features: [
         '5,000 monthly automation credits',
-        'All AI models (Claude 3.5, GPT-4o & Nova)',
+        'All AI models (Claude 3.5 Sonnet & Nova)',
         'Priority screening question solver',
-        'Deep relevance matching & keyword scanner',
-        'Autonomous multi-job batch application',
-        'Priority email & chat support',
+        'Deep resume keyword scanner',
+        'Multi-job automated batch processing',
+        'Priority chat & email support',
       ],
-      popular: true,
-      color: 'from-amber-500 to-orange-600',
+      recommended: true,
     },
     {
-      code: 'power',
-      name: 'Power Enterprise Plan',
-      tagline: 'Maximum speed and limits for power job seekers & teams',
-      amountPaise: 499900,
-      priceFormatted: '₹4,999',
-      credits: '25,000 Credits / mo',
+      code: 'power' as const,
+      name: 'Power Enterprise',
+      badge: 'Maximum Speed',
+      tagline: 'Maximum throughput for multi-role campaigns',
+      monthlyPrice: '₹4,999',
+      annualPrice: '₹3,999',
+      credits: '25,000',
       rateLimit: '600 req / min',
       features: [
         '25,000 monthly automation credits',
-        '600 req/min enterprise rate limit',
-        'Unlimited concurrent background apply loops',
-        'Custom screening answers & rules engine',
-        'Instant credit top-ups with no cooldowns',
-        'Dedicated 24/7 priority support',
+        '600 req/min ultra-fast rate limit',
+        'Concurrent background apply sessions',
+        'Custom screening rules & answers engine',
+        'Instant credit top-ups without cooldown',
+        'Dedicated 24/7 engineering support',
       ],
-      popular: false,
-      color: 'from-purple-500 to-indigo-600',
+      recommended: false,
     },
   ];
-
-  if (!isOpen) return null;
 
   const handleCheckout = async (planCode: string) => {
     setLoadingPlanCode(planCode);
@@ -136,57 +139,69 @@ export const PremiumPlansModal: React.FC<PremiumPlansModalProps> = ({
       // check / webhook); nothing is unlocked here.
       if (res.data?.shortUrl) {
         window.open(res.data.shortUrl, '_blank');
-        setSuccessMessage('Checkout opened. Your plan activates as soon as the payment is confirmed.');
+        setSuccessMessage('Razorpay payment window opened. Your plan activates as soon as the payment is confirmed.');
       } else {
         setSuccessMessage(
-          `Subscription session created for ${planCode.toUpperCase()}. Complete the payment to activate it.`,
+          `Subscription order generated for ${planCode.toUpperCase()}. Complete the payment to activate it.`,
         );
       }
     } catch (err: any) {
-      setErrorMessage(err.message || 'Failed to initiate checkout. Please try again.');
+      setErrorMessage(err.message || 'Payment initiation failed. Please try again or check connection.');
     } finally {
       setLoadingPlanCode(null);
     }
   };
 
+  const remaining = userCredits?.remainingCredits ?? 0;
+  const allocated = Math.max(userCredits?.allocatedCredits ?? 1, 1);
+  const creditPercent = Math.min(Math.round((remaining / allocated) * 100), 100);
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-3 backdrop-blur-sm animate-in fade-in duration-200">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-3 backdrop-blur-xs animate-in fade-in duration-200">
       <div
-        className={`relative flex flex-col w-full max-w-md max-h-[92vh] rounded-2xl border shadow-2xl overflow-hidden ${
-          isDarkMode ? 'bg-slate-900 border-slate-700 text-white' : 'bg-white border-gray-200 text-gray-900'
+        className={`relative flex flex-col w-full max-w-lg max-h-[92vh] rounded-2xl border shadow-xl overflow-hidden ${
+          isDarkMode ? 'bg-slate-900 border-slate-800 text-slate-100' : 'bg-white border-slate-200 text-slate-900'
         }`}>
-        {/* Modal Header */}
-        <div className="relative p-5 pb-3 border-b border-inherit bg-gradient-to-b from-sky-500/10 to-transparent shrink-0">
+        {/* Header Bar */}
+        <div
+          className={`relative px-5 pt-5 pb-4 border-b shrink-0 ${
+            isDarkMode ? 'border-slate-800 bg-slate-900' : 'border-slate-200 bg-slate-50'
+          }`}>
           <button
             onClick={onClose}
-            className="absolute right-4 top-4 rounded-full p-1.5 text-gray-400 hover:text-white hover:bg-slate-700/50 transition-colors cursor-pointer"
+            className={`absolute right-4 top-4 rounded-lg p-1.5 transition-colors cursor-pointer ${
+              isDarkMode
+                ? 'text-slate-400 hover:text-slate-100 hover:bg-slate-800'
+                : 'text-slate-400 hover:text-slate-900 hover:bg-slate-200'
+            }`}
             aria-label="Close modal">
-            <FiX className="size-5" />
+            <FiX className="size-4" />
           </button>
 
-          <div className="flex items-center gap-2 mb-1">
-            <span className="flex items-center justify-center size-7 rounded-lg bg-gradient-to-tr from-amber-500 to-orange-500 text-white shadow-md shadow-orange-500/20">
-              <FiZap className="size-4" />
-            </span>
-            <span className="text-[11px] font-bold uppercase tracking-wider text-amber-400">
-              Commercial Subscription
-            </span>
+          {/* Section Breadcrumb / Category */}
+          <div className="flex items-center gap-1.5 text-xs font-semibold text-indigo-600 dark:text-indigo-400 mb-1">
+            <span className="text-xs">✦</span>
+            <span>SUBSCRIPTION & CREDITS</span>
           </div>
-          <h2 className="text-lg font-extrabold tracking-tight">NanoBrowser Premium Plans</h2>
-          <p className="text-xs text-gray-400 mt-0.5">
-            Supercharge your job hunt with cloud automation capacity & AI credits.
+
+          <h2 className="text-lg font-bold text-slate-900 dark:text-slate-100">Automate Job Applications with AI</h2>
+          <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+            Choose a plan that fits your job search volume. Credits refill monthly.
           </p>
 
           {/* JobForm Automator plan (server-verified, shown for information) */}
           {isPremiumActive(jobformPremium) && (
-            <div className="mt-3 flex items-center gap-2 rounded-xl border border-violet-500/30 bg-violet-500/10 px-3 py-2 text-xs">
+            <div
+              className={`mt-3 flex items-center gap-2 rounded-xl border px-3 py-2 text-xs ${
+                isDarkMode ? 'border-violet-500/30 bg-violet-500/10' : 'border-violet-200 bg-violet-50'
+              }`}>
               <FiStar className={`size-4 shrink-0 ${isDarkMode ? 'text-violet-300' : 'text-violet-600'}`} />
               <div>
                 <span className={`font-semibold ${isDarkMode ? 'text-violet-200' : 'text-violet-700'}`}>
                   JobForm Automator {jobformPremium?.tier}
                 </span>
                 {jobformPremium?.endDate && jobformPremium.tier !== 'Diamond' && (
-                  <span className={`block text-[11px] ${isDarkMode ? 'text-gray-300' : 'text-gray-600'}`}>
+                  <span className={`block text-[11px] ${isDarkMode ? 'text-slate-300' : 'text-slate-600'}`}>
                     Active until {new Date(jobformPremium.endDate).toLocaleDateString()}
                   </span>
                 )}
@@ -194,140 +209,203 @@ export const PremiumPlansModal: React.FC<PremiumPlansModalProps> = ({
             </div>
           )}
 
-          {/* Dynamic Subscription Status Banner */}
-          {currentSubscription?.status === 'ACTIVE' && currentSubscription?.planCodeSnapshot !== 'free-trial' ? (
-            <div className="mt-3 flex items-center justify-between rounded-xl border border-sky-500/30 bg-sky-500/10 px-3 py-2 text-xs">
-              <div className="flex items-center gap-2">
-                <FiCheckCircle className="size-4 text-sky-400 shrink-0" />
-                <div>
-                  <span className="font-semibold text-sky-300">
-                    {currentSubscription.planNameSnapshot || 'Active Subscription'} Active
-                  </span>
-                  <span className="text-[11px] text-gray-300 block">
-                    Valid until {new Date(currentSubscription.currentPeriodEnd).toLocaleDateString()}
-                  </span>
-                </div>
+          {/* Current Subscription & Credit Status Card */}
+          <div
+            className={`mt-3 rounded-xl border p-3 ${
+              isDarkMode ? 'border-slate-800 bg-slate-800/60' : 'border-slate-200 bg-white'
+            }`}>
+            <div className="flex items-center justify-between text-xs mb-1.5">
+              <div className="flex items-center gap-1.5">
+                {currentSubscription?.status === 'ACTIVE' && currentSubscription?.planCodeSnapshot !== 'free-trial' ? (
+                  <>
+                    <span className="size-2 rounded-full bg-emerald-500" />
+                    <span className="font-semibold text-slate-800 dark:text-slate-200">
+                      {currentSubscription.planNameSnapshot || 'Pro Automation'} Plan Active
+                    </span>
+                  </>
+                ) : currentSubscription?.status === 'EXPIRED' ? (
+                  <>
+                    <span className="size-2 rounded-full bg-amber-500" />
+                    <span className="font-semibold text-amber-700 dark:text-amber-400">Subscription Expired</span>
+                  </>
+                ) : (
+                  <>
+                    <span className="size-2 rounded-full bg-blue-500" />
+                    <span className="font-semibold text-slate-800 dark:text-slate-200">Free Trial Active</span>
+                  </>
+                )}
               </div>
-              {userCredits && (
-                <span className="rounded-full bg-sky-500/20 px-2 py-0.5 text-[10px] font-bold text-sky-300 border border-sky-500/30">
-                  ⚡ {userCredits.remainingCredits} Credits
+
+              {/* Credits text */}
+              <span className="font-semibold text-slate-700 dark:text-slate-300">
+                {remaining.toLocaleString()}{' '}
+                <span className="font-normal text-slate-400">/ {allocated.toLocaleString()} Credits</span>
+              </span>
+            </div>
+
+            {/* Progress bar */}
+            <div className="w-full h-1.5 rounded-full bg-slate-200 dark:bg-slate-700 overflow-hidden">
+              <div
+                className={`h-full transition-all duration-500 rounded-full ${
+                  creditPercent < 20 ? 'bg-amber-500' : 'bg-blue-600'
+                }`}
+                style={{ width: `${Math.max(creditPercent, 3)}%` }}
+              />
+            </div>
+
+            {/* Validity / Help subtext */}
+            <div className="mt-1.5 flex items-center justify-between text-[11px] text-slate-500 dark:text-slate-400">
+              <span>
+                {currentSubscription?.currentPeriodEnd
+                  ? `Renews: ${new Date(currentSubscription.currentPeriodEnd).toLocaleDateString()}`
+                  : '50-100 free trial credits allocated'}
+              </span>
+              <span className="flex items-center gap-1">
+                <FiZap className="size-3 text-indigo-500" />
+                <span>1 credit = 1 automated step</span>
+              </span>
+            </div>
+          </div>
+
+          {/* Billing Switcher (Monthly / Annual) */}
+          <div className="mt-3 flex items-center justify-center">
+            <div className="inline-flex items-center p-0.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-100 dark:bg-slate-800">
+              <button
+                type="button"
+                onClick={() => setBillingInterval('monthly')}
+                className={`px-3 py-1 text-xs font-semibold rounded-md transition-all cursor-pointer ${
+                  billingInterval === 'monthly'
+                    ? 'bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100 shadow-xs'
+                    : 'text-slate-500 dark:text-slate-400 hover:text-slate-900'
+                }`}>
+                Monthly
+              </button>
+              <button
+                type="button"
+                onClick={() => setBillingInterval('yearly')}
+                className={`px-3 py-1 text-xs font-semibold rounded-md transition-all cursor-pointer flex items-center gap-1 ${
+                  billingInterval === 'yearly'
+                    ? 'bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100 shadow-xs'
+                    : 'text-slate-500 dark:text-slate-400 hover:text-slate-900'
+                }`}>
+                <span>Annual</span>
+                <span className="text-[10px] font-bold text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/40 px-1.5 py-0.2 rounded-full border border-emerald-200 dark:border-emerald-800">
+                  Save 20%
                 </span>
-              )}
+              </button>
             </div>
-          ) : currentSubscription?.status === 'EXPIRED' ? (
-            <div className="mt-3 flex items-center justify-between rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs">
-              <div className="flex items-center gap-2">
-                <FiShield className="size-4 text-amber-400 shrink-0" />
-                <div>
-                  <span className="font-semibold text-amber-300">Trial / Subscription Expired</span>
-                  <span className="text-[11px] text-gray-300 block">Choose a plan to resume auto-applying</span>
-                </div>
-              </div>
-            </div>
-          ) : (
-            <div className="mt-3 flex items-center justify-between rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs">
-              <div className="flex items-center gap-2">
-                <FiCheckCircle className="size-4 text-emerald-400 shrink-0" />
-                <div>
-                  <span className="font-semibold text-emerald-300">Free Trial Active</span>
-                  <span className="text-[11px] text-gray-300 block">5-day access auto-provisioned</span>
-                </div>
-              </div>
-              {userCredits && (
-                <span className="rounded-full bg-emerald-500/20 px-2 py-0.5 text-[10px] font-bold text-emerald-300 border border-emerald-500/30">
-                  ⚡ {userCredits.remainingCredits} Credits Left
-                </span>
-              )}
-            </div>
-          )}
+          </div>
         </div>
 
-        {/* Scrollable Plans List */}
-        <div className="flex-1 overflow-y-auto p-4 space-y-3.5">
+        {/* Scrollable Plan Selection Cards */}
+        <div className="flex-1 overflow-y-auto p-4 space-y-3">
           {errorMessage && (
-            <div className="rounded-xl border border-red-500/40 bg-red-500/10 p-2.5 text-xs text-red-300">
-              {errorMessage}
+            <div className="rounded-lg border border-red-200 dark:border-red-900/50 bg-red-50 dark:bg-red-950/30 p-2.5 text-xs text-red-600 dark:text-red-400 flex items-center gap-2">
+              <FiX className="size-4 shrink-0 text-red-600 dark:text-red-400" />
+              <span>{errorMessage}</span>
             </div>
           )}
+
           {successMessage && (
-            <div className="rounded-xl border border-emerald-500/40 bg-emerald-500/10 p-2.5 text-xs text-emerald-300 flex items-center gap-2">
-              <FiCheck className="size-4 text-emerald-400" />
+            <div className="rounded-lg border border-emerald-200 dark:border-emerald-900/50 bg-emerald-50 dark:bg-emerald-950/30 p-2.5 text-xs text-emerald-600 dark:text-emerald-400 flex items-center gap-2">
+              <FiCheck className="size-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
               <span>{successMessage}</span>
             </div>
           )}
 
           {plans.map(plan => {
             const isSelected = selectedPlanCode === plan.code;
-            const isPopular = plan.popular;
             const isCurrentActivePlan =
               currentSubscription?.status === 'ACTIVE' && currentSubscription?.planCodeSnapshot === plan.code;
+            const price = billingInterval === 'yearly' ? plan.annualPrice : plan.monthlyPrice;
 
             return (
               <div
                 key={plan.code}
-                onClick={() => setSelectedPlanCode(plan.code as any)}
+                onClick={() => setSelectedPlanCode(plan.code)}
                 className={`relative rounded-xl border p-4 transition-all cursor-pointer ${
                   isCurrentActivePlan
                     ? isDarkMode
-                      ? 'border-emerald-500/80 bg-emerald-500/10 shadow-lg shadow-emerald-500/10 ring-1 ring-emerald-500'
-                      : 'border-emerald-500 bg-emerald-50/50 shadow-md ring-1 ring-emerald-500'
+                      ? 'border-emerald-600/70 bg-emerald-950/20'
+                      : 'border-emerald-500 bg-emerald-50/40'
                     : isSelected
-                      ? isDarkMode
-                        ? 'border-sky-500 bg-sky-500/10 shadow-lg shadow-sky-500/10 ring-1 ring-sky-500'
-                        : 'border-sky-500 bg-sky-50 shadow-md ring-1 ring-sky-500'
+                      ? plan.recommended
+                        ? isDarkMode
+                          ? 'border-blue-500 bg-blue-950/20 shadow-xs'
+                          : 'border-blue-600 bg-blue-50/30 shadow-xs'
+                        : isDarkMode
+                          ? 'border-slate-700 bg-slate-800/80 shadow-xs'
+                          : 'border-slate-400 bg-slate-50/50 shadow-xs'
                       : isDarkMode
-                        ? 'border-slate-800 bg-slate-800/50 hover:border-slate-700'
-                        : 'border-gray-200 bg-white hover:border-gray-300'
+                        ? 'border-slate-800 bg-slate-900 hover:border-slate-700'
+                        : 'border-slate-200 bg-white hover:border-slate-300'
                 }`}>
+                {/* Plan Badge Pill */}
                 {isCurrentActivePlan ? (
-                  <span className="absolute -top-2.5 right-4 rounded-full bg-emerald-600 px-2.5 py-0.5 text-[9px] font-black uppercase tracking-wider text-white shadow-sm flex items-center gap-1">
-                    <FiCheck className="size-2.5" /> Current Plan
+                  <span className="absolute -top-2.5 right-4 rounded-full bg-emerald-600 px-2.5 py-0.5 text-[10px] font-semibold text-white shadow-xs flex items-center gap-1">
+                    <FiCheck className="size-3" /> Current Plan
                   </span>
-                ) : isPopular ? (
-                  <span className="absolute -top-2.5 right-4 rounded-full bg-gradient-to-r from-amber-500 to-orange-500 px-2.5 py-0.5 text-[9px] font-black uppercase tracking-wider text-white shadow-sm">
-                    ⭐ Most Popular
+                ) : plan.badge ? (
+                  <span
+                    className={`absolute -top-2.5 right-4 rounded-full px-2.5 py-0.5 text-[10px] font-semibold shadow-xs ${
+                      plan.recommended
+                        ? 'bg-blue-600 text-white'
+                        : isDarkMode
+                          ? 'bg-slate-700 text-slate-200'
+                          : 'bg-slate-800 text-white'
+                    }`}>
+                    {plan.badge}
                   </span>
                 ) : null}
 
+                {/* Plan Header */}
                 <div className="flex items-start justify-between">
                   <div>
-                    <h3 className="font-bold text-sm flex items-center gap-1.5">
+                    <h3 className="font-semibold text-sm text-slate-900 dark:text-slate-100 flex items-center gap-2">
                       <span>{plan.name}</span>
                     </h3>
-                    <p className="text-[11px] text-gray-400 mt-0.5">{plan.tagline}</p>
+                    <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">{plan.tagline}</p>
                   </div>
+
                   <div className="text-right">
-                    <span className="text-base font-extrabold">{plan.priceFormatted}</span>
-                    <span className="text-[10px] text-gray-400 block">/ month</span>
+                    <div className="flex items-baseline justify-end gap-1">
+                      <span className="text-lg font-bold text-slate-900 dark:text-slate-100">{price}</span>
+                      <span className="text-xs text-slate-500 dark:text-slate-400">/ mo</span>
+                    </div>
+                    {billingInterval === 'yearly' && (
+                      <span className="text-[10px] text-slate-400 block">Billed annually</span>
+                    )}
                   </div>
                 </div>
 
-                {/* Metrics Pill */}
-                <div className="mt-2.5 flex items-center gap-2 text-[10px] font-semibold">
-                  <span className="rounded-md border border-sky-500/30 bg-sky-500/15 px-2 py-0.5 text-sky-300">
-                    ⚡ {plan.credits}
+                {/* Credits & Limits Spec Pills */}
+                <div className="mt-2.5 flex items-center gap-2 text-xs">
+                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md border border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 font-medium">
+                    <FiZap className="size-3 text-indigo-500" />
+                    <span>{plan.credits} Credits / mo</span>
                   </span>
-                  <span className="rounded-md border border-purple-500/30 bg-purple-500/15 px-2 py-0.5 text-purple-300">
-                    🚀 {plan.rateLimit}
+                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md border border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 font-medium">
+                    <FiClock className="size-3 text-slate-400" />
+                    <span>{plan.rateLimit}</span>
                   </span>
                 </div>
 
                 {/* Features List */}
-                <div className="mt-3 space-y-1.5 border-t border-inherit pt-2.5">
+                <div className="mt-3 space-y-1.5 border-t border-slate-100 dark:border-slate-800/80 pt-2.5">
                   {plan.features.map((feat, idx) => (
-                    <div key={idx} className="flex items-center gap-2 text-[11px]">
-                      <FiCheck className="size-3 text-emerald-400 shrink-0" />
-                      <span className="text-gray-300">{feat}</span>
+                    <div key={idx} className="flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300">
+                      <FiCheck className="size-3.5 text-emerald-600 dark:text-emerald-500 shrink-0" />
+                      <span>{feat}</span>
                     </div>
                   ))}
                 </div>
 
-                {/* Action Button */}
+                {/* Primary / Secondary CTA Button */}
                 <div className="mt-3.5">
                   {isCurrentActivePlan ? (
-                    <div className="w-full flex items-center justify-center gap-2 rounded-xl py-2 px-4 text-xs font-bold text-emerald-400 bg-emerald-500/10 border border-emerald-500/30 cursor-default">
+                    <div className="w-full flex items-center justify-center gap-1.5 rounded-lg py-2 px-3 text-xs font-semibold text-emerald-700 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800 cursor-default">
                       <FiCheckCircle className="size-3.5" />
-                      <span>Current Active Plan</span>
+                      <span>Active Subscription</span>
                     </div>
                   ) : (
                     <button
@@ -337,15 +415,17 @@ export const PremiumPlansModal: React.FC<PremiumPlansModalProps> = ({
                         handleCheckout(plan.code);
                       }}
                       disabled={loadingPlanCode === plan.code}
-                      className={`w-full flex items-center justify-center gap-2 rounded-xl py-2 px-4 text-xs font-bold text-white shadow transition-all cursor-pointer ${
-                        isPopular
-                          ? 'bg-gradient-to-r from-amber-500 to-orange-600 hover:from-amber-600 hover:to-orange-700 shadow-orange-500/20 active:scale-[0.99]'
-                          : 'bg-gradient-to-r from-sky-500 to-indigo-600 hover:from-sky-600 hover:to-indigo-700 shadow-sky-500/20 active:scale-[0.99]'
+                      className={`w-full flex items-center justify-center gap-2 rounded-lg py-2 px-4 text-xs font-semibold transition-all cursor-pointer ${
+                        plan.recommended
+                          ? 'bg-blue-600 hover:bg-blue-700 text-white shadow-xs active:scale-[0.99]'
+                          : isDarkMode
+                            ? 'bg-slate-800 hover:bg-slate-700 text-slate-100 border border-slate-700'
+                            : 'bg-white hover:bg-slate-50 text-slate-800 border border-slate-300 shadow-xs'
                       } disabled:opacity-50`}>
                       {loadingPlanCode === plan.code ? (
                         <>
                           <AiOutlineLoading3Quarters className="size-3.5 animate-spin" />
-                          <span>Initiating Checkout...</span>
+                          <span>Preparing Checkout...</span>
                         </>
                       ) : (
                         <>
@@ -362,19 +442,25 @@ export const PremiumPlansModal: React.FC<PremiumPlansModalProps> = ({
           })}
         </div>
 
-        {/* Modal Footer / Dismiss */}
-        <div className="p-4 pt-3 border-t border-inherit bg-slate-900/60 flex items-center justify-between shrink-0">
-          <span className="text-[11px] text-gray-400">Cancel or upgrade anytime.</span>
+        {/* Modal Footer (Trust & Dismiss) */}
+        <div
+          className={`p-3.5 border-t shrink-0 flex items-center justify-between text-xs ${
+            isDarkMode ? 'border-slate-800 bg-slate-900' : 'border-slate-200 bg-slate-50'
+          }`}>
+          <div className="flex items-center gap-1.5 text-slate-500 dark:text-slate-400">
+            <FiLock className="size-3.5 text-emerald-600 dark:text-emerald-500" />
+            <span>Secure 256-bit Razorpay Checkout</span>
+          </div>
+
           <button
             type="button"
             onClick={onClose}
-            className="flex items-center gap-1.5 rounded-xl border border-slate-700 bg-slate-800 px-3.5 py-1.5 text-xs font-semibold text-sky-400 hover:bg-slate-700 hover:text-sky-300 transition-colors cursor-pointer">
-            <span>
-              {currentSubscription?.status === 'ACTIVE' && currentSubscription?.planCodeSnapshot !== 'free-trial'
-                ? 'Close & Continue'
-                : 'Continue with Free Trial'}
-            </span>
-            <FiArrowRight className="size-3" />
+            className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer ${
+              isDarkMode
+                ? 'text-slate-300 hover:text-white hover:bg-slate-800'
+                : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200'
+            }`}>
+            Close
           </button>
         </div>
       </div>

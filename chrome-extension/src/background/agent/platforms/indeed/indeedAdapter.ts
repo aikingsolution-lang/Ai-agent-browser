@@ -18,6 +18,28 @@ const logger = createLogger('IndeedAdapter');
 
 export const CAPTCHA_MANUAL_SOLVE_TIMEOUT_MS = 60_000; // 60s total window for manual verification
 export const CAPTCHA_POLL_INTERVAL_MS = 3_000; // 3s polling interval
+export const OTP_MANUAL_SOLVE_TIMEOUT_MS = 90_000; // 90s total window for SMS/phone verification
+export const OTP_POLL_INTERVAL_MS = 2_500; // 2.5s polling interval
+
+export interface IManualUserActionOptions {
+  tabId?: number;
+  puppeteerPage?: any;
+  context?: IPlatformExecutionContext;
+  jobTitle?: string;
+  userMessage: string;
+  actionType: 'captcha' | 'otp' | 'login';
+  statusLabel?: string;
+  timeoutMs: number;
+  pollIntervalMs: number;
+  isStillPresent: () => Promise<boolean>;
+  onSuccessMessage?: string;
+}
+
+export interface IManualUserActionResult {
+  solved: boolean;
+  aborted: boolean;
+  timedOut: boolean;
+}
 
 export class IndeedAdapter implements IPlatformAdapter {
   public readonly platformId: SupportedPlatform = 'indeed';
@@ -26,6 +48,8 @@ export class IndeedAdapter implements IPlatformAdapter {
   public readonly pacing: IndeedPacing = indeedPacing;
   public captchaManualSolveTimeoutMs: number = CAPTCHA_MANUAL_SOLVE_TIMEOUT_MS;
   public captchaPollIntervalMs: number = CAPTCHA_POLL_INTERVAL_MS;
+  public otpManualSolveTimeoutMs: number = OTP_MANUAL_SOLVE_TIMEOUT_MS;
+  public otpPollIntervalMs: number = OTP_POLL_INTERVAL_MS;
 
   /**
    * Matches any Indeed domain URL (e.g., indeed.com, in.indeed.com, uk.indeed.com)
@@ -44,6 +68,7 @@ export class IndeedAdapter implements IPlatformAdapter {
     location: string,
     start?: number,
     candidateName?: string | (string | undefined | null)[],
+    easyApplyOnly: boolean = true,
   ): string {
     const cleanRole = sanitizeRoleSearchQuery(role, candidateName, 'Software Engineer');
     let cleanLoc = (location || '').trim();
@@ -72,6 +97,10 @@ export class IndeedAdapter implements IPlatformAdapter {
     }
     if (typeof start === 'number' && start > 0) {
       params.set('start', String(start));
+    }
+    if (easyApplyOnly) {
+      // Indeed's composite filter slot for "Easily apply" (iafilter)
+      params.set('sc', '0kf:iafilter();');
     }
 
     return `${baseUrl}?${params.toString()}`;
@@ -240,24 +269,33 @@ export class IndeedAdapter implements IPlatformAdapter {
   }
 
   /**
-   * Waits for manual CAPTCHA / Cloudflare challenge resolution by the user in the runner window.
-   * Gives the user a short window (e.g. 60 seconds) to solve it manually before falling back
-   * to a platform pause.
+   * Shared helper for waiting on manual user actions in the runner tab
+   * (e.g., CAPTCHA/Cloudflare challenges, SMS/OTP phone verification).
    *
-   * CRITICAL GUARANTEE: Zero programmatic interaction with any challenge elements.
-   * Only passive detection polling.
+   * Reuses the tested pattern:
+   * 1. Focuses the runner window if tabId is provided
+   * 2. Broadcasts Live Activity & port updates with actionable user messaging
+   * 3. Non-blocking polling with pacing delay
+   * 4. Immediate abort signal checking
+   * 5. Resumes cleanly when condition clears or times out
    */
-  public async waitForManualCaptchaResolution(
-    tabId?: number,
-    puppeteerPage?: any,
-    context?: IPlatformExecutionContext,
-    jobTitle?: string,
-  ): Promise<{ solved: boolean; aborted: boolean }> {
-    const userMessage =
-      "Indeed needs you to verify you're human — click the runner tab and complete the check. We'll check automatically every few seconds.";
+  public async waitForManualUserAction(options: IManualUserActionOptions): Promise<IManualUserActionResult> {
+    const {
+      tabId,
+      puppeteerPage,
+      context,
+      jobTitle,
+      userMessage,
+      statusLabel = 'needs_verification',
+      timeoutMs,
+      pollIntervalMs,
+      isStillPresent,
+      onSuccessMessage,
+    } = options;
+
     logger.info(`[IndeedAdapter] ${userMessage}`);
 
-    // Focus runner window if Chrome tabs/windows API is available so user sees challenge
+    // Focus runner window if Chrome tabs/windows API is available so user sees prompt
     if (typeof chrome !== 'undefined' && chrome.windows) {
       try {
         if (tabId && chrome.tabs) {
@@ -277,7 +315,7 @@ export class IndeedAdapter implements IPlatformAdapter {
       url: (puppeteerPage?.url?.() as string) || '',
       title: jobTitle || 'Indeed Job',
       company: 'Indeed',
-      status: 'needs_verification',
+      status: statusLabel as any,
       reason: userMessage,
       creditsUsed: 0,
     });
@@ -293,45 +331,35 @@ export class IndeedAdapter implements IPlatformAdapter {
     }
 
     const startTime = Date.now();
-    while (Date.now() - startTime < this.captchaManualSolveTimeoutMs) {
+    while (Date.now() - startTime < timeoutMs) {
       // Check immediately for Stop button / cancellation
       if (context?.signal?.aborted) {
-        logger.info('[IndeedAdapter] Stop requested during verification wait window.');
-        return { solved: false, aborted: true };
+        logger.info('[IndeedAdapter] Stop requested during manual action wait window.');
+        return { solved: false, aborted: true, timedOut: false };
       }
 
       // Interruptible passive wait
-      const waitResult = await this.pacing.waitFieldInteraction(
-        context?.signal,
-        this.captchaPollIntervalMs,
-        this.captchaPollIntervalMs,
-      );
+      const waitResult = await this.pacing.waitFieldInteraction(context?.signal, pollIntervalMs, pollIntervalMs);
       if (waitResult.wasAborted || context?.signal?.aborted) {
-        logger.info('[IndeedAdapter] Verification wait cancelled by user.');
-        return { solved: false, aborted: true };
+        logger.info('[IndeedAdapter] Manual action wait cancelled by user.');
+        return { solved: false, aborted: true, timedOut: false };
       }
 
-      // Check if challenge cleared (PASSIVE CHECK ONLY — zero programmatic interaction)
-      let isStillPresent = false;
-      if (tabId && (await this.checkCaptchaPresentOnTab(tabId))) {
-        isStillPresent = true;
-      } else if (puppeteerPage && (await this.checkCaptchaPresent(puppeteerPage, tabId))) {
-        isStillPresent = true;
-      } else if (!tabId && !puppeteerPage) {
-        isStillPresent = await this.checkCaptchaPresent();
-      }
+      // Check if requirement cleared (PASSIVE CHECK ONLY — zero programmatic interaction)
+      const stillPresent = await isStillPresent().catch(() => false);
 
       await new Promise(r => setTimeout(r, 2));
 
-      if (!isStillPresent) {
-        logger.info('[IndeedAdapter] Verification solved — resuming application.');
+      if (!stillPresent) {
+        const successMsg = onSuccessMessage || 'Verification solved — resuming application...';
+        logger.info(`[IndeedAdapter] ${successMsg}`);
         context?.onLiveActivity?.({
           jobId: context.runId || 'indeed_job',
           url: (puppeteerPage?.url?.() as string) || '',
           title: jobTitle || 'Indeed Job',
           company: 'Indeed',
           status: 'running',
-          reason: 'Verification solved — resuming application...',
+          reason: successMsg,
           creditsUsed: 0,
         });
 
@@ -339,18 +367,204 @@ export class IndeedAdapter implements IPlatformAdapter {
           try {
             context.portToSend.postMessage({
               type: 'LINKEDIN_STATUS_UPDATE',
-              text: '✅ Verification solved — resuming application...',
+              text: `✅ ${successMsg}`,
               status: 'ok',
             });
           } catch {}
         }
 
-        return { solved: true, aborted: false };
+        return { solved: true, aborted: false, timedOut: false };
       }
     }
 
-    logger.warning(`[IndeedAdapter] Manual verification window (${this.captchaManualSolveTimeoutMs / 1000}s) expired.`);
-    return { solved: false, aborted: false };
+    logger.warning(`[IndeedAdapter] Manual action window (${timeoutMs / 1000}s) expired.`);
+    return { solved: false, aborted: false, timedOut: true };
+  }
+
+  /**
+   * Waits for manual CAPTCHA / Cloudflare challenge resolution by the user in the runner window.
+   * Gives the user a short window (e.g. 60 seconds) to solve it manually before falling back
+   * to a platform pause.
+   *
+   * CRITICAL GUARANTEE: Zero programmatic interaction with any challenge elements.
+   * Only passive detection polling.
+   */
+  public async waitForManualCaptchaResolution(
+    tabId?: number,
+    puppeteerPage?: any,
+    context?: IPlatformExecutionContext,
+    jobTitle?: string,
+  ): Promise<{ solved: boolean; aborted: boolean }> {
+    const res = await this.waitForManualUserAction({
+      tabId,
+      puppeteerPage,
+      context,
+      jobTitle,
+      actionType: 'captcha',
+      userMessage:
+        "Indeed needs you to verify you're human — click the runner tab and complete the check. We'll check automatically every few seconds.",
+      statusLabel: 'needs_verification',
+      timeoutMs: this.captchaManualSolveTimeoutMs,
+      pollIntervalMs: this.captchaPollIntervalMs,
+      isStillPresent: async () => {
+        if (tabId && (await this.checkCaptchaPresentOnTab(tabId))) return true;
+        if (puppeteerPage && (await this.checkCaptchaPresent(puppeteerPage, tabId))) return true;
+        if (!tabId && !puppeteerPage) return await this.checkCaptchaPresent();
+        return false;
+      },
+      onSuccessMessage: 'Verification solved — resuming application...',
+    });
+    return { solved: res.solved, aborted: res.aborted };
+  }
+
+  /**
+   * Checks whether the current page or tab presents an SMS / Phone OTP verification challenge.
+   * Strictly passive inspection — zero programmatic interaction.
+   *
+   * Detects:
+   * 1. Phone / SMS verification containers or headings ("verify your phone", "enter the code sent to")
+   * 2. OTP / verification code inputs (autocomplete="one-time-code", name="verificationCode", etc.)
+   * 3. Distinct from normal contact phone number questions (requires "code" / "sent to" / "verify" signals).
+   */
+  public async checkOtpVerificationPresent(puppeteerPage?: any, tabId?: number): Promise<boolean> {
+    const evaluateOtpDOM = () => {
+      // Helper: check if element is attached and rendered visibly
+      const isVisible = (el: Element | null): boolean => {
+        if (!el) return false;
+        const htmlEl = el as HTMLElement;
+        const style = window.getComputedStyle ? window.getComputedStyle(htmlEl) : (htmlEl as any).style;
+        if (
+          style &&
+          (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity || '1') === 0)
+        ) {
+          return false;
+        }
+        const rect = htmlEl.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      };
+
+      // 1. Text signal checks across the page or modal
+      // We look for specific SMS / phone code verification phrases
+      const bodyText = (document.body ? document.body.innerText : '').toLowerCase();
+
+      const hasVerificationPhrase =
+        bodyText.includes('verify your phone') ||
+        bodyText.includes('verify phone number') ||
+        bodyText.includes('enter the code sent to') ||
+        bodyText.includes('enter the code we sent') ||
+        bodyText.includes('enter verification code') ||
+        bodyText.includes('we sent a verification code') ||
+        bodyText.includes('we sent a code to') ||
+        bodyText.includes('we texted a code to') ||
+        bodyText.includes('enter the 6-digit code') ||
+        bodyText.includes('enter 6-digit code') ||
+        bodyText.includes('6-digit verification code') ||
+        bodyText.includes('phone verification') ||
+        bodyText.includes('sms verification') ||
+        (bodyText.includes('verification code') &&
+          (bodyText.includes('phone') ||
+            bodyText.includes('text') ||
+            bodyText.includes('sms') ||
+            bodyText.includes('resend')));
+
+      // 2. Specific OTP / One-Time-Code inputs
+      const otpInputs = Array.from(
+        document.querySelectorAll<HTMLInputElement>(
+          'input[autocomplete="one-time-code"], input[name*="verificationCode" i], input[name*="phoneCode" i], input[name*="smsCode" i], input[name*="otp" i], input[id*="verification-code" i], input[id*="otp" i], input[id*="phone-verify" i], input[data-testid*="otp" i], input[data-testid*="verification-code" i], input[data-testid*="phone-verify" i]',
+        ),
+      );
+
+      const hasVisibleOtpInput = otpInputs.some(inp => isVisible(inp));
+
+      // 3. Cluster of single-digit inputs (common in OTP / verification UIs)
+      const singleDigitInputs = Array.from(
+        document.querySelectorAll<HTMLInputElement>(
+          'input[maxlength="1"], input[data-index], input[class*="pin" i], input[class*="digit" i]',
+        ),
+      ).filter(inp => isVisible(inp));
+      const hasDigitCluster =
+        singleDigitInputs.length >= 4 &&
+        (bodyText.includes('code') || bodyText.includes('verify') || hasVerificationPhrase);
+
+      // 4. Combined signal:
+      if (hasVisibleOtpInput) {
+        return true;
+      }
+
+      if (hasDigitCluster) {
+        return true;
+      }
+
+      if (hasVerificationPhrase) {
+        // Confirm there is an active visible text/number input in the same view or modal
+        const anyInput = Array.from(
+          document.querySelectorAll<HTMLInputElement>(
+            'input[type="text"], input[type="tel"], input[type="number"], input:not([type])',
+          ),
+        ).some(inp => isVisible(inp));
+
+        if (anyInput) {
+          return true;
+        }
+      }
+
+      return false;
+    };
+
+    if (puppeteerPage) {
+      try {
+        const isPresent = await puppeteerPage.evaluate(evaluateOtpDOM);
+        if (isPresent) return true;
+      } catch {
+        // Non-critical evaluation failure
+      }
+    }
+
+    if (typeof chrome !== 'undefined' && chrome.scripting && tabId) {
+      try {
+        const results = await chrome.scripting.executeScript({
+          target: { tabId, allFrames: true },
+          func: evaluateOtpDOM,
+        });
+        if (results && results.some(r => r.result === true)) {
+          return true;
+        }
+      } catch {
+        // Non-critical execution failure
+      }
+    }
+
+    return false;
+  }
+
+  /**
+   * Waits for manual SMS / Phone OTP verification by the user in the runner window.
+   * Gives the user a generous window (e.g. 90 seconds) to receive SMS and enter the code.
+   * If the timeout expires without user action, skips the job cleanly rather than failing the platform.
+   */
+  public async waitForManualOtpResolution(
+    tabId?: number,
+    puppeteerPage?: any,
+    context?: IPlatformExecutionContext,
+    jobTitle?: string,
+  ): Promise<{ solved: boolean; aborted: boolean; timedOut: boolean }> {
+    const userMessage =
+      'Indeed needs SMS verification for this application — please check your phone and enter the code in the runner tab.';
+    return this.waitForManualUserAction({
+      tabId,
+      puppeteerPage,
+      context,
+      jobTitle,
+      actionType: 'otp',
+      userMessage,
+      statusLabel: 'needs_verification',
+      timeoutMs: this.otpManualSolveTimeoutMs,
+      pollIntervalMs: this.otpPollIntervalMs,
+      isStillPresent: async () => {
+        return await this.checkOtpVerificationPresent(puppeteerPage, tabId);
+      },
+      onSuccessMessage: 'SMS verification completed — resuming application...',
+    });
   }
 
   /**
@@ -455,11 +669,392 @@ export class IndeedAdapter implements IPlatformAdapter {
   }
 
   /**
+   * Ensures the "Easily apply" filter is activated on the Indeed search results page.
+   * If not already active:
+   * 1. Checks if 'iafilter' is present in page URL or if the filter pill is already active.
+   * 2. Finds the "Easily apply" pill in the filter bar (as shown underneath search inputs).
+   * 3. Dispatches mouse click events to activate it.
+   * 4. Handles any popover confirmation dialog if rendered.
+   */
+  public async ensureEasilyApplyFilterActive(page: Page): Promise<{ active: boolean; clicked: boolean }> {
+    try {
+      const evaluateFilterDOM = async () => {
+        const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+
+        function isVisible(el: HTMLElement | null): boolean {
+          if (!el) return false;
+          const style = window.getComputedStyle(el);
+          if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+          const rect = el.getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0;
+        }
+
+        function dispatchHumanClick(el: HTMLElement) {
+          el.scrollIntoView({ behavior: 'instant', block: 'center' });
+          if (typeof el.focus === 'function') el.focus();
+          const mouseOpts = { bubbles: true, cancelable: true, view: window };
+          el.dispatchEvent(new PointerEvent('pointerdown', mouseOpts));
+          el.dispatchEvent(new MouseEvent('mousedown', mouseOpts));
+          el.dispatchEvent(new PointerEvent('pointerup', mouseOpts));
+          el.dispatchEvent(new MouseEvent('mouseup', mouseOpts));
+          el.click();
+        }
+
+        // Helper: Find active Indeed filter popover / dropdown if already open
+        const findOpenPopover = (): HTMLElement | null => {
+          const dialogCandidates = Array.from(
+            document.querySelectorAll<HTMLElement>(
+              '[role="dialog"], [role="listbox"], [role="menu"], [data-testid*="popover" i], div[class*="popover" i], div[class*="dropdown" i], div[id*="popover" i], div[class*="yosegi-FilterDialog" i]',
+            ),
+          );
+          for (const d of dialogCandidates) {
+            if (!isVisible(d)) continue;
+            const text = (d.innerText || d.textContent || '').toLowerCase();
+            if (
+              text.includes('easily apply on indeed') ||
+              (text.includes('easily apply') && (text.includes('update') || text.includes('reset')))
+            ) {
+              return d;
+            }
+          }
+          return null;
+        };
+
+        // Helper: Handle popover selection and confirmation
+        const handlePopover = async (pop: HTMLElement): Promise<boolean> => {
+          // 1. Find all radio/checkbox inputs inside popover
+          const radioInputs = Array.from(
+            pop.querySelectorAll<HTMLInputElement>('input[type="radio"], input[type="checkbox"], input'),
+          );
+
+          let targetInput: HTMLInputElement | null = null;
+          let allJobsInput: HTMLInputElement | null = null;
+
+          for (const inp of radioInputs) {
+            const val = (inp.value || '').toLowerCase();
+            const id = (inp.id || '').toLowerCase();
+            const aria = (inp.getAttribute('aria-label') || '').toLowerCase();
+            const parentText = (inp.parentElement?.innerText || inp.parentElement?.textContent || '')
+              .replace(/\s+/g, ' ')
+              .trim()
+              .toLowerCase();
+
+            const isEasilyApply =
+              val.includes('iafilter') ||
+              id.includes('easily') ||
+              aria.includes('easily apply') ||
+              (parentText.includes('easily apply') && !parentText.includes('all jobs'));
+
+            const isAllJobs =
+              val.includes('all') || id.includes('all') || aria.includes('all jobs') || parentText.includes('all jobs');
+
+            if (isEasilyApply && !targetInput) targetInput = inp;
+            if (isAllJobs && !allJobsInput) allJobsInput = inp;
+          }
+
+          // 2. Locate interactive option elements (li, role="radio", label, button, div, span)
+          // CRITICAL: Exclude containers that have "all jobs", "reset", or "update" in text to avoid matching outer wrapper!
+          const optionCandidates = Array.from(
+            pop.querySelectorAll<HTMLElement>(
+              'li, [role="radio"], [role="option"], [role="menuitem"], label, button, div, span',
+            ),
+          );
+
+          const easilyApplyCandidates = optionCandidates.filter(opt => {
+            if (!isVisible(opt)) return false;
+            const text = (opt.innerText || opt.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
+            if (text.includes('all jobs') || text.includes('reset') || text.includes('update')) return false;
+            return text.includes('easily apply') || text.includes('easy apply');
+          });
+
+          // Sort candidates: prefer role="radio", label, li, and shortest text length (deepest leaf element)
+          easilyApplyCandidates.sort((a, b) => {
+            const aBonus = (a.getAttribute('role') === 'radio' ? -20 : 0) + (a.tagName === 'LABEL' ? -10 : 0);
+            const bBonus = (b.getAttribute('role') === 'radio' ? -20 : 0) + (b.tagName === 'LABEL' ? -10 : 0);
+            const aLen = (a.innerText || a.textContent || '').trim().length;
+            const bLen = (b.innerText || b.textContent || '').trim().length;
+            return aBonus + aLen - (bBonus + bLen);
+          });
+
+          const targetOption: HTMLElement | null = easilyApplyCandidates[0] || null;
+
+          if (!targetInput && targetOption) {
+            targetInput =
+              targetOption.querySelector<HTMLInputElement>('input') ||
+              (targetOption.getAttribute('for')
+                ? pop.querySelector<HTMLInputElement>(`input#${targetOption.getAttribute('for')}`)
+                : null);
+          }
+
+          // 3. Helper to verify if "Easily apply on Indeed" is actively selected
+          const isEasilyApplySelected = (): boolean => {
+            if (targetInput && targetInput.checked) return true;
+            if (targetOption) {
+              const ariaChecked = targetOption.getAttribute('aria-checked');
+              const ariaSelected = targetOption.getAttribute('aria-selected');
+              if (ariaChecked === 'true' || ariaSelected === 'true') return true;
+
+              const optInp = targetOption.querySelector<HTMLInputElement>('input');
+              if (optInp && optInp.checked) return true;
+
+              const classNames = [
+                targetOption.className,
+                targetOption.parentElement?.className,
+                targetOption.closest('li, [role="radio"], label')?.className,
+              ]
+                .filter(Boolean)
+                .join(' ')
+                .toLowerCase();
+
+              if (
+                classNames.includes('selected') ||
+                classNames.includes('checked') ||
+                classNames.includes('active') ||
+                classNames.includes('is-selected')
+              ) {
+                return true;
+              }
+
+              const hasCheckmark = Boolean(
+                targetOption.querySelector('svg[class*="check" i], [class*="checkmark" i], [data-testid*="check" i]') ||
+                  /✓|✔/.test(targetOption.textContent || ''),
+              );
+              if (hasCheckmark) return true;
+            }
+            if (allJobsInput && !allJobsInput.checked && targetInput && targetInput.checked) {
+              return true;
+            }
+            return false;
+          };
+
+          // 4. Perform robust selection with multi-strategy click & verification loop
+          if (!isEasilyApplySelected()) {
+            for (let attempt = 0; attempt < 3; attempt++) {
+              if (isEasilyApplySelected()) break;
+
+              // Strategy A: Direct native input click and change event
+              if (targetInput) {
+                try {
+                  if (typeof targetInput.focus === 'function') targetInput.focus();
+                  dispatchHumanClick(targetInput);
+                  if (!targetInput.checked) {
+                    targetInput.checked = true;
+                    targetInput.dispatchEvent(new Event('change', { bubbles: true }));
+                    targetInput.dispatchEvent(new Event('input', { bubbles: true }));
+                  }
+                } catch {}
+              }
+
+              // Strategy B: Click target option element + dispatch Space/Enter keys
+              if (targetOption) {
+                try {
+                  dispatchHumanClick(targetOption);
+                  targetOption.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', code: 'Space', bubbles: true }));
+                  targetOption.dispatchEvent(new KeyboardEvent('keyup', { key: ' ', code: 'Space', bubbles: true }));
+                } catch {}
+
+                // Strategy C: Click closest label if targetOption is child of label
+                const parentLabel: HTMLElement | null = targetOption.closest('label');
+                if (parentLabel && parentLabel !== targetOption) {
+                  try {
+                    dispatchHumanClick(parentLabel);
+                  } catch {}
+                }
+              }
+
+              // Poll briefly to see if selection registered
+              for (let poll = 0; poll < 4; poll++) {
+                await sleep(100);
+                if (isEasilyApplySelected()) break;
+              }
+
+              if (isEasilyApplySelected()) break;
+            }
+          }
+
+          // 5. Click the "Update" button ONLY after selection has been executed
+          const actionButtons = Array.from(
+            pop.querySelectorAll<HTMLElement>('button, [role="button"], input[type="submit"], a'),
+          );
+          const updateBtn = actionButtons.find(b => {
+            if (!isVisible(b)) return false;
+            const bText = (b.innerText || b.textContent || '').trim().toLowerCase();
+            if (bText.includes('reset') || bText.includes('clear')) return false;
+            return (
+              bText === 'update' ||
+              bText.includes('update') ||
+              bText === 'done' ||
+              bText === 'apply' ||
+              bText.includes('show jobs')
+            );
+          });
+
+          if (updateBtn) {
+            dispatchHumanClick(updateBtn);
+            await sleep(600);
+            return true;
+          }
+
+          return Boolean(targetOption && isEasilyApplySelected());
+        };
+
+        // Step 1: Check if popover is ALREADY open (e.g. from previous action)
+        let popover = findOpenPopover();
+        if (popover) {
+          const success = await handlePopover(popover);
+          return { active: true, clicked: success, found: true };
+        }
+
+        // Step 2: Locate the filter pill in the filter carousel/toolbar
+        const allCandidates = Array.from(
+          document.querySelectorAll<HTMLElement>(
+            'button, a, [role="button"], li button, li a, [data-testid*="filter" i], div[class*="pill" i], div[class*="filter" i], span[role="button"]',
+          ),
+        );
+
+        let filterPill: HTMLElement | null = null;
+        for (const el of allCandidates) {
+          if (!isVisible(el)) continue;
+
+          // Exclude anything inside job cards, job preview, or apply buttons
+          if (
+            el.closest('#jobsearch-ViewjobPaneWrapper') ||
+            el.closest('.jobsearch-JobComponent') ||
+            el.closest('.job_seen_beacon') ||
+            el.closest('.cardOutline') ||
+            el.closest('#mosaic-provider-jobcards') ||
+            el.closest('#viewJobButtonContainer')
+          ) {
+            continue;
+          }
+
+          const rawText = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
+          const aria = (el.getAttribute('aria-label') || '').toLowerCase();
+          const id = (el.id || '').toLowerCase();
+          const testid = (el.getAttribute('data-testid') || '').toLowerCase();
+
+          const isMatch =
+            rawText.includes('easily apply') ||
+            rawText.includes('easy apply') ||
+            aria.includes('easily apply') ||
+            aria.includes('easy apply') ||
+            id.includes('easily-apply') ||
+            id.includes('easilyapply') ||
+            testid.includes('easily-apply') ||
+            testid.includes('easilyapply');
+
+          if (isMatch) {
+            filterPill = el.closest('button, a, [role="button"]') || el;
+            break;
+          }
+        }
+
+        if (!filterPill) {
+          return { active: false, clicked: false, found: false };
+        }
+
+        // Step 3: Check if already active
+        const style = window.getComputedStyle(filterPill);
+        const bg = style.backgroundColor;
+        const isDarkBg =
+          bg !== 'rgba(0, 0, 0, 0)' &&
+          bg !== 'transparent' &&
+          bg !== 'rgb(255, 255, 255)' &&
+          bg !== 'rgb(243, 242, 241)';
+        const isAriaPressed =
+          filterPill.getAttribute('aria-pressed') === 'true' ||
+          filterPill.getAttribute('aria-checked') === 'true' ||
+          filterPill.getAttribute('aria-selected') === 'true';
+        const isClassSelected =
+          filterPill.classList.contains('active') ||
+          filterPill.classList.contains('selected') ||
+          filterPill.classList.contains('is-active') ||
+          filterPill.classList.contains('yosegi-FilterPill-selected') ||
+          filterPill.parentElement?.classList.contains('selected') ||
+          filterPill.parentElement?.classList.contains('active');
+        const hasNumberBadge = Boolean(
+          filterPill.querySelector(
+            '[class*="badge" i], [class*="count" i], [data-testid*="badge" i], [aria-label*="1" i]',
+          ) || /\b[1-9]\d*\b|✓|✔/.test(filterPill.textContent || ''),
+        );
+
+        const isActuallyActive = isAriaPressed || isClassSelected || hasNumberBadge || (isDarkBg && hasNumberBadge);
+        const isAriaExpanded = filterPill.getAttribute('aria-expanded') === 'true';
+
+        if (isActuallyActive && !isAriaExpanded) {
+          return { active: true, clicked: false, found: true };
+        }
+
+        // Step 4: Click the filter pill to open the popover or toggle
+        dispatchHumanClick(filterPill);
+        await sleep(600);
+
+        // Check if popover opened after clicking
+        popover = findOpenPopover();
+        if (popover) {
+          const success = await handlePopover(popover);
+          // Wait briefly for popover to close and pill badge / state to reflect
+          await sleep(400);
+          const postHasBadge = Boolean(
+            filterPill.querySelector(
+              '[class*="badge" i], [class*="count" i], [data-testid*="badge" i], [aria-label*="1" i]',
+            ) || /\b[1-9]\d*\b|✓|✔/.test(filterPill.textContent || ''),
+          );
+          const postActive =
+            postHasBadge ||
+            filterPill.getAttribute('aria-pressed') === 'true' ||
+            filterPill.classList.contains('selected') ||
+            filterPill.classList.contains('active');
+
+          return { active: postActive || success, clicked: success, found: true };
+        }
+
+        // If it was a direct anchor navigation
+        if (filterPill instanceof HTMLAnchorElement && filterPill.href && filterPill.href.includes('indeed.com')) {
+          if (window.location.href !== filterPill.href) {
+            window.location.href = filterPill.href;
+          }
+        }
+
+        return { active: true, clicked: true, found: true };
+      };
+
+      if (page.puppeteerPage) {
+        const res = (await page.puppeteerPage.evaluate(evaluateFilterDOM)) as {
+          active?: boolean;
+          clicked?: boolean;
+        } | null;
+        return { active: Boolean(res?.active), clicked: Boolean(res?.clicked) };
+      }
+
+      if (typeof chrome !== 'undefined' && chrome.scripting && page.tabId) {
+        const execRes = await chrome.scripting
+          .executeScript({ target: { tabId: page.tabId }, func: evaluateFilterDOM })
+          .catch(() => []);
+        const r = execRes?.[0]?.result as { active?: boolean; clicked?: boolean } | null;
+        return { active: Boolean(r?.active), clicked: Boolean(r?.clicked) };
+      }
+
+      return { active: false, clicked: false };
+    } catch (err) {
+      logger.warning('[IndeedAdapter] Error activating Easily apply filter:', err);
+      return { active: false, clicked: false };
+    }
+  }
+
+  /**
    * Extracts job cards from Indeed search results with strict two-signal Quick Apply detection.
    * Confirms both leaf badge element AND text line confirmation, excluding any external indicators.
    */
   public async extractJobCards(page: Page): Promise<IJobQueueItem[]> {
     try {
+      // Proactively ensure Easily apply filter is activated on search results before extracting
+      const filterRes = await this.ensureEasilyApplyFilterActive(page).catch(() => ({ active: false, clicked: false }));
+      if (filterRes.clicked) {
+        logger.info('[IndeedAdapter] Activated "Easily apply" filter pill. Waiting for results to refresh...');
+        await new Promise(r => setTimeout(r, 3500));
+      }
+
       const evaluateJobCardsDOM = () => {
         // Guard against "No results found" banners
         const noResultsBanner = document.querySelector(
@@ -620,8 +1215,19 @@ export class IndeedAdapter implements IPlatformAdapter {
               cardText.includes('apply via company') ||
               textLines.some((l: string) => l.includes('company site') || l.includes('apply directly'));
 
-            // Strict Two-Signal requirement: BOTH Signal 1 and Signal 2 MUST be true, AND NOT external
-            const isQuickApply = hasBadgeElement && hasEasilyApplyLine && !isExternal;
+            const isFilterActiveOnPage =
+              window.location.search.includes('iafilter') || window.location.href.includes('iafilter');
+
+            // Quick Apply Detection:
+            // 1. If Easily apply filter is active on page, non-external cards are Indeed Apply.
+            // 2. Otherwise, require badge element, text line, or card text explicitly containing "easily apply".
+            // 3. In all cases, strictly exclude external redirect indicators.
+            const isQuickApply =
+              !isExternal &&
+              (isFilterActiveOnPage ||
+                (hasBadgeElement && hasEasilyApplyLine) ||
+                cardText.includes('easily apply') ||
+                cardText.includes('apply with indeed'));
 
             const domain = window.location.hostname.includes('in.indeed.com') ? 'in.indeed.com' : 'www.indeed.com';
             const fullUrl = `https://${domain}/viewjob?jk=${jk}`;
@@ -1173,6 +1779,28 @@ export class IndeedAdapter implements IPlatformAdapter {
         await this.pacing.waitPageSettle(context.signal);
       }
 
+      // CHECKPOINT 4b: Form Step Transition SMS / Phone OTP check
+      if (await this.checkOtpVerificationPresent(puppeteerPage, activeTabId)) {
+        logger.info(
+          `[IndeedAdapter] SMS/Phone OTP verification detected on step ${step} for "${job.title}". Pausing for user manual input.`,
+        );
+        const waitResult = await this.waitForManualOtpResolution(activeTabId, puppeteerPage, context, job.title);
+        if (waitResult.aborted) {
+          if (activeTabId !== page.tabId && typeof chrome !== 'undefined' && chrome.tabs) {
+            await chrome.tabs.remove(activeTabId).catch(() => {});
+          }
+          return { status: 'skipped', reason: 'Stopped by user' };
+        }
+        if (!waitResult.solved) {
+          logger.warning(`[IndeedAdapter] SMS verification window timed out for "${job.title}". Skipping job cleanly.`);
+          if (activeTabId !== page.tabId && typeof chrome !== 'undefined' && chrome.tabs) {
+            await chrome.tabs.remove(activeTabId).catch(() => {});
+          }
+          return { status: 'skipped', reason: 'Indeed SMS/phone verification timed out.' };
+        }
+        await this.pacing.waitPageSettle(context.signal);
+      }
+
       // Check if application was already submitted / completed
       const isSuccess = await this.checkApplicationSubmitted(activeTabId, puppeteerPage);
       if (isSuccess) {
@@ -1227,6 +1855,31 @@ export class IndeedAdapter implements IPlatformAdapter {
       const currentFingerprint = `${stepAction.text}:${stepAction.inputCount || 0}`;
       if (currentFingerprint === previousFingerprint) {
         consecutiveSameStepCount++;
+
+        // Check if we are stuck because an SMS / Phone OTP verification appeared on this step
+        if (await this.checkOtpVerificationPresent(puppeteerPage, activeTabId)) {
+          logger.info(
+            `[IndeedAdapter] SMS verification wall detected during repeated step for "${job.title}". Pausing for user input.`,
+          );
+          const waitResult = await this.waitForManualOtpResolution(activeTabId, puppeteerPage, context, job.title);
+          if (waitResult.aborted) {
+            if (activeTabId !== page.tabId && typeof chrome !== 'undefined' && chrome.tabs) {
+              await chrome.tabs.remove(activeTabId).catch(() => {});
+            }
+            return { status: 'skipped', reason: 'Stopped by user' };
+          }
+          if (!waitResult.solved) {
+            logger.warning(`[IndeedAdapter] SMS verification window timed out for "${job.title}". Skipping cleanly.`);
+            if (activeTabId !== page.tabId && typeof chrome !== 'undefined' && chrome.tabs) {
+              await chrome.tabs.remove(activeTabId).catch(() => {});
+            }
+            return { status: 'skipped', reason: 'Indeed SMS/phone verification timed out.' };
+          }
+          consecutiveSameStepCount = 0;
+          await this.pacing.waitPageSettle(context.signal);
+          continue;
+        }
+
         if (consecutiveSameStepCount >= 2) {
           // Attempt auto-healing validation errors before aborting
           logger.info(`[IndeedAdapter] Step ${step}: Detected repeated step; attempting validation error auto-heal...`);
@@ -1267,6 +1920,29 @@ export class IndeedAdapter implements IPlatformAdapter {
 
           submissionConfirmed = await this.checkApplicationSubmitted(activeTabId, puppeteerPage);
           if (submissionConfirmed) break;
+
+          // Check if SMS / Phone OTP verification appeared post-submit
+          if (await this.checkOtpVerificationPresent(puppeteerPage, activeTabId)) {
+            logger.info(
+              `[IndeedAdapter] Post-submit SMS OTP verification detected for "${job.title}". Pausing for user input.`,
+            );
+            const waitResult = await this.waitForManualOtpResolution(activeTabId, puppeteerPage, context, job.title);
+            if (waitResult.aborted) {
+              if (activeTabId !== page.tabId && typeof chrome !== 'undefined' && chrome.tabs) {
+                await chrome.tabs.remove(activeTabId).catch(() => {});
+              }
+              return { status: 'skipped', reason: 'Stopped by user' };
+            }
+            if (!waitResult.solved) {
+              if (activeTabId !== page.tabId && typeof chrome !== 'undefined' && chrome.tabs) {
+                await chrome.tabs.remove(activeTabId).catch(() => {});
+              }
+              return { status: 'skipped', reason: 'Indeed SMS/phone verification timed out.' };
+            }
+            await this.pacing.waitPageSettle(context.signal);
+            submissionConfirmed = await this.checkApplicationSubmitted(activeTabId, puppeteerPage);
+            if (submissionConfirmed) break;
+          }
 
           // Check if validation errors appeared after submit attempt
           const hasErrors = await this.autoHealValidationErrors(activeTabId, puppeteerPage, context, job);
@@ -1846,6 +2522,16 @@ export class IndeedAdapter implements IPlatformAdapter {
         let fieldType: 'text' | 'number' | 'radio' | 'dropdown' | 'select' | 'checkbox' | 'date' = 'text';
 
         const labelLower = labelText.toLowerCase();
+
+        // Guard: Do NOT fill SMS / Phone OTP verification inputs with candidate answers
+        const isOtpInput =
+          el.getAttribute('autocomplete') === 'one-time-code' ||
+          /verification[-_ ]?code|phone[-_ ]?code|sms[-_ ]?code|\botp\b/i.test(name || '') ||
+          /verification[-_ ]?code|phone[-_ ]?code|sms[-_ ]?code|\botp\b/i.test(el.id || '') ||
+          /enter (?:the )?(?:6-digit )?code|verification code/i.test(labelLower);
+        if (isOtpInput) {
+          return;
+        }
         const hasCalendar =
           inputType === 'date' ||
           Boolean(

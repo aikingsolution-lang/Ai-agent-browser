@@ -472,8 +472,21 @@ export class ApplicationEngine {
         }
       }
 
-      // 4. Progress to next step (Next, Review, or Submit)
-      const progressed = await this.clickNextOrSubmit(page);
+      // 4. Proactively inspect and heal any inline form errors before progressing
+      await this.inspectAndHealErrors(page, careerBrain);
+
+      // Progress to next step (Next, Review, or Submit)
+      let progressed = await this.clickNextOrSubmit(page);
+      if (!progressed) {
+        // Heal any freshly revealed validation errors and retry click
+        const healed = await this.inspectAndHealErrors(page, careerBrain);
+        if (healed > 0) {
+          logger.info(`[ApplicationEngine] Healed ${healed} validation errors. Retrying Next/Review...`);
+          await new Promise(r => setTimeout(r, 600));
+          progressed = await this.clickNextOrSubmit(page);
+        }
+      }
+
       if (!progressed) {
         const isDone = await this.checkSuccessState(page);
         if (isDone) return true;
@@ -487,6 +500,78 @@ export class ApplicationEngine {
     }
 
     return false; // Hit max steps without success
+  }
+
+  /**
+   * Universal DOM Error Inspector & Auto-Healer:
+   * Finds red warnings (e.g. "Enter a decimal number larger than 0.0"), strips characters,
+   * sets candidate's real experience digits, and dispatches full synthetic React events.
+   */
+  private async inspectAndHealErrors(page: Page, data: ICareerBrain): Promise<number> {
+    const yoe = String(data.yearsOfExperience ?? 1);
+    return page.evaluate((candidateYoe: string) => {
+      const modal = document.querySelector(
+        'div[role="dialog"][aria-modal="true"], div[data-test-modal], .jobs-easy-apply-modal',
+      );
+      if (!modal) return 0;
+
+      let healedCount = 0;
+
+      const triggerReactInput = (input: HTMLInputElement | HTMLTextAreaElement, value: string) => {
+        input.focus();
+        input.dispatchEvent(new Event('focus', { bubbles: true }));
+        const proto =
+          input instanceof HTMLTextAreaElement
+            ? window.HTMLTextAreaElement.prototype
+            : window.HTMLInputElement.prototype;
+        const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+        if (setter) setter.call(input, value);
+        else input.value = value;
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+        input.dispatchEvent(new Event('blur', { bubbles: true }));
+        healedCount++;
+      };
+
+      // 1. Detect all error banners and alerts inside the modal
+      const errorElements = Array.from(
+        modal.querySelectorAll(
+          '.artdeco-inline-feedback--error, [aria-invalid="true"], [role="alert"], [data-test-form-element-error-messages], p[class*="error" i]',
+        ),
+      );
+
+      for (const errEl of errorElements) {
+        const errText = (errEl.textContent || '').trim().toLowerCase();
+        if (!errText) continue;
+
+        const container =
+          errEl.closest('.jobs-easy-apply-form-section__grouping, .fb-dash-form-element, div') || errEl.parentElement;
+        const input = container?.querySelector<HTMLInputElement | HTMLTextAreaElement>('input, textarea');
+        if (input) {
+          const label = container?.querySelector('label');
+          const labelText = (label?.textContent || '').toLowerCase();
+
+          // Decimal / number validation error (e.g. "Enter a decimal number larger than 0.0")
+          if (
+            errText.includes('decimal') ||
+            errText.includes('number') ||
+            errText.includes('digit') ||
+            errText.includes('larger than') ||
+            errText.includes('valid number')
+          ) {
+            if (labelText.includes('total') || labelText.includes('experi')) {
+              triggerReactInput(input, candidateYoe);
+            } else {
+              const raw = input.value || '';
+              const cleaned = raw.replace(/[^0-9.]/g, '') || candidateYoe;
+              triggerReactInput(input, cleaned);
+            }
+          }
+        }
+      }
+
+      return healedCount;
+    }, yoe);
   }
 
   // ═════════════════════════════════════════════════════════════════════════════
@@ -779,7 +864,16 @@ export class ApplicationEngine {
     logger.info('[ApplicationEngine] Custom questions detected. Triggering Bedrock / Career Brain solver...');
 
     // 1. Scrape labels and inputs from current modal using LINKEDIN_INPUT_SELECTORS
-    const extracted = await page.evaluate(() => {
+    const extracted: {
+      questions: Array<{
+        questionId: string;
+        questionText: string;
+        questionType: string;
+        required: boolean;
+        options: string[];
+      }>;
+      formattedString: string;
+    } = await page.evaluate(() => {
       const modal = document.querySelector(
         'div[role="dialog"][aria-modal="true"], div[data-test-modal], .jobs-easy-apply-modal',
       );
@@ -893,6 +987,7 @@ export class ApplicationEngine {
         data.resumeText,
         goldenAnswersText,
         extracted.formattedString,
+        data,
       );
 
       if (bedrockResult && Array.isArray(bedrockResult.answers)) {
@@ -915,8 +1010,12 @@ export class ApplicationEngine {
     // Fallback: If Bedrock response was empty or LLM absent, use standard questionSolver
     if (answersToInject.length === 0) {
       const standardSolutions = await solveQuestions(
-        extracted.questions.map((q: IScreeningQuestion) => ({
-          ...q,
+        extracted.questions.map(q => ({
+          questionId: q.questionId,
+          questionText: q.questionText,
+          questionType: q.questionType as IScreeningQuestion['questionType'],
+          required: q.required,
+          options: q.options,
           userAnswer: null,
         })),
         data,
@@ -926,6 +1025,80 @@ export class ApplicationEngine {
       answersToInject = standardSolutions
         .filter(s => s.isConfident && Boolean(s.answer))
         .map(s => ({ fieldId: s.questionId, answer: s.answer }));
+    }
+
+    // Post-process & Sanitize:
+    // 1. Enforce candidate's real yearsOfExperience on total experience questions (never hallucinate 14 years)
+    // 2. Sanitize numeric/experience/salary answers: strip words like "years", "yrs", "inr" to pure numbers
+    // 3. Fallback answers for required fields like Current In-Hand Salary P/M and Expected CTC P/M
+    const yoe = String(data.yearsOfExperience ?? 1);
+    const rawCurrentCtc =
+      Number((data.currentCTC || data.salaryExpectation || '120000').replace(/[^0-9.]/g, '')) || 120000;
+    const rawExpectedCtc =
+      Number((data.expectedCTC || data.salaryExpectation || '500000').replace(/[^0-9.]/g, '')) || 500000;
+    const currentMonthly = String(Math.round(rawCurrentCtc / 12) || 10000);
+    const expectedMonthly = String(Math.round(rawExpectedCtc / 12) || 41666);
+
+    const questionMap = new Map(extracted.questions.map(q => [q.questionId, q]));
+
+    answersToInject = answersToInject.map(a => {
+      const q = questionMap.get(a.fieldId);
+      const qText = (q?.questionText || '').toLowerCase();
+      let ans = a.answer;
+
+      // Total experience detection (e.g. "Total year of Experiance?*")
+      if (
+        /\b(?:total|overall|all)\s*(?:years?|yrs?)?\s*(?:of)?\s*(?:work|professional)?\s*experi[ea]nce\b/i.test(
+          qText,
+        ) ||
+        /\btotal\s*experi[ea]nce\b/i.test(qText) ||
+        /\bexperi[ea]nce\s*in\s*years\b/i.test(qText) ||
+        /^(?:total\s*)?(?:work\s*)?experi[ea]nce/i.test(qText)
+      ) {
+        ans = yoe;
+      } else if (
+        /\byears?\b|\bexperi[ea]nce\b|\bhow many\b/i.test(qText) ||
+        /\b(?:ctc|salary|p\/m|in-hand)\b/i.test(qText)
+      ) {
+        // Strip non-numeric characters to ensure decimal number validation passes
+        const numMatch = ans.match(/([0-9]+(?:\.[0-9]+)?)/);
+        if (numMatch) {
+          ans = numMatch[1];
+        }
+      }
+
+      return { fieldId: a.fieldId, answer: ans };
+    });
+
+    // Auto-fill any missing required fields from CareerBrain
+    for (const q of extracted.questions) {
+      if (q.required && !answersToInject.some(a => a.fieldId === q.questionId)) {
+        const qText = q.questionText.toLowerCase();
+        let fallbackVal = '';
+
+        if (/\b(?:total|overall)?\s*experi[ea]nce\b|\byears?\b/i.test(qText)) {
+          fallbackVal = yoe;
+        } else if (/\bin[-\s]*hand\s*salary|\bcurrent\s*(?:ctc|salary).*(?:p\/?m|monthly|per\s*month)/i.test(qText)) {
+          fallbackVal = currentMonthly;
+        } else if (/\bcurrent\s*(?:ctc|salary)/i.test(qText)) {
+          fallbackVal = String(rawCurrentCtc);
+        } else if (/\bexpect.*(?:ctc|salary).*(?:p\/?m|monthly|per\s*month)|\bexpectation\s*ctc\s*p\/?m/i.test(qText)) {
+          fallbackVal = expectedMonthly;
+        } else if (/\bexpect.*(?:ctc|salary)/i.test(qText)) {
+          fallbackVal = String(rawExpectedCtc);
+        } else if (/\bnotice\s*period/i.test(qText)) {
+          fallbackVal = data.noticePeriod || 'Immediate';
+        } else if (q.options && q.options.length > 0) {
+          fallbackVal = q.options.find(o => /yes/i.test(o)) || q.options[0];
+        }
+
+        if (fallbackVal) {
+          logger.info(
+            `[ApplicationEngine] Auto-filling missing required field "${q.questionText}" -> "${fallbackVal}"`,
+          );
+          answersToInject.push({ fieldId: q.questionId, answer: fallbackVal });
+        }
+      }
     }
 
     // 3. Synthetic React event injection into DOM

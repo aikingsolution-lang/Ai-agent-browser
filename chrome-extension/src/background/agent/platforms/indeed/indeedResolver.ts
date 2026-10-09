@@ -370,14 +370,17 @@ function computeInitialAnswer(
     q.includes('experience do you have') ||
     q.includes('experience with') ||
     q.includes('worked with') ||
-    q.includes('working with')
+    q.includes('working with') ||
+    q.includes('total year') ||
+    q.includes('experiance') ||
+    q.includes('total experience')
   ) {
     const isGenericTotal =
-      /total\s+(?:years\s+of\s+)?(?:work\s+)?experience/i.test(q) ||
-      /overall\s+(?:years\s+of\s+)?(?:work\s+)?experience/i.test(q) ||
-      /years\s+of\s+(?:work|professional)\s+experience\s+do\s+you\s+have/i.test(q) ||
-      /how\s+many\s+years\s+of\s+(?:work|professional|total|overall)\s+experience/i.test(q) ||
-      /total\s+experience/i.test(q);
+      /\b(?:total|overall|all)\s*(?:years?|yrs?)?\s*(?:of)?\s*(?:work|professional)?\s*experi[ea]nce\b/i.test(q) ||
+      /\bhow\s*many\s*(?:years?|yrs?)\s*(?:of)?\s*(?:total|overall|work|professional)?\s*experi[ea]nce\b/i.test(q) ||
+      /\btotal\s*experi[ea]nce\b/i.test(q) ||
+      /\bexperi[ea]nce\s*in\s*years\b/i.test(q) ||
+      /^(?:total\s*)?(?:work\s*)?experi[ea]nce\s*(?:\(in\s*years?\))?[:?*]?$/i.test(q);
 
     if (isGenericTotal) {
       const yoe = String(careerBrain.yearsOfExperience ?? 1);

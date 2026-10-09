@@ -93,10 +93,19 @@ export async function inspectAndHealFormErrors(page: any, containerSelector?: st
             continue;
           }
 
-          // 2. Numeric required error (e.g. "please enter a number")
-          if (errL.includes('number') || errL.includes('numeric') || errL.includes('digits')) {
-            const raw = (inputEl as HTMLInputElement).value || '3';
-            const cleanNum = raw.replace(/[^0-9.]/g, '') || '3';
+          // 2. Numeric required error (e.g. "Enter a decimal number larger than 0.0" or "please enter a number")
+          if (
+            errL.includes('decimal') ||
+            errL.includes('number') ||
+            errL.includes('numeric') ||
+            errL.includes('digits') ||
+            errL.includes('larger than')
+          ) {
+            const raw = (inputEl as HTMLInputElement).value || '1';
+            let cleanNum = raw.replace(/[^0-9.]/g, '') || '1';
+            if (errL.includes('larger than 0') && (cleanNum === '0' || cleanNum === '0.0')) {
+              cleanNum = '1';
+            }
             (inputEl as HTMLInputElement).value = cleanNum;
             inputEl.dispatchEvent(new Event('input', { bubbles: true }));
             inputEl.dispatchEvent(new Event('change', { bubbles: true }));

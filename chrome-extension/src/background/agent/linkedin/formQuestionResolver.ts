@@ -284,13 +284,15 @@ export function isSkillExperienceYearsQuestion(field: FormFieldDescriptor): {
 
   // Must NOT be generic total experience (without specific skill attribution)
   const isGenericTotalExperience =
-    /how many years of (?:total\s*|overall\s*|professional\s*|relevant\s*)?(?:work\s*)?experience\b/i.test(
+    /\b(?:total|overall|all)\s*(?:years?|yrs?)?\s*(?:of)?\s*(?:work|professional)?\s*experi[ea]nce\b/i.test(
       labelLower,
     ) ||
-    /total\s+(?:years\s+of\s+)?(?:work\s+)?experience\b/i.test(labelLower) ||
-    /overall\s+(?:years\s+of\s+)?(?:work\s+)?experience\b/i.test(labelLower) ||
-    /years\s+of\s+(?:work|professional)\s+experience\s+do\s+you\s+have\b/i.test(labelLower) ||
-    /^(?:total\s*)?(?:work\s*)?experience\s*(?:\(in\s*years?\))?[:?]?$/i.test(labelLower);
+    /\bhow\s*many\s*(?:years?|yrs?)\s*(?:of)?\s*(?:total|overall|work|professional)?\s*experi[ea]nce\b/i.test(
+      labelLower,
+    ) ||
+    /\btotal\s*experi[ea]nce\b/i.test(labelLower) ||
+    /\bexperi[ea]nce\s*in\s*years\b/i.test(labelLower) ||
+    /^(?:total\s*)?(?:work\s*)?experi[ea]nce\s*(?:\(in\s*years?\))?[:?*]?$/i.test(labelLower);
 
   if (isGenericTotalExperience) {
     const hasSpecificSkillAttribution =
@@ -988,9 +990,12 @@ export function adaptAnswerToFieldFormat(
   }
 
   // 3. Work Experience / Years Questions
-  const isExpQuestion = /how many years|years of|experience with|years with/i.test(labelLower);
-  if (isExpQuestion && isNumericField) {
-    const expMatch = answer.match(/^(\d+(?:\.\d+)?)\s*(?:\+)?\s*(?:years?|yrs?)?$/i);
+  const isExpQuestion =
+    /how many years|years? of|experi[ea]nce with|years? with|total\s*(?:year|years)?|overall\s*experi[ea]nce|experi[ea]nce/i.test(
+      labelLower,
+    );
+  if (isExpQuestion) {
+    const expMatch = answer.match(/(\d+(?:\.\d+)?)/);
     if (expMatch) {
       const requiresWhole = /whole\s*number/i.test(combinedContext);
       const num = parseFloat(expMatch[1]);
@@ -1129,13 +1134,15 @@ export function matchRuleBased(
 
   // 1b. Generic Total Work Experience (NOT tied to any specific skill or technology)
   const isGenericTotalExperience =
-    /how many years of (?:total\s*|overall\s*|professional\s*|relevant\s*)?(?:work\s*)?experience\b/i.test(
+    /\b(?:total|overall|all)\s*(?:years?|yrs?)?\s*(?:of)?\s*(?:work|professional)?\s*experi[ea]nce\b/i.test(
       labelLower,
     ) ||
-    /total\s+(?:years\s+of\s+)?(?:work\s+)?experience\b/i.test(labelLower) ||
-    /overall\s+(?:years\s+of\s+)?(?:work\s+)?experience\b/i.test(labelLower) ||
-    /years\s+of\s+(?:work|professional)\s+experience\s+do\s+you\s+have\b/i.test(labelLower) ||
-    /^(?:total\s*)?(?:work\s*)?experience\s*(?:\(in\s*years?\))?[:?]?$/i.test(labelLower);
+    /\bhow\s*many\s*(?:years?|yrs?)\s*(?:of)?\s*(?:total|overall|work|professional)?\s*experi[ea]nce\b/i.test(
+      labelLower,
+    ) ||
+    /\btotal\s*experi[ea]nce\b/i.test(labelLower) ||
+    /\bexperi[ea]nce\s*in\s*years\b/i.test(labelLower) ||
+    /^(?:total\s*)?(?:work\s*)?experi[ea]nce\s*(?:\(in\s*years?\))?[:?*]?$/i.test(labelLower);
 
   if (isGenericTotalExperience) {
     // Distinguishing signal: check whether a specific technology/tool name or skill-attribution pattern appears
@@ -1154,7 +1161,7 @@ export function matchRuleBased(
     });
 
     if (!hasSkillAttribution && !mentionsCandidateSkill) {
-      const rawYoe = careerBrain.yearsOfExperience ?? 0;
+      const rawYoe = careerBrain.yearsOfExperience ?? 1;
       const formattedYoe =
         /whole\s*number/i.test(labelLower + ' ' + (field.hintText || '') + ' ' + (field.placeholder || '')) ||
         Number.isInteger(rawYoe)
