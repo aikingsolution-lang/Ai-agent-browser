@@ -341,9 +341,31 @@ export class NaukriAdapter implements IPlatformAdapter {
         }
 
         // Check if questionnaire/chatbot container is open
-        const modal = document.querySelector(selectors.MODAL_CONTAINER.join(', '));
-        if (modal && (modal as HTMLElement).offsetParent !== null) {
-          return { type: 'modal_open' };
+        for (const sel of selectors.MODAL_CONTAINER) {
+          const els = Array.from(document.querySelectorAll(sel)) as HTMLElement[];
+          for (const el of els) {
+            if (el.offsetParent !== null || window.getComputedStyle(el).display !== 'none') {
+              return { type: 'modal_open' };
+            }
+          }
+        }
+
+        // Fallback: check fixed/absolute containers with questionnaire content
+        const allCandidates = Array.from(document.querySelectorAll('div, form, section, aside')) as HTMLElement[];
+        for (const el of allCandidates) {
+          const style = window.getComputedStyle(el);
+          if ((style.position === 'fixed' || style.position === 'absolute') && style.display !== 'none') {
+            const text = (el.innerText || '').toLowerCase();
+            if (
+              (text.includes('current ctc') ||
+                text.includes('skip this question') ||
+                text.includes('in lacs') ||
+                text.includes('notice period')) &&
+              el.querySelector('input, select, textarea, button')
+            ) {
+              return { type: 'modal_open' };
+            }
+          }
         }
 
         return { type: 'unknown' };
@@ -366,18 +388,51 @@ export class NaukriAdapter implements IPlatformAdapter {
         return { status: 'failed', reason: fillResult.reason || 'Could not complete questionnaire.' };
       }
 
-      // If nothing changed, wait an extra 2s and re-verify success banner
+      // If nothing changed immediately, wait an extra 2s and re-verify
       await new Promise(r => setTimeout(r, 2000));
-      const recheckSuccess = await puppeteerPage.evaluate((selectors: typeof NAUKRI_SELECTORS) => {
+      const secondaryCheck = await puppeteerPage.evaluate((selectors: typeof NAUKRI_SELECTORS) => {
         const bodyText = (document.body.innerText || '').toLowerCase();
-        return selectors.SUCCESS_INDICATORS.some(ind => bodyText.includes(ind));
+        const success = selectors.SUCCESS_INDICATORS.some(ind => bodyText.includes(ind));
+        if (success) {
+          return { type: 'success' };
+        }
+
+        // Check if modal opened late
+        for (const sel of selectors.MODAL_CONTAINER) {
+          const els = Array.from(document.querySelectorAll(sel)) as HTMLElement[];
+          for (const el of els) {
+            if (el.offsetParent !== null || window.getComputedStyle(el).display !== 'none') {
+              return { type: 'modal_open' };
+            }
+          }
+        }
+
+        // Check if apply button text now says "applied"
+        const applyBtns = Array.from(document.querySelectorAll('button, a'));
+        for (const b of applyBtns) {
+          const bt = (b.textContent || '').trim().toLowerCase();
+          if (selectors.ALREADY_APPLIED_INDICATORS.some(ind => bt.includes(ind))) {
+            return { type: 'success' };
+          }
+        }
+
+        return { type: 'unknown' };
       }, NAUKRI_SELECTORS);
 
-      if (recheckSuccess) {
+      if (secondaryCheck.type === 'success') {
         return { status: 'applied', creditsUsed: 1 };
       }
 
-      return { status: 'applied', creditsUsed: 1 };
+      if (secondaryCheck.type === 'modal_open') {
+        logger.info('[NaukriAdapter] Questionnaire or Chatbot opened on secondary check. Solving questions...');
+        const fillResult = await this.handleNaukriQuestionnaire(puppeteerPage, careerBrain, context);
+        if (fillResult.success) {
+          return { status: 'applied', creditsUsed: 1, modalOpened: true };
+        }
+        return { status: 'failed', reason: fillResult.reason || 'Could not complete questionnaire.' };
+      }
+
+      return { status: 'failed', reason: 'Application could not be confirmed after clicking apply button.' };
     } catch (err: any) {
       logger.error('[NaukriAdapter] Error applying to job:', err);
       return { status: 'failed', reason: err?.message || 'Unexpected application error' };
@@ -390,161 +445,448 @@ export class NaukriAdapter implements IPlatformAdapter {
     context?: IPlatformExecutionContext,
   ): Promise<{ success: boolean; reason?: string }> {
     try {
-      // Find all input and select fields in modal
-      const fields = await puppeteerPage.evaluate(() => {
-        const modal = document.querySelector(
-          'div.apply-message-container, div.chatbot-container, div.apply-modal, div.layer-wrap',
-        );
-        if (!modal) return [];
+      const MAX_STEPS = 6;
+      let lastQuestionHandled = '';
 
-        const inputs = Array.from(modal.querySelectorAll('input, select, textarea'));
-        return inputs.map((el, idx) => {
-          const labelEl = el.closest('label') || el.parentElement?.querySelector('label');
-          const placeholder = el.getAttribute('placeholder') || '';
-          const name = el.getAttribute('name') || '';
-          const labelText = (labelEl?.textContent || placeholder || name || '').trim();
+      for (let step = 1; step <= MAX_STEPS; step++) {
+        logger.info(`[NaukriAdapter] Handling questionnaire step ${step}/${MAX_STEPS}...`);
 
-          const tagName = el.tagName.toLowerCase();
-          let fieldType = 'text';
-          if (tagName === 'select') fieldType = 'select';
-          else if (el.getAttribute('type') === 'radio') fieldType = 'radio';
-          else if (el.getAttribute('type') === 'checkbox') fieldType = 'checkbox';
-          else if (el.getAttribute('type') === 'number') fieldType = 'number';
-
-          const options: string[] = [];
-          if (tagName === 'select') {
-            const optEls = Array.from(el.querySelectorAll('option'));
-            for (const o of optEls) {
-              const t = (o.textContent || '').trim();
-              if (t && !t.toLowerCase().includes('select')) options.push(t);
-            }
+        // 1. Check if application is already completed or modal is closed
+        const status = await puppeteerPage.evaluate((selectors: typeof NAUKRI_SELECTORS) => {
+          const bodyText = (document.body.innerText || '').toLowerCase();
+          if (selectors.SUCCESS_INDICATORS.some(ind => bodyText.includes(ind))) {
+            return { state: 'success' };
           }
 
-          return {
-            index: idx,
-            labelText,
-            fieldType,
-            options,
-          };
-        });
-      });
-
-      logger.info(`[NaukriAdapter] Detected ${fields.length} questionnaire fields.`);
-
-      for (const f of fields) {
-        let answer = resolveNaukriQuestion(f.labelText, f.fieldType as any, f.options, careerBrain);
-
-        if (answer.confidence < 0.9) {
-          try {
-            const llm = context?.scopedLLM || (await getActiveChatModel(context?.runId)) || undefined;
-            if (llm) {
-              logger.info(`[NaukriAdapter] 🧠 Asking LLM to resolve field: "${f.labelText}"`);
-              const llmFieldType =
-                f.fieldType === 'select'
-                  ? 'dropdown'
-                  : ['text', 'number', 'radio', 'checkbox'].includes(f.fieldType)
-                    ? (f.fieldType as 'text' | 'number' | 'radio' | 'checkbox')
-                    : 'text';
-              const llmRes = await solveQuestionAutonomousWithLLM(
-                { label: f.labelText, fieldType: llmFieldType, options: f.options },
-                careerBrain,
-                llm,
-              );
-              if (llmRes.success && llmRes.answer) {
-                answer = { value: llmRes.answer, confidence: 0.99, source: 'profile' };
-                logger.info(`[NaukriAdapter] ✅ LLM resolved "${f.labelText}" -> "${answer.value}"`);
+          // Check if active modal/drawer is visible
+          let modal: HTMLElement | null = null;
+          for (const sel of selectors.MODAL_CONTAINER) {
+            const els = Array.from(document.querySelectorAll(sel)) as HTMLElement[];
+            for (const el of els) {
+              if (el.offsetParent !== null || window.getComputedStyle(el).display !== 'none') {
+                modal = el;
+                break;
               }
             }
-          } catch (err) {
-            logger.warning(`[NaukriAdapter] LLM field resolution fallback error:`, err);
+            if (modal) break;
           }
-        }
 
-        logger.info(
-          `[NaukriAdapter] Field "${f.labelText}" -> Answering: "${answer.value}" (source: ${answer.source})`,
-        );
-
-        await puppeteerPage.evaluate(
-          (idx: number, val: string, fType: string) => {
-            const modal = document.querySelector(
-              'div.apply-message-container, div.chatbot-container, div.apply-modal, div.layer-wrap',
-            );
-            if (!modal) return;
-            const inputs = Array.from(modal.querySelectorAll('input, select, textarea'));
-            const el = inputs[idx] as any;
-            if (!el) return;
-
-            if (fType === 'select') {
-              let matchedIdx = -1;
-              const vLower = val.toLowerCase().trim();
-              for (let i = 0; i < el.options.length; i++) {
-                const optText = el.options[i].text.toLowerCase().trim();
-                const optVal = (el.options[i].value || '').toLowerCase().trim();
-                if (optText === vLower || optVal === vLower) {
-                  matchedIdx = i;
+          if (!modal) {
+            // Check fallback fixed/absolute candidate
+            const allCandidates = Array.from(document.querySelectorAll('div, form, section, aside')) as HTMLElement[];
+            for (const el of allCandidates) {
+              const style = window.getComputedStyle(el);
+              if ((style.position === 'fixed' || style.position === 'absolute') && style.display !== 'none') {
+                const text = (el.innerText || '').toLowerCase();
+                if (
+                  (text.includes('current ctc') ||
+                    text.includes('skip this question') ||
+                    text.includes('in lacs') ||
+                    text.includes('notice period')) &&
+                  el.querySelector('input, select, textarea, button')
+                ) {
+                  modal = el;
                   break;
                 }
-                if (matchedIdx === -1 && (optText.includes(vLower) || vLower.includes(optText))) {
-                  matchedIdx = i;
+              }
+            }
+          }
+
+          if (!modal) {
+            return { state: 'closed' };
+          }
+
+          return { state: 'modal_open' };
+        }, NAUKRI_SELECTORS);
+
+        if (status.state === 'success') {
+          logger.info(`[NaukriAdapter] Questionnaire completed successfully (success indicator found).`);
+          return { success: true };
+        }
+
+        if (status.state === 'closed') {
+          if (step > 1) {
+            logger.info(`[NaukriAdapter] Modal closed after step ${step - 1}. Application presumed complete.`);
+            return { success: true };
+          }
+          return { success: true };
+        }
+
+        // 2. Extract fields and skip button availability
+        const stepData = await puppeteerPage.evaluate((selectors: typeof NAUKRI_SELECTORS) => {
+          let modal: HTMLElement | null = null;
+          for (const sel of selectors.MODAL_CONTAINER) {
+            const els = Array.from(document.querySelectorAll(sel)) as HTMLElement[];
+            for (const el of els) {
+              if (el.offsetParent !== null || window.getComputedStyle(el).display !== 'none') {
+                modal = el;
+                break;
+              }
+            }
+            if (modal) break;
+          }
+
+          if (!modal) {
+            const allCandidates = Array.from(document.querySelectorAll('div, form, section, aside')) as HTMLElement[];
+            for (const el of allCandidates) {
+              const style = window.getComputedStyle(el);
+              if ((style.position === 'fixed' || style.position === 'absolute') && style.display !== 'none') {
+                const text = (el.innerText || '').toLowerCase();
+                if (
+                  (text.includes('current ctc') ||
+                    text.includes('skip this question') ||
+                    text.includes('in lacs') ||
+                    text.includes('notice period')) &&
+                  el.querySelector('input, select, textarea, button')
+                ) {
+                  modal = el;
+                  break;
                 }
               }
-              if (matchedIdx !== -1) {
-                el.selectedIndex = matchedIdx;
-                el.dispatchEvent(new Event('change', { bubbles: true }));
-              }
-            } else if (fType === 'radio' || fType === 'checkbox') {
-              el.checked = true;
-              el.dispatchEvent(new Event('change', { bubbles: true }));
-            } else {
-              el.value = val;
-              el.dispatchEvent(new Event('input', { bubbles: true }));
-              el.dispatchEvent(new Event('change', { bubbles: true }));
             }
-          },
-          f.index,
-          answer.value,
-          f.fieldType,
+          }
+
+          if (!modal) return { fields: [], hasSkipBtn: false, modalHeading: '' };
+
+          // Check for "Skip this question" button
+          let hasSkipBtn = false;
+          const allClickables = Array.from(modal.querySelectorAll('button, a, span, div')) as HTMLElement[];
+          for (const c of allClickables) {
+            const ct = (c.textContent || '').trim().toLowerCase();
+            if (ct.includes('skip this question') || ct === 'skip question' || ct === 'skip') {
+              hasSkipBtn = true;
+              break;
+            }
+          }
+
+          // Extract modal main heading
+          const headEl = modal.querySelector(
+            'h1, h2, h3, h4, h5, h6, [class*="title" i], [class*="header" i], [class*="question" i]',
+          );
+          const modalHeading = (headEl?.textContent || '').trim();
+
+          const inputs = Array.from(
+            modal.querySelectorAll('input:not([type="hidden"]), select, textarea'),
+          ) as HTMLElement[];
+          const fields = inputs.map((el, idx) => {
+            const placeholder = el.getAttribute('placeholder') || '';
+            const name = el.getAttribute('name') || '';
+
+            // Robust question text retrieval
+            let labelText = '';
+            if (el.getAttribute('aria-label')) {
+              labelText = el.getAttribute('aria-label')!.trim();
+            } else if (el.id) {
+              const lbl = modal!.querySelector(`label[for="${el.id}"]`);
+              if (lbl?.textContent?.trim()) labelText = lbl.textContent.trim();
+            }
+            if (!labelText) {
+              const parentLabel = el.closest('label');
+              if (parentLabel?.textContent?.trim()) labelText = parentLabel.textContent.trim();
+            }
+            if (!labelText) {
+              let parent = el.parentElement;
+              while (parent && parent !== modal && !labelText) {
+                const qEl = parent.querySelector(
+                  'h1, h2, h3, h4, h5, h6, [class*="title" i], [class*="label" i], [class*="question" i], [class*="head" i]',
+                );
+                if (qEl && qEl !== el && qEl.textContent?.trim()) {
+                  labelText = qEl.textContent.trim();
+                  break;
+                }
+                parent = parent.parentElement;
+              }
+            }
+            if (!labelText) {
+              labelText = modalHeading || placeholder || name || '';
+            }
+
+            const tagName = el.tagName.toLowerCase();
+            let fieldType = 'text';
+            if (tagName === 'select') fieldType = 'select';
+            else if (el.getAttribute('type') === 'radio') fieldType = 'radio';
+            else if (el.getAttribute('type') === 'checkbox') fieldType = 'checkbox';
+            else if (el.getAttribute('type') === 'number') fieldType = 'number';
+
+            const options: string[] = [];
+            if (tagName === 'select') {
+              const optEls = Array.from(el.querySelectorAll('option'));
+              for (const o of optEls) {
+                const t = (o.textContent || '').trim();
+                if (t && !t.toLowerCase().includes('select')) options.push(t);
+              }
+            }
+
+            const currentValue = (el as HTMLInputElement).value || '';
+
+            return {
+              index: idx,
+              labelText,
+              placeholder,
+              fieldType,
+              options,
+              currentValue,
+            };
+          });
+
+          return { fields, hasSkipBtn, modalHeading };
+        }, NAUKRI_SELECTORS);
+
+        logger.info(
+          `[NaukriAdapter] Step ${step}: Found ${stepData.fields.length} fields. Skip button present: ${stepData.hasSkipBtn}`,
         );
 
-        await new Promise(r => setTimeout(r, 400));
-      }
+        let skippedField = false;
 
-      // Check and self-heal any validation errors before submitting
-      const preHealing = await inspectAndHealFormErrors({ puppeteerPage });
-      if (preHealing.correctedCount > 0) {
-        logger.info(`[NaukriAdapter] Self-healed ${preHealing.correctedCount} validation errors before submit.`);
-      }
+        // 3. Process fields
+        for (const f of stepData.fields) {
+          lastQuestionHandled = f.labelText;
+          let answer = resolveNaukriQuestion(f.labelText, f.fieldType as any, f.options, careerBrain, f.placeholder);
 
-      // Click submit in modal
-      await puppeteerPage.evaluate((selectors: typeof NAUKRI_SELECTORS) => {
-        for (const sel of selectors.SUBMIT_BUTTON) {
-          const btn = document.querySelector(sel) as HTMLElement | null;
-          if (btn && btn.offsetParent !== null) {
-            btn.click();
-            return;
-          }
-        }
-      }, NAUKRI_SELECTORS);
-
-      await new Promise(r => setTimeout(r, 2000));
-
-      // Check if modal is still open due to an error, and self-heal
-      const postHealing = await inspectAndHealFormErrors({ puppeteerPage });
-      if (postHealing.hasErrors && postHealing.correctedCount > 0) {
-        logger.info(`[NaukriAdapter] Post-submit error detected. Re-submitting after self-healing...`);
-        await puppeteerPage.evaluate((selectors: typeof NAUKRI_SELECTORS) => {
-          for (const sel of selectors.SUBMIT_BUTTON) {
-            const btn = document.querySelector(sel) as HTMLElement | null;
-            if (btn && btn.offsetParent !== null) {
-              btn.click();
-              return;
+          if (answer.confidence < 0.9 && (!answer.value || answer.confidence <= 0.4)) {
+            try {
+              const llm = context?.scopedLLM || (await getActiveChatModel(context?.runId)) || undefined;
+              if (llm) {
+                logger.info(`[NaukriAdapter] 🧠 Asking LLM to resolve field: "${f.labelText}"`);
+                const llmFieldType =
+                  f.fieldType === 'select'
+                    ? 'dropdown'
+                    : ['text', 'number', 'radio', 'checkbox'].includes(f.fieldType)
+                      ? (f.fieldType as 'text' | 'number' | 'radio' | 'checkbox')
+                      : 'text';
+                const llmRes = await solveQuestionAutonomousWithLLM(
+                  { label: f.labelText, fieldType: llmFieldType, options: f.options },
+                  careerBrain,
+                  llm,
+                );
+                if (llmRes.success && llmRes.answer) {
+                  answer = { value: llmRes.answer, confidence: 0.99, source: 'profile' };
+                  logger.info(`[NaukriAdapter] ✅ LLM resolved "${f.labelText}" -> "${answer.value}"`);
+                }
+              }
+            } catch (err) {
+              logger.warning(`[NaukriAdapter] LLM field resolution fallback error:`, err);
             }
           }
+
+          // If answer is still empty, and modal has "Skip this question", click Skip!
+          if (!answer.value && stepData.hasSkipBtn) {
+            logger.info(
+              `[NaukriAdapter] Field "${f.labelText}" has no resolved value. Clicking "Skip this question"...`,
+            );
+            await puppeteerPage.evaluate((selectors: typeof NAUKRI_SELECTORS) => {
+              let modal: HTMLElement | null = null;
+              for (const sel of selectors.MODAL_CONTAINER) {
+                const el = document.querySelector(sel) as HTMLElement | null;
+                if (el && (el.offsetParent !== null || window.getComputedStyle(el).display !== 'none')) {
+                  modal = el;
+                  break;
+                }
+              }
+              const container = modal || document.body;
+              const skipEls = Array.from(container.querySelectorAll('button, a, span, div')) as HTMLElement[];
+              for (const s of skipEls) {
+                const st = (s.textContent || '').trim().toLowerCase();
+                if (st.includes('skip this question') || st === 'skip question' || st === 'skip') {
+                  s.click();
+                  return;
+                }
+              }
+            }, NAUKRI_SELECTORS);
+
+            skippedField = true;
+            await new Promise(r => setTimeout(r, 2000));
+            break; // Skip advances to next question/step
+          }
+
+          logger.info(
+            `[NaukriAdapter] Field "${f.labelText}" -> Answering: "${answer.value}" (source: ${answer.source})`,
+          );
+
+          // Fill into DOM
+          await puppeteerPage.evaluate(
+            (idx: number, val: string, fType: string, selectors: typeof NAUKRI_SELECTORS) => {
+              let modal: HTMLElement | null = null;
+              for (const sel of selectors.MODAL_CONTAINER) {
+                const el = document.querySelector(sel) as HTMLElement | null;
+                if (el && (el.offsetParent !== null || window.getComputedStyle(el).display !== 'none')) {
+                  modal = el;
+                  break;
+                }
+              }
+              if (!modal) modal = document.body;
+
+              const inputs = Array.from(
+                modal.querySelectorAll('input:not([type="hidden"]), select, textarea'),
+              ) as HTMLElement[];
+              const el = inputs[idx] as any;
+              if (!el) return;
+
+              el.focus?.();
+
+              if (fType === 'select') {
+                let matchedIdx = -1;
+                const vLower = val.toLowerCase().trim();
+                for (let i = 0; i < el.options.length; i++) {
+                  const optText = el.options[i].text.toLowerCase().trim();
+                  const optVal = (el.options[i].value || '').toLowerCase().trim();
+                  if (optText === vLower || optVal === vLower) {
+                    matchedIdx = i;
+                    break;
+                  }
+                  if (matchedIdx === -1 && (optText.includes(vLower) || vLower.includes(optText))) {
+                    matchedIdx = i;
+                  }
+                }
+                if (matchedIdx !== -1) {
+                  el.selectedIndex = matchedIdx;
+                  el.dispatchEvent(new Event('change', { bubbles: true }));
+                }
+              } else if (fType === 'radio' || fType === 'checkbox') {
+                el.checked = true;
+                el.dispatchEvent(new Event('click', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+              } else {
+                // Use native setter for React / modern web frameworks
+                const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+                if (nativeSetter) {
+                  nativeSetter.call(el, val);
+                } else {
+                  el.value = val;
+                }
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+                el.dispatchEvent(new Event('blur', { bubbles: true }));
+              }
+            },
+            f.index,
+            answer.value,
+            f.fieldType,
+            NAUKRI_SELECTORS,
+          );
+
+          await new Promise(r => setTimeout(r, 400));
+        }
+
+        if (skippedField) {
+          // Skip already dispatched action, continue to next step
+          continue;
+        }
+
+        // 4. Heal any validation errors before submitting
+        const preHealing = await inspectAndHealFormErrors({ puppeteerPage });
+        if (preHealing.correctedCount > 0) {
+          logger.info(`[NaukriAdapter] Self-healed ${preHealing.correctedCount} validation errors before submit.`);
+        }
+
+        // 5. Click Save / Submit / Next button (or fallback to Skip if disabled)
+        const submitAction = await puppeteerPage.evaluate((selectors: typeof NAUKRI_SELECTORS) => {
+          let modal: HTMLElement | null = null;
+          for (const sel of selectors.MODAL_CONTAINER) {
+            const el = document.querySelector(sel) as HTMLElement | null;
+            if (el && (el.offsetParent !== null || window.getComputedStyle(el).display !== 'none')) {
+              modal = el;
+              break;
+            }
+          }
+          if (!modal) modal = document.body;
+
+          // Find action button
+          let actionBtn: HTMLElement | null = null;
+          for (const sel of selectors.SUBMIT_BUTTON) {
+            const btn = modal.querySelector(sel) as HTMLElement | null;
+            if (btn && btn.offsetParent !== null) {
+              actionBtn = btn;
+              break;
+            }
+          }
+
+          if (!actionBtn) {
+            const allBtns = Array.from(modal.querySelectorAll('button, a')) as HTMLElement[];
+            for (const b of allBtns) {
+              const t = (b.textContent || '').trim().toLowerCase();
+              if (
+                t === 'save' ||
+                t === 'save & next' ||
+                t === 'save and next' ||
+                t === 'next' ||
+                t === 'submit' ||
+                t === 'apply' ||
+                t === 'continue'
+              ) {
+                actionBtn = b;
+                break;
+              }
+            }
+          }
+
+          const isBtnDisabled =
+            actionBtn &&
+            ((actionBtn as HTMLButtonElement).disabled ||
+              actionBtn.classList.contains('disabled') ||
+              actionBtn.getAttribute('aria-disabled') === 'true');
+
+          // If action button is disabled or missing, check if "Skip this question" is available
+          if (!actionBtn || isBtnDisabled) {
+            const skipEls = Array.from(modal.querySelectorAll('button, a, span, div')) as HTMLElement[];
+            for (const s of skipEls) {
+              const st = (s.textContent || '').trim().toLowerCase();
+              if (st.includes('skip this question') || st === 'skip question' || st === 'skip') {
+                s.click();
+                return { clicked: true, action: 'skip_fallback' };
+              }
+            }
+          }
+
+          if (actionBtn && !isBtnDisabled) {
+            actionBtn.click();
+            return { clicked: true, action: 'save' };
+          }
+
+          return { clicked: false, reason: 'button_disabled_no_skip' };
         }, NAUKRI_SELECTORS);
+
+        logger.info(`[NaukriAdapter] Step ${step} submit result: ${JSON.stringify(submitAction)}`);
+
         await new Promise(r => setTimeout(r, 2000));
+
+        // Check if modal has closed or success appeared
+        const postSubmitCheck = await puppeteerPage.evaluate((selectors: typeof NAUKRI_SELECTORS) => {
+          const bodyText = (document.body.innerText || '').toLowerCase();
+          const hasSuccess = selectors.SUCCESS_INDICATORS.some(ind => bodyText.includes(ind));
+          if (hasSuccess) return { finished: true };
+
+          let modalOpen = false;
+          for (const sel of selectors.MODAL_CONTAINER) {
+            const el = document.querySelector(sel) as HTMLElement | null;
+            if (el && (el.offsetParent !== null || window.getComputedStyle(el).display !== 'none')) {
+              modalOpen = true;
+              break;
+            }
+          }
+          return { finished: !modalOpen };
+        }, NAUKRI_SELECTORS);
+
+        if (postSubmitCheck.finished) {
+          logger.info(`[NaukriAdapter] Application finished after step ${step}.`);
+          return { success: true };
+        }
       }
 
-      return { success: true };
+      // Check final state after loop
+      const finalCheck = await puppeteerPage.evaluate((selectors: typeof NAUKRI_SELECTORS) => {
+        const bodyText = (document.body.innerText || '').toLowerCase();
+        return selectors.SUCCESS_INDICATORS.some(ind => bodyText.includes(ind));
+      }, NAUKRI_SELECTORS);
+
+      if (finalCheck) {
+        return { success: true };
+      }
+
+      return {
+        success: false,
+        reason: `Questionnaire remained open after maximum steps. Last question: "${lastQuestionHandled}"`,
+      };
     } catch (err: any) {
       logger.warning('[NaukriAdapter] Failed filling questionnaire:', err);
       return { success: false, reason: err.message };

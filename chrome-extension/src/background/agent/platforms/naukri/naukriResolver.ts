@@ -12,14 +12,53 @@ export interface INaukriAnswerResult {
  */
 export function resolveNaukriQuestion(
   questionText: string,
-  fieldType: 'text' | 'number' | 'radio' | 'dropdown' | 'select',
+  fieldType: 'text' | 'number' | 'radio' | 'dropdown' | 'select' | 'checkbox',
   options: string[] = [],
   careerBrain: ICareerBrain,
+  placeholder: string = '',
 ): INaukriAnswerResult {
+  const q = questionText.toLowerCase().trim();
+  const p = placeholder.toLowerCase().trim();
+  const combined = `${q} ${p}`.trim();
+
+  const isLakhsPrompt =
+    combined.includes('in lac') ||
+    combined.includes('in lakh') ||
+    combined.includes('lacs per annum') ||
+    combined.includes('lakhs per annum') ||
+    combined.includes('lpa') ||
+    combined.includes('lakhs') ||
+    combined.includes('lacs');
+
   // 1. High-speed semantic matcher
   const semantic = matchQuestionSemantically(questionText, careerBrain);
   if (semantic && semantic.confidence >= 0.88 && semantic.matchedAnswer) {
     let finalVal = semantic.matchedAnswer;
+    if (isLakhsPrompt) {
+      const numeric = Number(finalVal.replace(/[^0-9.]/g, ''));
+      if (numeric >= 1000) {
+        finalVal = String(Number((numeric / 100000).toFixed(2))).replace(/\.00$/, '');
+      } else if (numeric > 0) {
+        finalVal = String(numeric);
+      }
+    }
+    const isDaysPrompt =
+      fieldType === 'number' ||
+      combined.includes('in days') ||
+      combined.includes('(days)') ||
+      combined.includes('days');
+
+    if (
+      isDaysPrompt &&
+      (combined.includes('notice') || combined.includes('joining') || combined.includes('availability'))
+    ) {
+      const num = finalVal.replace(/[^0-9]/g, '');
+      if (num) {
+        finalVal = num;
+      } else if (finalVal.toLowerCase().includes('immediate')) {
+        finalVal = '0';
+      }
+    }
     if (options.length > 0) {
       const aligned = alignValueToOptions(finalVal, options, questionText);
       if (aligned) finalVal = aligned.matchedOption;
@@ -31,11 +70,25 @@ export function resolveNaukriQuestion(
     };
   }
 
-  const q = questionText.toLowerCase().trim();
-
   // 1. Notice Period
-  if (q.includes('notice') || q.includes('joining') || q.includes('how soon') || q.includes('availability')) {
+  if (
+    combined.includes('notice') ||
+    combined.includes('joining') ||
+    combined.includes('how soon') ||
+    combined.includes('availability')
+  ) {
     const candidateNotice = (careerBrain.noticePeriod || 'Immediate').toLowerCase();
+    const isDaysRequest =
+      fieldType === 'number' ||
+      combined.includes('in days') ||
+      combined.includes('(days)') ||
+      combined.includes('days');
+
+    let numericDays = '0';
+    if (candidateNotice.includes('15')) numericDays = '15';
+    else if (candidateNotice.includes('30') || candidateNotice.includes('1 month')) numericDays = '30';
+    else if (candidateNotice.includes('60') || candidateNotice.includes('2 month')) numericDays = '60';
+    else if (candidateNotice.includes('90') || candidateNotice.includes('3 month')) numericDays = '90';
 
     if (options.length > 0) {
       // Find matching option
@@ -75,36 +128,95 @@ export function resolveNaukriQuestion(
       return { value: bestMatch, confidence: 0.95, source: 'profile' };
     }
 
+    if (isDaysRequest) {
+      return { value: numericDays, confidence: 0.95, source: 'profile' };
+    }
+
     return { value: careerBrain.noticePeriod || 'Immediate', confidence: 0.9, source: 'profile' };
   }
 
   // 2. Current CTC / Salary
   if (
-    q.includes('current ctc') ||
-    q.includes('current annual') ||
-    q.includes('current salary') ||
-    q.includes('in-hand salary') ||
-    (q.includes('current') && (q.includes('ctc') || q.includes('salary') || q.includes('p/m')))
+    combined.includes('current ctc') ||
+    combined.includes('current annual') ||
+    combined.includes('current salary') ||
+    combined.includes('in-hand salary') ||
+    (combined.includes('current') &&
+      (combined.includes('ctc') || combined.includes('salary') || combined.includes('p/m'))) ||
+    (combined.includes('ctc') && (isLakhsPrompt || combined.includes('per annum')))
   ) {
-    const ctc = careerBrain.currentCTC || careerBrain.salaryExpectation || '120000';
-    const numericCtc = Number(ctc.replace(/[^0-9.]/g, '')) || 120000;
-    const isMonthly = q.includes('p/m') || q.includes('per month') || q.includes('monthly') || q.includes('in-hand');
-    const val = isMonthly ? String(Math.round(numericCtc / 12)) : String(numericCtc);
+    const ctc = careerBrain.currentCTC || careerBrain.salaryExpectation || '';
+    const numericCtc = ctc ? Number(ctc.replace(/[^0-9.]/g, '')) : 0;
+    const isMonthly =
+      combined.includes('p/m') ||
+      combined.includes('per month') ||
+      combined.includes('monthly') ||
+      combined.includes('in-hand');
+
+    let val = '';
+    if (numericCtc > 0) {
+      if (isMonthly) {
+        val = String(Math.round(numericCtc / 12));
+      } else if (isLakhsPrompt) {
+        if (numericCtc >= 1000) {
+          val = String(Number((numericCtc / 100000).toFixed(2))).replace(/\.00$/, '');
+        } else {
+          val = String(numericCtc);
+        }
+      } else {
+        val = String(numericCtc);
+      }
+    }
+
+    if (options.length > 0 && val) {
+      const aligned = alignValueToOptions(val, options, questionText);
+      if (aligned) val = aligned.matchedOption;
+    }
+
+    if (!val) {
+      return { value: '', confidence: 0.2, source: 'default' };
+    }
+
     return { value: val, confidence: 0.95, source: 'profile' };
   }
 
   // 3. Expected CTC / Salary
   if (
-    q.includes('expected ctc') ||
-    q.includes('expected annual') ||
-    q.includes('expected salary') ||
-    (q.includes('expected') && (q.includes('ctc') || q.includes('salary') || q.includes('p/m'))) ||
-    q.includes('salary expectation')
+    combined.includes('expected ctc') ||
+    combined.includes('expected annual') ||
+    combined.includes('expected salary') ||
+    (combined.includes('expected') &&
+      (combined.includes('ctc') || combined.includes('salary') || combined.includes('p/m'))) ||
+    combined.includes('salary expectation')
   ) {
-    const expCtc = careerBrain.expectedCTC || careerBrain.salaryExpectation || '500000';
-    const numericCtc = Number(expCtc.replace(/[^0-9.]/g, '')) || 500000;
-    const isMonthly = q.includes('p/m') || q.includes('per month') || q.includes('monthly');
-    const val = isMonthly ? String(Math.round(numericCtc / 12)) : String(numericCtc);
+    const expCtc = careerBrain.expectedCTC || careerBrain.salaryExpectation || '';
+    const numericCtc = expCtc ? Number(expCtc.replace(/[^0-9.]/g, '')) : 0;
+    const isMonthly = combined.includes('p/m') || combined.includes('per month') || combined.includes('monthly');
+
+    let val = '';
+    if (numericCtc > 0) {
+      if (isMonthly) {
+        val = String(Math.round(numericCtc / 12));
+      } else if (isLakhsPrompt) {
+        if (numericCtc >= 1000) {
+          val = String(Number((numericCtc / 100000).toFixed(2))).replace(/\.00$/, '');
+        } else {
+          val = String(numericCtc);
+        }
+      } else {
+        val = String(numericCtc);
+      }
+    }
+
+    if (options.length > 0 && val) {
+      const aligned = alignValueToOptions(val, options, questionText);
+      if (aligned) val = aligned.matchedOption;
+    }
+
+    if (!val) {
+      return { value: '', confidence: 0.2, source: 'default' };
+    }
+
     return { value: val, confidence: 0.95, source: 'profile' };
   }
 
