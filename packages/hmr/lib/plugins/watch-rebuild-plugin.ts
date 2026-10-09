@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import type { PluginOption } from 'vite';
+import type { PluginOption } from 'vite' with { 'resolution-mode': 'import' };
 import { WebSocket } from 'ws';
 import MessageInterpreter from '../interpreter';
 import { BUILD_COMPLETE, LOCAL_RELOAD_SOCKET_URL } from '../constant';

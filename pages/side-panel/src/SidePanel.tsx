@@ -1,7 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { RxDiscordLogo } from 'react-icons/rx';
-import { FiSettings, FiZap, FiUser, FiLogOut } from 'react-icons/fi';
+import { FiSettings, FiZap, FiUser, FiLogOut, FiStar } from 'react-icons/fi';
 import { PiPlusBold } from 'react-icons/pi';
 import { GrHistory } from 'react-icons/gr';
 import {
@@ -13,6 +13,7 @@ import {
   cloudApiSettingsStore,
   type CloudApiSettingsConfig,
   authStorage,
+  endAccountSession,
   type UserSessionData,
   careerBrainStore,
   validateProfileCompleteness,
@@ -21,14 +22,13 @@ import {
   checkCopilotAccess,
   dailyQuotaStore,
 } from '@extension/storage';
-import { backendApiClient } from '@extension/shared';
+import { backendApiClient, isPremiumActive, openJobformSignIn, refreshAccountStatus } from '@extension/shared';
 import favoritesStorage, { type FavoritePrompt } from '@extension/storage/lib/prompt/favorites';
 import { t } from '@extension/i18n';
 import MessageList from './components/MessageList';
 import ChatInput from './components/ChatInput';
 import ChatHistoryList from './components/ChatHistoryList';
 import BookmarkList from './components/BookmarkList';
-import { AuthModal } from './components/AuthModal';
 import { AuthGateView } from './components/AuthGateView';
 import { PremiumPlansModal } from './components/PremiumPlansModal';
 import { EventType, type AgentEvent, ExecutionState } from './types/event';
@@ -64,7 +64,6 @@ const SidePanel = () => {
   const [cloudSettings, setCloudSettings] = useState<CloudApiSettingsConfig | null>(null);
   const [authSession, setAuthSession] = useState<UserSessionData | null>(null);
   const [isAuthLoading, setIsAuthLoading] = useState<boolean>(true);
-  const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
   const [isPlansModalOpen, setIsPlansModalOpen] = useState(false);
   const [userCredits, setUserCredits] = useState<{ remainingCredits: number; allocatedCredits: number } | null>(null);
   const [mainTab, setMainTab] = useState<'apply' | 'resume' | 'chat'>('apply');
@@ -145,6 +144,15 @@ const SidePanel = () => {
     }
   }, [checkModelConfiguration]);
 
+  // Subscription / JobForm Automator premium status, re-read from the backend at most every 5 minutes
+  // (and right after sign-in or a website payment, which the background handles).
+  const lastStatusRefreshRef = useRef(0);
+  const refreshStatusIfStale = useCallback(async (force = false) => {
+    if (!force && Date.now() - lastStatusRefreshRef.current < 5 * 60 * 1000) return;
+    lastStatusRefreshRef.current = Date.now();
+    await refreshAccountStatus().catch(error => console.error('Error refreshing subscription status:', error));
+  }, []);
+
   // 2. Controlled API Credits Fetcher (Only called on mount, task finish, tab focus, or controlled 60s interval)
   const fetchCreditsBalance = useCallback(async () => {
     try {
@@ -153,6 +161,7 @@ const SidePanel = () => {
         setUserCredits(null);
         return;
       }
+      refreshStatusIfStale();
       backendApiClient.setToken(session.token);
       const creditsRes = await backendApiClient.getCreditsBalance();
       if (creditsRes.data) {
@@ -171,7 +180,7 @@ const SidePanel = () => {
     } catch (error) {
       console.error('Error fetching credits balance from API:', error);
     }
-  }, []);
+  }, [refreshStatusIfStale]);
 
   const sessionIdRef = useRef<string | null>(null);
   const isReplayingRef = useRef<boolean>(false);
@@ -955,10 +964,10 @@ const SidePanel = () => {
     setAuthSession(session);
 
     if (!session?.token) {
-      setIsAuthModalOpen(true);
+      openJobformSignIn();
       appendMessage({
         actor: Actors.SYSTEM,
-        content: 'Please sign in or create an account to start executing AI browser tasks with NanoBrowser.',
+        content: 'Please log in with JobForm Automator to start executing AI browser tasks with NanoBrowser.',
         timestamp: Date.now(),
       });
       return;
@@ -1107,7 +1116,7 @@ const SidePanel = () => {
           ...prev,
         ]);
         setIsApplying(false);
-        setIsAuthModalOpen(true);
+        openJobformSignIn();
         return;
       }
 
@@ -1590,6 +1599,15 @@ const SidePanel = () => {
                     <span className="flex items-center gap-1 font-semibold text-sky-400">
                       <FiUser className="size-3.5 text-sky-400" />
                       {authSession.user.name.split(' ')[0]}
+                      {isPremiumActive(authSession.premium) && (
+                        <span
+                          className="inline-flex size-4 items-center justify-center rounded-full bg-violet-600 text-white"
+                          title={`JobForm Automator ${authSession.premium?.tier} (verified by the server)`}
+                          aria-label={`JobForm Automator ${authSession.premium?.tier}`}
+                          data-premium-tier={authSession.premium?.tier}>
+                          <FiStar className="size-2.5" />
+                        </span>
+                      )}
                     </span>
                     {userCredits && (
                       <button
@@ -1611,8 +1629,11 @@ const SidePanel = () => {
                     <button
                       type="button"
                       onClick={async () => {
-                        await authStorage.clearSession();
+                        // Signs NanoBrowser out only: the JobForm Automator website session is untouched
+                        // (no token revocation, no request to the website). Website pages then don't sign
+                        // NanoBrowser back in until "Login with JobForm Automator" is clicked.
                         backendApiClient.logout();
+                        await endAccountSession({ pauseWebsiteAutoLogin: true });
                         setAuthSession(null);
                         setUserCredits(null);
                       }}
@@ -1624,10 +1645,11 @@ const SidePanel = () => {
                 ) : (
                   <button
                     type="button"
-                    onClick={() => setIsAuthModalOpen(true)}
+                    onClick={openJobformSignIn}
+                    title="Login with JobForm Automator"
                     className="inline-flex cursor-pointer items-center space-x-1 rounded-full bg-gradient-to-r from-sky-500 to-indigo-600 px-2.5 py-0.5 text-[10px] font-bold text-white shadow transition-transform hover:scale-105">
                     <FiUser className="size-3" />
-                    <span>Sign In</span>
+                    <span>Login</span>
                   </button>
                 )}
               </>
@@ -1710,14 +1732,7 @@ const SidePanel = () => {
             <div className="size-8 animate-spin rounded-full border-2 border-sky-400 border-t-transparent" />
           </div>
         ) : !authSession?.token ? (
-          <AuthGateView
-            isDarkMode={isDarkMode}
-            onSuccess={() => {
-              syncAuthFromStorage();
-              fetchCreditsBalance();
-              setIsPlansModalOpen(true);
-            }}
-          />
+          <AuthGateView isDarkMode={isDarkMode} />
         ) : showHistory ? (
           <div className="flex-1 overflow-hidden">
             <ChatHistoryList
@@ -1734,7 +1749,7 @@ const SidePanel = () => {
             isDarkMode={isDarkMode}
             onStartAutoApply={handleStartAutoApply}
             onStop={handleStopLinkedInApply}
-            onOpenAuthModal={() => setIsAuthModalOpen(true)}
+            onOpenAuthModal={openJobformSignIn}
             onOpenPlansModal={() => setIsPlansModalOpen(true)}
             isApplying={isApplying}
             activeStatusText={activeStatusText}
@@ -1776,9 +1791,9 @@ const SidePanel = () => {
 
                   {!authSession?.token ? (
                     <button
-                      onClick={() => setIsAuthModalOpen(true)}
+                      onClick={openJobformSignIn}
                       className="my-2 w-full cursor-pointer rounded-lg bg-gradient-to-r from-sky-500 to-indigo-600 px-4 py-2.5 text-xs font-bold text-white shadow-lg transition-all hover:from-sky-600 hover:to-indigo-700">
-                      Sign In / Create Account
+                      Login with JobForm Automator
                     </button>
                   ) : (
                     <div className="my-2 rounded-lg border border-sky-500/30 bg-sky-500/10 p-3 text-xs font-semibold text-sky-400">
@@ -2107,16 +2122,6 @@ const SidePanel = () => {
           </>
         )}
       </div>
-
-      <AuthModal
-        isOpen={isAuthModalOpen}
-        onClose={() => setIsAuthModalOpen(false)}
-        onSuccess={async () => {
-          await syncAuthFromStorage();
-          await fetchCreditsBalance();
-          setIsPlansModalOpen(true);
-        }}
-      />
 
       <PremiumPlansModal
         isOpen={isPlansModalOpen}

@@ -4,6 +4,7 @@ export * from './chat';
 export * from './profile';
 export * from './prompt/favorites';
 export * from './auth/authStorage';
+export * from './auth/accountSession';
 export * from './linkedin/resumeApproval';
 export * from './linkedin/linkedInConfig';
 export * from './linkedin/dryRunStorage';

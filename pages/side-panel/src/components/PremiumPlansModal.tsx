@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { backendApiClient } from '@extension/shared';
-import { cloudApiSettingsStore } from '@extension/storage';
+import { backendApiClient, isPremiumActive, refreshAccountStatus } from '@extension/shared';
+import type { PremiumStatus } from '@extension/storage';
 import {
   FiCheck,
   FiZap,
@@ -28,9 +28,9 @@ export const PremiumPlansModal: React.FC<PremiumPlansModalProps> = ({
   userCredits,
 }) => {
   const [currentSubscription, setCurrentSubscription] = useState<any | null>(null);
+  const [jobformPremium, setJobformPremium] = useState<PremiumStatus | null>(null);
   const [loadingPlanCode, setLoadingPlanCode] = useState<string | null>(null);
   const [selectedPlanCode, setSelectedPlanCode] = useState<'starter' | 'pro' | 'power'>('pro');
-  const [billingInterval, setBillingInterval] = useState<'monthly' | 'yearly'>('monthly');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
@@ -40,11 +40,15 @@ export const PremiumPlansModal: React.FC<PremiumPlansModalProps> = ({
     let isMounted = true;
     async function loadSubscription() {
       try {
-        const res = await backendApiClient.getSubscriptionMe();
-        if (isMounted && res.data?.subscription) {
-          setCurrentSubscription(res.data.subscription);
-          if (res.data.subscription.planCodeSnapshot && res.data.subscription.planCodeSnapshot !== 'free-trial') {
-            setSelectedPlanCode(res.data.subscription.planCodeSnapshot as any);
+        // Status always comes from the backend (also updates the stored session)
+        const status = await refreshAccountStatus();
+        if (isMounted && status) {
+          setJobformPremium(status.premium);
+        }
+        if (isMounted && status?.subscription) {
+          setCurrentSubscription(status.subscription);
+          if (status.subscription.planCodeSnapshot && status.subscription.planCodeSnapshot !== 'free-trial') {
+            setSelectedPlanCode(status.subscription.planCodeSnapshot as any);
           }
         }
       } catch (err) {
@@ -128,19 +132,16 @@ export const PremiumPlansModal: React.FC<PremiumPlansModalProps> = ({
       const idempotencyKey = `checkout_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
       const res = await backendApiClient.createCheckoutSession(planCode, idempotencyKey);
 
+      // The plan becomes active only when the backend has verified the payment (Razorpay signature
+      // check / webhook); nothing is unlocked here.
       if (res.data?.shortUrl) {
         window.open(res.data.shortUrl, '_blank');
-        setSuccessMessage(`Checkout initiated! Opening payment page...`);
+        setSuccessMessage('Checkout opened. Your plan activates as soon as the payment is confirmed.');
       } else {
-        setSuccessMessage(`Subscription session created for ${planCode.toUpperCase()}!`);
+        setSuccessMessage(
+          `Subscription session created for ${planCode.toUpperCase()}. Complete the payment to activate it.`,
+        );
       }
-
-      await cloudApiSettingsStore.updateSubscription({
-        planId: planCode as any,
-        status: 'active',
-        billingInterval,
-      });
-      await cloudApiSettingsStore.setApiMode('premium');
     } catch (err: any) {
       setErrorMessage(err.message || 'Failed to initiate checkout. Please try again.');
     } finally {
@@ -175,6 +176,23 @@ export const PremiumPlansModal: React.FC<PremiumPlansModalProps> = ({
           <p className="text-xs text-gray-400 mt-0.5">
             Supercharge your job hunt with cloud automation capacity & AI credits.
           </p>
+
+          {/* JobForm Automator plan (server-verified, shown for information) */}
+          {isPremiumActive(jobformPremium) && (
+            <div className="mt-3 flex items-center gap-2 rounded-xl border border-violet-500/30 bg-violet-500/10 px-3 py-2 text-xs">
+              <FiStar className={`size-4 shrink-0 ${isDarkMode ? 'text-violet-300' : 'text-violet-600'}`} />
+              <div>
+                <span className={`font-semibold ${isDarkMode ? 'text-violet-200' : 'text-violet-700'}`}>
+                  JobForm Automator {jobformPremium?.tier}
+                </span>
+                {jobformPremium?.endDate && jobformPremium.tier !== 'Diamond' && (
+                  <span className={`block text-[11px] ${isDarkMode ? 'text-gray-300' : 'text-gray-600'}`}>
+                    Active until {new Date(jobformPremium.endDate).toLocaleDateString()}
+                  </span>
+                )}
+              </div>
+            </div>
+          )}
 
           {/* Dynamic Subscription Status Banner */}
           {currentSubscription?.status === 'ACTIVE' && currentSubscription?.planCodeSnapshot !== 'free-trial' ? (

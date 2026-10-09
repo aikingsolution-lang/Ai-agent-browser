@@ -9,7 +9,61 @@ export interface ApiResponse<T = any> {
   timestamp?: string;
 }
 
-import { BACKEND_API_URL } from './config';
+import { BACKEND_API_URL, FIREBASE_WEB_API_KEY } from './config';
+
+export type RefreshResult =
+  | { status: 'ok'; idToken: string; refreshToken: string; userId: string | null }
+  | { status: 'invalid' }
+  | { status: 'unavailable' };
+
+export type IdTokenCheck =
+  | { status: 'ok'; user: { uid: string; _id?: string; name?: string; email?: string; role?: string; status?: string } }
+  | { status: 'expired' }
+  | { status: 'invalid' }
+  | { status: 'unavailable' };
+
+const SESSION_KEY = 'nanobrowser_auth_session';
+const SIGNED_OUT_SESSION = {
+  token: null,
+  refreshToken: null,
+  user: null,
+  subscription: null,
+  credits: null,
+  premium: null,
+  source: null,
+};
+
+type StoredSession = Record<string, unknown> & { token?: string | null; refreshToken?: string | null; user?: unknown };
+
+async function readStoredSession(): Promise<StoredSession | null> {
+  if (typeof chrome === 'undefined' || !chrome?.storage?.local) return null;
+  return (await chrome.storage.local.get([SESSION_KEY]))?.[SESSION_KEY] ?? null;
+}
+
+async function writeStoredSession(session: StoredSession): Promise<void> {
+  if (typeof chrome === 'undefined' || !chrome?.storage?.local) return;
+  await chrome.storage.local.set({ [SESSION_KEY]: session });
+}
+
+function sessionUidOf(user: unknown): string | null {
+  if (!user || typeof user !== 'object') return null;
+  const record = user as Record<string, unknown>;
+  const id = record.uid ?? record._id ?? record.id;
+  return typeof id === 'string' && id ? id : null;
+}
+
+/** `exp` of a JWT in ms — read only to decide when to refresh; the backend verifies tokens. */
+export function jwtExpiryMs(token: string): number | null {
+  try {
+    const payload = token.split('.')[1];
+    if (!payload) return null;
+    const base64 = payload.replace(/-/g, '+').replace(/_/g, '/');
+    const json = JSON.parse(atob(base64.padEnd(Math.ceil(base64.length / 4) * 4, '=')));
+    return typeof json.exp === 'number' ? json.exp * 1000 : null;
+  } catch {
+    return null;
+  }
+}
 
 export class BackendApiClient {
   private baseUrl: string;
@@ -37,23 +91,94 @@ export class BackendApiClient {
     return this.refreshToken;
   }
 
+  /**
+   * Mirrors the stored session (chrome.storage.local), including a sign-out or account switch made
+   * in another extension context, so this instance never keeps acting as a previous user.
+   */
   public async ensureToken(): Promise<void> {
     try {
       if (typeof chrome !== 'undefined' && chrome?.storage?.local) {
-        const res = await chrome.storage.local.get(['nanobrowser_auth_session']);
-        const session = res?.nanobrowser_auth_session;
-        if (session?.token) {
-          this.token = session.token;
-        }
-        if (session?.refreshToken) {
-          this.refreshToken = session.refreshToken;
-        }
+        const res = await chrome.storage.local.get([SESSION_KEY]);
+        const session = res?.[SESSION_KEY];
+        this.token = session?.token || null;
+        this.refreshToken = session?.refreshToken || null;
       }
     } catch {
       // Storage not accessible or not available in this context
     }
   }
 
+  /**
+   * Exchanges a Firebase refresh token for a new ID token, like the JobForm Automator extension:
+   *   1. Firebase Secure Token API with the public Web API key;
+   *   2. fallback: the backend's POST /auth/refresh (same exchange, server side).
+   * 'invalid' means the refresh token is dead (revoked, expired, account disabled): sign out.
+   * 'unavailable' means it could not be checked right now (offline, outage): keep the session.
+   */
+  public async exchangeRefreshToken(refreshToken: string): Promise<RefreshResult> {
+    if (!refreshToken) return { status: 'invalid' };
+
+    if (FIREBASE_WEB_API_KEY) {
+      try {
+        const res = await fetch(
+          `https://securetoken.googleapis.com/v1/token?key=${encodeURIComponent(FIREBASE_WEB_API_KEY)}`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: `grant_type=refresh_token&refresh_token=${encodeURIComponent(refreshToken)}`,
+          },
+        );
+        if (res.ok) {
+          const data = await res.json();
+          if (data?.id_token && data?.user_id) {
+            return {
+              status: 'ok',
+              idToken: String(data.id_token),
+              refreshToken: String(data.refresh_token || refreshToken),
+              userId: String(data.user_id),
+            };
+          }
+        } else if (res.status === 400) {
+          // INVALID_REFRESH_TOKEN, TOKEN_EXPIRED, USER_DISABLED, USER_NOT_FOUND
+          return { status: 'invalid' };
+        }
+        // 403 (key restricted) / 5xx: try the backend
+      } catch {
+        // Network error: try the backend
+      }
+    }
+
+    try {
+      const res = await fetch(`${this.baseUrl}/auth/refresh`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ refreshToken }),
+      });
+      if (res.status === 401) return { status: 'invalid' };
+      const data = (await res.json().catch(() => null)) as ApiResponse<{
+        token: string;
+        refreshToken: string;
+        userId?: string;
+      }> | null;
+      if (res.ok && data?.success && data.data?.token) {
+        return {
+          status: 'ok',
+          idToken: data.data.token,
+          refreshToken: data.data.refreshToken || refreshToken,
+          userId: data.data.userId || null,
+        };
+      }
+    } catch {
+      // Offline
+    }
+    return { status: 'unavailable' };
+  }
+
+  /**
+   * Refreshes the stored session's ID token. Returns the new token, or null when it could not be
+   * refreshed. A dead refresh token ends the session (the user must sign in again); a temporary
+   * failure keeps it for a later retry.
+   */
   public async refreshAccessToken(): Promise<string | null> {
     if (this.refreshPromise) {
       return this.refreshPromise;
@@ -62,57 +187,32 @@ export class BackendApiClient {
     this.refreshPromise = (async () => {
       try {
         await this.ensureToken();
-        if (!this.refreshToken) {
+        const usedRefreshToken = this.refreshToken;
+        if (!usedRefreshToken) return null;
+
+        const result = await this.exchangeRefreshToken(usedRefreshToken);
+        const current = await readStoredSession();
+
+        // The session changed while refreshing (sign-out or another account): never overwrite it.
+        if (!current || current.refreshToken !== usedRefreshToken) {
+          await this.ensureToken();
           return null;
         }
 
-        const res = await fetch(`${this.baseUrl}/auth/refresh`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({ refreshToken: this.refreshToken }),
-        });
-
-        if (!res.ok) {
-          this.setToken(null);
-          this.setRefreshToken(null);
-          if (typeof chrome !== 'undefined' && chrome?.storage?.local) {
-            const current = (await chrome.storage.local.get(['nanobrowser_auth_session']))?.nanobrowser_auth_session;
-            if (current) {
-              await chrome.storage.local.set({
-                nanobrowser_auth_session: {
-                  ...current,
-                  token: null,
-                  refreshToken: null,
-                },
-              });
-            }
-          }
-          return null;
+        const sessionUid = sessionUidOf(current.user);
+        if (result.status === 'ok' && (!result.userId || !sessionUid || result.userId === sessionUid)) {
+          this.setToken(result.idToken);
+          this.setRefreshToken(result.refreshToken);
+          await writeStoredSession({ ...current, token: result.idToken, refreshToken: result.refreshToken });
+          return result.idToken;
         }
 
-        const data: ApiResponse<{ token: string; refreshToken: string }> = await res.json();
-        if (data.success && data.data?.token) {
-          const newToken = data.data.token;
-          const newRefreshToken = data.data.refreshToken || this.refreshToken;
-          this.setToken(newToken);
-          this.setRefreshToken(newRefreshToken);
+        if (result.status === 'unavailable') return null;
 
-          if (typeof chrome !== 'undefined' && chrome?.storage?.local) {
-            const current = (await chrome.storage.local.get(['nanobrowser_auth_session']))?.nanobrowser_auth_session;
-            if (current) {
-              await chrome.storage.local.set({
-                nanobrowser_auth_session: {
-                  ...current,
-                  token: newToken,
-                  refreshToken: newRefreshToken,
-                },
-              });
-            }
-          }
-          return newToken;
-        }
+        // Dead refresh token, or a token for another account than the stored session: sign out.
+        this.setToken(null);
+        this.setRefreshToken(null);
+        await writeStoredSession({ ...SIGNED_OUT_SESSION });
         return null;
       } catch {
         return null;
@@ -122,6 +222,49 @@ export class BackendApiClient {
     })();
 
     return this.refreshPromise;
+  }
+
+  /**
+   * The stored ID token, refreshed first when it expires within `minValidityMs` (Firebase ID tokens
+   * live one hour). Use before handing the token to a long-running consumer.
+   */
+  public async getFreshToken(minValidityMs = 5 * 60 * 1000): Promise<string | null> {
+    await this.ensureToken();
+    if (!this.token) return null;
+    const expiresAt = jwtExpiryMs(this.token);
+    if (expiresAt !== null && expiresAt - Date.now() > minValidityMs) return this.token;
+    if (!this.refreshToken) return expiresAt === null || expiresAt > Date.now() ? this.token : null;
+    const refreshed = await this.refreshAccessToken();
+    if (refreshed) return refreshed;
+    await this.ensureToken();
+    if (!this.token) return null;
+    const currentExpiry = jwtExpiryMs(this.token);
+    return currentExpiry === null || currentExpiry > Date.now() ? this.token : null;
+  }
+
+  /**
+   * Checks an ID token with the backend (GET /auth/me) without touching the stored session — used to
+   * verify a session handed over by the JobForm Automator website before it is accepted.
+   */
+  public async checkIdToken(idToken: string): Promise<IdTokenCheck> {
+    try {
+      const res = await fetch(`${this.baseUrl}/auth/me`, {
+        method: 'GET',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${idToken}` },
+      });
+      const data = (await res.json().catch(() => null)) as ApiResponse<{
+        user: { uid: string; _id?: string; name?: string; email?: string; role?: string; status?: string };
+      }> | null;
+      if (res.ok && data?.success && data.data?.user?.uid) {
+        return { status: 'ok', user: data.data.user };
+      }
+      if (res.status === 401) {
+        return { status: data?.error?.code === 'TOKEN_EXPIRED' ? 'expired' : 'invalid' };
+      }
+      return { status: 'unavailable' };
+    } catch {
+      return { status: 'unavailable' };
+    }
   }
 
   private getHeaders(extraHeaders: Record<string, string> = {}): Record<string, string> {
@@ -180,53 +323,8 @@ export class BackendApiClient {
   }
 
   // --- Auth APIs ---
-  public async register(payload: { name: string; email: string; password: string }) {
-    const res = await this.request<{ user: any; token: string; refreshToken?: string; subscription?: any }>(
-      '/auth/register',
-      {
-        method: 'POST',
-        body: JSON.stringify(payload),
-      },
-    );
-    if (res.data?.token) {
-      this.setToken(res.data.token);
-    }
-    if (res.data?.refreshToken) {
-      this.setRefreshToken(res.data.refreshToken);
-    }
-    return res;
-  }
-
-  public async login(payload: { email: string; password: string }) {
-    const res = await this.request<{ user: any; token: string; refreshToken?: string }>('/auth/login', {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    });
-    if (res.data?.token) {
-      this.setToken(res.data.token);
-    }
-    if (res.data?.refreshToken) {
-      this.setRefreshToken(res.data.refreshToken);
-    }
-    return res;
-  }
-
-  public async loginWithGoogle(payload: { idToken: string; nonce: string }) {
-    const res = await this.request<{ user: any; token: string; refreshToken?: string; subscription?: any }>(
-      '/auth/google',
-      {
-        method: 'POST',
-        body: JSON.stringify(payload),
-      },
-    );
-    if (res.data?.token) {
-      this.setToken(res.data.token);
-    }
-    if (res.data?.refreshToken) {
-      this.setRefreshToken(res.data.refreshToken);
-    }
-    return res;
-  }
+  // NanoBrowser has no login or registration of its own: users sign in on JobForm Automator and the
+  // website session is handed to the extension (see accountSync.ts / acceptWebsiteSession).
 
   public async getMe() {
     return this.request<{ user: any; subscription: any }>('/auth/me', {
@@ -234,21 +332,13 @@ export class BackendApiClient {
     });
   }
 
-  public async logout(): Promise<void> {
-    try {
-      if (this.refreshToken) {
-        await fetch(`${this.baseUrl}/auth/logout`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ refreshToken: this.refreshToken }),
-        });
-      }
-    } catch {
-      // Ignore network errors on logout
-    } finally {
-      this.setToken(null);
-      this.setRefreshToken(null);
-    }
+  /**
+   * Local sign-out: forgets this instance's tokens. Nothing is sent anywhere, so the JobForm
+   * Automator website session (same Firebase account) stays signed in.
+   */
+  public logout(): void {
+    this.setToken(null);
+    this.setRefreshToken(null);
   }
 
   // --- Credit APIs ---
@@ -363,7 +453,15 @@ export class BackendApiClient {
   }
 
   public async getSubscriptionMe() {
-    return this.request<{ subscription: any; plan: any }>('/subscription/me', {
+    return this.request<{
+      subscription: any;
+      plan?: any;
+      status?: string;
+      hasActiveEntitlement?: boolean;
+      trialInfo?: unknown;
+      /** JobForm Automator premium status, read by the backend from the verified payment record. */
+      premium?: JobformPremiumStatus | null;
+    }>('/subscription/me', {
       method: 'GET',
     });
   }
@@ -687,6 +785,17 @@ export class BackendApiClient {
       return { allowed: true, appliedToday: 0, dailyLimit: 15 };
     }
   }
+}
+
+export interface JobformPremiumStatus {
+  source: 'jobform-automator';
+  tier: 'Free' | 'Premium' | 'Diamond';
+  isPremium: boolean;
+  subscriptionType: string | null;
+  startDate: string | null;
+  endDate: string | null;
+  expired: boolean;
+  checkedAt: string;
 }
 
 export interface BackendResumeResponse {

@@ -68,6 +68,8 @@ export default defineConfig(({ mode }) => {
     'import.meta.env.DEV': isDev,
     'import.meta.env.VITE_POSTHOG_API_KEY': JSON.stringify(env.VITE_POSTHOG_API_KEY || process.env.VITE_POSTHOG_API_KEY || ''),
     'import.meta.env.VITE_BACKEND_API_URL': JSON.stringify(env.VITE_BACKEND_API_URL || process.env.VITE_BACKEND_API_URL || 'http://localhost:5000'),
+    // Backend address used by @extension/shared (empty → production backend)
+    __NANOBROWSER_BACKEND_URL__: JSON.stringify(env.VITE_BACKEND_API_URL || process.env.VITE_BACKEND_API_URL || ''),
   },
 
   envDir: '../',

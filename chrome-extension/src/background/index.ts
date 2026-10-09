@@ -8,7 +8,6 @@ import {
   analyticsSettingsStore,
   cloudApiSettingsStore,
   ProviderTypeEnum,
-  authStorage,
   careerBrainStore,
   validateProfileCompleteness,
   queueSafetyStore,
@@ -47,8 +46,12 @@ import { dedicatedJobRunner } from './agent/linkedin/dedicatedJobRunner';
 import { normalizeLinkedInJobUrl } from './agent/linkedin/urlUtils';
 import type { IJobData } from './agent/linkedin/types';
 import { careerCopilotEngine, auditCareerBrain } from './agent/copilot/careerCopilotEngine';
+import { registerWebsiteSessionSync } from './services/websiteSessionSync';
 
 const logger = createLogger('background');
+
+// JobForm Automator website sign-in / sign-out / payment events (from the content script)
+registerWebsiteSessionSync();
 
 const browserContext = new BrowserContext({});
 queueManager.setBrowserContext(browserContext);
@@ -89,15 +92,16 @@ const SIDE_PANEL_URL = chrome.runtime.getURL('side-panel/index.html');
  */
 async function getActiveChatModel(): Promise<BaseChatModel | undefined> {
   try {
-    const session = await authStorage.getSession();
-    if (session?.token) {
+    // Refreshed first: the model keeps this token for its lifetime
+    const token = await backendApiClient.getFreshToken();
+    if (token) {
       return new ChatOpenAI({
         modelName: 'amazon.nova-lite-v1:0',
-        apiKey: session.token,
+        apiKey: token,
         configuration: {
           baseURL: BACKEND_LLM_URL,
           defaultHeaders: {
-            Authorization: `Bearer ${session.token}`,
+            Authorization: `Bearer ${token}`,
           },
         },
         temperature: 0.1,
@@ -1474,9 +1478,10 @@ async function setupExecutor(
   isJobApplyRun = false,
 ) {
   const providers = await llmProviderStore.getAllProviders();
-  const session = await authStorage.getSession();
+  // Refreshed first (a stored token may have expired, e.g. after a browser restart)
+  const freshToken = await backendApiClient.getFreshToken();
 
-  const hasCloudAuth = Boolean(session?.token);
+  const hasCloudAuth = Boolean(freshToken);
   const hasLocalProviders = Object.keys(providers).length > 0;
 
   if (!hasLocalProviders && !hasCloudAuth) {
@@ -1489,7 +1494,7 @@ async function setupExecutor(
   if (hasCloudAuth) {
     logger.info('Using Backend Managed LLM Gateway (/api/v1/llm/chat) for logged-in user');
     const backendBaseUrl = BACKEND_LLM_URL;
-    const backendToken = session!.token;
+    const backendToken = freshToken;
 
     navigatorLLM = new ChatOpenAI({
       modelName: 'amazon.nova-lite-v1:0',

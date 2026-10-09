@@ -83,12 +83,8 @@ export const PremiumPlans: React.FC<PremiumPlansProps> = ({ isDarkMode }) => {
         );
       }
 
-      await cloudApiSettingsStore.updateSubscription({
-        planId: planCode as any,
-        status: 'active',
-        billingInterval,
-      });
-      await cloudApiSettingsStore.setApiMode('premium');
+      // Nothing is unlocked here: the plan becomes active only after the backend has verified the
+      // payment (Razorpay signature check / webhook); the local plan mirror follows the backend.
     } catch (error: any) {
       console.error('Failed to create Razorpay checkout session:', error);
       alert(error.message || 'Checkout failed. Please ensure you are logged in and backend is running.');

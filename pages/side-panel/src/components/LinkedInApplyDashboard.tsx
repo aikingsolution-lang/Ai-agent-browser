@@ -430,7 +430,7 @@ export function LinkedInApplyDashboard({
               onClick={() => onOpenAuthModal?.()}
               className="w-full flex items-center justify-center space-x-2 rounded-xl py-3 px-4 font-bold text-sm bg-gradient-to-r from-blue-600 to-indigo-600 text-white hover:from-blue-500 hover:to-indigo-500 shadow-md shadow-blue-500/20 active:scale-[0.99] cursor-pointer transition-all">
               <FiLock className="size-4" />
-              <span>Sign In to Auto Apply</span>
+              <span>Login with JobForm Automator</span>
             </button>
             <p className="text-[11px] text-center text-gray-400">
               An account is required to run automation and track applications.

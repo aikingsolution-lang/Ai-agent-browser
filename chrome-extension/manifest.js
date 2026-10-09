@@ -4,6 +4,9 @@ import deepmerge from 'deepmerge';
 const packageJson = JSON.parse(fs.readFileSync('../package.json', 'utf8'));
 
 const isFirefox = process.env.__FIREFOX__ === 'true';
+
+/** JobForm Automator website (see JOBFORM_WEBSITE_ORIGINS in packages/shared/lib/config.ts). */
+const JOBFORM_WEBSITE_MATCHES = ['https://www.jobformautomator.com/*', 'https://jobformautomator.com/*'];
 const isOpera = process.env.__OPERA__ === 'true';
 
 /**
@@ -70,12 +73,7 @@ const manifest = withOperaSidebar(
       'webNavigation',
       'cookies',
       'alarms',
-      'identity',
     ],
-    oauth2: {
-      client_id: '336340854879-i6hj15oe17se379u6k377slo7pvbvh3v.apps.googleusercontent.com',
-      scopes: ['openid', 'email', 'profile'],
-    },
     options_page: 'options/index.html',
     background: {
       service_worker: 'background.iife.js',
@@ -90,7 +88,15 @@ const manifest = withOperaSidebar(
     content_scripts: [
       {
         matches: ['http://*/*', 'https://*/*', '<all_urls>'],
+        exclude_matches: JOBFORM_WEBSITE_MATCHES,
         all_frames: true,
+        js: ['content/index.iife.js'],
+      },
+      {
+        // JobForm Automator website: only the session bridge runs here (top frame), injected before the
+        // page's scripts so a sign-in announced while the page loads is never missed.
+        matches: JOBFORM_WEBSITE_MATCHES,
+        run_at: 'document_start',
         js: ['content/index.iife.js'],
       },
     ],

@@ -1,7 +1,6 @@
 {
   "extends": "@extension/tsconfig/utils",
   "compilerOptions": {
-    "baseUrl": ".",
     "outDir": "dist",
     "types": ["chrome", "node"]
   },

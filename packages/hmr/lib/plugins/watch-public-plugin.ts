@@ -1,4 +1,4 @@
-import type { PluginOption } from 'vite';
+import type { PluginOption } from 'vite' with { 'resolution-mode': 'import' };
 import fg from 'fast-glob';
 
 export function watchPublicPlugin(): PluginOption {

@@ -1,10 +1,9 @@
 {
   "extends": "@extension/tsconfig/app",
   "compilerOptions": {
-    "baseUrl": ".",
     "ignoreDeprecations": "5.0",
     "paths": {
-      "@src/*": ["src/*"],
+      "@src/*": ["./src/*"],
       "@extension/storage": ["../packages/storage/index.ts"],
       "@extension/storage/*": ["../packages/storage/*"],
       "@extension/i18n": ["../packages/i18n/index.ts"],

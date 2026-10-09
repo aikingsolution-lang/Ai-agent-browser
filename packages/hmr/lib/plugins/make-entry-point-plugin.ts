@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import type { PluginOption } from 'vite';
+import type { PluginOption } from 'vite' with { 'resolution-mode': 'import' };
 
 /**
  * make entry point file for content script cache busting
