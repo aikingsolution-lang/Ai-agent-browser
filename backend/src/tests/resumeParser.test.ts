@@ -184,16 +184,16 @@ GitHub: https://github.com/bobjohnson`;
   });
 
   it('6. Regression: purges fabricated "5 years" across skills when candidate is an intern with no explicit durations', async () => {
-    const exactResumeFixture = `MUBASSHIR ALI
-Full Stack MERN Developer | Building Scalable Web Experiences with React, Next.js & Node.js
-+91 70031 51313 | mubasshirali0710@gmail.com | Bengaluru, India | LinkedIn | GitHub
+    const exactResumeFixture = `ALEX SMITH
+Full Stack Developer | Building Scalable Web Experiences with React, Next.js & Node.js
++91 98765 43210 | alex.smith@example.com | Bengaluru, India | LinkedIn | GitHub
 PROFESSIONAL SUMMARY
-B.Tech Computer Science graduate and full-stack MERN developer with hands-on internship and project experience building responsive, production-grade web applications using React.js, Next.js, Node.js, Express.js, and MongoDB.
+B.Tech Computer Science graduate and full-stack developer with hands-on internship and project experience building responsive, production-grade web applications using React.js, Next.js, Node.js, Express.js, and MongoDB.
 EDUCATION
 B.Tech, Computer Science & Engineering 2024
-Maulana Abul Kalam Azad University of Technology, West Bengal | CGPA: 8.57 / 10
+State University of Technology | CGPA: 8.5 / 10
 EXPERIENCE
-Next.js Developer Intern | AiKing Solutions Aug 2026 – Present
+Next.js Developer Intern | Tech Innovations Aug 2026 – Present
 ● Owning full-stack development of NanoBrowser SaaS, a subscription-based AI browser-automation Chrome extension built on an open-source base, architecting the backend with Node.js, TypeScript, Express.js, and MongoDB.
 PROJECTS
 AI Refund Support Agent | Next.js 15, React 19, Node.js, Express.js, Groq LLM Github
@@ -238,15 +238,15 @@ Machine Learning: Scikit-learn, Pandas, NumPy, Flask, Model Training & Evaluatio
 
     LlmProviderFactory.setMockOptions({
       mockResponseText: JSON.stringify({
-        fullName: 'Mubasshir Ali',
-        email: 'mubasshirali0710@gmail.com',
-        currentTitle: 'Full Stack MERN Developer',
+        fullName: 'Alex Smith',
+        email: 'alex.smith@example.com',
+        currentTitle: 'Full Stack Developer',
         skills: Object.keys(hallucinatedSkillExperience),
         yearsOfExperience: 0,
         hasWorkExperience: true,
         workExperience: [
           {
-            company: 'AiKing Solutions',
+            company: 'Tech Innovations',
             title: 'Next.js Developer Intern',
             startMonth: 'Aug',
             startYear: '2026',

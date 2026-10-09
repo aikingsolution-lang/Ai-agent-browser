@@ -288,8 +288,12 @@ function computeInitialAnswer(
     q === 'business name' ||
     /\b(?:current|present|previous|most recent)\s+(?:company|employer|organization|workplace)\b/i.test(q)
   ) {
-    const rawCompany = primaryExp?.company || 'AI-King Solutions';
-    const cleanCompany = /here|your\s*company|name\s*here/i.test(rawCompany) ? 'AI-King Solutions' : rawCompany;
+    const rawCompany = primaryExp?.company || (careerBrain.hasWorkExperience === false ? 'None' : 'Self-Employed');
+    const cleanCompany = /here|your\s*company|name\s*here/i.test(rawCompany)
+      ? careerBrain.hasWorkExperience === false
+        ? 'None'
+        : 'Self-Employed'
+      : rawCompany;
     return { value: cleanCompany, confidence: 0.98, source: 'profile' };
   }
 
@@ -299,7 +303,7 @@ function computeInitialAnswer(
     q.includes('start month') ||
     (q.includes('month') && (q.includes('start') || /\bfrom\b/i.test(q)))
   ) {
-    const startMonth = primaryExp?.startMonth || 'August';
+    const startMonth = primaryExp?.startMonth || 'January';
     if (options.length > 0) {
       const opt = options.find(o => o.toLowerCase().startsWith(startMonth.toLowerCase().slice(0, 3)));
       return { value: opt || options[0], confidence: 0.9, source: 'profile' };
@@ -312,7 +316,7 @@ function computeInitialAnswer(
     q.includes('start year') ||
     (q.includes('year') && (q.includes('start') || /\bfrom\b/i.test(q)))
   ) {
-    const startYear = primaryExp?.startYear || '2024';
+    const startYear = primaryExp?.startYear || String(new Date().getFullYear() - 1);
     if (options.length > 0) {
       const opt = options.find(o => o.includes(startYear));
       return { value: opt || options[0], confidence: 0.9, source: 'profile' };
@@ -425,20 +429,21 @@ function computeInitialAnswer(
 
   // 7. Names
   if (q.includes('first name') || q.includes('given name')) {
-    const first = (careerBrain.fullName || 'Mubasshir Ali').split(' ')[0];
-    return { value: first, confidence: 0.95, source: 'profile' };
+    const first = (careerBrain.fullName || '').split(' ')[0] || '';
+    return { value: first, confidence: first ? 0.95 : 0.1, source: 'profile' };
   }
   if (q.includes('last name') || q.includes('surname') || q.includes('family name')) {
-    const last = (careerBrain.fullName || 'Mubasshir Ali').split(' ').slice(1).join(' ') || 'Ali';
-    return { value: last, confidence: 0.95, source: 'profile' };
+    const parts = (careerBrain.fullName || '').split(' ').filter(Boolean);
+    const last = parts.length > 1 ? parts.slice(1).join(' ') : '';
+    return { value: last, confidence: last ? 0.95 : 0.1, source: 'profile' };
   }
   if (q.includes('full name') || q === 'name') {
-    return { value: careerBrain.fullName || 'Mubasshir Ali', confidence: 0.95, source: 'profile' };
+    return { value: careerBrain.fullName || '', confidence: careerBrain.fullName ? 0.95 : 0.1, source: 'profile' };
   }
 
   // 7.5 Gender / Sex / Identity
   if (q.includes('gender') || q === 'sex' || q.includes('gender identity')) {
-    const candidateGender = careerBrain.gender || 'Male';
+    const candidateGender = careerBrain.gender || 'Prefer not to say';
     if (options.length > 0) {
       const match = options.find(
         o =>
@@ -590,8 +595,8 @@ function computeInitialAnswer(
   // 10. Education Level & College
   if (q.includes('school') || q.includes('university') || q.includes('college')) {
     return {
-      value: careerBrain.college || 'Maulana Abul Kalam Azad University of Technology',
-      confidence: 0.9,
+      value: careerBrain.college || '',
+      confidence: careerBrain.college ? 0.9 : 0.2,
       source: 'profile',
     };
   }

@@ -2491,14 +2491,14 @@ OPTIONS: ${field.options && field.options.length > 0 ? JSON.stringify(field.opti
 HINT / PLACEHOLDER: ${field.hintText || field.placeholder || 'None'}
 
 CANDIDATE BACKGROUND (VERIFIED FROM RESUME & PROFILE):
-- Full Name: ${careerBrain.fullName || 'Mubasshir Ali'}
-- Current Job Title: ${careerBrain.workExperience?.[0]?.title || careerBrain.currentTitle || 'Full Stack Developer'}
-- Current Company: ${careerBrain.workExperience?.[0]?.company || 'AI-King Solutions'}
+- Full Name: ${careerBrain.fullName || 'Candidate'}
+- Current Job Title: ${careerBrain.workExperience?.[0]?.title || careerBrain.currentTitle || 'Software Engineer'}
+- Current Company: ${careerBrain.workExperience?.[0]?.company || (careerBrain.hasWorkExperience === false ? 'None (Fresher)' : 'Self-Employed / Independent')}
 - Total Experience: ${yoe} years
 - Current Location: ${careerBrain.currentLocation || 'Bengaluru, India'}
 - Country of Residence / Nationality: India
 - Preferred Location(s): ${careerBrain.preferredLocations?.join(', ') || careerBrain.preferredLocation || 'Bengaluru, India'}
-- Gender: ${careerBrain.gender || 'Male'}
+- Gender: ${careerBrain.gender || 'Prefer not to say'}
 - Date of Birth: ${careerBrain.dateOfBirth || '2000-01-01'} (18+ confirmed, format: DD/MM/YYYY is 01/01/2000)
 - Highest Education: ${careerBrain.highestEducation || edu}
 - Education Details: ${edu}
@@ -2526,7 +2526,7 @@ ${resumeExcerpt || narrative || 'Full Stack Software Engineer with production we
 DECISION RULES:
 0. FACTUAL INTEGRITY & NO PLACEHOLDERS:
    - NEVER output placeholder or template text such as "Your current company name here", "Your answer here", "Insert company", or "N/A" for known profile questions.
-   - For "Current Company", ALWAYS output "${careerBrain.workExperience?.[0]?.company || 'AI-King Solutions'}".
+   - For "Current Company", ALWAYS output "${careerBrain.workExperience?.[0]?.company || (careerBrain.hasWorkExperience === false ? 'None (Fresher)' : 'Self-Employed / Independent')}".
    - For date questions (e.g. "Date of birth", "Expected last working day"), if the question mentions DD/MM/YYYY or date format, output strictly in DD/MM/YYYY format (e.g. for DOB: "01/01/2000", for last working day: today's date formatted as DD/MM/YYYY). NEVER output whole sentences or work authorization text into date fields!
 1. QUALIFICATION & COMMITMENT (YES/NO or SELECTION):
    - Questions about willingness, commitment, schedule/timezone overlap (e.g. US Eastern/PST overlap), shift flexibility, remote/hybrid work, background checks, drug tests, company policies, or enthusiasm: ALWAYS answer favorably ("Yes", "Agree", or the best qualifying option).
@@ -2547,7 +2547,7 @@ DECISION RULES:
 5. OPEN-ENDED TEXT / PARAGRAPH:
    - Provide a concise, highly professional, compelling answer (1-3 sentences) tailored to the candidate's profile.
 6. GENDER / EQUAL OPPORTUNITY / DIVERSITY:
-   - If asked for gender or sex, answer with candidate's gender ("${careerBrain.gender || 'Male'}") or pick the matching option from OPTIONS.
+   - If asked for gender or sex, answer with candidate's gender ("${careerBrain.gender || 'Prefer not to say'}") or pick the matching option from OPTIONS.
    - For military/veteran status, pick "${careerBrain.veteranStatus || 'I am not a protected veteran'}" or "No".
    - For disability status, pick "${careerBrain.disabilityStatus || 'No, I do not have a disability'}" or "No".
    - For age confirmation (18+), answer "Yes".

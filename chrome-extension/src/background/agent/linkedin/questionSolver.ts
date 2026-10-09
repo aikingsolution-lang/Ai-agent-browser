@@ -409,16 +409,22 @@ export async function solveScreeningQuestion(
       );
       if (match) answer = match;
     }
-    return formatStandardAnswer(question, answer, 0.95, 'Derived from candidate CGPA (8.57/10).');
+    return formatStandardAnswer(
+      question,
+      answer,
+      0.95,
+      `Derived from candidate CGPA (${careerBrain.cgpa || 'profile'}).`,
+    );
   }
 
   // Candidate Name
   if (qTextLower === 'first name' || qTextLower.includes('first name')) {
-    const firstName = careerBrain.fullName ? careerBrain.fullName.split(' ')[0] : 'Mubasshir';
+    const firstName = careerBrain.fullName ? careerBrain.fullName.split(' ')[0] : 'Candidate';
     return formatStandardAnswer(question, firstName, 0.99, 'Derived from candidate first name.');
   }
   if (qTextLower === 'last name' || qTextLower.includes('last name')) {
-    const lastName = careerBrain.fullName ? careerBrain.fullName.split(' ').slice(1).join(' ') : 'Ali';
+    const parts = (careerBrain.fullName || '').split(' ').filter(Boolean);
+    const lastName = parts.length > 1 ? parts.slice(1).join(' ') : '';
     return formatStandardAnswer(question, lastName, 0.99, 'Derived from candidate last name.');
   }
 
@@ -474,8 +480,8 @@ Available Options: ${question.options.length > 0 ? JSON.stringify(question.optio
 Required: ${question.required}
 
 Candidate Career Brain Profile:
-- Full Name: ${careerBrain.fullName || 'Mubasshir Ali'}
-- Education: ${careerBrain.education || 'B.Tech CSE, MAKAUT'}
+- Full Name: ${careerBrain.fullName || 'Candidate'}
+- Education: ${careerBrain.education || "Bachelor's Degree"}
 - Background Narrative: ${careerBrain.backgroundNarrative}
 - Raw Resume Content:
 ${careerBrain.resumeText || ''}
@@ -606,7 +612,7 @@ export async function solveQuestions(
       .join('\n');
 
     const structuredProfile = `Candidate Profile:
-Name: ${careerBrain.fullName?.trim() || 'Mubasshir Ali'}
+Name: ${careerBrain.fullName?.trim() || 'Candidate'}
 Current Role: ${careerBrain.currentTitle?.trim() || 'Software Engineer'}
 Total Years of Experience: ${careerBrain.yearsOfExperience !== undefined && careerBrain.yearsOfExperience !== null ? careerBrain.yearsOfExperience : 1}
 Current Annual CTC: ${careerBrain.currentCTC?.trim() || '120000'}
@@ -618,7 +624,7 @@ Skills: ${(careerBrain.skills || []).join(', ') || 'NOT PROVIDED'}
 Skill Experience: ${careerBrain.skillExperience ? JSON.stringify(careerBrain.skillExperience) : 'None'}
 Education: ${careerBrain.education?.trim() || 'NOT PROVIDED'}
 College: ${careerBrain.college?.trim() || 'NOT PROVIDED'}
-CGPA: ${careerBrain.cgpa?.trim() || '8.57'}
+CGPA: ${careerBrain.cgpa?.trim() || 'NOT PROVIDED'}
 Work Authorization: ${careerBrain.workAuthorization?.trim() || 'Legally authorized to work without sponsorship'}
 Notice Period: ${careerBrain.noticePeriod?.trim() || 'Immediate'}
 Preferred Location: ${careerBrain.preferredLocation?.trim() || 'Bengaluru, India'}

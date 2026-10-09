@@ -926,14 +926,14 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
                 className={`w-full rounded-lg border px-3 py-1.5 text-xs outline-none ${
                   isDarkMode ? 'border-sky-800 bg-slate-900 text-white' : 'border-sky-200 bg-white text-gray-900'
                 }`}
-                placeholder="e.g. Rahul Sharma"
+                placeholder="e.g. John Doe"
               />
             </div>
             <div className="grid grid-cols-2 gap-2">
               <div>
                 <label className="block text-[11px] font-semibold opacity-70 mb-1">Gender</label>
                 <select
-                  value={editForm.gender || 'Male'}
+                  value={editForm.gender || 'Prefer not to say'}
                   onChange={e => setEditForm(prev => ({ ...prev, gender: e.target.value }))}
                   className={`w-full rounded-lg border px-3 py-1.5 text-xs outline-none ${
                     isDarkMode ? 'border-sky-800 bg-slate-900 text-white' : 'border-sky-200 bg-white text-gray-900'
@@ -979,7 +979,7 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
                   className={`w-full rounded-lg border px-3 py-1.5 text-xs outline-none ${
                     isDarkMode ? 'border-sky-800 bg-slate-900 text-white' : 'border-sky-200 bg-white text-gray-900'
                   }`}
-                  placeholder="rahul@example.com"
+                  placeholder="candidate@example.com"
                 />
               </div>
             </div>
@@ -1014,7 +1014,7 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
                   className={`w-full rounded-lg border px-3 py-1.5 text-xs outline-none ${
                     isDarkMode ? 'border-sky-800 bg-slate-900 text-white' : 'border-sky-200 bg-white text-gray-900'
                   }`}
-                  placeholder="e.g. Maulana Abul Kalam Azad Univ"
+                  placeholder="e.g. University of Technology"
                 />
               </div>
               <div>
@@ -1026,7 +1026,7 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
                   className={`w-full rounded-lg border px-3 py-1.5 text-xs outline-none ${
                     isDarkMode ? 'border-sky-800 bg-slate-900 text-white' : 'border-sky-200 bg-white text-gray-900'
                   }`}
-                  placeholder="e.g. 8.57 / 10"
+                  placeholder="e.g. 8.5 / 10 or 85%"
                 />
               </div>
             </div>

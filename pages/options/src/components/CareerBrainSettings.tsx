@@ -625,7 +625,7 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
               type="text"
               value={careerBrain.fullName || ''}
               onChange={e => setCareerBrain(prev => ({ ...prev, fullName: e.target.value }))}
-              placeholder="e.g. Mubasshir Ali"
+              placeholder="e.g. John Doe"
               className={`w-full rounded-md border ${
                 isDarkMode ? 'border-slate-600 bg-slate-700 text-gray-100' : 'border-gray-300 bg-white text-gray-800'
               } px-3 py-2 text-sm`}
@@ -635,7 +635,7 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
           <div>
             <label className="mb-1 block text-xs font-semibold text-gray-700 dark:text-gray-300">Gender</label>
             <select
-              value={careerBrain.gender || 'Male'}
+              value={careerBrain.gender || 'Prefer not to say'}
               onChange={e => setCareerBrain(prev => ({ ...prev, gender: e.target.value }))}
               className={`w-full rounded-md border ${
                 isDarkMode ? 'border-slate-600 bg-slate-700 text-gray-100' : 'border-gray-300 bg-white text-gray-800'
@@ -655,7 +655,7 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
               type="text"
               value={careerBrain.education || ''}
               onChange={e => setCareerBrain(prev => ({ ...prev, education: e.target.value }))}
-              placeholder="e.g. B.Tech Computer Science, MAKAUT (2020-2024), CGPA 8.57"
+              placeholder="e.g. B.Tech in Computer Science, State University (2020-2024)"
               className={`w-full rounded-md border ${
                 isDarkMode ? 'border-slate-600 bg-slate-700 text-gray-100' : 'border-gray-300 bg-white text-gray-800'
               } px-3 py-2 text-sm`}
@@ -670,7 +670,7 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
               type="text"
               value={careerBrain.college || ''}
               onChange={e => setCareerBrain(prev => ({ ...prev, college: e.target.value }))}
-              placeholder="e.g. Maulana Abul Kalam Azad University"
+              placeholder="e.g. University of Technology"
               className={`w-full rounded-md border ${
                 isDarkMode ? 'border-slate-600 bg-slate-700 text-gray-100' : 'border-gray-300 bg-white text-gray-800'
               } px-3 py-2 text-sm`}
@@ -685,7 +685,7 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
               type="text"
               value={careerBrain.cgpa || ''}
               onChange={e => setCareerBrain(prev => ({ ...prev, cgpa: e.target.value }))}
-              placeholder="e.g. 8.57 / 10"
+              placeholder="e.g. 8.5 / 10 or 85%"
               className={`w-full rounded-md border ${
                 isDarkMode ? 'border-slate-600 bg-slate-700 text-gray-100' : 'border-gray-300 bg-white text-gray-800'
               } px-3 py-2 text-sm`}

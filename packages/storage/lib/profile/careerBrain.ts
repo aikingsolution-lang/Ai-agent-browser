@@ -845,7 +845,7 @@ export const DEFAULT_GOLDEN_ANSWERS: IGoldenAnswer[] = [
   {
     id: 'gender_identity',
     question: 'What is your gender / gender identity?',
-    answer: 'Male',
+    answer: 'Prefer not to say',
     category: 'Diversity / Self-Identification',
     isDefault: true,
   },
@@ -866,123 +866,41 @@ export const DEFAULT_GOLDEN_ANSWERS: IGoldenAnswer[] = [
 ];
 
 export const DEFAULT_CAREER_BRAIN: ICareerBrain = {
-  fullName: 'Mubasshir Ali',
-  email: 'mubasshirali0710@gmail.com',
-  phoneNumber: '+91 70031 51313',
-  currentTitle: 'MERN Stack / Full Stack Developer',
-  resumeText: `MUBASSHIR ALI
-MERN Stack / Full Stack Developer
-+91 70031 51313 | mubasshirali0710@gmail.com | Bengaluru, India
-
-PROFESSIONAL SUMMARY
-B.Tech Computer Science graduate (CGPA 8.57/10) with expertise in MERN Stack and Python full-stack development. Experienced in building scalable web applications using React.js, Redux Toolkit, Node.js, Express.js, MongoDB, REST APIs, JWT authentication, and responsive UI design. Strong foundation in Data Structures & Algorithms (200+ LeetCode problems), DBMS, OOPs, Operating Systems, and Computer Networks.
-
-EDUCATION
-Maulana Abul Kalam Azad University of Technology, West Bengal
-Bachelor of Technology, Computer Science & Engineering • GPA: 8.57/10 • 2020 – 2024
-
-TECHNICAL SKILLS
-Frontend: React.js, Redux Toolkit, React Router, HTML5, CSS3, Tailwind CSS, JavaScript, TypeScript
-Backend: Node.js, Express.js, REST APIs, JWT, Python
-Database: MongoDB, Mongoose, MySQL
-Tools: Git, GitHub, Docker, Postman, VS Code`,
-  backgroundNarrative:
-    'B.Tech Computer Science graduate (CGPA 8.57/10) with expertise in MERN Stack and Python full-stack development. Experienced in building scalable web applications using React.js, Redux Toolkit, Node.js, Express.js, MongoDB, REST APIs, JWT authentication, and responsive UI design. Strong foundation in Data Structures & Algorithms (200+ LeetCode problems), DBMS, OOPs, Operating Systems, and Computer Networks.',
-  skills: [
-    'React.js',
-    'Redux Toolkit',
-    'Node.js',
-    'Express.js',
-    'MongoDB',
-    'REST APIs',
-    'JavaScript',
-    'TypeScript',
-    'Tailwind CSS',
-    'HTML5',
-    'CSS3',
-    'Python',
-    'Git',
-    'Docker',
-  ],
-  yearsOfExperience: 1,
-  hasWorkExperience: true,
-  workExperience: [
-    {
-      id: 'exp-1',
-      title: 'Next.js Developer Intern',
-      company: 'AI-King Solutions',
-      startMonth: 'August',
-      startYear: '2024',
-      endMonth: null,
-      endYear: null,
-      isCurrent: true,
-      description:
-        'Contributing to live client projects built with Next.js, React.js, and TypeScript. Integrating REST APIs with backend services and databases.',
-      source: 'manual',
-    },
-  ],
-  education:
-    'Bachelor of Technology in Computer Science & Engineering, Maulana Abul Kalam Azad University of Technology (2020 – 2024), CGPA: 8.57/10',
-  college: 'Maulana Abul Kalam Azad University of Technology',
-  cgpa: '8.57/10',
+  fullName: '',
+  email: '',
+  phoneNumber: '',
+  currentTitle: '',
+  resumeText: '',
+  backgroundNarrative: '',
+  skills: [],
+  yearsOfExperience: 0,
+  hasWorkExperience: false,
+  workExperience: [],
+  education: '',
+  college: '',
+  cgpa: '',
   currentCTC: undefined,
-  expectedCTC: '₹6,00,000 - ₹12,00,000',
-  currentLocation: 'Bengaluru, Karnataka, India',
+  expectedCTC: '',
+  currentLocation: '',
   noticePeriod: 'Immediate',
-  workAuthorization: 'Citizen of India / Authorized to work without sponsorship',
-  salaryExpectation: '₹6,00,000 - ₹12,00,000',
-  preferredLocation: 'Bengaluru, Karnataka, India',
+  workAuthorization: 'Authorized to work without sponsorship',
+  salaryExpectation: '',
+  preferredLocation: '',
   portfolioUrl: '',
-  githubUrl: 'https://github.com',
-  linkedinUrl: 'https://linkedin.com',
+  githubUrl: '',
+  linkedinUrl: '',
   goldenAnswers: DEFAULT_GOLDEN_ANSWERS,
   customAnswers: {},
-  skillExperience: {
-    'React.js': 1,
-    'Redux Toolkit': 1,
-    'Node.js': 1,
-    'Express.js': 1,
-    MongoDB: 1,
-    'REST APIs': 1,
-    JavaScript: 1,
-    TypeScript: 1,
-    'Tailwind CSS': 1,
-    HTML5: 1,
-    CSS3: 1,
-    Python: 1,
-    Git: 1,
-    Docker: 1,
-  },
-  predefinedRoles: [
-    'Frontend Developer',
-    'React Developer',
-    'MERN Stack Developer',
-    'Full Stack Developer',
-    'AI Evaluator',
-  ],
-  preferredLocations: ['Bengaluru, Karnataka, India', 'Hyderabad, Telangana, India', 'Remote'],
-  experienceLevels: ['Fresher', 'Entry Level', 'Internship'],
-  jobTypes: ['Full-time', 'Internship'],
+  skillExperience: {},
+  predefinedRoles: [],
+  preferredLocations: [],
+  experienceLevels: [],
+  jobTypes: ['Full-time'],
   resumes: [],
   activeResumeId: undefined,
-  autoExtractedSkills: [
-    'React.js',
-    'Redux Toolkit',
-    'Node.js',
-    'Express.js',
-    'MongoDB',
-    'REST APIs',
-    'JavaScript',
-    'TypeScript',
-    'Tailwind CSS',
-    'HTML5',
-    'CSS3',
-    'Python',
-    'Git',
-    'Docker',
-  ],
-  gender: 'Male',
-  dateOfBirth: '2000-01-01',
+  autoExtractedSkills: [],
+  gender: 'Prefer not to say',
+  dateOfBirth: '',
   highestEducation: "Bachelor's Degree",
   willingToRelocate: 'Yes',
   preferredShift: 'Day / Flexible',
@@ -1146,6 +1064,31 @@ export async function getCareerBrainData(): Promise<ICareerBrain> {
       data = merged;
     }
 
+    // Seamless auto-migration: Purge any hardcoded legacy developer personal data from old default state
+    let purgedHardcodedDefaults = false;
+    if (
+      data.email?.toLowerCase() === 'mubasshirali0710@gmail.com' ||
+      data.phoneNumber === '+91 70031 51313' ||
+      (data.fullName?.toLowerCase() === 'mubasshir ali' &&
+        (data.college?.toLowerCase().includes('maulana') ||
+          data.workExperience?.[0]?.company?.toLowerCase().includes('ai-king')))
+    ) {
+      data.fullName = '';
+      data.email = '';
+      data.phoneNumber = '';
+      data.resumeText = '';
+      data.backgroundNarrative = '';
+      data.college = '';
+      data.cgpa = '';
+      data.education = '';
+      data.currentTitle = '';
+      data.skills = [];
+      data.workExperience = [];
+      data.skillExperience = {};
+      data.autoExtractedSkills = [];
+      purgedHardcodedDefaults = true;
+    }
+
     // Seamless auto-migration: Purge any stale generic work-experience date fields and social media (Facebook, X, etc.) from goldenAnswers
     let purgedStaleGolden = false;
     if (Array.isArray(data.goldenAnswers) && data.goldenAnswers.length > 0) {
@@ -1198,7 +1141,7 @@ export async function getCareerBrainData(): Promise<ICareerBrain> {
       if (data.preferredLocation) {
         data.preferredLocations = [data.preferredLocation];
       } else {
-        data.preferredLocations = ['Bengaluru, Karnataka, India'];
+        data.preferredLocations = [];
       }
     }
     data.preferredLocations = data.preferredLocations
@@ -1285,7 +1228,8 @@ export async function getCareerBrainData(): Promise<ICareerBrain> {
       sanitizedSkillExp ||
       migratedSkillExp ||
       cleanedLocation ||
-      migratedResumes
+      migratedResumes ||
+      purgedHardcodedDefaults
     ) {
       if (missingDefaults.length > 0) {
         data.goldenAnswers = [...(data.goldenAnswers || []), ...missingDefaults];

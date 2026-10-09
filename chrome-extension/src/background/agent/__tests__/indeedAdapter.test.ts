@@ -1058,7 +1058,7 @@ describe('IndeedAdapter - Phase 1', () => {
       const mockJob: any = {
         jobId: 'test-qa-job',
         title: 'Full Stack Developer',
-        company: 'AI-King',
+        company: 'Acme Corp',
         url: 'https://in.indeed.com/viewjob?jk=test-qa-job',
       };
 

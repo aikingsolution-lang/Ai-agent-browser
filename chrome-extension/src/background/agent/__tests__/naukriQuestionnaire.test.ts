@@ -5,8 +5,8 @@ import { NAUKRI_SELECTORS } from '../platforms/naukri/selectors';
 
 describe('Naukri Questionnaire & Drawer Resolvers', () => {
   const baseCareerBrain: Partial<ICareerBrain> = {
-    fullName: 'Mubasshir Ali',
-    email: 'mubasshir@example.com',
+    fullName: 'Alex Smith',
+    email: 'alex.smith@example.com',
     phoneNumber: '+91 9876543210',
     currentTitle: 'Full Stack Developer',
     currentCTC: '700000',

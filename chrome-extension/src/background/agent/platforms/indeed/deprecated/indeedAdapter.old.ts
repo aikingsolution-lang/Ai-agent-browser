@@ -1576,9 +1576,9 @@ export class IndeedAdapter implements IPlatformAdapter {
             }
           } else if (/\b(current\s+company|present\s+company|employer|company\s+name)\b/i.test(labelLo)) {
             // Guarantee actual candidate company instead of placeholder
-            if (!answer.value || /placeholder|your\s+current|here|company\s+name/i.test(answer.value)) {
-              answer.value = careerBrain.workExperience?.[0]?.company || 'AI-King Solutions';
-            }
+            answer.value =
+              careerBrain.workExperience?.[0]?.company ||
+              (careerBrain.hasWorkExperience === false ? 'None' : 'Self-Employed');
           } else if (f.fieldType === 'number' || /\b(salary|ctc|compensation)\b/i.test(labelLo)) {
             // Ensure salary or numeric inputs are clean numbers
             const numMatch = (answer.value || '').match(/(\d+[\d,.]*)/);
@@ -2566,7 +2566,9 @@ export class IndeedAdapter implements IPlatformAdapter {
           }
         } else if (/\b(current\s+company|present\s+company|employer|company\s+name)\b/i.test(fixLabelLo)) {
           if (!resolvedAnswer || /placeholder|your\s+current|here|company\s+name/i.test(resolvedAnswer)) {
-            resolvedAnswer = careerBrain.workExperience?.[0]?.company || 'AI-King Solutions';
+            resolvedAnswer =
+              careerBrain.workExperience?.[0]?.company ||
+              (careerBrain.hasWorkExperience === false ? 'None' : 'Self-Employed');
           }
         } else if (fix.type === 'number' || /\b(salary|ctc|compensation)\b/i.test(fixLabelLo)) {
           const numMatch = (resolvedAnswer || '').match(/(\d+[\d,.]*)/);

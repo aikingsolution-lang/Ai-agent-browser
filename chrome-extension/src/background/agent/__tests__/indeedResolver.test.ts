@@ -5,8 +5,8 @@ import { DEFAULT_CAREER_BRAIN, type ICareerBrain } from '@extension/storage';
 describe('IndeedResolver - Phase 6 Question Resolution', () => {
   const mockCareerBrain: ICareerBrain = {
     ...DEFAULT_CAREER_BRAIN,
-    fullName: 'Mubasshir Ali',
-    email: 'mubasshir@example.com',
+    fullName: 'Alex Smith',
+    email: 'alex.smith@example.com',
     phoneNumber: '+91 9876543210',
     currentLocation: 'Bengaluru, Karnataka, India',
     preferredLocations: ['Bengaluru, Karnataka, India', 'Remote'],
@@ -17,12 +17,12 @@ describe('IndeedResolver - Phase 6 Question Resolution', () => {
     noticePeriod: '15 days',
     education: "Bachelor's Degree",
     highestEducation: 'B.Tech in Computer Science',
-    college: 'Maulana Abul Kalam Azad University of Technology',
+    college: 'State University of Technology',
     gender: 'Male',
     workExperience: [
       {
         id: 'exp-1',
-        company: 'AI-King Solutions',
+        company: 'Tech Solutions Inc',
         title: 'Full Stack Developer',
         isCurrent: true,
         startMonth: 'January',
