@@ -1753,6 +1753,27 @@ export class DedicatedJobRunner {
         }
       }
 
+      // 4.1 Check if runner tab is already on an active LinkedIn search page
+      try {
+        const currentUrl = (await currentPage.url?.()) || '';
+        if (currentUrl.includes('/jobs/search')) {
+          const parsedUrl = new URL(currentUrl);
+          const activeLocation = parsedUrl.searchParams.get('location');
+          const activeKeywords = parsedUrl.searchParams.get('keywords');
+          if (activeLocation && !prioritizedLocations.includes(activeLocation)) {
+            // Prioritize the user's actively open search location at the top of the queue
+            prioritizedLocations.unshift(activeLocation);
+            this.notifyStatus(
+              portToSend,
+              `🔍 Detected active search on runner tab: Location="${activeLocation}"${activeKeywords ? `, Role="${activeKeywords}"` : ''}. Prioritizing current page search results.`,
+              'info',
+            );
+          }
+        }
+      } catch (err) {
+        logger.debug('[DedicatedJobRunner] Could not inspect active runner tab URL:', err);
+      }
+
       // 5. Read Left-Hand Job List Pane across prioritized locations (until BATCH_CAP is satisfied)
       const queue: Array<{ jobId: string; title: string; company: string; url: string }> = [];
       const seenJobIds = new Set<string>();

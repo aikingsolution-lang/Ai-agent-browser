@@ -4001,19 +4001,28 @@ export default class Page {
     for (let s = 0; s < scrollAttempts; s++) {
       await this._puppeteerPage
         .evaluate(() => {
-          const container =
-            document.querySelector('.jobs-search-results-list') ||
-            document.querySelector('.scaffold-layout__list') ||
-            document.querySelector('.jobs-search-results-list__list') ||
-            document.querySelector('div[data-view-name="job-card"]')?.parentElement;
-          if (container) {
-            container.scrollBy(0, 500);
-          } else {
+          const containers = [
+            document.querySelector('.jobs-search-results-list'),
+            document.querySelector('.scaffold-layout__list'),
+            document.querySelector('.scaffold-layout__list-container'),
+            document.querySelector('.jobs-search-results-list__list'),
+            document.querySelector('div[data-view-name="job-card"]')?.parentElement,
+            document.querySelector('ul.scaffold-layout__list-container'),
+          ].filter(Boolean) as HTMLElement[];
+
+          let scrolled = false;
+          for (const c of containers) {
+            if (c.scrollHeight > c.clientHeight) {
+              c.scrollBy(0, 500);
+              scrolled = true;
+            }
+          }
+          if (!scrolled) {
             window.scrollBy(0, 500);
           }
         })
         .catch(() => {});
-      await new Promise(r => setTimeout(r, 800));
+      await new Promise(r => setTimeout(r, 600));
     }
 
     return await this._puppeteerPage
@@ -4090,29 +4099,72 @@ export default class Page {
           return txt;
         }
 
-        const listContainer =
-          document.querySelector('.jobs-search-results-list') ||
-          document.querySelector('.scaffold-layout__list') ||
-          document.querySelector('.jobs-search-results-list__list') ||
-          document;
+        const candidateContainers = [
+          document.querySelector('.jobs-search-results-list'),
+          document.querySelector('.scaffold-layout__list'),
+          document.querySelector('.scaffold-layout__list-container'),
+          document.querySelector('.jobs-search-results-list__list'),
+          document.querySelector('ul.scaffold-layout__list-container'),
+          document,
+        ].filter(Boolean) as (Element | Document)[];
 
-        const cards = Array.from(
-          listContainer.querySelectorAll(
-            'li.jobs-search-results__list-item, li.scaffold-layout__list-item, div.job-card-container, div[data-job-id], li[data-occludable-job-id], [data-view-name="job-card"]',
-          ),
-        ) as HTMLElement[];
+        const cardSelectors = [
+          'li.jobs-search-results__list-item',
+          'li.scaffold-layout__list-item',
+          'li[data-occludable-job-id]',
+          'div.job-card-container',
+          'div[data-job-id]',
+          'div[data-occludable-job-id]',
+          '[data-view-name="job-card"]',
+          '.job-card-list__entity-lockup',
+          'div.base-card',
+        ].join(', ');
+
+        let cards: HTMLElement[] = [];
+        for (const container of candidateContainers) {
+          const found = Array.from(container.querySelectorAll(cardSelectors)) as HTMLElement[];
+          if (found.length > 0) {
+            cards = found;
+            break;
+          }
+        }
+
+        // Global fallback across entire document
+        if (cards.length === 0) {
+          cards = Array.from(document.querySelectorAll(cardSelectors)) as HTMLElement[];
+        }
+
+        // Fallback: search for any anchor tag with /jobs/view/ or currentJobId=
+        if (cards.length === 0) {
+          const links = Array.from(
+            document.querySelectorAll('a[href*="/jobs/view/"], a[href*="currentJobId="]'),
+          ) as HTMLElement[];
+          const linkParents = new Set<HTMLElement>();
+          for (const l of links) {
+            const parent = (l.closest('li, div[data-job-id], .job-card-container, [data-view-name="job-card"]') ||
+              l.parentElement) as HTMLElement;
+            if (parent) linkParents.add(parent);
+          }
+          cards = Array.from(linkParents);
+        }
 
         const results: SearchJobCard[] = [];
         const seenJobIds = new Set<string>();
 
         for (const card of cards) {
           // 1. Try finding job ID from data attributes
-          let jobId = card.getAttribute('data-job-id') || card.getAttribute('data-occludable-job-id') || '';
+          let jobId =
+            card.getAttribute('data-job-id') ||
+            card.getAttribute('data-occludable-job-id') ||
+            (card as any).dataset?.jobId ||
+            (card as any).dataset?.occludableJobId ||
+            '';
 
           // 2. Try finding job link
-          const link = card.querySelector<HTMLAnchorElement>(
-            'a.job-card-container__link, a.job-card-list__title, a.job-card-container__link--cursor-pointer, a[href*="/jobs/view/"], a[href*="currentJobId="]',
-          );
+          const link =
+            card.querySelector<HTMLAnchorElement>(
+              'a.job-card-container__link, a.job-card-list__title, a.job-card-container__link--cursor-pointer, a[href*="/jobs/view/"], a[href*="currentJobId="], a[data-control-name="job_card_title"]',
+            ) || (card.tagName.toLowerCase() === 'a' ? (card as HTMLAnchorElement) : null);
 
           if (!jobId && link) {
             const href = link.href || '';
@@ -4122,9 +4174,21 @@ export default class Page {
             }
           }
 
-          // 3. Try finding urn
+          // 3. Check any anchor tag inside card
           if (!jobId) {
-            const urn = card.getAttribute('data-entity-urn') || '';
+            const anyLink = card.querySelector<HTMLAnchorElement>('a[href*="/jobs/view/"], a[href*="currentJobId="]');
+            if (anyLink) {
+              const href = anyLink.href || '';
+              const match = href.match(/(?:\/jobs\/view\/|currentJobId=)(\d+)/);
+              if (match && match[1]) {
+                jobId = match[1];
+              }
+            }
+          }
+
+          // 4. Try finding urn
+          if (!jobId) {
+            const urn = card.getAttribute('data-entity-urn') || card.getAttribute('data-job-urn') || '';
             const urnMatch = urn.match(/urn:li:jobPosting:(\d+)/);
             if (urnMatch && urnMatch[1]) {
               jobId = urnMatch[1];
@@ -4138,14 +4202,14 @@ export default class Page {
 
           // Extract title
           const titleEl = card.querySelector(
-            'a.job-card-list__title, .job-card-container__link, .artdeco-entity-lockup__title, strong, h3',
+            'a.job-card-list__title, .job-card-container__link, .artdeco-entity-lockup__title, strong, h3, [data-control-name="job_card_title"]',
           );
           const rawTitle = cleanElementText(titleEl) || cleanElementText(link);
           const title = cleanLinkedInJobTitle(rawTitle);
 
           // Extract company
           const companyEl = card.querySelector(
-            '.job-card-container__company-name, .artdeco-entity-lockup__subtitle, .job-card-container__primary-description, span.t-14',
+            '.job-card-container__company-name, .artdeco-entity-lockup__subtitle, .job-card-container__primary-description, span.t-14, [data-control-name="job_card_company"]',
           );
           const company = cleanElementText(companyEl) || 'Unknown Company';
 
@@ -4172,20 +4236,45 @@ export default class Page {
 
     return await this._puppeteerPage
       .evaluate((targetId: string) => {
-        const listContainer =
-          document.querySelector('.jobs-search-results-list') ||
-          document.querySelector('.scaffold-layout__list') ||
-          document.querySelector('.jobs-search-results-list__list') ||
-          document;
+        const candidateContainers = [
+          document.querySelector('.jobs-search-results-list'),
+          document.querySelector('.scaffold-layout__list'),
+          document.querySelector('.scaffold-layout__list-container'),
+          document.querySelector('.jobs-search-results-list__list'),
+          document,
+        ].filter(Boolean) as (Element | Document)[];
 
-        const cards = Array.from(
-          listContainer.querySelectorAll(
-            'li.jobs-search-results__list-item, li.scaffold-layout__list-item, div.job-card-container, div[data-job-id], li[data-occludable-job-id], [data-view-name="job-card"]',
-          ),
-        ) as HTMLElement[];
+        const cardSelectors = [
+          'li.jobs-search-results__list-item',
+          'li.scaffold-layout__list-item',
+          'li[data-occludable-job-id]',
+          'div.job-card-container',
+          'div[data-job-id]',
+          'div[data-occludable-job-id]',
+          '[data-view-name="job-card"]',
+          '.job-card-list__entity-lockup',
+          'div.base-card',
+        ].join(', ');
+
+        let cards: HTMLElement[] = [];
+        for (const container of candidateContainers) {
+          const found = Array.from(container.querySelectorAll(cardSelectors)) as HTMLElement[];
+          if (found.length > 0) {
+            cards = found;
+            break;
+          }
+        }
+        if (cards.length === 0) {
+          cards = Array.from(document.querySelectorAll(cardSelectors)) as HTMLElement[];
+        }
 
         for (const card of cards) {
-          const cardJobId = card.getAttribute('data-job-id') || card.getAttribute('data-occludable-job-id') || '';
+          const cardJobId =
+            card.getAttribute('data-job-id') ||
+            card.getAttribute('data-occludable-job-id') ||
+            (card as any).dataset?.jobId ||
+            (card as any).dataset?.occludableJobId ||
+            '';
 
           const link = card.querySelector<HTMLAnchorElement>(
             'a.job-card-container__link, a.job-card-list__title, a[href*="/jobs/view/"], a[href*="currentJobId="]',
@@ -4194,6 +4283,10 @@ export default class Page {
           let matches = cardJobId === targetId;
           if (!matches && link) {
             matches = link.href.includes(targetId);
+          }
+          if (!matches) {
+            const anyLink = card.querySelector<HTMLAnchorElement>(`a[href*="${targetId}"]`);
+            if (anyLink) matches = true;
           }
 
           if (matches) {
@@ -4206,6 +4299,15 @@ export default class Page {
             return true;
           }
         }
+
+        // Direct anchor fallback
+        const directAnchor = document.querySelector<HTMLAnchorElement>(`a[href*="${targetId}"]`);
+        if (directAnchor) {
+          directAnchor.scrollIntoView({ behavior: 'instant', block: 'center' });
+          directAnchor.click();
+          return true;
+        }
+
         return false;
       }, jobId)
       .catch(() => false);
