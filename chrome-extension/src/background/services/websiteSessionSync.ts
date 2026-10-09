@@ -156,10 +156,13 @@ export async function syncSessionFromOpenJobformTabs(): Promise<{ ok: boolean; r
     if (typeof chrome === 'undefined' || !chrome.tabs?.query || !chrome.scripting?.executeScript) {
       return { ok: false, reason: 'unsupported' };
     }
-    const tabs = await chrome.tabs.query({
-      url: ['https://www.jobformautomator.com/*', 'https://jobformautomator.com/*'],
-    });
-    if (!tabs || tabs.length === 0) {
+    await resumeWebsiteAutoLogin().catch(() => undefined);
+
+    const allTabs = await chrome.tabs.query({});
+    const tabs = (allTabs || []).filter(
+      tab => tab.url && (tab.url.includes('jobformautomator.com') || tab.url.includes('localhost:3000')),
+    );
+    if (tabs.length === 0) {
       return { ok: false, reason: 'no-tabs' };
     }
 
@@ -170,17 +173,43 @@ export async function syncSessionFromOpenJobformTabs(): Promise<{ ok: boolean; r
           target: { tabId: tab.id },
           func: () => {
             try {
-              const storage = window.localStorage;
-              let authRecord: string | null = null;
-              for (let i = 0; i < storage.length; i++) {
-                const key = storage.key(i);
-                if (key && key.startsWith('firebase:authUser:') && key.endsWith(':[DEFAULT]')) {
-                  authRecord = storage.getItem(key);
-                  break;
+              const storages = [window.localStorage, window.sessionStorage];
+              for (const storage of storages) {
+                if (!storage) continue;
+                for (let i = 0; i < storage.length; i++) {
+                  const key = storage.key(i);
+                  if (key && key.startsWith('firebase:authUser:')) {
+                    const raw = storage.getItem(key);
+                    if (raw) {
+                      try {
+                        const parsed = JSON.parse(raw);
+                        const uid = parsed?.uid || parsed?.id || parsed?.userId;
+                        const idToken =
+                          parsed?.stsTokenManager?.accessToken ||
+                          parsed?.accessToken ||
+                          parsed?.idToken ||
+                          parsed?.token;
+                        const refreshToken = parsed?.stsTokenManager?.refreshToken || parsed?.refreshToken || '';
+                        if (typeof uid === 'string' && uid && typeof idToken === 'string' && idToken) {
+                          return { uid, idToken, refreshToken };
+                        }
+                      } catch {}
+                    }
+                  }
+                }
+                const userRaw = storage.getItem('user') || storage.getItem('candidate');
+                const token = storage.getItem('token') || storage.getItem('idToken') || storage.getItem('accessToken');
+                if (userRaw && token) {
+                  try {
+                    const parsedUser = JSON.parse(userRaw);
+                    const uid = parsedUser?.uid || parsedUser?._id || parsedUser?.id;
+                    if (typeof uid === 'string' && uid && typeof token === 'string') {
+                      return { uid, idToken: token, refreshToken: '' };
+                    }
+                  } catch {}
                 }
               }
-              const flag = storage.getItem('IsLogin') ?? storage.getItem('isLogin') ?? storage.getItem('is_login');
-              return { authRecord, flag };
+              return null;
             } catch {
               return null;
             }
@@ -188,35 +217,19 @@ export async function syncSessionFromOpenJobformTabs(): Promise<{ ok: boolean; r
         });
 
         const data = results?.[0]?.result;
-        if (!data || !data.authRecord) continue;
+        if (!data || !data.uid || !data.idToken) continue;
 
-        const flagNorm = data.flag ? data.flag.toLowerCase().trim() : null;
-        if (flagNorm === 'false' || flagNorm === '0') continue;
+        const res = await acceptWebsiteSession({
+          uid: data.uid,
+          idToken: data.idToken,
+          refreshToken: data.refreshToken,
+        });
 
-        let user: { uid?: string; stsTokenManager?: { accessToken?: string; refreshToken?: string } } | null = null;
-        try {
-          user = JSON.parse(data.authRecord);
-        } catch {
-          continue;
-        }
-
-        const tokens = user?.stsTokenManager;
-        if (
-          typeof user?.uid === 'string' &&
-          typeof tokens?.accessToken === 'string' &&
-          typeof tokens?.refreshToken === 'string'
-        ) {
-          const res = await handleWebsiteMessage({
-            type: JOBFORM_WEBSITE_MESSAGES.login,
-            trigger: 'page-load',
-            uid: user.uid,
-            idToken: tokens.accessToken,
-            refreshToken: tokens.refreshToken,
-          });
-          if (res.ok) {
-            logger.info(`Synced session from active JobForm Automator tab ${tab.id}`);
-            return { ok: true, uid: user.uid };
-          }
+        if (res.ok) {
+          logger.info(`Synced session from active JobForm Automator tab ${tab.id} for user ${data.uid}`);
+          return { ok: true, uid: data.uid };
+        } else {
+          logger.warning(`acceptWebsiteSession returned false: ${res.reason}`);
         }
       } catch (e) {
         logger.warning(`Failed to inspect tab ${tab.id}:`, e);

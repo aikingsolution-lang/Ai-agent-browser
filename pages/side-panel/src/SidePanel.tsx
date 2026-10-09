@@ -1647,7 +1647,15 @@ const SidePanel = () => {
                 ) : (
                   <button
                     type="button"
-                    onClick={openJobformSignIn}
+                    onClick={async () => {
+                      if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
+                        const res = await chrome.runtime
+                          .sendMessage({ type: 'SYNC_JOBFORM_SESSION' })
+                          .catch(() => null);
+                        if (res?.ok) return;
+                      }
+                      openJobformSignIn();
+                    }}
                     title="Login with JobForm Automator"
                     className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 px-3 py-1 text-xs font-semibold text-white shadow-xs transition-colors">
                     <FiUser className="size-3.5" />
