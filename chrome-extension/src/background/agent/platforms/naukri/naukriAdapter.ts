@@ -334,38 +334,78 @@ export class NaukriAdapter implements IPlatformAdapter {
 
       // 5. Check if 1-Click apply succeeded or modal/questionnaire opened
       const postClickCheck = await puppeteerPage.evaluate((selectors: typeof NAUKRI_SELECTORS) => {
-        const bodyText = (document.body.innerText || '').toLowerCase();
-        const success = selectors.SUCCESS_INDICATORS.some(ind => bodyText.includes(ind));
-        if (success) {
+        function isVisible(el: HTMLElement): boolean {
+          if (!el || el.offsetParent === null) return false;
+          const style = window.getComputedStyle(el);
+          if (
+            style.display === 'none' ||
+            style.visibility === 'hidden' ||
+            style.opacity === '0' ||
+            style.pointerEvents === 'none'
+          ) {
+            return false;
+          }
+          const rect = el.getBoundingClientRect();
+          if (rect.width < 50 || rect.height < 50) return false;
+          if (rect.right <= 0 || rect.bottom <= 0 || rect.left >= window.innerWidth || rect.top >= window.innerHeight) {
+            return false;
+          }
+          return true;
+        }
+
+        function checkSuccess(): boolean {
+          const bodyText = (document.body.innerText || '').toLowerCase();
+          if (selectors.SUCCESS_INDICATORS.some(ind => bodyText.includes(ind))) {
+            return true;
+          }
+          const applyBtns = Array.from(document.querySelectorAll('button, a'));
+          for (const b of applyBtns) {
+            const bt = (b.textContent || '').trim().toLowerCase();
+            if (
+              bt === 'applied' ||
+              bt === 'already applied' ||
+              bt.startsWith('applied on') ||
+              b.classList.contains('applied') ||
+              b.classList.contains('already-applied')
+            ) {
+              return true;
+            }
+          }
+          return false;
+        }
+
+        function findModal(): HTMLElement | null {
+          for (const sel of selectors.MODAL_CONTAINER) {
+            const els = Array.from(document.querySelectorAll(sel)) as HTMLElement[];
+            for (const el of els) {
+              if (isVisible(el)) {
+                const hasInputs = el.querySelector(
+                  'input:not([type="hidden"]):not([type="file"]):not([type="submit"]):not([type="button"]):not([type="reset"]), select, textarea',
+                );
+                const text = (el.innerText || '').toLowerCase();
+                const hasText =
+                  text.includes('skip this question') ||
+                  text.includes('current ctc') ||
+                  text.includes('expected ctc') ||
+                  text.includes('notice period') ||
+                  text.includes('in lacs') ||
+                  text.includes('save');
+                if (hasInputs || hasText) {
+                  return el;
+                }
+              }
+            }
+          }
+          return null;
+        }
+
+        if (checkSuccess()) {
           return { type: 'success' };
         }
 
-        // Check if questionnaire/chatbot container is open
-        for (const sel of selectors.MODAL_CONTAINER) {
-          const els = Array.from(document.querySelectorAll(sel)) as HTMLElement[];
-          for (const el of els) {
-            if (el.offsetParent !== null || window.getComputedStyle(el).display !== 'none') {
-              return { type: 'modal_open' };
-            }
-          }
-        }
-
-        // Fallback: check fixed/absolute containers with questionnaire content
-        const allCandidates = Array.from(document.querySelectorAll('div, form, section, aside')) as HTMLElement[];
-        for (const el of allCandidates) {
-          const style = window.getComputedStyle(el);
-          if ((style.position === 'fixed' || style.position === 'absolute') && style.display !== 'none') {
-            const text = (el.innerText || '').toLowerCase();
-            if (
-              (text.includes('current ctc') ||
-                text.includes('skip this question') ||
-                text.includes('in lacs') ||
-                text.includes('notice period')) &&
-              el.querySelector('input, select, textarea, button')
-            ) {
-              return { type: 'modal_open' };
-            }
-          }
+        const modal = findModal();
+        if (modal) {
+          return { type: 'modal_open' };
         }
 
         return { type: 'unknown' };
@@ -391,29 +431,78 @@ export class NaukriAdapter implements IPlatformAdapter {
       // If nothing changed immediately, wait an extra 2s and re-verify
       await new Promise(r => setTimeout(r, 2000));
       const secondaryCheck = await puppeteerPage.evaluate((selectors: typeof NAUKRI_SELECTORS) => {
-        const bodyText = (document.body.innerText || '').toLowerCase();
-        const success = selectors.SUCCESS_INDICATORS.some(ind => bodyText.includes(ind));
-        if (success) {
+        function isVisible(el: HTMLElement): boolean {
+          if (!el || el.offsetParent === null) return false;
+          const style = window.getComputedStyle(el);
+          if (
+            style.display === 'none' ||
+            style.visibility === 'hidden' ||
+            style.opacity === '0' ||
+            style.pointerEvents === 'none'
+          ) {
+            return false;
+          }
+          const rect = el.getBoundingClientRect();
+          if (rect.width < 50 || rect.height < 50) return false;
+          if (rect.right <= 0 || rect.bottom <= 0 || rect.left >= window.innerWidth || rect.top >= window.innerHeight) {
+            return false;
+          }
+          return true;
+        }
+
+        function checkSuccess(): boolean {
+          const bodyText = (document.body.innerText || '').toLowerCase();
+          if (selectors.SUCCESS_INDICATORS.some(ind => bodyText.includes(ind))) {
+            return true;
+          }
+          const applyBtns = Array.from(document.querySelectorAll('button, a'));
+          for (const b of applyBtns) {
+            const bt = (b.textContent || '').trim().toLowerCase();
+            if (
+              bt === 'applied' ||
+              bt === 'already applied' ||
+              bt.startsWith('applied on') ||
+              b.classList.contains('applied') ||
+              b.classList.contains('already-applied')
+            ) {
+              return true;
+            }
+          }
+          return false;
+        }
+
+        function findModal(): HTMLElement | null {
+          for (const sel of selectors.MODAL_CONTAINER) {
+            const els = Array.from(document.querySelectorAll(sel)) as HTMLElement[];
+            for (const el of els) {
+              if (isVisible(el)) {
+                const hasInputs = el.querySelector(
+                  'input:not([type="hidden"]):not([type="file"]):not([type="submit"]):not([type="button"]):not([type="reset"]), select, textarea',
+                );
+                const text = (el.innerText || '').toLowerCase();
+                const hasText =
+                  text.includes('skip this question') ||
+                  text.includes('current ctc') ||
+                  text.includes('expected ctc') ||
+                  text.includes('notice period') ||
+                  text.includes('in lacs') ||
+                  text.includes('save');
+                if (hasInputs || hasText) {
+                  return el;
+                }
+              }
+            }
+          }
+          return null;
+        }
+
+        if (checkSuccess()) {
           return { type: 'success' };
         }
 
-        // Check if modal opened late
-        for (const sel of selectors.MODAL_CONTAINER) {
-          const els = Array.from(document.querySelectorAll(sel)) as HTMLElement[];
-          for (const el of els) {
-            if (el.offsetParent !== null || window.getComputedStyle(el).display !== 'none') {
-              return { type: 'modal_open' };
-            }
-          }
-        }
-
-        // Check if apply button text now says "applied"
-        const applyBtns = Array.from(document.querySelectorAll('button, a'));
-        for (const b of applyBtns) {
-          const bt = (b.textContent || '').trim().toLowerCase();
-          if (selectors.ALREADY_APPLIED_INDICATORS.some(ind => bt.includes(ind))) {
-            return { type: 'success' };
-          }
+        const modal = findModal();
+        if (modal) {
+          return { type: 'modal_open' };
         }
 
         return { type: 'unknown' };
@@ -566,7 +655,9 @@ export class NaukriAdapter implements IPlatformAdapter {
           const modalHeading = (headEl?.textContent || '').trim();
 
           const inputs = Array.from(
-            modal.querySelectorAll('input:not([type="hidden"]), select, textarea'),
+            modal.querySelectorAll(
+              'input:not([type="hidden"]):not([type="file"]):not([type="submit"]):not([type="button"]):not([type="reset"]):not([type="image"]), select, textarea',
+            ),
           ) as HTMLElement[];
           const fields = inputs.map((el, idx) => {
             const placeholder = el.getAttribute('placeholder') || '';
@@ -635,6 +726,57 @@ export class NaukriAdapter implements IPlatformAdapter {
         logger.info(
           `[NaukriAdapter] Step ${step}: Found ${stepData.fields.length} fields. Skip button present: ${stepData.hasSkipBtn}`,
         );
+
+        if (stepData.fields.length === 0) {
+          const isApplied = await puppeteerPage.evaluate((selectors: typeof NAUKRI_SELECTORS) => {
+            const bodyText = (document.body.innerText || '').toLowerCase();
+            if (selectors.SUCCESS_INDICATORS.some(ind => bodyText.includes(ind))) return true;
+            const applyBtns = Array.from(document.querySelectorAll('button, a'));
+            return applyBtns.some(b => {
+              const t = (b.textContent || '').trim().toLowerCase();
+              return (
+                t === 'applied' ||
+                t === 'already applied' ||
+                t.startsWith('applied on') ||
+                b.classList.contains('applied') ||
+                b.classList.contains('already-applied')
+              );
+            });
+          }, NAUKRI_SELECTORS);
+
+          if (isApplied) {
+            logger.info('[NaukriAdapter] Application already confirmed on 0-field step.');
+            return { success: true };
+          }
+
+          // Try clicking any action button in the container if available
+          const clicked = await puppeteerPage.evaluate((selectors: typeof NAUKRI_SELECTORS) => {
+            let modal: HTMLElement | null = null;
+            for (const sel of selectors.MODAL_CONTAINER) {
+              const el = document.querySelector(sel) as HTMLElement | null;
+              if (el && el.offsetParent !== null) {
+                modal = el;
+                break;
+              }
+            }
+            const container = modal || document.body;
+            for (const sel of selectors.SUBMIT_BUTTON) {
+              const btn = container.querySelector(sel) as HTMLElement | null;
+              if (btn && btn.offsetParent !== null && !(btn as HTMLButtonElement).disabled) {
+                btn.click();
+                return true;
+              }
+            }
+            return false;
+          }, NAUKRI_SELECTORS);
+
+          if (clicked) {
+            await new Promise(r => setTimeout(r, 2000));
+            continue;
+          }
+
+          return { success: true };
+        }
 
         let skippedField = false;
 
@@ -717,10 +859,14 @@ export class NaukriAdapter implements IPlatformAdapter {
               if (!modal) modal = document.body;
 
               const inputs = Array.from(
-                modal.querySelectorAll('input:not([type="hidden"]), select, textarea'),
+                modal.querySelectorAll(
+                  'input:not([type="hidden"]):not([type="file"]):not([type="submit"]):not([type="button"]):not([type="reset"]):not([type="image"]), select, textarea',
+                ),
               ) as HTMLElement[];
               const el = inputs[idx] as any;
               if (!el) return;
+
+              if (el.tagName.toLowerCase() === 'input' && el.type === 'file') return;
 
               el.focus?.();
 
@@ -747,12 +893,17 @@ export class NaukriAdapter implements IPlatformAdapter {
                 el.dispatchEvent(new Event('click', { bubbles: true }));
                 el.dispatchEvent(new Event('change', { bubbles: true }));
               } else {
-                // Use native setter for React / modern web frameworks
-                const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
-                if (nativeSetter) {
-                  nativeSetter.call(el, val);
-                } else {
-                  el.value = val;
+                try {
+                  const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+                  if (nativeSetter) {
+                    nativeSetter.call(el, val);
+                  } else {
+                    el.value = val;
+                  }
+                } catch {
+                  try {
+                    el.value = val;
+                  } catch {}
                 }
                 el.dispatchEvent(new Event('input', { bubbles: true }));
                 el.dispatchEvent(new Event('change', { bubbles: true }));
@@ -850,16 +1001,53 @@ export class NaukriAdapter implements IPlatformAdapter {
 
         await new Promise(r => setTimeout(r, 2000));
 
-        // Check if modal has closed or success appeared
+        // Check if modal has closed or application succeeded
         const postSubmitCheck = await puppeteerPage.evaluate((selectors: typeof NAUKRI_SELECTORS) => {
+          function isVisible(el: HTMLElement): boolean {
+            if (!el || el.offsetParent === null) return false;
+            const style = window.getComputedStyle(el);
+            if (
+              style.display === 'none' ||
+              style.visibility === 'hidden' ||
+              style.opacity === '0' ||
+              style.pointerEvents === 'none'
+            ) {
+              return false;
+            }
+            const rect = el.getBoundingClientRect();
+            if (rect.width < 50 || rect.height < 50) return false;
+            if (
+              rect.right <= 0 ||
+              rect.bottom <= 0 ||
+              rect.left >= window.innerWidth ||
+              rect.top >= window.innerHeight
+            ) {
+              return false;
+            }
+            return true;
+          }
+
           const bodyText = (document.body.innerText || '').toLowerCase();
           const hasSuccess = selectors.SUCCESS_INDICATORS.some(ind => bodyText.includes(ind));
           if (hasSuccess) return { finished: true };
 
+          const applyBtns = Array.from(document.querySelectorAll('button, a'));
+          const isBtnApplied = applyBtns.some(b => {
+            const t = (b.textContent || '').trim().toLowerCase();
+            return (
+              t === 'applied' ||
+              t === 'already applied' ||
+              t.startsWith('applied on') ||
+              b.classList.contains('applied') ||
+              b.classList.contains('already-applied')
+            );
+          });
+          if (isBtnApplied) return { finished: true };
+
           let modalOpen = false;
           for (const sel of selectors.MODAL_CONTAINER) {
             const el = document.querySelector(sel) as HTMLElement | null;
-            if (el && (el.offsetParent !== null || window.getComputedStyle(el).display !== 'none')) {
+            if (el && isVisible(el)) {
               modalOpen = true;
               break;
             }
@@ -876,7 +1064,18 @@ export class NaukriAdapter implements IPlatformAdapter {
       // Check final state after loop
       const finalCheck = await puppeteerPage.evaluate((selectors: typeof NAUKRI_SELECTORS) => {
         const bodyText = (document.body.innerText || '').toLowerCase();
-        return selectors.SUCCESS_INDICATORS.some(ind => bodyText.includes(ind));
+        if (selectors.SUCCESS_INDICATORS.some(ind => bodyText.includes(ind))) return true;
+        const applyBtns = Array.from(document.querySelectorAll('button, a'));
+        return applyBtns.some(b => {
+          const t = (b.textContent || '').trim().toLowerCase();
+          return (
+            t === 'applied' ||
+            t === 'already applied' ||
+            t.startsWith('applied on') ||
+            b.classList.contains('applied') ||
+            b.classList.contains('already-applied')
+          );
+        });
       }, NAUKRI_SELECTORS);
 
       if (finalCheck) {

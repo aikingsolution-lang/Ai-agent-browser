@@ -47,6 +47,7 @@ export const NAUKRI_SELECTORS = {
     'application sent',
     'applied successfully',
     'your application has been sent',
+    'you have applied',
     '.apply-message',
   ],
 
@@ -65,10 +66,6 @@ export const NAUKRI_SELECTORS = {
     'div.layer-wrap',
     'div[class*="chatbot" i]',
     'div[class*="bot-container" i]',
-    '[role="dialog"]',
-    'div[class*="drawer" i]:not(.nI-gNb-drawer)',
-    'section[class*="drawer" i]',
-    'aside[class*="drawer" i]',
   ],
   SUBMIT_BUTTON: [
     'button.apply-message-btn',
