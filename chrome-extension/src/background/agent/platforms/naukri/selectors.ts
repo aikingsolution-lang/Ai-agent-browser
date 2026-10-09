@@ -147,4 +147,16 @@ export const NAUKRI_SELECTORS = {
     'div[class*="bot-options" i] > *',
     'ul[class*="bot-options" i] > li',
   ],
+  VERIFICATION_SELECTORS: [
+    'iframe[src*="recaptcha" i]',
+    'iframe[src*="hcaptcha" i]',
+    'iframe[src*="cloudflare" i]',
+    'div[class*="captcha" i]',
+    'div[id*="captcha" i]',
+    'div[class*="otp-container" i]',
+    'div[class*="verify-mobile" i]',
+    'div[class*="verification" i]',
+    'input[name*="otp" i]',
+    'input[id*="otp" i]',
+  ],
 };

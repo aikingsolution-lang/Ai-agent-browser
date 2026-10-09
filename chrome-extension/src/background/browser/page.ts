@@ -2163,6 +2163,11 @@ export default class Page {
         if (easyApplyBtn) {
           easyApplyBtn.scrollIntoView({ behavior: 'instant', block: 'center' });
           easyApplyBtn.focus();
+          const opts = { bubbles: true, cancelable: true, view: window };
+          easyApplyBtn.dispatchEvent(new PointerEvent('pointerdown', opts));
+          easyApplyBtn.dispatchEvent(new MouseEvent('mousedown', opts));
+          easyApplyBtn.dispatchEvent(new PointerEvent('pointerup', opts));
+          easyApplyBtn.dispatchEvent(new MouseEvent('mouseup', opts));
           easyApplyBtn.click();
           return { clicked: true };
         }
@@ -4873,13 +4878,23 @@ export default class Page {
         const modal = findActiveModal(document) || document.body;
         const buttons = Array.from(modal.querySelectorAll('button')) as HTMLButtonElement[];
 
+        function dispatchFullClick(el: HTMLElement) {
+          el.scrollIntoView({ behavior: 'instant', block: 'center' });
+          el.focus();
+          const opts = { bubbles: true, cancelable: true, view: window };
+          el.dispatchEvent(new PointerEvent('pointerdown', opts));
+          el.dispatchEvent(new MouseEvent('mousedown', opts));
+          el.dispatchEvent(new PointerEvent('pointerup', opts));
+          el.dispatchEvent(new MouseEvent('mouseup', opts));
+          el.click();
+        }
+
         // Try Review first
         for (const btn of buttons) {
           const text = (btn.textContent || '').trim();
           const aria = (btn.getAttribute('aria-label') || '').trim();
           if (/review/i.test(aria) || /^\s*review\s*$/i.test(text)) {
-            btn.scrollIntoView({ behavior: 'instant', block: 'center' });
-            btn.click();
+            dispatchFullClick(btn);
             return { clicked: true, type: 'review' as const };
           }
         }
@@ -4889,8 +4904,7 @@ export default class Page {
           const text = (btn.textContent || '').trim();
           const aria = (btn.getAttribute('aria-label') || '').trim();
           if (/next|continue/i.test(aria) || /^\s*(next|continue)\s*$/i.test(text)) {
-            btn.scrollIntoView({ behavior: 'instant', block: 'center' });
-            btn.click();
+            dispatchFullClick(btn);
             return { clicked: true, type: 'next' as const };
           }
         }
@@ -4980,6 +4994,11 @@ export default class Page {
           if (isSubmit) {
             btn.scrollIntoView({ behavior: 'instant', block: 'center' });
             btn.focus();
+            const opts = { bubbles: true, cancelable: true, view: window };
+            btn.dispatchEvent(new PointerEvent('pointerdown', opts));
+            btn.dispatchEvent(new MouseEvent('mousedown', opts));
+            btn.dispatchEvent(new PointerEvent('pointerup', opts));
+            btn.dispatchEvent(new MouseEvent('mouseup', opts));
             btn.click();
             return { clicked: true };
           }

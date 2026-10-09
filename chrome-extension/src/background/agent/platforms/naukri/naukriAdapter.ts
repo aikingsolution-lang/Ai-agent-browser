@@ -253,7 +253,41 @@ export class NaukriAdapter implements IPlatformAdapter {
         await new Promise(r => setTimeout(r, 4000));
       }
 
-      // 2. Check if already applied
+      // 2. Check if a CAPTCHA or verification screen appeared
+      const hasVerificationWall = await puppeteerPage.evaluate((selectors: typeof NAUKRI_SELECTORS) => {
+        for (const sel of selectors.VERIFICATION_SELECTORS) {
+          const el = document.querySelector(sel);
+          if (el && (el as HTMLElement).offsetParent !== null) return true;
+        }
+        const text = (document.body.innerText || '').toLowerCase();
+        return (
+          text.includes('enter the otp') ||
+          text.includes('verify your mobile') ||
+          text.includes('verify your email') ||
+          text.includes('complete the security check') ||
+          text.includes('suspicious activity')
+        );
+      }, NAUKRI_SELECTORS);
+
+      if (hasVerificationWall) {
+        logger.warning(`[NaukriAdapter] 🛑 Verification wall / OTP detected for "${job.title}". Pausing.`);
+        if (onLiveActivity) {
+          onLiveActivity({
+            jobId: job.jobId,
+            url: job.url,
+            title: job.title,
+            company: job.company,
+            status: 'needs_verification',
+            reason: 'Naukri requested OTP or CAPTCHA verification. Please complete it in the runner tab.',
+          });
+        }
+        return {
+          status: 'skipped',
+          reason: 'Naukri requested OTP or CAPTCHA verification. Complete it manually.',
+        };
+      }
+
+      // 3. Check if already applied
       const alreadyApplied = await puppeteerPage.evaluate((selectors: typeof NAUKRI_SELECTORS) => {
         const text = (document.body.innerText || '').toLowerCase();
         return selectors.ALREADY_APPLIED_INDICATORS.some(ind => text.includes(ind));
@@ -312,10 +346,21 @@ export class NaukriAdapter implements IPlatformAdapter {
       // 4. Click the Apply button
       logger.info(`[NaukriAdapter] Clicking Apply button: "${applyBtnState.text}"`);
       await puppeteerPage.evaluate((selectors: typeof NAUKRI_SELECTORS) => {
+        function robustClick(target: HTMLElement) {
+          target.scrollIntoView({ behavior: 'instant', block: 'center' });
+          target.focus();
+          const opts = { bubbles: true, cancelable: true, view: window };
+          target.dispatchEvent(new PointerEvent('pointerdown', opts));
+          target.dispatchEvent(new MouseEvent('mousedown', opts));
+          target.dispatchEvent(new PointerEvent('pointerup', opts));
+          target.dispatchEvent(new MouseEvent('mouseup', opts));
+          target.click();
+        }
+
         for (const sel of selectors.PRIMARY_APPLY_BUTTON) {
           const el = document.querySelector(sel) as HTMLElement | null;
           if (el && el.offsetParent !== null) {
-            el.click();
+            robustClick(el);
             return;
           }
         }
@@ -323,7 +368,7 @@ export class NaukriAdapter implements IPlatformAdapter {
         for (const b of buttons) {
           const bText = (b.textContent || '').trim().toLowerCase();
           if (bText === 'apply' || bText === 'apply on website') {
-            (b as HTMLElement).click();
+            robustClick(b as HTMLElement);
             return;
           }
         }
@@ -1482,10 +1527,13 @@ export class NaukriAdapter implements IPlatformAdapter {
                 actionBtn.removeAttribute('aria-disabled');
               } catch {}
             }
+            actionBtn.scrollIntoView({ behavior: 'instant', block: 'center' });
             actionBtn.focus?.();
-            actionBtn.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }));
-            actionBtn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-            actionBtn.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+            const mOpts = { bubbles: true, cancelable: true, view: window };
+            actionBtn.dispatchEvent(new PointerEvent('pointerdown', mOpts));
+            actionBtn.dispatchEvent(new MouseEvent('mousedown', mOpts));
+            actionBtn.dispatchEvent(new PointerEvent('pointerup', mOpts));
+            actionBtn.dispatchEvent(new MouseEvent('mouseup', mOpts));
             actionBtn.click();
             return { clicked: true, action: 'save' };
           }
