@@ -8,7 +8,7 @@ import type {
   SupportedPlatform,
 } from '../types';
 import { NAUKRI_SELECTORS } from './selectors';
-import { resolveNaukriQuestion } from './naukriResolver';
+import { resolveNaukriQuestion, resolveNaukriWithLLM } from './naukriResolver';
 import { inspectAndHealFormErrors } from '../../intelligence';
 import { sanitizeRoleSearchQuery } from '@extension/storage';
 import { createLogger } from '@src/background/log';
@@ -929,7 +929,23 @@ export class NaukriAdapter implements IPlatformAdapter {
           const optTexts = (stepData.choiceOptions as Array<{ text: string; index: number }>).map(
             (o: { text: string; index: number }) => o.text,
           );
-          const resolvedChoice = resolveNaukriQuestion(lastQuestionHandled, 'radio', optTexts, careerBrain);
+          let resolvedChoice = resolveNaukriQuestion(lastQuestionHandled, 'radio', optTexts, careerBrain);
+
+          // User request: Always consult LLM for radio/choice options if LLM is active
+          try {
+            const llm = context?.scopedLLM || (await getActiveChatModel(context?.runId)) || undefined;
+            if (llm) {
+              logger.info(`[NaukriAdapter] 🧠 Asking LLM to pick choice option for: "${lastQuestionHandled}"`);
+              const llmRes = await resolveNaukriWithLLM(lastQuestionHandled, 'radio', optTexts, careerBrain, llm);
+              if (llmRes.success && llmRes.answer) {
+                resolvedChoice = { value: llmRes.answer, confidence: 0.99, source: 'profile' };
+                logger.info(`[NaukriAdapter] ✅ LLM chose option: "${resolvedChoice.value}"`);
+              }
+            }
+          } catch (err) {
+            logger.warning('[NaukriAdapter] LLM choice option resolution error:', err);
+          }
+
           logger.info(
             `[NaukriAdapter] Choice question "${lastQuestionHandled}" -> Resolved: "${resolvedChoice.value}"`,
           );
@@ -990,30 +1006,39 @@ export class NaukriAdapter implements IPlatformAdapter {
           for (const f of stepData.fields) {
             const qText = f.labelText || lastQuestionHandled;
             let answer = resolveNaukriQuestion(qText, f.fieldType as any, f.options, careerBrain, f.placeholder);
+            const isLakhsQ = qText.toLowerCase().includes('lac') || qText.toLowerCase().includes('lakh');
 
-            if (answer.confidence < 0.9 && (!answer.value || answer.confidence <= 0.4)) {
-              try {
-                const llm = context?.scopedLLM || (await getActiveChatModel(context?.runId)) || undefined;
-                if (llm) {
-                  logger.info(`[NaukriAdapter] 🧠 Asking LLM to resolve field: "${qText}"`);
-                  const llmFieldType =
-                    f.fieldType === 'select'
-                      ? 'dropdown'
-                      : ['text', 'number', 'radio', 'checkbox'].includes(f.fieldType)
-                        ? (f.fieldType as 'text' | 'number' | 'radio' | 'checkbox')
-                        : 'text';
-                  const llmRes = await solveQuestionAutonomousWithLLM(
-                    { label: qText, fieldType: llmFieldType, options: f.options },
-                    careerBrain,
-                    llm,
-                  );
-                  if (llmRes.success && llmRes.answer) {
-                    answer = { value: llmRes.answer, confidence: 0.99, source: 'profile' };
-                    logger.info(`[NaukriAdapter] ✅ LLM resolved "${qText}" -> "${answer.value}"`);
-                  }
+            // Consult LLM for concise one-word / one-line answer
+            try {
+              const llm = context?.scopedLLM || (await getActiveChatModel(context?.runId)) || undefined;
+              if (llm && (!answer.value || answer.confidence < 0.95 || isLakhsQ)) {
+                logger.info(`[NaukriAdapter] 🧠 Asking LLM for concise answer: "${qText}"`);
+                const llmRes = await resolveNaukriWithLLM(
+                  qText,
+                  f.fieldType as any,
+                  f.options,
+                  careerBrain,
+                  llm,
+                  f.placeholder,
+                );
+                if (llmRes.success && llmRes.answer) {
+                  answer = { value: llmRes.answer, confidence: 0.99, source: 'profile' };
+                  logger.info(`[NaukriAdapter] ✅ LLM resolved "${qText}" -> "${answer.value}"`);
                 }
-              } catch (err) {
-                logger.warning(`[NaukriAdapter] LLM field resolution fallback error:`, err);
+              }
+            } catch (err) {
+              logger.warning(`[NaukriAdapter] LLM field resolution error:`, err);
+            }
+
+            // Sanitize CTC in Lakhs prompt to pure Lakhs numeric (e.g. "7" or "7.5")
+            if (isLakhsQ && answer.value) {
+              const numMatch = answer.value.match(/(\d+(?:\.\d+)?)/);
+              if (numMatch) {
+                let num = parseFloat(numMatch[1]);
+                if (num >= 1000) num = Number((num / 100000).toFixed(2));
+                answer.value = String(num).replace(/\.00$/, '');
+              } else {
+                answer.value = '7';
               }
             }
 
@@ -1042,6 +1067,18 @@ export class NaukriAdapter implements IPlatformAdapter {
               didAnswer = true;
               await new Promise(r => setTimeout(r, 2000));
               break;
+            }
+
+            // Fallback if field is empty and skip is unavailable, so modal never gets stuck
+            if (!answer.value) {
+              if (isLakhsQ) {
+                const yoe = careerBrain.yearsOfExperience ?? 3;
+                answer = { value: String(Math.max(3, Math.round(yoe * 2.5))), confidence: 0.8, source: 'default' };
+              } else if (f.fieldType === 'number') {
+                answer = { value: '0', confidence: 0.5, source: 'default' };
+              } else {
+                answer = { value: 'Yes', confidence: 0.5, source: 'default' };
+              }
             }
 
             logger.info(`[NaukriAdapter] Field "${qText}" -> Answering: "${answer.value}"`);
@@ -1108,9 +1145,11 @@ export class NaukriAdapter implements IPlatformAdapter {
                       el.value = val;
                     } catch {}
                   }
-                  el.dispatchEvent(new Event('input', { bubbles: true }));
-                  el.dispatchEvent(new Event('change', { bubbles: true }));
-                  el.dispatchEvent(new Event('blur', { bubbles: true }));
+                  el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+                  el.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+                  el.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: '0' }));
+                  el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: '0' }));
+                  el.dispatchEvent(new Event('blur', { bubbles: true, composed: true }));
                 }
               },
               f.index,
@@ -1182,12 +1221,19 @@ export class NaukriAdapter implements IPlatformAdapter {
               actionBtn.classList.contains('disabled') ||
               actionBtn.getAttribute('aria-disabled') === 'true');
 
-          if (actionBtn && !isBtnDisabled) {
+          if (actionBtn) {
+            if (isBtnDisabled) {
+              try {
+                (actionBtn as HTMLButtonElement).disabled = false;
+                actionBtn.classList.remove('disabled');
+                actionBtn.removeAttribute('aria-disabled');
+              } catch {}
+            }
             actionBtn.click();
             return { clicked: true, action: 'save' };
           }
 
-          // Fallback to Skip this question if Save is disabled
+          // Fallback to Skip this question if Save is missing
           const skipEls = Array.from(modal.querySelectorAll('button, a, span, div')) as HTMLElement[];
           for (const s of skipEls) {
             const st = (s.textContent || '').trim().toLowerCase();

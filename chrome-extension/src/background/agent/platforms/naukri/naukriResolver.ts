@@ -1,5 +1,7 @@
 import { type ICareerBrain, parseLocationParts } from '@extension/storage';
 import { alignValueToOptions, matchQuestionSemantically } from '../../intelligence';
+import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
+import { HumanMessage, SystemMessage } from '@langchain/core/messages';
 
 export interface INaukriAnswerResult {
   value: string;
@@ -265,18 +267,28 @@ export function resolveNaukriQuestion(
     const isMonthly = combined.includes('p/m') || combined.includes('per month') || combined.includes('monthly');
 
     let val = '';
-    if (numericCtc > 0) {
-      if (isMonthly) {
-        val = String(Math.round(numericCtc / 12));
-      } else if (isLakhsPrompt) {
-        if (numericCtc >= 1000) {
-          val = String(Number((numericCtc / 100000).toFixed(2))).replace(/\.00$/, '');
-        } else {
-          val = String(numericCtc);
-        }
+    let effNumericCtc = numericCtc;
+    let resolvedConfidence = 0.95;
+    let resolvedSource: 'profile' | 'default' = 'profile';
+
+    if (effNumericCtc <= 0) {
+      const yoe = careerBrain.yearsOfExperience ?? 3;
+      const defaultLakhs = Math.max(5, Math.round(yoe * 3.5));
+      effNumericCtc = defaultLakhs * 100000;
+      resolvedConfidence = 0.85;
+      resolvedSource = 'default';
+    }
+
+    if (isMonthly) {
+      val = String(Math.round(effNumericCtc / 12));
+    } else if (isLakhsPrompt) {
+      if (effNumericCtc >= 1000) {
+        val = String(Number((effNumericCtc / 100000).toFixed(2))).replace(/\.00$/, '');
       } else {
-        val = String(numericCtc);
+        val = String(effNumericCtc);
       }
+    } else {
+      val = String(effNumericCtc);
     }
 
     if (options.length > 0 && val) {
@@ -285,10 +297,10 @@ export function resolveNaukriQuestion(
     }
 
     if (!val) {
-      return { value: '', confidence: 0.2, source: 'default' };
+      return { value: '10', confidence: 0.5, source: 'default' };
     }
 
-    return { value: val, confidence: 0.95, source: 'profile' };
+    return { value: val, confidence: resolvedConfidence, source: resolvedSource };
   }
 
   // 4. Total Experience / Years of experience / Skill experience (e.g. "How many years of experience do you have in Aws Devops?")
@@ -403,4 +415,123 @@ export function resolveNaukriQuestion(
     };
   }
   return { value: fallbackVal, confidence: 0.5, source: 'default' };
+}
+
+/**
+ * Uses LLM to answer questionnaire and screening questions on Naukri.com,
+ * ensuring answers are strictly 1 word, 1 number, or an exact choice option,
+ * with intelligent Lakhs conversion and option alignment.
+ */
+export async function resolveNaukriWithLLM(
+  questionText: string,
+  fieldType: 'text' | 'number' | 'radio' | 'dropdown' | 'select' | 'checkbox',
+  options: string[] = [],
+  careerBrain: ICareerBrain,
+  llm: BaseChatModel,
+  placeholder: string = '',
+): Promise<{ success: boolean; answer: string }> {
+  try {
+    const qLower = questionText.toLowerCase();
+    const isLakhsPrompt =
+      qLower.includes('in lac') ||
+      qLower.includes('in lakh') ||
+      qLower.includes('lacs per annum') ||
+      qLower.includes('lakhs per annum') ||
+      qLower.includes('lpa') ||
+      qLower.includes('lakhs') ||
+      qLower.includes('lacs');
+
+    const yoe = careerBrain.yearsOfExperience ?? 3;
+    const defaultCtcLakhs = Math.max(3, Math.round(yoe * 2.5));
+    const currentCtc = careerBrain.currentCTC || `${defaultCtcLakhs * 100000}`;
+    const expectedCtc =
+      careerBrain.expectedCTC || careerBrain.salaryExpectation || `${Math.round(defaultCtcLakhs * 1.5) * 100000}`;
+
+    const systemPrompt = `You are an expert autonomous job application AI applying on Naukri.com.
+Answer the recruiter's question accurately based on the candidate's profile.
+
+RULES FOR THE OUTPUT:
+1. OUTPUT FORMAT: Output ONLY the concise final answer — exactly ONE WORD, ONE NUMBER, or ONE EXACT OPTION from the options list.
+   - NEVER output sentences, explanations, conversational filler, quotes, or markdown.
+   - For radio / checkbox / dropdown options: Pick the EXACT matching option text from the provided OPTIONS list that qualifies the candidate best.
+2. CTC / SALARY IN LAKHS:
+   - If the question asks for CTC "in Lacs" or "in Lakhs" (e.g. "What is your current CTC in Lacs per annum?"):
+     Output strictly the single numeric figure in Lakhs (e.g. "7" or "8" or "6.5"). NEVER output 700000 or full currency numbers!
+3. EXPERIENCE:
+   - For years of experience (total or skill-specific like AWS, DevOps), output only the numeric years (e.g. "${yoe}").
+   - If options exist (e.g. ["6+", "Less than 6"]), choose the option matching the candidate.
+4. NOTICE PERIOD:
+   - If asking for days, output digits (e.g. "15" or "0"). Otherwise output "15 Days" or "Immediate".
+5. QUALIFYING COMMITMENT:
+   - For willingness to relocate, background check, shift flexibility, or mandatory requirements, always pick "Yes" or favorable choice.`;
+
+    const userPrompt = `QUESTION: "${questionText}"
+FIELD TYPE: ${fieldType}
+OPTIONS: ${options.length > 0 ? JSON.stringify(options) : 'None (free text / number)'}
+PLACEHOLDER: "${placeholder}"
+
+CANDIDATE PROFILE:
+- Full Name: ${careerBrain.fullName || 'Candidate'}
+- Current Title: ${careerBrain.currentTitle || 'DevOps Engineer / Software Engineer'}
+- Years of Experience: ${yoe}
+- Current CTC: ${currentCtc}
+- Expected CTC: ${expectedCtc}
+- Notice Period: ${careerBrain.noticePeriod || '15 Days'}
+- Location: ${careerBrain.currentLocation || 'Bengaluru, India'}
+- Preferred Locations: ${careerBrain.preferredLocations?.join(', ') || careerBrain.preferredLocation || 'Bengaluru, Hyderabad, Remote'}
+- Skills: ${(careerBrain.skills || []).join(', ') || 'AWS, DevOps, Docker, Kubernetes, CI/CD, Python'}
+- Skill Experience: ${careerBrain.skillExperience ? JSON.stringify(careerBrain.skillExperience) : 'N/A'}
+- Resume Summary: ${(careerBrain.resumeText || '').slice(0, 1500)}
+
+FINAL ANSWER (one word, one number, or exact option):`;
+
+    const response = await llm.invoke([new SystemMessage(systemPrompt), new HumanMessage(userPrompt)]);
+
+    let raw = response.content.toString().trim();
+    // Clean markdown, quotes, trailing punctuation
+    raw = raw
+      .replace(/^["'`]|["'`]$/g, '')
+      .replace(/\n.*$/s, '')
+      .trim();
+
+    // If options are provided, align strictly to one of the options
+    if (options.length > 0) {
+      const aligned = alignValueToOptions(raw, options, questionText);
+      if (aligned) {
+        return { success: true, answer: aligned.matchedOption };
+      }
+      const matched = options.find(
+        o => o.toLowerCase() === raw.toLowerCase() || o.toLowerCase().includes(raw.toLowerCase()),
+      );
+      if (matched) {
+        return { success: true, answer: matched };
+      }
+      return { success: true, answer: options[0] };
+    }
+
+    // If question asks for CTC in Lakhs, sanitize to pure Lakhs number
+    if (isLakhsPrompt) {
+      const numMatch = raw.match(/(\d+(?:\.\d+)?)/);
+      if (numMatch) {
+        let num = parseFloat(numMatch[1]);
+        if (num >= 1000) {
+          num = Number((num / 100000).toFixed(2));
+        }
+        return { success: true, answer: String(num).replace(/\.00$/, '') };
+      }
+      return { success: true, answer: String(defaultCtcLakhs) };
+    }
+
+    // If fieldType is number, sanitize to digits only
+    if (fieldType === 'number') {
+      const numMatch = raw.match(/(\d+(?:\.\d+)?)/);
+      if (numMatch) {
+        return { success: true, answer: numMatch[1] };
+      }
+    }
+
+    return { success: true, answer: raw };
+  } catch {
+    return { success: false, answer: '' };
+  }
 }
