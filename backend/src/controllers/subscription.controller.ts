@@ -1,9 +1,22 @@
 import type { Request, Response, NextFunction } from 'express';
-import { Subscription } from '../models/subscription.model.js';
-import { Plan } from '../models/plan.model.js';
-import { User } from '../models/user.model.js';
 import { TrialService } from '../services/trial.service.js';
+import { PlanService } from '../services/planSeed.service.js';
 import { AppError } from '../middleware/errorHandler.js';
+import { JobformPremiumService, type JobformPremiumStatus } from '../services/jobformPremium.service.js';
+import { logger } from '../utils/logger.js';
+
+/**
+ * JobForm Automator premium status (read-only, server-side). null when it can't be read right now,
+ * which clients must treat as "not premium" (never as "keep the last known value").
+ */
+async function readJobformPremium(userId: string): Promise<JobformPremiumStatus | null> {
+  try {
+    return await JobformPremiumService.getStatus(userId);
+  } catch (error: any) {
+    logger.warn(`[Subscription] Could not read JobForm Automator premium status for ${userId}: ${error?.message}`);
+    return null;
+  }
+}
 
 export class SubscriptionController {
   /**
@@ -22,32 +35,35 @@ export class SubscriptionController {
       await TrialService.expireSubscriptionIfEnded(userId);
       await TrialService.healUserTrialSubscriptionIfEligible(userId);
 
-      // 2. Fetch user document to verify trial eligibility flag
-      const user = await User.findById(userId);
+      // 2. Check the permanent trial eligibility flag
+      const hasUsedTrial = await TrialService.hasUsedTrial(userId);
 
-      // 3. Fetch latest subscription for user
-      let subscription: any = await Subscription.findOne({ userId }).sort({ createdAt: -1 });
+      // 3. Fetch the user's current subscription
+      let subscription = await TrialService.getCurrentSubscriptionDto(userId);
 
-      if (!subscription && !user?.hasUsedTrial) {
+      if (!subscription && !hasUsedTrial) {
         // Auto-provision 5-day free trial ONLY for brand-new users who have NEVER used a trial before
         try {
           subscription = await TrialService.createFreeTrial(userId);
-        } catch (trialErr) {
-          subscription = await Subscription.findOne({ userId }).sort({ createdAt: -1 });
+        } catch {
+          subscription = await TrialService.getCurrentSubscriptionDto(userId);
         }
       }
+
+      const premium = await readJobformPremium(userId);
 
       if (!subscription) {
         res.status(200).json({
           success: true,
           data: {
             subscription: null,
-            status: user?.hasUsedTrial ? 'EXPIRED' : 'NONE',
+            status: hasUsedTrial ? 'EXPIRED' : 'NONE',
             hasActiveEntitlement: false,
             trialInfo: null,
-            message: user?.hasUsedTrial
+            message: hasUsedTrial
               ? 'Your free trial has already been used. Please subscribe to a paid plan to continue.'
               : undefined,
+            premium,
           },
         });
         return;
@@ -67,6 +83,7 @@ export class SubscriptionController {
           status: subscription.status,
           hasActiveEntitlement,
           trialInfo,
+          premium,
         },
       });
     } catch (error) {
@@ -80,7 +97,7 @@ export class SubscriptionController {
    */
   public static async getPlans(_req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
-      const plans = await Plan.find({ isActive: true }).select('-__v');
+      const plans = await PlanService.getActivePlans();
       res.status(200).json({
         success: true,
         data: { plans },

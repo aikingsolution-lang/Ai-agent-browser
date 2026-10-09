@@ -1,7 +1,25 @@
-import { Types } from 'mongoose';
-import { CareerBrain, type ICareerBrainDocument } from '../models/careerBrain.model.js';
-import { Subscription } from '../models/subscription.model.js';
+/**
+ * profile.service.ts
+ *
+ * Career Brain profile and daily application quota, backed by Firebase RTDB at
+ * nanobrowser/career_brains/{uid} (previously the Mongo CareerBrain collection, unique per user).
+ * Public methods, semantics and response shapes match the Mongo version.
+ *
+ * RTDB-specific handling:
+ *   - Profile syncs use field-level update(), never a whole-node set, so they can't overwrite a
+ *     concurrent quota increment (Mongo's $set only touched the listed fields too).
+ *   - The quota check-and-increment is a transaction on the small dailyQuota node (Mongo's
+ *     conditional $inc).
+ *   - skillExperience / customAnswers are keyed by user text ("Node.js", questions with "/" …),
+ *     which RTDB keys can't hold, so they're stored as entry lists and rebuilt as maps on read.
+ */
+
 import { AppError } from '../middleware/errorHandler.js';
+import { CareerBrainRepository, SubscriptionRepository } from './rtdb/repositories.js';
+import { stripUndefined, todayString } from './rtdb/rtdbUtils.js';
+import { customAnswersToList, skillExperienceToList } from './rtdb/mappers.js';
+import { toCareerBrainDto, type CareerBrainDto } from './rtdb/serializers.js';
+import type { CareerBrainRecord, DailyQuotaRecord } from './rtdb/records.js';
 import type { ParsedResumeData } from '../schemas/resume.schema.js';
 
 export interface QuotaStatus {
@@ -13,99 +31,207 @@ export interface QuotaStatus {
   lastResetDate: string;
 }
 
+/** Fields the Mongo version updated on an existing profile during an extension sync. */
+const SYNC_UPDATE_FIELDS = [
+  'fullName',
+  'email',
+  'phoneNumber',
+  'currentTitle',
+  'resumeText',
+  'backgroundNarrative',
+  'skills',
+  'yearsOfExperience',
+  'education',
+  'noticePeriod',
+  'workAuthorization',
+  'salaryExpectation',
+  'currentLocation',
+  'preferredLocation',
+  'preferredLocations',
+  'portfolioUrl',
+  'githubUrl',
+  'linkedinUrl',
+  'goldenAnswers',
+  'customAnswers',
+  'skillExperience',
+] as const;
+
+/** All profile fields a client may set when the profile is first created. */
+const CREATE_FIELDS = [
+  ...SYNC_UPDATE_FIELDS,
+  'resumeFileName',
+  'hasWorkExperience',
+  'workExperience',
+  'college',
+  'cgpa',
+  'workHistory',
+] as const;
+
+const REQUIRED_ON_CREATE = ['fullName', 'email', 'currentTitle', 'resumeText'] as const;
+
+type ApiProfileField = (typeof CREATE_FIELDS)[number];
+
+function trimString(value: unknown): string {
+  if (value === null || value === undefined) return '';
+  return String(value).trim();
+}
+
+function stringList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter(item => item !== null && item !== undefined).map(item => String(item));
+}
+
+function objectList<T>(value: unknown): T[] {
+  if (!Array.isArray(value)) return [];
+  return stripUndefined(value.filter(item => item !== null && typeof item === 'object')) as T[];
+}
+
+/**
+ * Converts one API field value to its stored form (trimming strings and lowercasing the email
+ * the way the Mongoose schema did). Returns [storedField, storedValue].
+ */
+function toStoredField(field: ApiProfileField, value: unknown): [string, unknown] {
+  switch (field) {
+    case 'email':
+      return ['email', trimString(value).toLowerCase()];
+    case 'skills':
+    case 'preferredLocations':
+      return [field, stringList(value)];
+    case 'yearsOfExperience':
+      return [field, Math.max(0, Number(value) || 0)];
+    case 'hasWorkExperience':
+      return [field, Boolean(value)];
+    case 'workExperience':
+    case 'workHistory':
+    case 'goldenAnswers':
+      return [field, objectList(value)];
+    case 'skillExperience':
+      return ['skillExperienceList', skillExperienceToList(value)];
+    case 'customAnswers':
+      return ['customAnswersList', customAnswersToList(value)];
+    default:
+      return [field, trimString(value)];
+  }
+}
+
+function defaultQuota(dailyLimit: number, today: string): DailyQuotaRecord {
+  return { appliedToday: 0, dailyLimit, lastResetDate: today };
+}
+
+/** A new profile with the Mongoose schema defaults. */
+function newProfileRecord(uid: string, today: string, now: number): CareerBrainRecord {
+  return {
+    uid,
+    fullName: '',
+    email: '',
+    phoneNumber: '',
+    currentTitle: '',
+    resumeText: '',
+    resumeFileName: '',
+    backgroundNarrative: '',
+    skills: [],
+    yearsOfExperience: 0,
+    hasWorkExperience: true,
+    workExperience: [],
+    education: '',
+    college: '',
+    cgpa: '',
+    workHistory: [],
+    noticePeriod: 'Immediate',
+    workAuthorization: 'Authorized to work',
+    skillExperienceList: [],
+    salaryExpectation: '',
+    currentLocation: '',
+    preferredLocation: '',
+    preferredLocations: [],
+    portfolioUrl: '',
+    githubUrl: '',
+    linkedinUrl: '',
+    goldenAnswers: [],
+    customAnswersList: [],
+    tier: 'free',
+    dailyQuota: defaultQuota(15, today),
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+function tierForLimit(limit: number): 'free' | 'premium' {
+  return limit > 15 ? 'premium' : 'free';
+}
+
 export class ProfileService {
   private static getTodayString(): string {
-    return new Date().toISOString().split('T')[0];
+    return todayString();
   }
 
   /**
    * Retrieves user's Career Brain profile by userId.
    */
-  public static async getProfile(userId: string): Promise<ICareerBrainDocument | null> {
-    const userObjectId = new Types.ObjectId(userId);
-    return CareerBrain.findOne({ userId: userObjectId });
+  public static async getProfile(userId: string): Promise<CareerBrainDto | null> {
+    const record = await CareerBrainRepository.get(userId);
+    return record ? toCareerBrainDto(record) : null;
   }
 
   /**
    * Upserts the user's Career Brain profile from extension sync.
+   * Tier and daily quota are never taken from the client.
    */
-  public static async syncProfile(
-    userId: string,
-    profileData: Partial<ICareerBrainDocument>,
-  ): Promise<ICareerBrainDocument> {
-    const userObjectId = new Types.ObjectId(userId);
+  public static async syncProfile(userId: string, profileData: Record<string, any>): Promise<CareerBrainDto> {
+    const data = profileData && typeof profileData === 'object' ? profileData : {};
     const today = this.getTodayString();
+    const now = Date.now();
 
-    const existing = await CareerBrain.findOne({ userId: userObjectId });
+    if (!(await CareerBrainRepository.exists(userId))) {
+      const record = newProfileRecord(userId, today, now) as unknown as Record<string, unknown>;
+      for (const field of CREATE_FIELDS) {
+        if (data[field] === undefined || data[field] === null) continue;
+        const [storedField, storedValue] = toStoredField(field, data[field]);
+        record[storedField] = storedValue;
+      }
 
-    if (!existing) {
-      const newProfile = new CareerBrain({
-        ...profileData,
-        userId: userObjectId,
-        tier: 'free',
-        dailyQuota: {
-          appliedToday: 0,
-          dailyLimit: 15,
-          lastResetDate: today,
-        },
-      });
-      await newProfile.save();
-      return newProfile;
+      const missing = REQUIRED_ON_CREATE.filter(field => !record[field]);
+      if (missing.length > 0) {
+        throw new AppError(`Career Brain validation failed: ${missing.join(', ')} required`, 400, 'VALIDATION_ERROR');
+      }
+
+      if (await CareerBrainRepository.createIfMissing(userId, record as unknown as CareerBrainRecord)) {
+        return toCareerBrainDto(record as unknown as CareerBrainRecord);
+      }
+      // Another request created it first: fall through and update it.
     }
 
     // Preserve tier and daily quota while updating candidate profile data
-    const updated = await CareerBrain.findOneAndUpdate(
-      { userId: userObjectId },
-      {
-        $set: {
-          fullName: profileData.fullName ?? existing.fullName,
-          email: profileData.email ?? existing.email,
-          phoneNumber: profileData.phoneNumber ?? existing.phoneNumber,
-          currentTitle: profileData.currentTitle ?? existing.currentTitle,
-          resumeText: profileData.resumeText ?? existing.resumeText,
-          backgroundNarrative: profileData.backgroundNarrative ?? existing.backgroundNarrative,
-          skills: profileData.skills ?? existing.skills,
-          yearsOfExperience: profileData.yearsOfExperience ?? existing.yearsOfExperience,
-          education: profileData.education ?? existing.education,
-          noticePeriod: profileData.noticePeriod ?? existing.noticePeriod,
-          workAuthorization: profileData.workAuthorization ?? existing.workAuthorization,
-          salaryExpectation: profileData.salaryExpectation ?? existing.salaryExpectation,
-          currentLocation: profileData.currentLocation ?? existing.currentLocation,
-          preferredLocation: profileData.preferredLocation ?? existing.preferredLocation,
-          preferredLocations: profileData.preferredLocations ?? existing.preferredLocations,
-          portfolioUrl: profileData.portfolioUrl ?? existing.portfolioUrl,
-          githubUrl: profileData.githubUrl ?? existing.githubUrl,
-          linkedinUrl: profileData.linkedinUrl ?? existing.linkedinUrl,
-          goldenAnswers: profileData.goldenAnswers ?? existing.goldenAnswers,
-          customAnswers: profileData.customAnswers ?? existing.customAnswers,
-          skillExperience: profileData.skillExperience ?? existing.skillExperience,
-        },
-      },
-      { new: true, runValidators: true },
-    );
+    const patch: Record<string, unknown> = {};
+    for (const field of SYNC_UPDATE_FIELDS) {
+      if (data[field] === undefined || data[field] === null) continue;
+      const [storedField, storedValue] = toStoredField(field, data[field]);
+      patch[storedField] = storedValue;
+    }
+    patch.updatedAt = now;
+    await CareerBrainRepository.update(userId, patch);
 
+    const updated = await CareerBrainRepository.get(userId);
     if (!updated) {
       throw new AppError('Failed to update Career Brain profile', 500, 'UPDATE_FAILED');
     }
-
-    return updated;
+    return toCareerBrainDto(updated);
   }
 
   /**
-   * Atomically upserts Career Brain profile from parsed resume data.
+   * Upserts the Career Brain profile from parsed resume data (overwrites the resume-derived
+   * fields with the newly parsed values, as before).
    */
   public static async createOrUpdateFromResume(
     userId: string,
     parsed: ParsedResumeData,
     rawResumeText: string,
     fileName: string,
-  ): Promise<ICareerBrainDocument> {
-    const userObjectId = new Types.ObjectId(userId);
+  ): Promise<CareerBrainDto> {
     const today = this.getTodayString();
+    const now = Date.now();
+    const existing = await CareerBrainRepository.get(userId);
 
-    const existing = await CareerBrain.findOne({ userId: userObjectId });
-
-    // When user uploads a new resume, completely overwrite old resume data with clean new parsed data
     const cleanSkillExp: Record<string, number> = {};
     if (parsed.skillExperience) {
       for (const [skill, yrs] of Object.entries(parsed.skillExperience)) {
@@ -114,7 +240,7 @@ export class ProfileService {
       }
     }
 
-    const updatePayload = {
+    const updatePayload: Partial<Record<ApiProfileField, unknown>> = {
       fullName: parsed.fullName?.trim() || existing?.fullName || 'Candidate',
       email: parsed.email?.trim() || existing?.email || '',
       phoneNumber: parsed.phoneNumber?.trim() || '',
@@ -141,32 +267,25 @@ export class ProfileService {
       linkedinUrl: parsed.linkedinUrl || '',
     };
 
-    if (!existing) {
-      const newProfile = new CareerBrain({
-        ...updatePayload,
-        userId: userObjectId,
-        tier: 'free',
-        dailyQuota: {
-          appliedToday: 0,
-          dailyLimit: 15,
-          lastResetDate: today,
-        },
-      });
-      await newProfile.save();
-      return newProfile;
+    const stored: Record<string, unknown> = {};
+    for (const [field, value] of Object.entries(updatePayload)) {
+      const [storedField, storedValue] = toStoredField(field as ApiProfileField, value);
+      stored[storedField] = storedValue;
     }
 
-    const updated = await CareerBrain.findOneAndUpdate(
-      { userId: userObjectId },
-      { $set: updatePayload },
-      { new: true, runValidators: true },
-    );
+    if (!existing) {
+      const record = { ...newProfileRecord(userId, today, now), ...stored } as CareerBrainRecord;
+      if (await CareerBrainRepository.createIfMissing(userId, record)) {
+        return toCareerBrainDto(record);
+      }
+    }
 
+    await CareerBrainRepository.update(userId, { ...stored, updatedAt: now });
+    const updated = await CareerBrainRepository.get(userId);
     if (!updated) {
       throw new AppError('Failed to update Career Brain profile from resume', 500, 'UPDATE_FAILED');
     }
-
-    return updated;
+    return toCareerBrainDto(updated);
   }
 
   /**
@@ -176,11 +295,8 @@ export class ProfileService {
    * Pro Automation Plan: 100/day
    * Power Enterprise Plan: 500/day
    */
-  public static async getDailyLimitForUser(userObjectId: Types.ObjectId): Promise<number> {
-    const sub = await Subscription.findOne({
-      userId: userObjectId,
-      status: { $in: ['TRIALING', 'ACTIVE'] },
-    }).sort({ createdAt: -1 });
+  public static async getDailyLimitForUser(userId: string): Promise<number> {
+    const sub = await SubscriptionRepository.getCurrent(userId);
 
     if (!sub || sub.status !== 'ACTIVE') {
       return 15;
@@ -199,47 +315,48 @@ export class ProfileService {
   }
 
   /**
-   * Retrieves active daily quota with lazy reset.
+   * Retrieves active daily quota with lazy reset (calendar day rollover or plan limit change).
    */
   public static async getQuota(userId: string): Promise<QuotaStatus> {
-    const userObjectId = new Types.ObjectId(userId);
     const today = this.getTodayString();
-    const expectedLimit = await this.getDailyLimitForUser(userObjectId);
+    const expectedLimit = await this.getDailyLimitForUser(userId);
 
-    let profile = await CareerBrain.findOne({ userId: userObjectId });
-
-    if (!profile) {
+    if (!(await CareerBrainRepository.exists(userId))) {
       // Return default free/tier quota status
       return {
         allowed: true,
         appliedToday: 0,
         dailyLimit: expectedLimit,
         remaining: expectedLimit,
-        tier: expectedLimit > 15 ? 'premium' : 'free',
+        tier: tierForLimit(expectedLimit),
         lastResetDate: today,
       };
     }
 
-    // Lazy reset if calendar date changed OR if subscription tier limit changed
-    const needsDateReset = profile.dailyQuota.lastResetDate !== today;
-    const needsLimitUpdate = profile.dailyQuota.dailyLimit !== expectedLimit;
+    let changed = false;
+    const quota = await CareerBrainRepository.transactQuota(userId, defaultQuota(expectedLimit, today), current => {
+      changed = false;
+      const needsDateReset = current.lastResetDate !== today;
+      const needsLimitUpdate = current.dailyLimit !== expectedLimit;
+      if (!needsDateReset && !needsLimitUpdate) return current;
+      changed = true;
+      return {
+        appliedToday: needsDateReset ? 0 : current.appliedToday,
+        lastResetDate: needsDateReset ? today : current.lastResetDate,
+        dailyLimit: expectedLimit,
+      };
+    });
 
-    if (needsDateReset || needsLimitUpdate) {
-      profile = await CareerBrain.findOneAndUpdate(
-        { userId: userObjectId },
-        {
-          $set: {
-            ...(needsDateReset ? { 'dailyQuota.appliedToday': 0, 'dailyQuota.lastResetDate': today } : {}),
-            'dailyQuota.dailyLimit': expectedLimit,
-            tier: expectedLimit > 15 ? 'premium' : 'free',
-          },
-        },
-        { new: true },
-      );
+    let tier: 'free' | 'premium';
+    if (changed) {
+      tier = tierForLimit(expectedLimit);
+      await CareerBrainRepository.update(userId, { tier, updatedAt: Date.now() });
+    } else {
+      tier = (await CareerBrainRepository.getTier(userId)) ?? tierForLimit(expectedLimit);
     }
 
-    const appliedToday = profile?.dailyQuota.appliedToday ?? 0;
-    const dailyLimit = profile?.dailyQuota.dailyLimit ?? expectedLimit;
+    const appliedToday = quota.appliedToday ?? 0;
+    const dailyLimit = quota.dailyLimit ?? expectedLimit;
     const remaining = Math.max(0, dailyLimit - appliedToday);
 
     return {
@@ -247,117 +364,88 @@ export class ProfileService {
       appliedToday,
       dailyLimit,
       remaining,
-      tier: profile?.tier ?? (expectedLimit > 15 ? 'premium' : 'free'),
-      lastResetDate: profile?.dailyQuota.lastResetDate ?? today,
+      tier,
+      lastResetDate: quota.lastResetDate ?? today,
     };
   }
 
   /**
-   * Atomically verifies and increments daily application count using $inc.
+   * Atomically verifies and increments the daily application count.
    * Prevents race conditions and double-counting across concurrent requests.
    */
   public static async checkAndIncrementQuota(userId: string): Promise<QuotaStatus> {
-    const userObjectId = new Types.ObjectId(userId);
     const today = this.getTodayString();
-    const expectedLimit = await this.getDailyLimitForUser(userObjectId);
+    const expectedLimit = await this.getDailyLimitForUser(userId);
 
-    let profile = await CareerBrain.findOne({ userId: userObjectId });
-
-    if (!profile) {
+    if (!(await CareerBrainRepository.exists(userId))) {
       // Auto-create initial profile entry to track quota
-      profile = new CareerBrain({
-        userId: userObjectId,
+      const placeholder: CareerBrainRecord = {
+        ...newProfileRecord(userId, today, Date.now()),
         fullName: 'Candidate',
         email: 'user@example.com',
         phoneNumber: '+91 0000000000',
         currentTitle: 'Developer',
         resumeText: 'Auto-initialized Career Brain record.',
-        tier: expectedLimit > 15 ? 'premium' : 'free',
-        dailyQuota: {
-          appliedToday: 0,
-          dailyLimit: expectedLimit,
-          lastResetDate: today,
-        },
-      });
-      await profile.save();
-    }
-
-    // 1. Lazy reset if date rolled over OR if subscription tier limit updated
-    const needsDateReset = profile.dailyQuota.lastResetDate !== today;
-    const needsLimitUpdate = profile.dailyQuota.dailyLimit !== expectedLimit;
-
-    if (needsDateReset || needsLimitUpdate) {
-      await CareerBrain.updateOne(
-        { userId: userObjectId },
-        {
-          $set: {
-            ...(needsDateReset ? { 'dailyQuota.appliedToday': 0, 'dailyQuota.lastResetDate': today } : {}),
-            'dailyQuota.dailyLimit': expectedLimit,
-            tier: expectedLimit > 15 ? 'premium' : 'free',
-          },
-        },
-      );
-      profile.dailyQuota.dailyLimit = expectedLimit;
-      if (needsDateReset) profile.dailyQuota.appliedToday = 0;
-    }
-
-    // 2. Atomic find and increment with quota boundary check
-    const currentLimit = expectedLimit;
-
-    const updated = await CareerBrain.findOneAndUpdate(
-      {
-        userId: userObjectId,
-        'dailyQuota.appliedToday': { $lt: currentLimit },
-      },
-      {
-        $inc: { 'dailyQuota.appliedToday': 1 },
-      },
-      { new: true },
-    );
-
-    if (!updated) {
-      // Quota limit hit!
-      const fresh = await CareerBrain.findOne({ userId: userObjectId });
-      const appliedToday = fresh?.dailyQuota.appliedToday ?? currentLimit;
-
-      return {
-        allowed: false,
-        appliedToday,
-        dailyLimit: currentLimit,
-        remaining: 0,
-        tier: fresh?.tier ?? (expectedLimit > 15 ? 'premium' : 'free'),
-        lastResetDate: fresh?.dailyQuota.lastResetDate ?? today,
+        tier: tierForLimit(expectedLimit),
+        dailyQuota: defaultQuota(expectedLimit, today),
       };
+      await CareerBrainRepository.createIfMissing(userId, placeholder);
     }
 
-    const appliedToday = updated.dailyQuota.appliedToday;
-    const remaining = Math.max(0, currentLimit - appliedToday);
+    let allowed = false;
+    let settingsChanged = false;
+    const quota = await CareerBrainRepository.transactQuota(userId, defaultQuota(expectedLimit, today), current => {
+      allowed = false;
+      settingsChanged = false;
+      // 1. Lazy reset if the date rolled over or the subscription limit changed
+      const needsDateReset = current.lastResetDate !== today;
+      const next: DailyQuotaRecord = {
+        appliedToday: needsDateReset ? 0 : current.appliedToday || 0,
+        lastResetDate: needsDateReset ? today : current.lastResetDate,
+        dailyLimit: expectedLimit,
+      };
+      settingsChanged = needsDateReset || current.dailyLimit !== expectedLimit;
 
+      // 2. Increment only while under the limit
+      if (next.appliedToday < expectedLimit) {
+        allowed = true;
+        next.appliedToday += 1;
+      }
+      return next;
+    });
+
+    if (settingsChanged) {
+      await CareerBrainRepository.update(userId, { tier: tierForLimit(expectedLimit), updatedAt: Date.now() });
+    }
+    const tier = settingsChanged
+      ? tierForLimit(expectedLimit)
+      : ((await CareerBrainRepository.getTier(userId)) ?? tierForLimit(expectedLimit));
+
+    const appliedToday = quota.appliedToday;
     return {
-      allowed: true,
+      allowed,
       appliedToday,
-      dailyLimit: currentLimit,
-      remaining,
-      tier: updated.tier,
-      lastResetDate: updated.dailyQuota.lastResetDate,
+      dailyLimit: expectedLimit,
+      remaining: allowed ? Math.max(0, expectedLimit - appliedToday) : 0,
+      tier,
+      lastResetDate: quota.lastResetDate,
     };
   }
 
   /**
-   * Upgrades user tier to Premium and sets plan-based quota (called by payment flows / webhooks).
+   * Upgrades user tier to Premium and sets the plan-based quota (called by payment flows / webhooks).
+   * Like the Mongo version, does nothing when the user has no Career Brain profile yet.
    */
-  public static async upgradeToPremium(userId: string, targetLimit?: number): Promise<ICareerBrainDocument | null> {
-    const userObjectId = new Types.ObjectId(userId);
-    const limit = targetLimit || (await this.getDailyLimitForUser(userObjectId));
-    return CareerBrain.findOneAndUpdate(
-      { userId: userObjectId },
-      {
-        $set: {
-          tier: 'premium',
-          'dailyQuota.dailyLimit': limit,
-        },
-      },
-      { new: true },
-    );
+  public static async upgradeToPremium(userId: string, targetLimit?: number): Promise<CareerBrainDto | null> {
+    const limit = targetLimit || (await this.getDailyLimitForUser(userId));
+    if (!(await CareerBrainRepository.exists(userId))) {
+      return null;
+    }
+    await CareerBrainRepository.update(userId, {
+      tier: 'premium',
+      'dailyQuota/dailyLimit': limit,
+      updatedAt: Date.now(),
+    });
+    return this.getProfile(userId);
   }
 }

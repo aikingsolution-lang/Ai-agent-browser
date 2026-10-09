@@ -29,7 +29,7 @@ export class ResumeController {
   }
 
   /**
-   * Uploads and parses raw PDF/DOCX resume, then syncs structured data to MongoDB CareerBrain.
+   * Uploads and parses raw PDF/DOCX resume, then syncs structured data to the CareerBrain profile (RTDB).
    * POST /api/v1/resume/upload-and-parse
    */
   static async uploadAndParseResume(req: Request, res: Response, next: NextFunction): Promise<void> {
@@ -38,7 +38,8 @@ export class ResumeController {
         throw new AppError('No resume file uploaded. Please attach a PDF or Word document.', 400, 'FILE_REQUIRED');
       }
 
-      const userId = (req as any).user?.id;
+      // The Firebase uid keys the CareerBrain record (`user.id` only existed on Mongoose documents).
+      const userId = req.user?.uid;
       if (!userId) {
         throw new AppError('Authentication required to associate parsed resume with Career Brain', 401, 'UNAUTHORIZED');
       }
@@ -50,7 +51,7 @@ export class ResumeController {
         req.file.mimetype,
       );
 
-      // 2. Atomically persist to MongoDB CareerBrain
+      // 2. Persist to the user's CareerBrain profile
       const updatedCareerBrain = await ProfileService.createOrUpdateFromResume(
         userId,
         parseResult.parsedData,

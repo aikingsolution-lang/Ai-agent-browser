@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { sendSuccess, sendError } from '../utils/apiResponse.js';
-import { checkDatabaseHealth } from '../config/database.js';
+import { hasAdminCredentials } from '../config/firebase-admin.js';
+import { isRtdbAvailable, pingRtdb, RTDB_ROOT } from '../services/rtdb/client.js';
 
 export const healthRouter: Router = Router();
 
@@ -24,12 +25,29 @@ healthRouter.get('/health', livenessHandler);
 healthRouter.get('/health/live', livenessHandler);
 
 // Readiness probe (GET /ready and GET /health/ready)
-const readinessHandler = (_req: any, res: any) => {
-  const dbHealth = checkDatabaseHealth();
+// Ready when Firebase Realtime Database answers a real read (bounded by a timeout).
+const readinessHandler = async (_req: any, res: any) => {
   const uptimeSeconds = Math.floor(process.uptime());
 
-  if (!dbHealth.isConnected) {
-    sendError(res, 'Database dependency unavailable', 503, 'SERVICE_UNAVAILABLE', { database: dbHealth });
+  if (!isRtdbAvailable()) {
+    sendError(res, 'Database dependency unavailable', 503, 'SERVICE_UNAVAILABLE', {
+      database: { provider: 'firebase-rtdb', isConnected: false, state: 'not_configured' },
+    });
+    return;
+  }
+
+  const ping = await pingRtdb();
+  const database = {
+    provider: 'firebase-rtdb',
+    namespace: RTDB_ROOT,
+    isConnected: ping.ok,
+    state: ping.ok ? 'connected' : 'unreachable',
+    latencyMs: ping.latencyMs,
+    hasServiceAccount: hasAdminCredentials(),
+  };
+
+  if (!ping.ok) {
+    sendError(res, 'Database dependency unavailable', 503, 'SERVICE_UNAVAILABLE', { database });
     return;
   }
 
@@ -40,7 +58,7 @@ const readinessHandler = (_req: any, res: any) => {
       service: 'nanobrowser-backend',
       version: '0.1.0',
       uptime: `${uptimeSeconds}s`,
-      database: dbHealth,
+      database,
     },
     'Service ready',
     200,

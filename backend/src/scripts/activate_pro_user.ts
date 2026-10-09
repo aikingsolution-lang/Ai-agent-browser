@@ -1,114 +1,68 @@
-import mongoose from 'mongoose';
-import { User } from '../models/user.model.js';
-import { Subscription } from '../models/subscription.model.js';
-import { Plan } from '../models/plan.model.js';
+/**
+ * activate_pro_user.ts — manually activate a paid plan for one user (Firebase RTDB).
+ *
+ *   npx tsx src/scripts/activate_pro_user.ts --email someone@example.com [--plan pro] [--days 30] [--execute]
+ *   npx tsx src/scripts/activate_pro_user.ts --uid <firebaseUid> [--plan pro] [--days 30] [--execute]
+ *
+ * Dry run by default (prints what would change). With --execute: makes the plan the user's ACTIVE
+ * subscription, allocates the plan's credits and upgrades the Career Brain tier.
+ * --email looks the uid up in Firebase Auth (read-only); the user must already exist there.
+ */
+
+import { adminAuth, hasAdminCredentials } from '../config/firebase-admin.js';
+import { PlanSeedService, PlanService } from '../services/planSeed.service.js';
+import { SubscriptionLifecycleService } from '../services/subscriptionLifecycle.service.js';
+import { TrialService } from '../services/trial.service.js';
 import { CreditService } from '../services/credit.service.js';
-import { ProfileService } from '../services/profile.service.js';
-import { PlanSeedService } from '../services/planSeed.service.js';
-import { env } from '../config/env.js';
 
-const targetEmail = 'mubasshirali0710@gmail.com'.trim().toLowerCase();
-
-async function activatePro() {
-  await mongoose.connect(env.MONGO_URI);
-  console.log(`Connected to MongoDB`);
-
-  await PlanSeedService.seedDefaultPlans();
-  const proPlan = await Plan.findOne({ code: 'pro' });
-  if (!proPlan) {
-    throw new Error('Pro plan not found in database');
-  }
-
-  let user = await User.findOne({ email: targetEmail });
-  if (!user) {
-    console.log(`User ${targetEmail} not found. Creating user account...`);
-    user = await User.create({
-      name: 'Mubasshir Ali',
-      email: targetEmail,
-      role: 'user',
-      status: 'active',
-      googleLinked: true,
-    });
-    console.log(`Created new user with ID: ${user._id}`);
-  } else {
-    console.log(`Found existing user: ${user.name} (${user.email}) ID: ${user._id}`);
-  }
-
-  const now = new Date();
-  const periodEnd = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
-
-  let subscription = await Subscription.findOne({ userId: user._id }).sort({ createdAt: -1 });
-  if (!subscription) {
-    subscription = await Subscription.create({
-      userId: user._id,
-      planId: proPlan._id,
-      planCodeSnapshot: proPlan.code,
-      planNameSnapshot: proPlan.name,
-      creditsSnapshot: proPlan.creditsPerBillingPeriod,
-      amountSnapshot: proPlan.amount,
-      currencySnapshot: proPlan.currency,
-      billingIntervalSnapshot: proPlan.billingInterval,
-      status: 'ACTIVE',
-      isTrial: false,
-      provider: 'manual_activation',
-      providerSubscriptionId: `sub_manual_pro_${Date.now()}`,
-      currentPeriodStart: now,
-      currentPeriodEnd: periodEnd,
-      cancelAtPeriodEnd: false,
-      lastEventTimestamp: now,
-    });
-    console.log(`Created new ACTIVE Pro subscription: ${subscription._id}`);
-  } else {
-    subscription.planId = proPlan._id;
-    subscription.planCodeSnapshot = proPlan.code;
-    subscription.planNameSnapshot = proPlan.name;
-    subscription.creditsSnapshot = proPlan.creditsPerBillingPeriod;
-    subscription.amountSnapshot = proPlan.amount;
-    subscription.currencySnapshot = proPlan.currency;
-    subscription.billingIntervalSnapshot = proPlan.billingInterval;
-    subscription.status = 'ACTIVE';
-    subscription.isTrial = false;
-    subscription.provider = subscription.provider || 'manual_activation';
-    subscription.providerSubscriptionId = subscription.providerSubscriptionId || `sub_manual_pro_${Date.now()}`;
-    subscription.currentPeriodStart = now;
-    subscription.currentPeriodEnd = periodEnd;
-    subscription.cancelAtPeriodEnd = false;
-    subscription.pastDueStartedAt = undefined;
-    subscription.lastEventTimestamp = now;
-    await subscription.save();
-    console.log(`Updated existing subscription to ACTIVE Pro: ${subscription._id}`);
-  }
-
-  // Allocate 5,000 Pro credits
-  const balance = await CreditService.initializeCreditsForSubscription({
-    userId: user._id,
-    subscriptionId: subscription._id,
-    allocatedCredits: proPlan.creditsPerBillingPeriod,
-    periodStart: now,
-    periodEnd: periodEnd,
-    description: `Pro Subscription Activation (5,000 credits)`,
-    type: 'SUBSCRIPTION_RENEWAL',
-  });
-  console.log(`Updated Credit Balance: ${balance.remainingCredits} / ${balance.allocatedCredits}`);
-
-  // Upgrade Career Brain daily application quota to Premium
-  try {
-    await ProfileService.upgradeToPremium(user._id.toString());
-    console.log(`Upgraded Career Brain to Premium tier (100 jobs/day)`);
-  } catch (err: any) {
-    console.log(`Career Brain note: ${err.message}`);
-  }
-
-  console.log(`\n🎉 PRO SUBSCRIPTION ACTIVATED SUCCESSFULLY for ${targetEmail}`);
-  console.log(`- Plan: ${proPlan.name} (${proPlan.code})`);
-  console.log(`- Status: ACTIVE`);
-  console.log(`- Credits: ${balance.remainingCredits}`);
-  console.log(`- Valid Until: ${periodEnd.toISOString()}`);
-
-  await mongoose.disconnect();
+function arg(name: string): string | undefined {
+  const index = process.argv.indexOf(`--${name}`);
+  return index >= 0 ? process.argv[index + 1] : undefined;
 }
 
-activatePro().catch(err => {
-  console.error('Failed to activate Pro subscription:', err);
-  process.exit(1);
-});
+async function resolveUid(): Promise<string> {
+  const uid = arg('uid');
+  if (uid) return uid;
+  const email = arg('email');
+  if (!email) throw new Error('Pass --uid <firebaseUid> or --email <email>.');
+  if (!adminAuth) throw new Error('Firebase Auth is not configured.');
+  return (await adminAuth.getUserByEmail(email.trim().toLowerCase())).uid;
+}
+
+async function main(): Promise<void> {
+  if (!hasAdminCredentials()) {
+    throw new Error('Set FIREBASE_ADMIN_CLIENT_EMAIL / FIREBASE_ADMIN_PRIVATE_KEY / FIREBASE_DATABASE_URL first.');
+  }
+  const planCode = arg('plan') ?? 'pro';
+  const days = Number(arg('days') ?? 30);
+  const execute = process.argv.includes('--execute');
+
+  const uid = await resolveUid();
+  await PlanSeedService.seedDefaultPlans();
+  const plan = await PlanService.getActivePlan(planCode);
+  if (!plan) throw new Error(`Plan '${planCode}' not found`);
+
+  const current = await TrialService.getCurrentSubscriptionDto(uid);
+  const balance = await CreditService.getCreditBalance(uid);
+  console.log(`User ${uid}`);
+  console.log(`  current subscription: ${current ? `${current.planCodeSnapshot} (${current.status})` : 'none'}`);
+  console.log(
+    `  current credits:      ${balance ? `${balance.remainingCredits}/${balance.allocatedCredits}` : 'none'}`,
+  );
+  console.log(`  → ${plan.name} (${plan.code}), ACTIVE for ${days} days, ${plan.creditsPerBillingPeriod} credits`);
+
+  if (!execute) {
+    console.log('\nDry run — nothing changed. Re-run with --execute to apply.');
+    return;
+  }
+
+  const subscription = await SubscriptionLifecycleService.activatePlanManually(uid, plan.code, days);
+  console.log(`\nActivated ${subscription.planNameSnapshot} for ${uid}, valid until ${subscription.currentPeriodEnd}`);
+}
+
+main()
+  .then(() => process.exit(0))
+  .catch(error => {
+    console.error(`Failed: ${error?.message || error}`);
+    process.exit(1);
+  });

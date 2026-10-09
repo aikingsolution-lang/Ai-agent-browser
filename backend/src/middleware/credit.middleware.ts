@@ -1,13 +1,13 @@
 import type { Request, Response, NextFunction } from 'express';
 import { CreditService } from '../services/credit.service.js';
-import { type IUserCreditBalance } from '../models/userCreditBalance.model.js';
+import type { CreditBalanceDto } from '../services/rtdb/serializers.js';
+import { isRtdbAvailable } from '../services/rtdb/client.js';
 import { AppError } from './errorHandler.js';
-import { checkDatabaseHealth } from '../config/database.js';
 
 declare global {
   namespace Express {
     interface Request {
-      creditBalance?: IUserCreditBalance;
+      creditBalance?: CreditBalanceDto;
     }
   }
 }
@@ -24,9 +24,8 @@ export function checkCredits(requiredCredits = 1) {
         throw new AppError('Authentication required to access this resource', 401, 'UNAUTHORIZED');
       }
 
-      // Fail-closed check if database is disconnected
-      const dbHealth = checkDatabaseHealth();
-      if (!dbHealth.isConnected) {
+      // Fail-closed check if the database is not configured
+      if (!isRtdbAvailable()) {
         throw new AppError('Service temporarily unavailable, cannot verify credits', 503, 'SERVICE_UNAVAILABLE');
       }
 

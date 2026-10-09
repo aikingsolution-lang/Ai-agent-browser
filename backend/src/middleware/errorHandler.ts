@@ -18,23 +18,6 @@ export class AppError extends Error {
 }
 
 export function errorHandler(err: Error | AppError, _req: Request, res: Response, _next: NextFunction): void {
-  // Handle Mongo duplicate key error (E11000)
-  if ((err as any).code === 11000 || err.message?.includes('E11000')) {
-    sendError(res, 'Email address is already registered', 409, 'EMAIL_EXISTS');
-    return;
-  }
-
-  // Handle Mongo buffering / connection timeout error
-  if (err.message?.includes('buffering timed out')) {
-    sendError(
-      res,
-      'Database connection timed out. Please check that MongoDB is running and network access is allowed.',
-      503,
-      'DATABASE_UNAVAILABLE',
-    );
-    return;
-  }
-
   const statusCode = err instanceof AppError ? err.statusCode : 500;
   const code = err instanceof AppError ? err.code : 'INTERNAL_SERVER_ERROR';
 

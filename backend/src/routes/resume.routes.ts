@@ -10,7 +10,7 @@ export const resumeRouter: Router = Router();
 // Generation of tailored resumes
 resumeRouter.post('/generate', validate(generateResumeSchema), ResumeController.generateResume);
 
-// Upload & Parse raw resume (PDF/DOCX) and sync to MongoDB CareerBrain
+// Upload & Parse raw resume (PDF/DOCX) and sync to the user's CareerBrain profile
 resumeRouter.post(
   '/upload-and-parse',
   authenticate,

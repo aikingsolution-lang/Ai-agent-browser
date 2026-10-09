@@ -1,22 +1,49 @@
-import type mongoose from 'mongoose';
-import { UserCreditBalance, type IUserCreditBalance } from '../models/userCreditBalance.model.js';
-import { CreditLedger, type ICreditLedger, type CreditTransactionType } from '../models/creditLedger.model.js';
+/**
+ * credit.service.ts
+ *
+ * Credit balances and the credit ledger, backed by Firebase RTDB (previously the Mongo
+ * UserCreditBalance and CreditLedger collections). Public methods and result shapes are the same
+ * as the Mongo version.
+ *
+ *   nanobrowser/credit_balances/{uid}                 current balance
+ *   nanobrowser/credit_ledger/{uid}/{entryId}         append-only audit trail
+ *   nanobrowser/credit_ledger_meta/{uid}/count        ledger size (for paginated totals)
+ *   nanobrowser/credit_idempotency/{uid}/{keyHash}    idempotency claims
+ *
+ * Mongo guarantees and their RTDB equivalents:
+ *   - `remainingCredits >= amount` guard + `$inc`  → transaction on the balance node.
+ *   - unique CreditLedger.idempotencyKey + compensating rollback → a claim node taken in a
+ *     transaction BEFORE the balance changes (JobForm Automator's processed_payments pattern), so a
+ *     key can only ever deduct once. Claims are scoped per user (the Mongo index was global, which
+ *     let one user's key collide with another user's).
+ *   - balance upsert + ledger insert → one atomic multi-location update.
+ */
+
 import { AppError } from '../middleware/errorHandler.js';
 import { logger } from '../utils/logger.js';
+import { newId, sleep, toMs } from './rtdb/rtdbUtils.js';
+import { applyUpdates, CreditRepository, type UpdateMap } from './rtdb/repositories.js';
+import { paths } from './rtdb/client.js';
+import {
+  toCreditBalanceDto,
+  toCreditLedgerDto,
+  type CreditBalanceDto,
+  type CreditLedgerDto,
+} from './rtdb/serializers.js';
+import type { CreditBalanceRecord, CreditLedgerRecord, CreditTransactionType } from './rtdb/records.js';
 
 export interface InitializeCreditsParams {
-  userId: string | mongoose.Types.ObjectId;
-  subscriptionId: string | mongoose.Types.ObjectId;
+  userId: string;
+  subscriptionId: string;
   allocatedCredits: number;
-  periodStart: Date;
-  periodEnd: Date;
+  periodStart: Date | number;
+  periodEnd: Date | number;
   description?: string;
   type?: CreditTransactionType;
-  session?: mongoose.ClientSession;
 }
 
 export interface DeductCreditsParams {
-  userId: string | mongoose.Types.ObjectId;
+  userId: string;
   amount: number;
   description: string;
   idempotencyKey?: string;
@@ -24,17 +51,32 @@ export interface DeductCreditsParams {
 }
 
 export interface DeductCreditsResult {
-  balance: IUserCreditBalance;
-  ledgerEntry: ICreditLedger;
+  balance: CreditBalanceDto;
+  ledgerEntry: CreditLedgerDto;
   isIdempotentRetry: boolean;
+}
+
+/** A PENDING claim older than this belongs to a request that died mid-way and may be taken over. */
+const STALE_CLAIM_MS = 2 * 60 * 1000;
+/** How long a concurrent duplicate waits for the in-flight request with the same key (~3s total). */
+const CLAIM_WAIT_STEPS_MS = [50, 100, 200, 300, 500, 700, 1000];
+
+type ClaimState = { kind: 'OWNED' } | { kind: 'COMPLETED'; entryId: string };
+
+function runIdOf(metadata?: Record<string, any>): string | undefined {
+  const runId = metadata?.runId;
+  return typeof runId === 'string' && runId.trim() ? runId.trim() : undefined;
 }
 
 export class CreditService {
   /**
-   * Initializes or resets credits for a user subscription.
-   * Atomically upserts UserCreditBalance and writes an initial CreditLedger entry.
+   * Builds the atomic update that resets a user's balance for a subscription period and records
+   * the allocation in the ledger. Callers can merge it with other writes (e.g. the subscription
+   * itself) so both land together.
    */
-  public static async initializeCreditsForSubscription(params: InitializeCreditsParams): Promise<IUserCreditBalance> {
+  public static async buildAllocationUpdates(
+    params: InitializeCreditsParams,
+  ): Promise<{ updates: UpdateMap; balance: CreditBalanceRecord; entry: CreditLedgerRecord }> {
     const {
       userId,
       subscriptionId,
@@ -43,178 +85,169 @@ export class CreditService {
       periodEnd,
       description = 'Initial subscription credit allocation',
       type = 'TRIAL_ALLOCATION',
-      session,
     } = params;
 
-    const queryOptions: mongoose.QueryOptions = {
-      upsert: true,
-      new: true,
-      setDefaultsOnInsert: true,
+    if (!Number.isInteger(allocatedCredits) || allocatedCredits < 0) {
+      throw new AppError('Allocated credits must be a non-negative integer', 400, 'INVALID_AMOUNT');
+    }
+
+    const now = Date.now();
+    const existing = await CreditRepository.getBalance(userId);
+    const balance: CreditBalanceRecord = {
+      subscriptionId,
+      allocatedCredits,
+      usedCredits: 0,
+      remainingCredits: allocatedCredits,
+      periodStart: toMs(periodStart) ?? now,
+      periodEnd: toMs(periodEnd) ?? now,
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now,
     };
-    if (session) {
-      queryOptions.session = session;
-    }
+    const entry: CreditLedgerRecord = {
+      entryId: newId('cl'),
+      uid: userId,
+      subscriptionId,
+      amount: allocatedCredits,
+      balanceBefore: existing ? existing.remainingCredits : 0,
+      balanceAfter: allocatedCredits,
+      type,
+      description,
+      createdAt: now,
+    };
 
-    // 0. Fetch existing balance for balanceBefore calculation
-    const existingBalance = await UserCreditBalance.findOne({ userId }).session(session || null);
-    const balanceBefore = existingBalance ? existingBalance.remainingCredits : 0;
+    return {
+      updates: { [paths.creditBalance(userId)]: balance, ...CreditRepository.ledgerAppendUpdates(userId, entry) },
+      balance,
+      entry,
+    };
+  }
 
-    // 1. Upsert real-time user credit balance
-    const balance = await UserCreditBalance.findOneAndUpdate(
-      { userId },
-      {
-        $set: {
-          userId,
-          subscriptionId,
-          allocatedCredits,
-          usedCredits: 0,
-          remainingCredits: allocatedCredits,
-          periodStart,
-          periodEnd,
-        },
-      },
-      queryOptions,
-    );
-
-    if (!balance) {
-      throw new AppError('Failed to initialize user credit balance', 500, 'INTERNAL_SERVER_ERROR');
-    }
-
-    // 2. Write immutable transaction audit entry into CreditLedger
-    await CreditLedger.create(
-      [
-        {
-          userId,
-          subscriptionId,
-          amount: allocatedCredits,
-          balanceBefore,
-          balanceAfter: allocatedCredits,
-          type,
-          description,
-        },
-      ],
-      session ? { session } : {},
-    );
-
+  /**
+   * Initializes or resets credits for a user subscription.
+   * Atomically writes the balance and an allocation entry in the ledger.
+   */
+  public static async initializeCreditsForSubscription(params: InitializeCreditsParams): Promise<CreditBalanceDto> {
+    const { updates, balance } = await this.buildAllocationUpdates(params);
+    await applyUpdates(updates);
     logger.info(
-      `Initialized ${allocatedCredits} credits (${type}) for user ${userId} on subscription ${subscriptionId}`,
+      `Initialized ${params.allocatedCredits} credits (${params.type ?? 'TRIAL_ALLOCATION'}) for user ${params.userId} on subscription ${params.subscriptionId}`,
     );
+    return toCreditBalanceDto(params.userId, balance);
+  }
 
-    return balance;
+  /** Takes the idempotency claim for `key`, waiting briefly for a concurrent request using the same key. */
+  private static async acquireClaim(uid: string, key: string): Promise<ClaimState> {
+    for (let attempt = 0; attempt <= CLAIM_WAIT_STEPS_MS.length; attempt++) {
+      const now = Date.now();
+      const { claimed, existing } = await CreditRepository.claimIdempotency(uid, key, now);
+      if (claimed) return { kind: 'OWNED' };
+
+      if (existing?.status === 'COMPLETED' && existing.entryId) {
+        return { kind: 'COMPLETED', entryId: existing.entryId };
+      }
+      if (existing?.status === 'PENDING' && existing.createdAt < now - STALE_CLAIM_MS) {
+        if (await CreditRepository.reclaimStaleIdempotency(uid, key, now - STALE_CLAIM_MS, now)) {
+          logger.warn(`Reclaimed stale idempotency claim '${key}' for user ${uid}`);
+          return { kind: 'OWNED' };
+        }
+      }
+      if (attempt < CLAIM_WAIT_STEPS_MS.length) await sleep(CLAIM_WAIT_STEPS_MS[attempt]);
+    }
+    throw new AppError(
+      'A request with this idempotency key is still being processed. Retry shortly.',
+      409,
+      'IDEMPOTENCY_KEY_IN_PROGRESS',
+    );
+  }
+
+  private static async idempotentResult(uid: string, entryId: string): Promise<DeductCreditsResult> {
+    const [entry, balance] = await Promise.all([
+      CreditRepository.getLedgerEntry(uid, entryId),
+      CreditRepository.getBalance(uid),
+    ]);
+    if (!entry || !balance) {
+      throw new AppError('Idempotent result is no longer available', 409, 'IDEMPOTENCY_RESULT_MISSING');
+    }
+    return {
+      balance: toCreditBalanceDto(uid, balance),
+      ledgerEntry: toCreditLedgerDto(entry),
+      isIdempotentRetry: true,
+    };
   }
 
   /**
    * Atomically deducts credits from a user's balance.
-   * Enforces remainingCredits >= amount at database execution level to prevent negative balances.
-   * Enforces strict idempotency via idempotencyKey with atomic compensating rollback under concurrency.
+   * Never lets the balance go negative; a given idempotencyKey deducts at most once.
    */
-  public static async deductCredits(
-    params: DeductCreditsParams,
-    session?: mongoose.ClientSession,
-  ): Promise<DeductCreditsResult> {
+  public static async deductCredits(params: DeductCreditsParams): Promise<DeductCreditsResult> {
     const { userId, amount, description, idempotencyKey, metadata } = params;
 
     if (amount <= 0 || !Number.isInteger(amount)) {
       throw new AppError('Deduction amount must be a positive integer', 400, 'INVALID_AMOUNT');
     }
 
-    // 1. Idempotency Pre-Check
     if (idempotencyKey) {
-      const existingLedger = await CreditLedger.findOne({ idempotencyKey }).session(session || null);
-      if (existingLedger) {
-        const currentBalance = await UserCreditBalance.findOne({ userId }).session(session || null);
+      const claim = await this.acquireClaim(userId, idempotencyKey);
+      if (claim.kind === 'COMPLETED') {
         logger.info(`Idempotent retry detected for key '${idempotencyKey}', returning existing result`);
-        return {
-          balance: currentBalance!,
-          ledgerEntry: existingLedger,
-          isIdempotentRetry: true,
-        };
+        return this.idempotentResult(userId, claim.entryId);
       }
     }
 
-    // 2. Atomic Credit Deduction (remainingCredits >= amount guard condition)
-    const updateOptions: mongoose.QueryOptions = { new: true };
-    if (session) {
-      updateOptions.session = session;
-    }
+    let deducted = false;
+    try {
+      const now = Date.now();
+      const result = await CreditRepository.deduct(userId, amount, now);
 
-    const updatedBalance = await UserCreditBalance.findOneAndUpdate(
-      {
-        userId,
-        remainingCredits: { $gte: amount },
-      },
-      {
-        $inc: {
-          usedCredits: amount,
-          remainingCredits: -amount,
-        },
-      },
-      updateOptions,
-    );
-
-    if (!updatedBalance) {
-      const existingBalance = await UserCreditBalance.findOne({ userId }).session(session || null);
-      if (!existingBalance) {
+      if (result.outcome === 'NO_BALANCE' || !result.balance) {
         throw new AppError('No credit balance found for user. Please contact support.', 402, 'INSUFFICIENT_CREDITS');
       }
-      throw new AppError(
-        `Insufficient credit balance. Required: ${amount}, Available: ${existingBalance.remainingCredits}`,
-        402,
-        'INSUFFICIENT_CREDITS',
-      );
-    }
+      if (result.outcome === 'INSUFFICIENT') {
+        throw new AppError(
+          `Insufficient credit balance. Required: ${amount}, Available: ${result.balance.remainingCredits}`,
+          402,
+          'INSUFFICIENT_CREDITS',
+        );
+      }
+      deducted = true;
 
-    const balanceBefore = updatedBalance.remainingCredits + amount;
+      const entry: CreditLedgerRecord = {
+        entryId: newId('cl'),
+        uid: userId,
+        subscriptionId: result.balance.subscriptionId,
+        amount: -amount,
+        balanceBefore: result.balanceBefore,
+        balanceAfter: result.balanceAfter,
+        type: 'USAGE_DEDUCTION',
+        description,
+        idempotencyKey,
+        runId: runIdOf(metadata),
+        metadata: metadata || {},
+        createdAt: now,
+      };
 
-    // 3. Log transaction entry in CreditLedger
-    try {
-      const ledgerDocs = await CreditLedger.create(
-        [
-          {
-            userId,
-            subscriptionId: updatedBalance.subscriptionId,
-            amount: -amount,
-            balanceBefore,
-            balanceAfter: updatedBalance.remainingCredits,
-            type: 'USAGE_DEDUCTION',
-            description,
-            idempotencyKey,
-            metadata: metadata || {},
-          },
-        ],
-        session ? { session } : {},
-      );
+      await applyUpdates({
+        ...CreditRepository.ledgerAppendUpdates(userId, entry),
+        ...(idempotencyKey
+          ? CreditRepository.idempotencyCompleteUpdates(userId, idempotencyKey, entry.entryId, now)
+          : {}),
+      });
 
       return {
-        balance: updatedBalance,
-        ledgerEntry: ledgerDocs[0],
+        balance: toCreditBalanceDto(userId, result.balance),
+        ledgerEntry: toCreditLedgerDto(entry),
         isIdempotentRetry: false,
       };
-    } catch (error: any) {
-      if (error.code === 11000 || error.message?.includes('E11000')) {
-        // Race condition: another concurrent request with same idempotencyKey created ledger entry first.
-        // Compensating step: Revert the credit deduction on UserCreditBalance
-        const restoredBalance = await UserCreditBalance.findOneAndUpdate(
-          { userId },
-          {
-            $inc: {
-              usedCredits: -amount,
-              remainingCredits: amount,
-            },
-          },
-          updateOptions,
+    } catch (error) {
+      if (deducted) {
+        // The ledger write failed after the balance changed: put the credits back (compensating
+        // step, as the Mongo version did) so balance and ledger never disagree.
+        await CreditRepository.refund(userId, amount, Date.now()).catch(refundErr =>
+          logger.error(`Compensating refund failed for user ${userId}: ${refundErr?.message}`),
         );
-
-        // Fetch the winning ledger entry for this idempotency key
-        const winningLedger = await CreditLedger.findOne({ idempotencyKey }).session(session || null);
-
-        const finalRestoredBalance = await UserCreditBalance.findOne({ userId }).session(session || null);
-
-        return {
-          balance: finalRestoredBalance || restoredBalance!,
-          ledgerEntry: winningLedger!,
-          isIdempotentRetry: true,
-        };
+      }
+      if (idempotencyKey) {
+        await CreditRepository.releaseIdempotency(userId, idempotencyKey).catch(() => undefined);
       }
       throw error;
     }
@@ -224,64 +257,80 @@ export class CreditService {
    * Atomically refunds credits back to a user's balance.
    */
   public static async refundCredits(params: {
-    userId: string | mongoose.Types.ObjectId;
+    userId: string;
     amount: number;
     description: string;
     idempotencyKey?: string;
     metadata?: Record<string, any>;
-  }): Promise<{ balance: IUserCreditBalance; ledgerEntry: ICreditLedger }> {
+  }): Promise<{ balance: CreditBalanceDto; ledgerEntry: CreditLedgerDto }> {
     const { userId, amount, description, idempotencyKey, metadata } = params;
 
     if (amount <= 0 || !Number.isInteger(amount)) {
       throw new AppError('Refund amount must be a positive integer', 400, 'INVALID_AMOUNT');
     }
 
-    const currentBalance = await UserCreditBalance.findOne({ userId });
-    if (!currentBalance) {
-      throw new AppError('Credit balance not found', 404, 'BALANCE_NOT_FOUND');
+    if (idempotencyKey) {
+      const claim = await this.acquireClaim(userId, idempotencyKey);
+      if (claim.kind === 'COMPLETED') {
+        const { balance, ledgerEntry } = await this.idempotentResult(userId, claim.entryId);
+        return { balance, ledgerEntry };
+      }
     }
 
-    const balanceBefore = currentBalance.remainingCredits;
-    const updatedBalance = await UserCreditBalance.findOneAndUpdate(
-      { userId },
-      {
-        $inc: {
-          usedCredits: -amount,
-          remainingCredits: amount,
-        },
-      },
-      { new: true },
-    );
+    let refunded = false;
+    try {
+      const now = Date.now();
+      const result = await CreditRepository.refund(userId, amount, now);
+      if (result.outcome !== 'APPLIED' || !result.balance) {
+        throw new AppError('Credit balance not found', 404, 'BALANCE_NOT_FOUND');
+      }
+      refunded = true;
 
-    const ledgerDocs = await CreditLedger.create([
-      {
-        userId,
-        subscriptionId: updatedBalance!.subscriptionId,
+      const entry: CreditLedgerRecord = {
+        entryId: newId('cl'),
+        uid: userId,
+        subscriptionId: result.balance.subscriptionId,
         amount,
-        balanceBefore,
-        balanceAfter: updatedBalance!.remainingCredits,
+        balanceBefore: result.balanceBefore,
+        balanceAfter: result.balanceAfter,
         type: 'REFUND',
         description,
         idempotencyKey,
+        runId: runIdOf(metadata),
         metadata: metadata || {},
-      },
-    ]);
+        createdAt: now,
+      };
 
-    return {
-      balance: updatedBalance!,
-      ledgerEntry: ledgerDocs[0],
-    };
+      await applyUpdates({
+        ...CreditRepository.ledgerAppendUpdates(userId, entry),
+        ...(idempotencyKey
+          ? CreditRepository.idempotencyCompleteUpdates(userId, idempotencyKey, entry.entryId, now)
+          : {}),
+      });
+
+      return { balance: toCreditBalanceDto(userId, result.balance), ledgerEntry: toCreditLedgerDto(entry) };
+    } catch (error) {
+      if (refunded) {
+        await CreditRepository.deduct(userId, amount, Date.now()).catch(err =>
+          logger.error(`Compensating refund reversal failed for user ${userId}: ${err?.message}`),
+        );
+      }
+      if (idempotencyKey) {
+        await CreditRepository.releaseIdempotency(userId, idempotencyKey).catch(() => undefined);
+      }
+      throw error;
+    }
   }
 
   /**
    * Securely and idempotently refunds credits incurred during a specific agent run.
-   * Computes the exact amount deducted from the CreditLedger for the given runId and userId.
+   * Computes the exact amount deducted from the ledger for the given runId and userId.
    * Rejects duplicate refunds for the same runId.
    */
   public static async refundRunCredits(params: {
-    userId: string | mongoose.Types.ObjectId;
+    userId: string;
     runId: string;
-  }): Promise<{ refundedAmount: number; runId: string; balance: IUserCreditBalance }> {
+  }): Promise<{ refundedAmount: number; runId: string; balance: CreditBalanceDto }> {
     const { userId, runId } = params;
 
     if (!runId || typeof runId !== 'string' || runId.trim() === '') {
@@ -289,48 +338,38 @@ export class CreditService {
     }
 
     const cleanRunId = runId.trim();
+    const runEntries = await CreditRepository.findLedgerByRunId(userId, cleanRunId);
 
-    // 1. Check if this runId has already been refunded
-    const existingRefund = await CreditLedger.findOne({
-      userId,
-      type: 'REFUND',
-      'metadata.runId': cleanRunId,
-    });
-
+    // 1. Already refunded? Return the earlier result.
+    const existingRefund = runEntries.find(entry => entry.type === 'REFUND');
     if (existingRefund) {
       logger.info(`Run ${cleanRunId} has already been refunded. Idempotent return.`);
-      const currentBalance = await UserCreditBalance.findOne({ userId });
+      const currentBalance = await CreditRepository.getBalance(userId);
+      if (!currentBalance) throw new AppError('Credit balance not found', 404, 'BALANCE_NOT_FOUND');
       return {
         refundedAmount: existingRefund.amount,
         runId: cleanRunId,
-        balance: currentBalance!,
+        balance: toCreditBalanceDto(userId, currentBalance),
       };
     }
 
-    // 2. Sum all USAGE_DEDUCTION ledger entries tagged with this runId
-    const usageEntries = await CreditLedger.find({
-      userId,
-      type: 'USAGE_DEDUCTION',
-      'metadata.runId': cleanRunId,
-    });
-
-    if (!usageEntries || usageEntries.length === 0) {
+    // 2. Sum all USAGE_DEDUCTION entries tagged with this runId
+    const usageEntries = runEntries.filter(entry => entry.type === 'USAGE_DEDUCTION');
+    if (usageEntries.length === 0) {
       throw new AppError(`No billable usage found for runId: ${cleanRunId}`, 404, 'RUN_NOT_FOUND');
     }
 
     const totalToRefund = usageEntries.reduce((sum, entry) => sum + Math.abs(entry.amount), 0);
-
     if (totalToRefund <= 0) {
       throw new AppError(`No credits were deducted for runId: ${cleanRunId}`, 400, 'NOTHING_TO_REFUND');
     }
 
-    // 3. Perform refund
-    const idempotencyKey = `refund_run_${cleanRunId}`;
+    // 3. Refund once per run: the idempotency claim makes concurrent refunds of the same run safe.
     const refundResult = await this.refundCredits({
       userId,
       amount: totalToRefund,
       description: `Automatic refund for failed agent run (${cleanRunId})`,
-      idempotencyKey,
+      idempotencyKey: `refund_run_${cleanRunId}`,
       metadata: {
         runId: cleanRunId,
         deductionEntriesCount: usageEntries.length,
@@ -338,39 +377,57 @@ export class CreditService {
     });
 
     return {
-      refundedAmount: totalToRefund,
+      refundedAmount: refundResult.ledgerEntry.amount,
       runId: cleanRunId,
       balance: refundResult.balance,
     };
   }
 
   /**
+   * Admin top-up (scripts/topup_credits.ts): sets allocated and remaining credits to `credits`
+   * (usedCredits untouched, as the old Mongo script did) and records an ADMIN_ADJUSTMENT entry.
+   */
+  public static async adminSetBalance(userId: string, credits: number, reason: string): Promise<CreditBalanceDto> {
+    if (!Number.isInteger(credits) || credits < 0) {
+      throw new AppError('Credits must be a non-negative integer', 400, 'INVALID_AMOUNT');
+    }
+    const now = Date.now();
+    let before = 0;
+    const result = await CreditRepository.setBalanceForAdmin(userId, credits, now, previous => {
+      before = previous;
+    });
+    const entry: CreditLedgerRecord = {
+      entryId: newId('cl'),
+      uid: userId,
+      subscriptionId: result.subscriptionId,
+      amount: credits - before,
+      balanceBefore: before,
+      balanceAfter: credits,
+      type: 'ADMIN_ADJUSTMENT',
+      description: reason,
+      createdAt: now,
+    };
+    await applyUpdates(CreditRepository.ledgerAppendUpdates(userId, entry));
+    return toCreditBalanceDto(userId, result);
+  }
+
+  /**
    * Retrieves current credit balance for a user.
    */
-  public static async getCreditBalance(userId: string | mongoose.Types.ObjectId): Promise<IUserCreditBalance | null> {
-    return UserCreditBalance.findOne({ userId });
+  public static async getCreditBalance(userId: string): Promise<CreditBalanceDto | null> {
+    const balance = await CreditRepository.getBalance(userId);
+    return balance ? toCreditBalanceDto(userId, balance) : null;
   }
 
   /**
    * Retrieves paginated credit history for a user sorted by newest first.
    */
   public static async getCreditHistory(
-    userId: string | mongoose.Types.ObjectId,
+    userId: string,
     page = 1,
     limit = 20,
-  ): Promise<{ items: ICreditLedger[]; total: number; page: number; limit: number }> {
-    const skip = (page - 1) * limit;
-
-    const [items, total] = await Promise.all([
-      CreditLedger.find({ userId }).sort({ createdAt: -1 }).skip(skip).limit(limit),
-      CreditLedger.countDocuments({ userId }),
-    ]);
-
-    return {
-      items,
-      total,
-      page,
-      limit,
-    };
+  ): Promise<{ items: CreditLedgerDto[]; total: number; page: number; limit: number }> {
+    const { items, total } = await CreditRepository.listLedger(userId, page, limit);
+    return { items: items.map(toCreditLedgerDto), total, page, limit };
   }
 }

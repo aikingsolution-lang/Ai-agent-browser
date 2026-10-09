@@ -1,14 +1,16 @@
 import crypto from 'node:crypto';
-import type mongoose from 'mongoose';
-import { LlmUsageLog, type ILlmUsageLog, type LlmRequestStatus } from '../models/llmUsageLog.model.js';
 import { CreditService } from './credit.service.js';
 import { LlmProviderFactory } from './llm/llmProviderFactory.js';
 import type { LlmMessage, LlmCompletionResponse } from './llm/llmProvider.interface.js';
+import { LlmUsageRepository } from './rtdb/repositories.js';
+import { newId } from './rtdb/rtdbUtils.js';
+import { toLlmUsageDto, type LlmUsageDto } from './rtdb/serializers.js';
+import type { LlmRequestStatus, LlmUsageRecord } from './rtdb/records.js';
 import { AppError } from '../middleware/errorHandler.js';
 import { logger } from '../utils/logger.js';
 
 export interface ProcessLlmChatParams {
-  userId: string | mongoose.Types.ObjectId;
+  userId: string;
   model: string;
   messages: LlmMessage[];
   temperature?: number;
@@ -37,6 +39,20 @@ export interface LlmChatResult {
   latencyMs: number;
 }
 
+/** LLM usage log, stored at nanobrowser/llm_usage/{uid}/{usageId} (previously the Mongo LlmUsageLog collection). */
+type UsageLogInput = Omit<LlmUsageRecord, 'usageId' | 'uid' | 'createdAt' | 'updatedAt'>;
+
+async function recordUsage(userId: string, input: UsageLogInput): Promise<void> {
+  const now = Date.now();
+  await LlmUsageRepository.create(userId, {
+    ...input,
+    usageId: newId('llm'),
+    uid: userId,
+    createdAt: now,
+    updatedAt: now,
+  });
+}
+
 export class LlmService {
   /**
    * Helper to calculate credits based on model multiplier and total tokens.
@@ -56,7 +72,7 @@ export class LlmService {
 
     // 1. Idempotency Check
     if (idempotencyKey) {
-      const existingLog = await LlmUsageLog.findOne({ idempotencyKey, userId });
+      const existingLog = await LlmUsageRepository.findByIdempotencyKey(userId, idempotencyKey);
       if (existingLog) {
         logger.info(`Idempotent retry detected for LLM key '${idempotencyKey}'`);
         return {
@@ -123,9 +139,8 @@ export class LlmService {
       });
 
       // 5. Record Usage Log
-      await LlmUsageLog.create({
+      await recordUsage(userId, {
         requestId,
-        userId,
         provider: provider.providerName,
         model,
         promptTokens: completion.promptTokens,
@@ -135,6 +150,7 @@ export class LlmService {
         latencyMs,
         status: 'SUCCESS',
         idempotencyKey,
+        runId,
         metadata: {
           content: completion.content,
           runId,
@@ -160,10 +176,9 @@ export class LlmService {
       const errorMessage = error.message || 'LLM Provider processing failed';
       const status: LlmRequestStatus = error.code === 'PROVIDER_TIMEOUT' || error.status === 504 ? 'TIMEOUT' : 'FAILED';
 
-      // Log FAILED or TIMEOUT status document (0 credits deducted)
-      await LlmUsageLog.create({
+      // Log FAILED or TIMEOUT status entry (0 credits deducted)
+      await recordUsage(userId, {
         requestId,
-        userId,
         provider: provider.providerName,
         model,
         promptTokens: 0,
@@ -174,7 +189,8 @@ export class LlmService {
         status,
         errorMessage,
         idempotencyKey,
-      }).catch(logErr => logger.error('Failed to save error LlmUsageLog:', logErr));
+        runId,
+      }).catch(logErr => logger.error('Failed to save error LLM usage log:', logErr));
 
       throw error;
     }
@@ -237,9 +253,8 @@ export class LlmService {
         });
       }
 
-      await LlmUsageLog.create({
+      await recordUsage(userId, {
         requestId,
-        userId,
         provider: provider.providerName,
         model,
         promptTokens: completion.promptTokens,
@@ -249,6 +264,7 @@ export class LlmService {
         latencyMs,
         status,
         idempotencyKey,
+        runId,
         metadata: {
           content: completion.content,
           runId,
@@ -274,9 +290,8 @@ export class LlmService {
       const errorMessage = error.message || 'LLM Streaming failed';
       const status: LlmRequestStatus = error.code === 'PROVIDER_TIMEOUT' || error.status === 504 ? 'TIMEOUT' : 'FAILED';
 
-      await LlmUsageLog.create({
+      await recordUsage(userId, {
         requestId,
-        userId,
         provider: provider.providerName,
         model,
         promptTokens: 0,
@@ -287,29 +302,25 @@ export class LlmService {
         status,
         errorMessage,
         idempotencyKey,
-      }).catch(logErr => logger.error('Failed to save error LlmUsageLog:', logErr));
+        runId,
+      }).catch(logErr => logger.error('Failed to save error LLM usage log:', logErr));
 
       throw error;
     }
   }
 
   /**
-   * Retrieves paginated LLM usage history for an authenticated user.
+   * Retrieves paginated LLM usage history for an authenticated user (newest first).
    */
   public static async getUsageHistory(
-    userId: string | mongoose.Types.ObjectId,
+    userId: string,
     page = 1,
     limit = 20,
-  ): Promise<{ items: ILlmUsageLog[]; total: number; page: number; limit: number }> {
-    const skip = (page - 1) * limit;
-
-    const [items, total] = await Promise.all([
-      LlmUsageLog.find({ userId }).sort({ createdAt: -1 }).skip(skip).limit(limit),
-      LlmUsageLog.countDocuments({ userId }),
-    ]);
+  ): Promise<{ items: LlmUsageDto[]; total: number; page: number; limit: number }> {
+    const { items, total } = await LlmUsageRepository.list(userId, page, limit);
 
     return {
-      items,
+      items: items.map(toLlmUsageDto),
       total,
       page,
       limit,
