@@ -45,6 +45,7 @@ import {
   FiCalendar,
   FiLock,
   FiFileText,
+  FiExternalLink,
 } from 'react-icons/fi';
 import { AiOutlineLoading3Quarters } from 'react-icons/ai';
 import { SkillAutocompleteInput } from './SkillAutocompleteInput';
@@ -1947,6 +1948,24 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
             ))}
           </div>
         </div>
+      </div>
+
+      {/* Settings & Automation Safeties Quick Link */}
+      <div
+        className={`rounded-xl border p-3 flex items-center justify-between text-xs ${
+          isDarkMode ? 'border-sky-900/60 bg-slate-800/60' : 'border-sky-100 bg-white/80 shadow-sm'
+        }`}>
+        <div>
+          <span className="font-semibold text-[11px] block text-sky-400">Career Brain & Automation Safeties</span>
+          <span className="text-[10px] opacity-60">Manage match score threshold, negative keywords & safeties</span>
+        </div>
+        <button
+          type="button"
+          onClick={() => chrome.runtime.openOptionsPage()}
+          className="inline-flex items-center gap-1 rounded-md px-2.5 py-1 text-[11px] font-semibold bg-sky-500/15 text-sky-300 hover:bg-sky-500/25 border border-sky-500/30 cursor-pointer transition-colors">
+          <span>Open Settings</span>
+          <FiExternalLink className="size-3" />
+        </button>
       </div>
     </div>
   );

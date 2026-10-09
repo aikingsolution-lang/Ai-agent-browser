@@ -3,7 +3,7 @@
  *
  * Sanitizes and summarizes job descriptions (token/cost control),
  * and evaluates candidate match against Career Brain context.
- * Jobs with fitScore < 75 are flagged to be skipped.
+ * Jobs with fitScore < 50 are flagged to be skipped.
  */
 
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
@@ -14,7 +14,7 @@ import type { IJobData, IFitScoreResult, FitRecommendation } from './types';
 
 const logger = createLogger('LinkedInFitScorer');
 
-export const MIN_FIT_SCORE_THRESHOLD = 75;
+export const MIN_FIT_SCORE_THRESHOLD = 50;
 
 /**
  * Strips HTML tags, removes excess whitespace, and extracts the most relevant

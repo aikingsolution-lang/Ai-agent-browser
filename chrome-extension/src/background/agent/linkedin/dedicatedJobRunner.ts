@@ -2149,7 +2149,8 @@ export class DedicatedJobRunner {
         }
 
         // Tier-2 Deep JD Relevance & Match Score Threshold Check (with Experience Gap Detection)
-        const minScoreThreshold = config.minFitScore || 70;
+        const minScoreThreshold =
+          typeof config.minFitScore === 'number' && config.minFitScore > 0 ? config.minFitScore : 50;
         const maxExpGap = config.maxExperienceGapYears ?? 3;
         const deepMatch = evaluateDeepRelevance(
           topCard.descriptionSnippet || '',

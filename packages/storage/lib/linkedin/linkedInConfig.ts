@@ -21,7 +21,7 @@ export interface ILinkedInAutomationConfig {
   targetJobTitle: string;
   /** Preferred location (e.g. Remote, City) */
   targetLocation: string;
-  /** Minimum RAG fit score required to apply (0-100, default: 75) */
+  /** Minimum RAG fit score required to apply (0-100, default: 50) */
   minFitScore: number;
   /** Maximum job applications allowed per day (default: 15) */
   dailyApplicationLimit: number;
@@ -42,7 +42,7 @@ export interface ILinkedInAutomationConfig {
 export const DEFAULT_LINKEDIN_CONFIG: ILinkedInAutomationConfig = {
   targetJobTitle: 'Full Stack Engineer',
   targetLocation: 'Remote',
-  minFitScore: 75,
+  minFitScore: 50,
   dailyApplicationLimit: 15,
   dryRun: true, // Default ON for user safety
   requireTailoredResume: false,

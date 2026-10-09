@@ -8,6 +8,10 @@ import {
   authStorage,
   type UserSessionData,
   queueSafetyStore,
+  linkedInConfigStore,
+  type ILinkedInAutomationConfig,
+  DEFAULT_LINKEDIN_CONFIG,
+  careerBrainStore,
 } from '@extension/storage';
 import { backendApiClient } from '@extension/shared';
 import {
@@ -21,6 +25,9 @@ import {
   FiDownload,
   FiLock,
   FiPauseCircle,
+  FiSliders,
+  FiChevronDown,
+  FiChevronUp,
 } from 'react-icons/fi';
 import { AiOutlineLoading3Quarters } from 'react-icons/ai';
 
@@ -100,6 +107,48 @@ export function LinkedInApplyDashboard({
   const [platformPauseInfo, setPlatformPauseInfo] = useState<{ isPaused: boolean; reason?: string }>({
     isPaused: false,
   });
+  const [automationConfig, setAutomationConfig] = useState<ILinkedInAutomationConfig>(DEFAULT_LINKEDIN_CONFIG);
+  const [showEasyApplySettings, setShowEasyApplySettings] = useState(false);
+  const [careerBrainInfo, setCareerBrainInfo] = useState<{ currentTitle: string; roles: string[] }>({
+    currentTitle: '',
+    roles: [],
+  });
+
+  // Sync automationConfig and Career Brain info
+  useEffect(() => {
+    let isMounted = true;
+    const syncConfig = async () => {
+      try {
+        const [cfg, brain] = await Promise.all([linkedInConfigStore.getConfig(), careerBrainStore.getCareerBrain()]);
+        if (isMounted) {
+          setAutomationConfig(cfg);
+          setCareerBrainInfo({
+            currentTitle: brain.currentTitle || '',
+            roles: Array.isArray(brain.predefinedRoles) ? brain.predefinedRoles : [],
+          });
+        }
+      } catch {}
+    };
+
+    syncConfig();
+    const unsubConfig = linkedInConfigStore.subscribe(() => {
+      syncConfig();
+    });
+    const unsubBrain = careerBrainStore.subscribe(() => {
+      syncConfig();
+    });
+
+    return () => {
+      isMounted = false;
+      unsubConfig();
+      unsubBrain();
+    };
+  }, []);
+
+  const handleUpdateFitScore = async (score: number) => {
+    setAutomationConfig(prev => ({ ...prev, minFitScore: score }));
+    await linkedInConfigStore.updateConfig({ minFitScore: score });
+  };
 
   // Sync platform pause status from queueSafetyStore
   useEffect(() => {
@@ -420,6 +469,129 @@ export function LinkedInApplyDashboard({
             </button>
           )}
         </div>
+      </div>
+
+      {/* Easy Apply & Match Criteria Settings Widget */}
+      <div
+        className={`rounded-xl border transition-all ${
+          isDarkMode ? 'border-sky-900 bg-slate-800/80' : 'border-sky-100 bg-white/90 shadow-sm'
+        }`}>
+        <div
+          onClick={() => setShowEasyApplySettings(prev => !prev)}
+          className="flex items-center justify-between p-3 cursor-pointer select-none">
+          <div className="flex items-center space-x-2">
+            <FiSliders className="size-4 text-sky-400" />
+            <div>
+              <div className="flex items-center gap-1.5">
+                <span className="text-xs font-bold">Easy Apply & Match Settings</span>
+                <span className="rounded bg-sky-500/20 px-1.5 py-0.2 text-[9px] font-bold text-sky-400 border border-sky-500/30">
+                  Min Fit: {automationConfig.minFitScore ?? 50}%
+                </span>
+              </div>
+              <p className="text-[10px] opacity-60">
+                {careerBrainInfo.currentTitle
+                  ? `Target: ${careerBrainInfo.currentTitle}${careerBrainInfo.roles.length > 1 ? ` (+${careerBrainInfo.roles.length - 1} more)` : ''}`
+                  : 'Configure match score threshold & safeties'}
+              </p>
+            </div>
+          </div>
+          <button type="button" className="p-1 rounded text-gray-400 hover:text-sky-400 transition-colors">
+            {showEasyApplySettings ? <FiChevronUp className="size-4" /> : <FiChevronDown className="size-4" />}
+          </button>
+        </div>
+
+        {showEasyApplySettings && (
+          <div className="border-t px-3 pb-3 pt-2 space-y-3 text-xs border-sky-500/10">
+            {/* Minimum Match / Fit Score Threshold Slider & Presets */}
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <label className="text-[11px] font-semibold text-gray-300">Minimum Match / Fit Score Threshold</label>
+                <span className="text-[11px] font-bold text-sky-400">{automationConfig.minFitScore ?? 50}% / 100</span>
+              </div>
+              <input
+                type="range"
+                min={30}
+                max={95}
+                step={5}
+                value={automationConfig.minFitScore ?? 50}
+                onChange={e => handleUpdateFitScore(Number(e.target.value))}
+                className="w-full cursor-pointer accent-sky-500"
+              />
+              <div className="flex flex-wrap gap-1 mt-1.5">
+                {[
+                  { label: '50% (Recommended / Default)', val: 50 },
+                  { label: '60% (Broad)', val: 60 },
+                  { label: '70% (Balanced)', val: 70 },
+                  { label: '80% (Strict)', val: 80 },
+                ].map(preset => (
+                  <button
+                    key={preset.val}
+                    type="button"
+                    onClick={() => handleUpdateFitScore(preset.val)}
+                    className={`rounded px-2 py-0.5 text-[10px] font-medium transition-colors cursor-pointer ${
+                      (automationConfig.minFitScore ?? 50) === preset.val
+                        ? 'bg-sky-500 text-white font-bold'
+                        : isDarkMode
+                          ? 'bg-slate-700 text-slate-300 hover:bg-slate-600'
+                          : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                    }`}>
+                    {preset.label}
+                  </button>
+                ))}
+              </div>
+              <p className="text-[10px] opacity-60 mt-1">
+                Jobs with keyword & tech stack relevance below {automationConfig.minFitScore ?? 50}% are automatically
+                skipped.
+              </p>
+            </div>
+
+            {/* Experience Gap & Safeties */}
+            <div className="grid grid-cols-2 gap-2 pt-1 border-t border-sky-500/10">
+              <div>
+                <label className="block text-[10px] font-semibold opacity-70 mb-0.5">Max Exp Gap Tolerance</label>
+                <select
+                  value={automationConfig.maxExperienceGapYears ?? 3}
+                  onChange={async e => {
+                    const val = Number(e.target.value);
+                    setAutomationConfig(prev => ({ ...prev, maxExperienceGapYears: val }));
+                    await linkedInConfigStore.updateConfig({ maxExperienceGapYears: val });
+                  }}
+                  className={`w-full rounded-md border px-2 py-1 text-[11px] outline-none ${
+                    isDarkMode ? 'border-sky-800 bg-slate-900 text-white' : 'border-sky-200 bg-white text-gray-900'
+                  }`}>
+                  <option value={1}>+1 Year</option>
+                  <option value={2}>+2 Years</option>
+                  <option value={3}>+3 Years (Default)</option>
+                  <option value={5}>+5 Years</option>
+                  <option value={10}>No Gap Limit</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-[10px] font-semibold opacity-70 mb-0.5">Negative Keywords</label>
+                <div
+                  className={`px-2 py-1 rounded-md border text-[11px] flex items-center justify-between ${
+                    isDarkMode ? 'border-sky-800 bg-slate-900 text-gray-300' : 'border-sky-200 bg-white text-gray-700'
+                  }`}>
+                  <span>{automationConfig.negativeKeywords?.length || 0} active</span>
+                  <span className="text-[9px] text-emerald-400 font-medium">Safe</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Link to Full Options Page */}
+            <div className="pt-1 flex items-center justify-between border-t border-sky-500/10 text-[10px]">
+              <span className="opacity-60">Need to edit golden answers or blacklisted companies?</span>
+              <button
+                type="button"
+                onClick={() => chrome.runtime.openOptionsPage()}
+                className="text-sky-400 hover:text-sky-300 font-semibold underline cursor-pointer flex items-center gap-1">
+                <span>Full Settings</span>
+                <FiExternalLink className="size-2.5" />
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Single Entry Point: Start Auto Apply or Sign In */}

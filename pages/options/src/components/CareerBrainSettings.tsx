@@ -1411,7 +1411,7 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
             </div>
             <input
               type="range"
-              min={50}
+              min={30}
               max={95}
               step={5}
               value={config.minFitScore}
@@ -1421,10 +1421,10 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
             {/* Quick Preset Buttons */}
             <div className="mt-1.5 flex flex-wrap gap-1.5">
               {[
+                { label: '50% (Recommended / Default)', val: 50 },
                 { label: '60% (Broad)', val: 60 },
                 { label: '70% (Balanced)', val: 70 },
-                { label: '75% (Recommended)', val: 75 },
-                { label: '85% (Strict)', val: 85 },
+                { label: '80% (Strict)', val: 80 },
               ].map(preset => (
                 <button
                   key={preset.val}
@@ -1432,7 +1432,7 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
                   onClick={() => setConfig(prev => ({ ...prev, minFitScore: preset.val }))}
                   className={`rounded px-2 py-0.5 text-[11px] font-medium transition-colors ${
                     config.minFitScore === preset.val
-                      ? 'bg-sky-600 text-white'
+                      ? 'bg-sky-600 text-white font-bold'
                       : isDarkMode
                         ? 'bg-slate-700 text-slate-300 hover:bg-slate-600'
                         : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
