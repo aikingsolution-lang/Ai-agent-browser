@@ -3,6 +3,16 @@ import { CreditService } from '../services/credit.service.js';
 import { creditHistoryQuerySchema } from '../schemas/credit.schema.js';
 import { sendSuccess } from '../utils/apiResponse.js';
 import { AppError } from '../middleware/errorHandler.js';
+import { env } from '../config/env.js';
+
+export const ALLOWED_FAILED_REFUND_REASONS = [
+  'max_attempts_exceeded',
+  'max_age_exceeded',
+  'client_dropped',
+  'network_failure',
+] as const;
+
+export type FailedRefundReason = (typeof ALLOWED_FAILED_REFUND_REASONS)[number];
 
 export class CreditController {
   /**
@@ -118,6 +128,69 @@ export class CreditController {
         },
         'Credits refunded successfully',
       );
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  /**
+   * POST /api/v1/credits/refund/report-failed
+   * Reports dropped client refund attempts for support inspection and auditing.
+   */
+  public static async reportFailedRefund(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const userId = req.user?._id?.toString();
+      if (!userId) {
+        throw new AppError('Authentication required', 401, 'UNAUTHORIZED');
+      }
+
+      const { runId, idempotencyKey, reason } = req.body;
+      if (!runId || !idempotencyKey || typeof runId !== 'string' || typeof idempotencyKey !== 'string') {
+        throw new AppError('runId and idempotencyKey are required', 400, 'INVALID_INPUT');
+      }
+
+      const rawReason = String(reason || '')
+        .trim()
+        .toLowerCase();
+      if (!ALLOWED_FAILED_REFUND_REASONS.includes(rawReason as FailedRefundReason)) {
+        throw new AppError(
+          `Invalid refund failure reason. Must be one of: ${ALLOWED_FAILED_REFUND_REASONS.join(', ')}`,
+          400,
+          'INVALID_REASON',
+        );
+      }
+
+      const result = await CreditService.reportFailedRefund({
+        userId,
+        runId: runId.trim(),
+        idempotencyKey: idempotencyKey.trim(),
+        reason: rawReason,
+      });
+
+      sendSuccess(res, result, 'Failed refund reported successfully');
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  /**
+   * POST /api/v1/credits/reconcile
+   * Scans unapplied runs that were charged and automatically refunds them.
+   * Gated behind ENABLE_CREDITS_RECONCILE feature flag (default false).
+   */
+  public static async reconcileUnapplied(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      if (!env.ENABLE_CREDITS_RECONCILE) {
+        throw new AppError('Credits reconciliation feature is currently disabled', 403, 'FEATURE_DISABLED');
+      }
+
+      const userId = req.user?._id?.toString();
+      if (!userId) {
+        throw new AppError('Authentication required', 401, 'UNAUTHORIZED');
+      }
+
+      const result = await CreditService.reconcileUnappliedRuns(userId);
+      sendSuccess(res, result, 'Reconciliation completed');
     } catch (error) {
       next(error);
     }

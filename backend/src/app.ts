@@ -14,6 +14,9 @@ import { healthRouter } from './routes/health.routes.js';
 export function createApp(): express.Application {
   const app = express();
 
+  // Trust Cloud Run / GFE reverse proxy (needed for rate-limiting and accurate client IPs)
+  app.set('trust proxy', 1);
+
   // Security Headers
   app.use(helmet());
 

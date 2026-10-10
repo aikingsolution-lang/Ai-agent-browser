@@ -74,40 +74,55 @@ export class DailyQuotaManager {
     remaining: number;
     currentCount: number;
     maxQuota: number;
+    reason?: 'quota_exceeded' | 'error';
   }> {
-    let data = await this.getQuotaData();
-
-    // Dynamically sync maxDailyQuota from active subscription or backend profile quota
     try {
-      const backendQuota = await backendApiClient.getProfileQuota().catch(() => null);
-      if (backendQuota?.dailyLimit && data.maxDailyQuota !== backendQuota.dailyLimit) {
+      let data = await this.getQuotaData();
+
+      // Dynamically sync maxDailyQuota from active subscription or backend profile quota
+      try {
+        const backendQuota = await backendApiClient.getProfileQuota().catch(() => null);
+        if (backendQuota?.dailyLimit && data.maxDailyQuota !== backendQuota.dailyLimit) {
+          data = {
+            ...data,
+            maxDailyQuota: backendQuota.dailyLimit,
+          };
+          await quotaStorage.set(data).catch(() => {});
+        }
+      } catch (err) {
+        logger.warning('[RateLimiter] Error syncing profile quota from backend:', err);
+      }
+
+      // Auto-unpause if limit was upgraded or applied count < maxDailyQuota
+      if (data.appliedCount < data.maxDailyQuota && data.isPausedDueToQuota) {
         data = {
           ...data,
-          maxDailyQuota: backendQuota.dailyLimit,
+          isPausedDueToQuota: false,
+          nextResumeTimestamp: null,
         };
-        await quotaStorage.set(data);
+        await quotaStorage.set(data).catch(() => {});
       }
-    } catch {}
 
-    // Auto-unpause if limit was upgraded or applied count < maxDailyQuota
-    if (data.appliedCount < data.maxDailyQuota && data.isPausedDueToQuota) {
-      data = {
-        ...data,
-        isPausedDueToQuota: false,
-        nextResumeTimestamp: null,
+      const remaining = Math.max(0, data.maxDailyQuota - data.appliedCount);
+      const allowed = remaining > 0 && !data.isPausedDueToQuota;
+
+      return {
+        allowed,
+        remaining,
+        currentCount: data.appliedCount,
+        maxQuota: data.maxDailyQuota,
+        reason: allowed ? undefined : 'quota_exceeded',
       };
-      await quotaStorage.set(data);
+    } catch (err) {
+      logger.error('[RateLimiter] Unexpected error in canApplyToday, failing closed:', err);
+      return {
+        allowed: false,
+        reason: 'error',
+        remaining: 0,
+        currentCount: 0,
+        maxQuota: 15,
+      };
     }
-
-    const remaining = Math.max(0, data.maxDailyQuota - data.appliedCount);
-    const allowed = remaining > 0 && !data.isPausedDueToQuota;
-
-    return {
-      allowed,
-      remaining,
-      currentCount: data.appliedCount,
-      maxQuota: data.maxDailyQuota,
-    };
   }
 
   /**

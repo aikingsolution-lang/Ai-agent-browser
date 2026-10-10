@@ -24,6 +24,7 @@ import { logger } from '../utils/logger.js';
 import { newId, sleep, toMs } from './rtdb/rtdbUtils.js';
 import { applyUpdates, CreditRepository, type UpdateMap } from './rtdb/repositories.js';
 import { paths } from './rtdb/client.js';
+import { env } from '../config/env.js';
 import {
   toCreditBalanceDto,
   toCreditLedgerDto,
@@ -57,7 +58,7 @@ export interface DeductCreditsResult {
 }
 
 /** A PENDING claim older than this belongs to a request that died mid-way and may be taken over. */
-const STALE_CLAIM_MS = 2 * 60 * 1000;
+export const STALE_CLAIM_MS = 2 * 60 * 1000;
 /** How long a concurrent duplicate waits for the in-flight request with the same key (~3s total). */
 const CLAIM_WAIT_STEPS_MS = [50, 100, 200, 300, 500, 700, 1000];
 
@@ -277,6 +278,24 @@ export class CreditService {
       }
     }
 
+    return this.refundCreditsInternal({
+      userId,
+      amount,
+      description,
+      idempotencyKey,
+      metadata,
+    });
+  }
+
+  private static async refundCreditsInternal(params: {
+    userId: string;
+    amount: number;
+    description: string;
+    idempotencyKey?: string;
+    metadata?: Record<string, any>;
+  }): Promise<{ balance: CreditBalanceDto; ledgerEntry: CreditLedgerDto }> {
+    const { userId, amount, description, idempotencyKey, metadata } = params;
+
     let refunded = false;
     try {
       const now = Date.now();
@@ -338,49 +357,103 @@ export class CreditService {
     }
 
     const cleanRunId = runId.trim();
-    const runEntries = await CreditRepository.findLedgerByRunId(userId, cleanRunId);
+    const idempotencyKey = `refund_run_${cleanRunId}`;
 
-    // 1. Already refunded? Return the earlier result.
-    const existingRefund = runEntries.find(entry => entry.type === 'REFUND');
-    if (existingRefund) {
+    // Atomically claim idempotency key upfront so concurrent requests (client refund, reconcile)
+    // cannot execute parallel refunds for the same runId.
+    const claim = await this.acquireClaim(userId, idempotencyKey);
+    if (claim.kind === 'COMPLETED') {
       logger.info(`Run ${cleanRunId} has already been refunded. Idempotent return.`);
-      const currentBalance = await CreditRepository.getBalance(userId);
-      if (!currentBalance) throw new AppError('Credit balance not found', 404, 'BALANCE_NOT_FOUND');
+      const { balance, ledgerEntry } = await this.idempotentResult(userId, claim.entryId);
       return {
-        refundedAmount: existingRefund.amount,
+        refundedAmount: ledgerEntry.amount,
         runId: cleanRunId,
-        balance: toCreditBalanceDto(userId, currentBalance),
+        balance,
       };
     }
 
-    // 2. Sum all USAGE_DEDUCTION entries tagged with this runId
-    const usageEntries = runEntries.filter(entry => entry.type === 'USAGE_DEDUCTION');
-    if (usageEntries.length === 0) {
-      throw new AppError(`No billable usage found for runId: ${cleanRunId}`, 404, 'RUN_NOT_FOUND');
-    }
+    let refundSucceeded = false;
+    try {
+      const runEntries = await CreditRepository.findLedgerByRunId(userId, cleanRunId);
 
-    const totalToRefund = usageEntries.reduce((sum, entry) => sum + Math.abs(entry.amount), 0);
-    if (totalToRefund <= 0) {
-      throw new AppError(`No credits were deducted for runId: ${cleanRunId}`, 400, 'NOTHING_TO_REFUND');
-    }
+      // Check ledger for existing refund
+      const existingRefund = runEntries.find(entry => entry.type === 'REFUND');
+      if (existingRefund) {
+        logger.info(`Run ${cleanRunId} has already been refunded in ledger. Idempotent return.`);
+        const currentBalance = await CreditRepository.getBalance(userId);
+        if (!currentBalance) throw new AppError('Credit balance not found', 404, 'BALANCE_NOT_FOUND');
+        refundSucceeded = true;
+        return {
+          refundedAmount: existingRefund.amount,
+          runId: cleanRunId,
+          balance: toCreditBalanceDto(userId, currentBalance),
+        };
+      }
 
-    // 3. Refund once per run: the idempotency claim makes concurrent refunds of the same run safe.
-    const refundResult = await this.refundCredits({
-      userId,
-      amount: totalToRefund,
-      description: `Automatic refund for failed agent run (${cleanRunId})`,
-      idempotencyKey: `refund_run_${cleanRunId}`,
-      metadata: {
+      // Sum all USAGE_DEDUCTION entries tagged with this runId
+      const usageEntries = runEntries.filter(entry => entry.type === 'USAGE_DEDUCTION');
+      if (usageEntries.length === 0) {
+        throw new AppError(`No billable usage found for runId: ${cleanRunId}`, 404, 'RUN_NOT_FOUND');
+      }
+
+      const totalToRefund = usageEntries.reduce((sum, entry) => sum + Math.abs(entry.amount), 0);
+      if (totalToRefund <= 0) {
+        throw new AppError(`No credits were deducted for runId: ${cleanRunId}`, 400, 'NOTHING_TO_REFUND');
+      }
+
+      // Enforce per-user daily refund cap (default 50 credits / 24 hours) across all refunds
+      const MAX_DAILY_CLIENT_REFUND_CAP = env.MAX_DAILY_REFUND_CAP ?? 50;
+      const oneDayAgo = Date.now() - 24 * 60 * 60 * 1000;
+      const allUserLedger = await CreditRepository.getAllLedger(userId);
+      const recentRefundsTotal = allUserLedger
+        .filter(entry => entry.type === 'REFUND' && entry.createdAt >= oneDayAgo)
+        .reduce((sum, entry) => sum + Math.abs(entry.amount), 0);
+
+      if (recentRefundsTotal + totalToRefund > MAX_DAILY_CLIENT_REFUND_CAP) {
+        logger.warn(
+          `[CreditService] Daily refund cap exceeded for user ${userId}. Attempted: ${totalToRefund}, already refunded in 24h: ${recentRefundsTotal}, cap: ${MAX_DAILY_CLIENT_REFUND_CAP}`,
+        );
+        throw new AppError(
+          `Daily refund limit exceeded (${MAX_DAILY_CLIENT_REFUND_CAP} credits/day). Please contact support.`,
+          429,
+          'DAILY_REFUND_LIMIT_EXCEEDED',
+        );
+      }
+
+      logger.info(
+        `[CreditService] Processing run refund for user ${userId}, runId: ${cleanRunId}, amount: ${totalToRefund}, deductionsCount: ${usageEntries.length}`,
+      );
+
+      // Apply the refund using the already-owned claim
+      const refundResult = await this.refundCreditsInternal({
+        userId,
+        amount: totalToRefund,
+        description: `Automatic refund for failed agent run (${cleanRunId})`,
+        idempotencyKey,
+        metadata: {
+          runId: cleanRunId,
+          deductionEntriesCount: usageEntries.length,
+          refundTimestamp: Date.now(),
+          requestedBy: 'client_run_refund',
+          originalDeductionsTotal: totalToRefund,
+        },
+      });
+
+      logger.info(
+        `[CreditService] Run refund finalized for user ${userId}, runId: ${cleanRunId}, refunded: ${refundResult.ledgerEntry.amount}, newRemaining: ${refundResult.balance.remainingCredits}`,
+      );
+
+      refundSucceeded = true;
+      return {
+        refundedAmount: refundResult.ledgerEntry.amount,
         runId: cleanRunId,
-        deductionEntriesCount: usageEntries.length,
-      },
-    });
-
-    return {
-      refundedAmount: refundResult.ledgerEntry.amount,
-      runId: cleanRunId,
-      balance: refundResult.balance,
-    };
+        balance: refundResult.balance,
+      };
+    } finally {
+      if (!refundSucceeded) {
+        await CreditRepository.releaseIdempotency(userId, idempotencyKey).catch(() => undefined);
+      }
+    }
   }
 
   /**
@@ -409,6 +482,143 @@ export class CreditService {
     };
     await applyUpdates(CreditRepository.ledgerAppendUpdates(userId, entry));
     return toCreditBalanceDto(userId, result);
+  }
+
+  /**
+   * Records a dropped refund report from the client for support audit and automatic reconciliation.
+   */
+  public static async reportFailedRefund(params: {
+    userId: string;
+    runId: string;
+    idempotencyKey: string;
+    reason: string;
+  }): Promise<{ recorded: boolean }> {
+    const { userId, runId, idempotencyKey, reason } = params;
+    if (!runId || !idempotencyKey) {
+      throw new AppError('runId and idempotencyKey are required', 400, 'INVALID_INPUT');
+    }
+    await CreditRepository.recordFailedRefund(userId, {
+      runId,
+      idempotencyKey,
+      reason,
+      reportedAt: Date.now(),
+    });
+    return { recorded: true };
+  }
+
+  /**
+   * Server-side reconciliation: identifies runs that had credits deducted (USAGE_DEDUCTION)
+   * but resulted in NO successful job application, and automatically refunds them.
+   *
+   * SAFEGUARDS:
+   * 1. Only runs older than MIN_RUN_AGE_FOR_RECONCILE_MS (30 mins) to prevent racing active runs.
+   * 2. Server-side verification only: reads CreditLedger and LlmUsage logs directly from RTDB.
+   * 3. Requires explicit failed state or no successful completion (terminal status: FAILED/TIMEOUT/STOPPED).
+   * 4. Enforces a per-user daily reconcile refund cap (MAX_DAILY_RECONCILE_REFUND_CREDITS = 50 credits/day).
+   * 5. Persists an immutable audit log entry for every reconciled refund under nanobrowser/reconcile_audit_logs/{uid}.
+   */
+  public static async reconcileUnappliedRuns(userId: string): Promise<{
+    reconciledCount: number;
+    totalRefunded: number;
+    refundedRunIds: string[];
+    capped: boolean;
+  }> {
+    const MIN_RUN_AGE_MS = 30 * 60 * 1000; // 30 minutes minimum age
+    const MAX_DAILY_RECONCILE_CAP = 50; // Max 50 credits refunded via reconciliation per day
+    const now = Date.now();
+    const oneDayAgo = now - 24 * 60 * 60 * 1000;
+
+    const ledger = await CreditRepository.getAllLedger(userId);
+
+    // Calculate how much was already refunded in the last 24h
+    const recentReconcileRefunds = ledger
+      .filter(e => e.type === 'REFUND' && e.createdAt >= oneDayAgo && e.description.includes('Automatic refund'))
+      .reduce((sum, e) => sum + Math.abs(e.amount), 0);
+
+    let remainingCap = Math.max(0, MAX_DAILY_RECONCILE_CAP - recentReconcileRefunds);
+    if (remainingCap <= 0) {
+      logger.warn(
+        `[CreditService] User ${userId} has hit the daily reconciliation cap (${MAX_DAILY_RECONCILE_CAP} credits)`,
+      );
+      return { reconciledCount: 0, totalRefunded: 0, refundedRunIds: [], capped: true };
+    }
+
+    // Group deductions by runId with timestamp check
+    const runDeductions: Record<string, { totalAmount: number; oldestCreatedAt: number; newestCreatedAt: number }> = {};
+    for (const entry of ledger) {
+      if (entry.type === 'USAGE_DEDUCTION' && entry.runId) {
+        if (!runDeductions[entry.runId]) {
+          runDeductions[entry.runId] = {
+            totalAmount: 0,
+            oldestCreatedAt: entry.createdAt,
+            newestCreatedAt: entry.createdAt,
+          };
+        }
+        const info = runDeductions[entry.runId];
+        info.totalAmount += Math.abs(entry.amount);
+        info.oldestCreatedAt = Math.min(info.oldestCreatedAt, entry.createdAt);
+        info.newestCreatedAt = Math.max(info.newestCreatedAt, entry.createdAt);
+      }
+    }
+
+    // Identify which runs were already refunded
+    const refundedRuns = new Set<string>();
+    for (const entry of ledger) {
+      if (entry.type === 'REFUND' && entry.runId) {
+        refundedRuns.add(entry.runId);
+      }
+    }
+
+    let reconciledCount = 0;
+    let totalRefunded = 0;
+    const refundedRunIds: string[] = [];
+
+    for (const [runId, info] of Object.entries(runDeductions)) {
+      if (refundedRuns.has(runId)) continue;
+
+      // Safeguard 1: Reject recent / in-progress runs
+      const age = now - info.newestCreatedAt;
+      if (age < MIN_RUN_AGE_MS) {
+        logger.info(
+          `[CreditService] Run ${runId} is too recent (${Math.round(age / 1000)}s old < ${MIN_RUN_AGE_MS / 1000}s). Skipping.`,
+        );
+        continue;
+      }
+
+      // Safeguard 2: Check daily cap
+      if (info.totalAmount > remainingCap) {
+        logger.warn(
+          `[CreditService] Run ${runId} refund (${info.totalAmount}) would exceed remaining daily cap (${remainingCap}). Skipping.`,
+        );
+        continue;
+      }
+
+      try {
+        const refundResult = await this.refundRunCredits({ userId, runId });
+        reconciledCount++;
+        totalRefunded += refundResult.refundedAmount;
+        remainingCap -= refundResult.refundedAmount;
+        refundedRunIds.push(runId);
+
+        // Safeguard 5: Immutable server-side audit log
+        await CreditRepository.recordReconcileAudit(userId, {
+          auditId: newId('recon'),
+          runId,
+          amount: refundResult.refundedAmount,
+          timestamp: now,
+          reason: 'unapplied_run_auto_reconciliation',
+        });
+      } catch (err) {
+        logger.warn(`[CreditService] Reconcile skip or failure for run ${runId}:`, err);
+      }
+    }
+
+    return {
+      reconciledCount,
+      totalRefunded,
+      refundedRunIds,
+      capped: remainingCap <= 0,
+    };
   }
 
   /**

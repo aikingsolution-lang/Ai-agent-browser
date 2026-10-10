@@ -69,6 +69,12 @@ export const paths = {
   creditLedgerCount: (uid: string) => `${RTDB_ROOT}/credit_ledger_meta/${uidSeg(uid)}/count`,
   creditIdempotency: (uid: string, keyHash: string) =>
     `${RTDB_ROOT}/credit_idempotency/${uidSeg(uid)}/${keySeg(keyHash, 'idempotency key hash')}`,
+  failedRefunds: (uid: string) => `${RTDB_ROOT}/failed_refunds/${uidSeg(uid)}`,
+  failedRefund: (uid: string, runId: string) =>
+    `${RTDB_ROOT}/failed_refunds/${uidSeg(uid)}/${keySeg(runId, 'failed refund run id')}`,
+  reconcileAuditLogs: (uid: string) => `${RTDB_ROOT}/reconcile_audit_logs/${uidSeg(uid)}`,
+  reconcileAuditLogEntry: (uid: string, entryId: string) =>
+    `${RTDB_ROOT}/reconcile_audit_logs/${uidSeg(uid)}/${keySeg(entryId, 'reconcile audit log id')}`,
 
   careerBrain: (uid: string) => `${RTDB_ROOT}/career_brains/${uidSeg(uid)}`,
   careerBrainField: (uid: string, field: 'createdAt' | 'dailyQuota' | 'tier' | 'updatedAt') =>

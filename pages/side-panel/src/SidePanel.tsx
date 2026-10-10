@@ -1,7 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { RxDiscordLogo } from 'react-icons/rx';
-import { FiSettings, FiZap, FiUser, FiLogOut, FiStar } from 'react-icons/fi';
+import { FiSettings, FiZap, FiUser, FiLogOut, FiStar, FiAlertTriangle, FiRefreshCw, FiX } from 'react-icons/fi';
 import { PiPlusBold } from 'react-icons/pi';
 import { GrHistory } from 'react-icons/gr';
 import {
@@ -22,7 +22,14 @@ import {
   checkCopilotAccess,
   dailyQuotaStore,
 } from '@extension/storage';
-import { backendApiClient, isPremiumActive, openJobformSignIn, refreshAccountStatus } from '@extension/shared';
+import {
+  backendApiClient,
+  isPremiumActive,
+  openJobformSignIn,
+  refreshAccountStatus,
+  runSystemDiagnostics,
+  type SystemDiagnosticsReport,
+} from '@extension/shared';
 import favoritesStorage, { type FavoritePrompt } from '@extension/storage/lib/prompt/favorites';
 import { t } from '@extension/i18n';
 import MessageList from './components/MessageList';
@@ -32,9 +39,10 @@ import BookmarkList from './components/BookmarkList';
 import { AuthGateView } from './components/AuthGateView';
 import { PremiumPlansModal } from './components/PremiumPlansModal';
 import { EventType, type AgentEvent, ExecutionState } from './types/event';
-import { FiBriefcase, FiFileText, FiMessageSquare } from 'react-icons/fi';
+import { FiBriefcase, FiFileText, FiMessageSquare, FiLock } from 'react-icons/fi';
 import { ResumeProfileView } from './components/ResumeProfileView';
 import { LinkedInApplyDashboard, type StructuredActivityItem } from './components/LinkedInApplyDashboard';
+import { FailedRefundBanner } from './components/FailedRefundBanner';
 import './SidePanel.css';
 
 // Declare chrome API types
@@ -79,6 +87,40 @@ const SidePanel = () => {
   const [copilotMessages, setCopilotMessages] = useState<Message[]>([]);
   const [isCopilotTyping, setIsCopilotTyping] = useState(false);
   const [copilotAudit, setCopilotAudit] = useState<{ score: number; missingFields: any[] } | null>(null);
+  const [diagnosticsReport, setDiagnosticsReport] = useState<SystemDiagnosticsReport | null>(null);
+  const [isDismissedDiagnostics, setIsDismissedDiagnostics] = useState(false);
+  const [showAuthRequiredBanner, setShowAuthRequiredBanner] = useState(false);
+  const [failedRefundNotice, setFailedRefundNotice] = useState<Array<{ runId: string; reason: string }> | null>(null);
+
+  const checkFailedRefunds = useCallback(async () => {
+    try {
+      if (typeof chrome !== 'undefined' && chrome?.storage?.local) {
+        const data = await chrome.storage.local.get(['nanobrowser_failed_refunds']);
+        const list = data?.nanobrowser_failed_refunds || [];
+        if (Array.isArray(list) && list.length > 0) {
+          setFailedRefundNotice(list);
+        } else {
+          setFailedRefundNotice(null);
+        }
+      }
+    } catch {
+      // Ignore
+    }
+  }, []);
+
+  const runDiagnostics = useCallback(async () => {
+    try {
+      const report = await runSystemDiagnostics();
+      setDiagnosticsReport(report);
+      await checkFailedRefunds();
+    } catch (err) {
+      console.warn('[SidePanel] Diagnostics check failed:', err);
+    }
+  }, [checkFailedRefunds]);
+
+  useEffect(() => {
+    runDiagnostics();
+  }, [runDiagnostics]);
 
   const refreshCopilotAudit = useCallback(async () => {
     try {
@@ -552,6 +594,10 @@ const SidePanel = () => {
             }
             return [newItem, ...prev.slice(0, 49)];
           });
+        } else if (message && message.type === 'AUTH_REQUIRED') {
+          setIsApplying(false);
+          setShowAuthRequiredBanner(true);
+          setActiveStatusText(message.error || message.message || 'Session expired. Please sign in again.');
         } else if (message && message.type === 'LINKEDIN_STATUS_UPDATE') {
           if (message.text) {
             setActiveStatusText(message.text);
@@ -565,7 +611,10 @@ const SidePanel = () => {
               lowerText.includes('timeout') ||
               lowerText.includes('pausing') ||
               lowerText.includes('paused') ||
-              lowerText.includes('additional verification')
+              lowerText.includes('additional verification') ||
+              lowerText.includes('session expired') ||
+              lowerText.includes('auth_required') ||
+              lowerText.includes('sign in again')
             ) {
               setIsApplying(false);
             }
@@ -1105,6 +1154,7 @@ const SidePanel = () => {
 
       if (!currentSession?.token) {
         const authMsg = 'Authentication required. Please sign in to start applying.';
+        setShowAuthRequiredBanner(true);
         setActiveStatusText(authMsg);
         setAppliedLogs(prev => [
           {
@@ -1699,6 +1749,91 @@ const SidePanel = () => {
             </button>
           </div>
         </header>
+
+        {/* Session Expired / Auth Required Banner */}
+        {showAuthRequiredBanner && (
+          <div
+            data-testid="auth-required-banner"
+            className="mx-3 my-2 p-3 rounded-xl border text-xs bg-red-500/10 border-red-500/30 text-red-700 dark:text-red-300 flex items-center justify-between gap-3 shadow-sm">
+            <div className="flex items-center gap-2.5 min-w-0">
+              <FiLock className="size-4 shrink-0 text-red-500" />
+              <div className="min-w-0">
+                <div className="font-bold text-xs text-red-800 dark:text-red-200">
+                  Session expired. Please sign in again.
+                </div>
+                <div className="text-[11px] opacity-80 truncate">
+                  Authentication is required to run automated job applications.
+                </div>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                setShowAuthRequiredBanner(false);
+                openJobformSignIn();
+              }}
+              className="px-3 py-1.5 rounded-lg text-xs font-bold bg-blue-600 text-white hover:bg-blue-500 shadow-sm cursor-pointer transition-all shrink-0">
+              Sign in
+            </button>
+          </div>
+        )}
+
+        {/* First-Run / System Diagnostics Banner */}
+        {diagnosticsReport && !diagnosticsReport.isReadyToApply && !isDismissedDiagnostics && (
+          <div className="mx-3 my-2 p-2.5 rounded-lg border text-xs bg-amber-500/10 border-amber-500/30 text-amber-700 dark:text-amber-300">
+            <div className="flex items-start justify-between gap-2">
+              <div className="flex items-start gap-2">
+                <FiAlertTriangle className="size-4 shrink-0 text-amber-500 mt-0.5" />
+                <div className="space-y-1">
+                  <div className="font-semibold text-[11px] uppercase tracking-wider text-amber-800 dark:text-amber-200">
+                    System Diagnostic Notice
+                  </div>
+                  {!diagnosticsReport.api.isReachable ? (
+                    <div>⚠️ Backend API unreachable ({diagnosticsReport.api.url}). Offline mode active.</div>
+                  ) : !diagnosticsReport.auth.isSignedIn ? (
+                    <div className="flex items-center justify-between gap-2">
+                      <span>⚠️ Not signed in. Sign in via JobForm Automator to use automated applications.</span>
+                      <button
+                        type="button"
+                        onClick={openJobformSignIn}
+                        className="px-2 py-0.5 rounded text-[11px] font-semibold bg-amber-600 text-white hover:bg-amber-700 cursor-pointer transition-colors shrink-0">
+                        Sign in
+                      </button>
+                    </div>
+                  ) : !diagnosticsReport.profile.isValid ? (
+                    <div>⚠️ Incomplete profile. Missing: {diagnosticsReport.profile.missingFields.join(', ')}.</div>
+                  ) : (
+                    <div>{diagnosticsReport.actionableAdvice[0]}</div>
+                  )}
+                  {diagnosticsReport.actionableAdvice.length > 0 && (
+                    <div className="text-[10px] opacity-80">
+                      Recommendation: {diagnosticsReport.actionableAdvice[0]}
+                    </div>
+                  )}
+                </div>
+              </div>
+              <div className="flex items-center gap-1 shrink-0">
+                <button
+                  type="button"
+                  onClick={runDiagnostics}
+                  className="p-1 hover:bg-amber-500/20 rounded cursor-pointer transition-colors"
+                  title="Re-run Diagnostics">
+                  <FiRefreshCw className="size-3" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setIsDismissedDiagnostics(true)}
+                  className="p-1 hover:bg-amber-500/20 rounded cursor-pointer transition-colors"
+                  title="Dismiss">
+                  <FiX className="size-3.5" />
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Failed Refund Audit Notice */}
+        <FailedRefundBanner notices={failedRefundNotice} onDismiss={() => setFailedRefundNotice(null)} />
 
         {/* Navigation Tabs - ONLY SHOWN WHEN AUTHENTICATED */}
         {!showHistory && authSession?.token && (

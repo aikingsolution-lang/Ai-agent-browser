@@ -53,6 +53,16 @@ const envSchema = z.object({
         '336340854879-i6hj15oe17se379u6k377slo7pvbvh3v.apps.googleusercontent.com',
     )
     .default('336340854879-i6hj15oe17se379u6k377slo7pvbvh3v.apps.googleusercontent.com'),
+
+  // ── Feature Flags & Limits ───────────────────────────────────────────────
+  ENABLE_CREDITS_RECONCILE: z
+    .union([z.boolean(), z.string()])
+    .transform(val => (typeof val === 'boolean' ? val : val === 'true' || val === '1'))
+    .default(false),
+  MAX_DAILY_REFUND_CAP: z
+    .union([z.number(), z.string()])
+    .transform(val => (typeof val === 'number' ? val : parseInt(val || '50', 10)))
+    .default(50),
 });
 
 const parsedEnv = envSchema.safeParse(process.env);
@@ -81,6 +91,9 @@ const baseEnv = parsedEnv.success
       GOOGLE_CLIENT_ID:
         process.env.GOOGLE_CLIENT_ID?.trim() ||
         '336340854879-i6hj15oe17se379u6k377slo7pvbvh3v.apps.googleusercontent.com',
+      ENABLE_CREDITS_RECONCILE:
+        process.env.ENABLE_CREDITS_RECONCILE === 'true' || process.env.ENABLE_CREDITS_RECONCILE === '1',
+      MAX_DAILY_REFUND_CAP: parseInt(process.env.MAX_DAILY_REFUND_CAP || '50', 10),
     };
 
 /**

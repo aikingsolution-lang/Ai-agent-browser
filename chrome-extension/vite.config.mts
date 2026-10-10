@@ -14,6 +14,19 @@ export default defineConfig(({ mode }) => {
   // Load environment variables from the parent directory
   const env = loadEnv(mode, resolve(rootDir, '..'), 'VITE_');
   
+  const isTest = mode === 'test' || process.env.NODE_ENV === 'test' || Boolean(process.env.VITEST);
+  const isProdBuild = isProduction && !isTest;
+
+  const backendUrl = (env.VITE_BACKEND_API_URL || process.env.VITE_BACKEND_API_URL || '').trim();
+  if (isProdBuild && !backendUrl) {
+    throw new Error(
+      '❌ [Vite Build Error] VITE_BACKEND_API_URL must be defined for production builds! ' +
+        'Check .env.production or set VITE_BACKEND_API_URL in environment.',
+    );
+  }
+
+  const resolvedBackendUrl = backendUrl || (isProdBuild ? '' : 'http://localhost:5000');
+
   return {
   resolve: {
     alias: {
@@ -67,9 +80,9 @@ export default defineConfig(({ mode }) => {
   define: {
     'import.meta.env.DEV': isDev,
     'import.meta.env.VITE_POSTHOG_API_KEY': JSON.stringify(env.VITE_POSTHOG_API_KEY || process.env.VITE_POSTHOG_API_KEY || ''),
-    'import.meta.env.VITE_BACKEND_API_URL': JSON.stringify(env.VITE_BACKEND_API_URL || process.env.VITE_BACKEND_API_URL || 'http://localhost:5000'),
+    'import.meta.env.VITE_BACKEND_API_URL': JSON.stringify(resolvedBackendUrl),
     // Backend address used by @extension/shared (empty → production backend)
-    __NANOBROWSER_BACKEND_URL__: JSON.stringify(env.VITE_BACKEND_API_URL || process.env.VITE_BACKEND_API_URL || ''),
+    __NANOBROWSER_BACKEND_URL__: JSON.stringify(resolvedBackendUrl),
   },
 
   envDir: '../',

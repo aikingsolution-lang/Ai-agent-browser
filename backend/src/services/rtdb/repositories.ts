@@ -431,6 +431,36 @@ export class CreditRepository {
   static async releaseIdempotency(uid: string, key: string): Promise<void> {
     await dbRef(paths.creditIdempotency(uid, hashKey(key))).remove();
   }
+
+  static async recordFailedRefund(
+    uid: string,
+    record: {
+      runId: string;
+      idempotencyKey: string;
+      reason: string;
+      reportedAt: number;
+    },
+  ): Promise<void> {
+    await dbRef(paths.failedRefund(uid, record.runId)).set(stripUndefined(record));
+  }
+
+  static async getAllLedger(uid: string): Promise<CreditLedgerRecord[]> {
+    const snap = await dbRef(paths.creditLedger(uid)).get();
+    return childrenOf<CreditLedgerRecord>(snap);
+  }
+
+  static async recordReconcileAudit(
+    uid: string,
+    record: {
+      auditId: string;
+      runId: string;
+      amount: number;
+      timestamp: number;
+      reason: string;
+    },
+  ): Promise<void> {
+    await dbRef(paths.reconcileAuditLogEntry(uid, record.auditId)).set(stripUndefined(record));
+  }
 }
 
 // ── CareerBrain ───────────────────────────────────────────────────────────────

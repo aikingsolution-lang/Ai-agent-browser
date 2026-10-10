@@ -21,6 +21,7 @@
 import type { Request, Response, NextFunction } from 'express';
 import { adminAuth } from '../config/firebase-admin.js';
 import { sendError } from '../utils/apiResponse.js';
+import { logger } from '../utils/logger.js';
 
 // ── Lightweight Firebase user shape attached to every authenticated request ───
 export interface FirebaseUser {
@@ -88,7 +89,10 @@ export async function authenticate(req: Request, res: Response, next: NextFuncti
     } catch (err: any) {
       // Firebase surfaces expiry as 'auth/id-token-expired' and invalidity as
       // 'auth/argument-error' or 'auth/invalid-id-token'.
-      const code: string = err?.code || '';
+      const code: string = err?.code || 'UNKNOWN_CODE';
+      const message: string = err?.message || 'No message';
+      logger.warn(`[AuthMiddleware] ID token verification failed: ${code} - ${message}`);
+
       if (code.includes('expired')) {
         sendError(res, 'Authentication token has expired', 401, 'TOKEN_EXPIRED');
         return;

@@ -10,7 +10,7 @@ export const StripeSettings: React.FC<StripeSettingsProps> = ({ isDarkMode }) =>
   const [settings, setSettings] = useState<CloudApiSettingsConfig | null>(null);
   const [loading, setLoading] = useState(true);
   const [razorpayKeyId, setRazorpayKeyId] = useState('rzp_test_TZudy51Zrf7t8w');
-  const [razorpayWebhookSecret, setRazorpayWebhookSecret] = useState('760c2bfa92c6f5c91d5033ff');
+  const [razorpayWebhookSecret, setRazorpayWebhookSecret] = useState('');
   const [environment, setEnvironment] = useState<'sandbox' | 'live'>('sandbox');
   const [isTestingWebhook, setIsTestingWebhook] = useState(false);
   const [webhookTestStatus, setWebhookTestStatus] = useState<string | null>(null);

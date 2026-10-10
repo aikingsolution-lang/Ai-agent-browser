@@ -2,7 +2,7 @@
 import { createLogger } from '@src/background/log';
 import type BrowserContext from '@src/background/browser/context';
 import type { Executor } from '@src/background/agent/executor';
-import { backendApiClient, BACKEND_LLM_URL } from '@extension/shared';
+import { backendApiClient, BACKEND_LLM_URL, MINIMUM_RUN_CREDITS } from '@extension/shared';
 import {
   careerBrainStore,
   validateProfileCompleteness,
@@ -23,6 +23,7 @@ import {
   sanitizeRoleSearchQuery,
 } from '@extension/storage';
 import { DailyQuotaManager } from './rateLimiter';
+import { runPreflight } from './preflight';
 import { normalizeLinkedInJobUrl } from './urlUtils';
 import { dedicatedWindowManager, type RunnerMode } from './dedicatedWindow';
 import { buildLinkedInApplyTaskDetails } from './taskBuilder';
@@ -1521,6 +1522,22 @@ export class DedicatedJobRunner {
         } catch {}
       }
       return { status: 'error', message: authErr, stats };
+    }
+
+    // 0.1 PREFLIGHT CHECK: API Reachability & Entitlement / Quota (Fail-Closed)
+    this.notifyStatus(portToSend, '🔍 Performing preflight health check & verifying credit balance...', 'info');
+    const preflight = await runPreflight();
+    if (!preflight.ok) {
+      this.notifyStatus(portToSend, preflight.statusMessage, 'fail');
+      if (preflight.error === 'AUTH_REQUIRED' && portToSend) {
+        try {
+          portToSend.postMessage({
+            type: 'AUTH_REQUIRED',
+            error: preflight.statusMessage,
+          });
+        } catch {}
+      }
+      return { status: 'error', message: preflight.statusMessage, stats };
     }
 
     // 1. Concurrency Guard

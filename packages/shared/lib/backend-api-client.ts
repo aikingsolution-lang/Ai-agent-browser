@@ -9,7 +9,7 @@ export interface ApiResponse<T = any> {
   timestamp?: string;
 }
 
-import { BACKEND_API_URL, FIREBASE_WEB_API_KEY } from './config';
+import { BACKEND_API_URL, FIREBASE_WEB_API_KEY, ENABLE_CREDITS_RECONCILE } from './config';
 
 export type RefreshResult =
   | { status: 'ok'; idToken: string; refreshToken: string; userId: string | null }
@@ -65,11 +65,15 @@ export function jwtExpiryMs(token: string): number | null {
   }
 }
 
+export const MAX_REFUND_ATTEMPTS = 5;
+export const MAX_REFUND_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours
+
 export class BackendApiClient {
   private baseUrl: string;
   private token: string | null = null;
   private refreshToken: string | null = null;
   private refreshPromise: Promise<string | null> | null = null;
+  public lastRefreshStatus: 'ok' | 'invalid' | 'unavailable' | null = null;
 
   constructor(baseUrl = BACKEND_API_URL) {
     this.baseUrl = baseUrl;
@@ -116,7 +120,10 @@ export class BackendApiClient {
    * 'unavailable' means it could not be checked right now (offline, outage): keep the session.
    */
   public async exchangeRefreshToken(refreshToken: string): Promise<RefreshResult> {
-    if (!refreshToken) return { status: 'invalid' };
+    if (!refreshToken) {
+      console.warn('[BackendApiClient] exchangeRefreshToken called without refreshToken (hasRefreshToken: false)');
+      return { status: 'invalid' };
+    }
 
     if (FIREBASE_WEB_API_KEY) {
       try {
@@ -138,12 +145,27 @@ export class BackendApiClient {
               userId: String(data.user_id),
             };
           }
-        } else if (res.status === 400) {
-          // INVALID_REFRESH_TOKEN, TOKEN_EXPIRED, USER_DISABLED, USER_NOT_FOUND
-          return { status: 'invalid' };
+        } else {
+          let googleErrorReason = `HTTP_${res.status}`;
+          try {
+            const errorBody = await res.json();
+            googleErrorReason = errorBody?.error?.message || errorBody?.error || googleErrorReason;
+          } catch {
+            // response not JSON
+          }
+          console.warn(
+            `[BackendApiClient] Secure token exchange failed with HTTP ${res.status}: ${googleErrorReason} (hasRefreshToken: ${Boolean(refreshToken)})`,
+          );
+          if (res.status === 400) {
+            // INVALID_REFRESH_TOKEN, TOKEN_EXPIRED, USER_DISABLED, USER_NOT_FOUND
+            return { status: 'invalid' };
+          }
         }
         // 403 (key restricted) / 5xx: try the backend
-      } catch {
+      } catch (err: any) {
+        console.warn(
+          `[BackendApiClient] Secure token exchange network error: ${err?.message || 'Network error'} (hasRefreshToken: ${Boolean(refreshToken)})`,
+        );
         // Network error: try the backend
       }
     }
@@ -188,9 +210,13 @@ export class BackendApiClient {
       try {
         await this.ensureToken();
         const usedRefreshToken = this.refreshToken;
-        if (!usedRefreshToken) return null;
+        if (!usedRefreshToken) {
+          console.warn('[BackendApiClient] refreshAccessToken: no refreshToken present (hasRefreshToken: false)');
+          return null;
+        }
 
         const result = await this.exchangeRefreshToken(usedRefreshToken);
+        this.lastRefreshStatus = result.status;
         const current = await readStoredSession();
 
         // The session changed while refreshing (sign-out or another account): never overwrite it.
@@ -362,28 +388,48 @@ export class BackendApiClient {
     );
   }
 
-  public async addPendingRefund(runId: string): Promise<void> {
+  public async addPendingRefund(runId: string, customKey?: string): Promise<string> {
+    const idempotencyKey = customKey || `refund_${runId}`;
     try {
       if (typeof chrome !== 'undefined' && chrome?.storage?.local) {
-        const data = await chrome.storage.local.get(['nanobrowser_pending_refunds']);
-        const list: string[] = data?.nanobrowser_pending_refunds || [];
-        if (!list.includes(runId)) {
-          list.push(runId);
-          await chrome.storage.local.set({ nanobrowser_pending_refunds: list });
+        const data = await chrome.storage.local.get(['nanobrowser_pending_refunds_v2', 'nanobrowser_pending_refunds']);
+        const queue: Array<{ runId: string; idempotencyKey: string; createdAt: number; attempts: number }> =
+          data?.nanobrowser_pending_refunds_v2 || [];
+        const existing = queue.find(q => q.runId === runId);
+        if (existing) {
+          return existing.idempotencyKey;
         }
+        queue.push({
+          runId,
+          idempotencyKey,
+          createdAt: Date.now(),
+          attempts: 0,
+        });
+        const legacyList: string[] = data?.nanobrowser_pending_refunds || [];
+        if (!legacyList.includes(runId)) legacyList.push(runId);
+        await chrome.storage.local.set({
+          nanobrowser_pending_refunds_v2: queue,
+          nanobrowser_pending_refunds: legacyList,
+        });
       }
     } catch {
       // Ignore
     }
+    return idempotencyKey;
   }
 
   public async removePendingRefund(runId: string): Promise<void> {
     try {
       if (typeof chrome !== 'undefined' && chrome?.storage?.local) {
-        const data = await chrome.storage.local.get(['nanobrowser_pending_refunds']);
-        const list: string[] = data?.nanobrowser_pending_refunds || [];
-        const filtered = list.filter(id => id !== runId);
-        await chrome.storage.local.set({ nanobrowser_pending_refunds: filtered });
+        const data = await chrome.storage.local.get(['nanobrowser_pending_refunds_v2', 'nanobrowser_pending_refunds']);
+        const queue: Array<{ runId: string; idempotencyKey: string }> = data?.nanobrowser_pending_refunds_v2 || [];
+        const filteredQueue = queue.filter(item => item.runId !== runId);
+        const legacyList: string[] = data?.nanobrowser_pending_refunds || [];
+        const filteredLegacy = legacyList.filter(id => id !== runId);
+        await chrome.storage.local.set({
+          nanobrowser_pending_refunds_v2: filteredQueue,
+          nanobrowser_pending_refunds: filteredLegacy,
+        });
       }
     } catch {
       // Ignore
@@ -392,24 +438,163 @@ export class BackendApiClient {
 
   public async retryPendingRefunds(): Promise<void> {
     try {
-      if (typeof chrome !== 'undefined' && chrome?.storage?.local) {
-        const data = await chrome.storage.local.get(['nanobrowser_pending_refunds']);
-        const list: string[] = data?.nanobrowser_pending_refunds || [];
-        for (const runId of list) {
-          try {
-            await this.refundCredits(runId);
-          } catch {
-            // Remains in queue if failed
-          }
+      if (typeof chrome === 'undefined' || !chrome?.storage?.local) return;
+      const data = await chrome.storage.local.get(['nanobrowser_pending_refunds_v2', 'nanobrowser_pending_refunds']);
+      const queue: Array<{
+        runId: string;
+        idempotencyKey: string;
+        createdAt: number;
+        attempts: number;
+        lastError?: string;
+      }> = data?.nanobrowser_pending_refunds_v2 || [];
+
+      // Migrate legacy string IDs if present
+      const legacyList: string[] = data?.nanobrowser_pending_refunds || [];
+      for (const legacyId of legacyList) {
+        if (!queue.some(item => item.runId === legacyId)) {
+          queue.push({
+            runId: legacyId,
+            idempotencyKey: `refund_${legacyId}`,
+            createdAt: Date.now(),
+            attempts: 0,
+          });
         }
       }
-    } catch {
-      // Ignore
+
+      const now = Date.now();
+      const activeQueue: typeof queue = [];
+      const expiredOrExhausted: typeof queue = [];
+
+      for (const item of queue) {
+        const age = now - (item.createdAt || now);
+        if (age > MAX_REFUND_AGE_MS || (item.attempts || 0) >= MAX_REFUND_ATTEMPTS) {
+          expiredOrExhausted.push(item);
+          console.warn(
+            `[RefundQueue] Dropping refund for run ${item.runId}: attempts=${item.attempts}/${MAX_REFUND_ATTEMPTS}, ageMs=${age}/${MAX_REFUND_AGE_MS}`,
+          );
+        } else {
+          activeQueue.push(item);
+        }
+      }
+
+      if (expiredOrExhausted.length > 0) {
+        const failedData = await chrome.storage.local.get(['nanobrowser_failed_refunds']);
+        const failedList: Array<{
+          runId: string;
+          idempotencyKey: string;
+          createdAt: number;
+          droppedAt: number;
+          attempts: number;
+          lastError?: string;
+          reason: string;
+          reported?: boolean;
+        }> = failedData?.nanobrowser_failed_refunds || [];
+
+        for (const item of expiredOrExhausted) {
+          const reason = (item.attempts || 0) >= MAX_REFUND_ATTEMPTS ? 'max_attempts_exceeded' : 'max_age_exceeded';
+          const failedRecord = {
+            runId: item.runId,
+            idempotencyKey: item.idempotencyKey,
+            createdAt: item.createdAt,
+            droppedAt: Date.now(),
+            attempts: item.attempts || 0,
+            lastError: item.lastError,
+            reason,
+            reported: false,
+          };
+          failedList.push(failedRecord);
+          console.error(
+            `[RefundQueue] Permanently dropped refund for run ${item.runId} to nanobrowser_failed_refunds (${reason}): attempts=${item.attempts}/${MAX_REFUND_ATTEMPTS}, lastError=${item.lastError}`,
+          );
+
+          // Report dropped refund to authenticated backend endpoint when reachable
+          this.reportFailedRefund({
+            runId: item.runId,
+            idempotencyKey: item.idempotencyKey,
+            reason,
+          })
+            .then(async () => {
+              failedRecord.reported = true;
+              await chrome.storage.local.set({ nanobrowser_failed_refunds: failedList });
+            })
+            .catch(reportErr => {
+              console.warn(
+                `[RefundQueue] Could not report dropped refund for run ${item.runId} to backend:`,
+                reportErr?.message,
+              );
+            });
+        }
+
+        await chrome.storage.local.set({
+          nanobrowser_failed_refunds: failedList,
+          nanobrowser_pending_refunds_v2: activeQueue,
+          nanobrowser_pending_refunds: activeQueue.map(q => q.runId),
+        });
+      }
+
+      // Retry reporting any previously un-reported entries in nanobrowser_failed_refunds
+      try {
+        const storedFailed = await chrome.storage.local.get(['nanobrowser_failed_refunds']);
+        const list: Array<{ runId: string; idempotencyKey: string; reason: string; reported?: boolean }> =
+          storedFailed?.nanobrowser_failed_refunds || [];
+        let updated = false;
+        for (const f of list) {
+          if (!f.reported) {
+            try {
+              await this.reportFailedRefund({ runId: f.runId, idempotencyKey: f.idempotencyKey, reason: f.reason });
+              f.reported = true;
+              updated = true;
+            } catch {
+              // Will retry next interval
+            }
+          }
+        }
+        if (updated) {
+          await chrome.storage.local.set({ nanobrowser_failed_refunds: list });
+        }
+      } catch {
+        // Ignore
+      }
+
+      for (const item of activeQueue) {
+        try {
+          item.attempts = (item.attempts || 0) + 1;
+          await this.refundCredits(item.runId, item.idempotencyKey);
+        } catch (err: any) {
+          item.lastError = err?.message || String(err);
+          console.warn(
+            `[RefundQueue] Retry attempt ${item.attempts}/${MAX_REFUND_ATTEMPTS} failed for run ${item.runId} (${err?.status || 'error'}):`,
+            err?.message,
+          );
+          // Persist attempt count update
+          await chrome.storage.local.set({
+            nanobrowser_pending_refunds_v2: activeQueue.filter(q => (q.attempts || 0) < MAX_REFUND_ATTEMPTS),
+            nanobrowser_pending_refunds: activeQueue
+              .filter(q => (q.attempts || 0) < MAX_REFUND_ATTEMPTS)
+              .map(q => q.runId),
+          });
+        }
+      }
+    } catch (err) {
+      console.error('[RefundQueue] Error processing retryPendingRefunds:', err);
     }
   }
 
-  public async refundCredits(runId: string) {
-    await this.addPendingRefund(runId);
+  public async refundCredits(
+    runId: string,
+    customIdempotencyKey?: string,
+  ): Promise<{
+    success: boolean;
+    message?: string;
+    data: {
+      remainingCredits: number;
+      usedCredits: number;
+      allocatedCredits: number;
+      refundedAmount: number;
+      runId: string;
+    };
+  }> {
+    const idempotencyKey = await this.addPendingRefund(runId, customIdempotencyKey);
     try {
       const res = await this.request<{
         remainingCredits: number;
@@ -419,30 +604,81 @@ export class BackendApiClient {
         runId: string;
       }>('/credits/refund', {
         method: 'POST',
-        body: JSON.stringify({ runId }),
+        headers: {
+          'x-idempotency-key': idempotencyKey,
+        },
+        body: JSON.stringify({ runId, idempotencyKey }),
       });
+      // HTTP 200 Success: remove from pending queue
       await this.removePendingRefund(runId);
-      return res;
-    } catch (error: any) {
-      const errMsg = String(error?.message || '').toLowerCase();
-      if (
-        error?.status === 400 ||
-        error?.status === 404 ||
-        error?.code === 'ALREADY_REFUNDED' ||
-        error?.code === 'RUN_NOT_FOUND' ||
-        errMsg.includes('no billable usage')
-      ) {
-        await this.removePendingRefund(runId);
-        return {
+      return {
+        ...res,
+        data: res.data || {
           remainingCredits: 0,
           usedCredits: 0,
           allocatedCredits: 0,
           refundedAmount: 0,
           runId,
+        },
+      };
+    } catch (error: any) {
+      const errMsg = String(error?.message || '').toLowerCase();
+      const isTerminal =
+        error?.code === 'ALREADY_REFUNDED' ||
+        errMsg.includes('already refunded') ||
+        errMsg.includes('no billable usage') ||
+        errMsg.includes('nothing to refund');
+
+      if (isTerminal) {
+        // Only remove on 200, ALREADY_REFUNDED, or "no billable usage"
+        await this.removePendingRefund(runId);
+        return {
+          success: true,
+          message: 'Already refunded or no billable usage',
+          data: {
+            remainingCredits: 0,
+            usedCredits: 0,
+            allocatedCredits: 0,
+            refundedAmount: 0,
+            runId,
+          },
         };
       }
+
+      // For 400/404 or transient 5xx/network errors, keep entry in queue, log, and throw
+      console.warn(
+        `[BackendApiClient] Refund call failed for run ${runId} (status ${error?.status || 'unknown'}):`,
+        error?.message,
+      );
       throw error;
     }
+  }
+
+  public async reportFailedRefund(payload: { runId: string; idempotencyKey: string; reason: string }) {
+    return this.request<{ recorded: boolean }>('/credits/refund/report-failed', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  public async reconcileUnappliedCredits() {
+    if (!ENABLE_CREDITS_RECONCILE) {
+      return {
+        success: true,
+        data: {
+          reconciledCount: 0,
+          totalRefunded: 0,
+          refundedRunIds: [],
+        },
+      };
+    }
+    return this.request<{
+      reconciledCount: number;
+      totalRefunded: number;
+      refundedRunIds: string[];
+    }>('/credits/reconcile', {
+      method: 'POST',
+    });
   }
 
   // --- Subscription APIs ---
@@ -784,6 +1020,15 @@ export class BackendApiClient {
       }
       return { allowed: true, appliedToday: 0, dailyLimit: 15 };
     }
+  }
+
+  public async checkHealth(): Promise<{ status: string }> {
+    const base = this.baseUrl.replace(/\/api\/v1\/?$/, '');
+    const res = await fetch(`${base}/health`, { method: 'GET' });
+    if (!res.ok) {
+      throw new Error(`Health check failed with HTTP ${res.status}`);
+    }
+    return (await res.json().catch(() => ({ status: 'ok' }))) as { status: string };
   }
 }
 

@@ -62,7 +62,8 @@ const manifest = withOperaSidebar(
      */
     name: '__MSG_app_metadata_name__',
     version: packageJson.version,
-    host_permissions: ['http://localhost:*/*', 'http://127.0.0.1:*/*', 'https://*/*', '<all_urls>'],
+    minimum_chrome_version: '116',
+    host_permissions: ['https://*/*', '<all_urls>'],
     permissions: [
       'storage',
       'scripting',

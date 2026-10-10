@@ -17,3 +17,9 @@ creditRouter.get('/history', CreditController.getHistory);
 
 // POST /api/v1/credits/refund
 creditRouter.post('/refund', refundRateLimiter, CreditController.refundCredits);
+
+// POST /api/v1/credits/refund/report-failed
+creditRouter.post('/refund/report-failed', refundRateLimiter, CreditController.reportFailedRefund);
+
+// POST /api/v1/credits/reconcile
+creditRouter.post('/reconcile', refundRateLimiter, CreditController.reconcileUnapplied);

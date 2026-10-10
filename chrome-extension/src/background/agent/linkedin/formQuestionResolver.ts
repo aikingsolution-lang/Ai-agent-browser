@@ -33,6 +33,49 @@ import { getActiveChatModel } from '../activeModelHelper';
 
 const logger = createLogger('FormQuestionResolver');
 
+// Circuit breaker for LLM tier: after 3 consecutive network failures, disable LLM tier for the rest of run / backoff
+let consecutiveLlmNetworkFailures = 0;
+let llmDisabledUntilTimestamp = 0;
+
+export function recordLlmNetworkFailure(err?: unknown): void {
+  consecutiveLlmNetworkFailures++;
+  const errMsg = (err as any)?.message || String(err || '');
+  logger.warning(
+    `[FormQuestionResolver] LLM network failure recorded (${consecutiveLlmNetworkFailures}/3 consecutive failures): ${errMsg}`,
+  );
+  if (consecutiveLlmNetworkFailures >= 3) {
+    // Disable LLM for 5 minutes
+    llmDisabledUntilTimestamp = Date.now() + 5 * 60 * 1000;
+    logger.error(
+      '[FormQuestionResolver] ⚠️ 3 consecutive LLM network failures detected. Disabling LLM tier for 5 minutes with backoff to prevent hangs.',
+    );
+  }
+}
+
+export function recordLlmSuccess(): void {
+  consecutiveLlmNetworkFailures = 0;
+  llmDisabledUntilTimestamp = 0;
+}
+
+export function isLlmTierAvailable(): boolean {
+  if (llmDisabledUntilTimestamp > 0 && Date.now() < llmDisabledUntilTimestamp) {
+    return false;
+  }
+  return true;
+}
+
+export function isNetworkError(err: unknown): boolean {
+  const msg = ((err as any)?.message || String(err || '')).toLowerCase();
+  return (
+    msg.includes('connection error') ||
+    msg.includes('failed to fetch') ||
+    msg.includes('network') ||
+    msg.includes('econnrefused') ||
+    msg.includes('etimedout') ||
+    msg.includes('timeout')
+  );
+}
+
 export type QuestionResolutionCategory = 'MATCHED' | 'GENERATED' | 'ASKED';
 
 export interface FormFieldDescriptor {
@@ -2021,6 +2064,7 @@ Output JSON schema:
         const rawAns = String(parsed.answer).trim();
         const adapted = adaptAnswerToFieldFormat(rawAns, field);
         if (adapted.valid) {
+          recordLlmSuccess();
           return {
             matched: true,
             answer: adapted.value,
@@ -2032,7 +2076,11 @@ Output JSON schema:
       }
     }
   } catch (err) {
-    logger.warning('[FormQuestionResolver] LLM semantic match error:', err);
+    if (isNetworkError(err)) {
+      recordLlmNetworkFailure(err);
+    } else {
+      logger.warning('[FormQuestionResolver] LLM semantic match error:', err);
+    }
   }
 
   return { matched: false };
@@ -2394,6 +2442,7 @@ INSTRUCTIONS:
         logger.info(
           `[FormQuestionResolver] [GENERATED subjective match] "${cleanLabel}": "${resolvedAnswer}" (${sourceDetail})`,
         );
+        recordLlmSuccess();
         return {
           matched: true,
           answer: resolvedAnswer,
@@ -2402,7 +2451,11 @@ INSTRUCTIONS:
       }
     }
   } catch (err) {
-    logger.warning(`[FormQuestionResolver] Error inferring subjective experience for "${cleanLabel}":`, err);
+    if (isNetworkError(err)) {
+      recordLlmNetworkFailure(err);
+    } else {
+      logger.warning(`[FormQuestionResolver] Error inferring subjective experience for "${cleanLabel}":`, err);
+    }
   }
 
   return { matched: false };
@@ -2645,6 +2698,7 @@ OUTPUT STRICTLY VALID JSON ONLY:
         logger.info(
           `[FormQuestionResolver] [AUTONOMOUS SOLVED] "${cleanLabel}": "${ans}" (${parsed.reason || 'Autonomous LLM determination'})`,
         );
+        recordLlmSuccess();
         return {
           success: true,
           answer: ans,
@@ -2653,7 +2707,11 @@ OUTPUT STRICTLY VALID JSON ONLY:
       }
     }
   } catch (err) {
-    logger.warning(`[FormQuestionResolver] Error in solveQuestionAutonomousWithLLM for "${cleanLabel}":`, err);
+    if (isNetworkError(err)) {
+      recordLlmNetworkFailure(err);
+    } else {
+      logger.warning(`[FormQuestionResolver] Error in solveQuestionAutonomousWithLLM for "${cleanLabel}":`, err);
+    }
   }
 
   return { success: false, reason: 'LLM failed to produce valid answer' };
@@ -2752,7 +2810,7 @@ export async function resolveModalFieldWithAudit(
   }
 
   // Step 2: Free-Text Narrative Question -> [GENERATED]
-  if (isFreeTextNarrativeQuestion(field) && llm) {
+  if (isFreeTextNarrativeQuestion(field) && llm && isLlmTierAvailable()) {
     logger.info(
       `[FormQuestionResolver] Detected free-text narrative question "${label}". Generating answer with LLM...`,
     );
@@ -2784,12 +2842,16 @@ export async function resolveModalFieldWithAudit(
         }
       }
     } catch (err) {
-      logger.warning(`[FormQuestionResolver] Free-text generation failed for "${label}":`, err);
+      if (isNetworkError(err)) {
+        recordLlmNetworkFailure(err);
+      } else {
+        logger.warning(`[FormQuestionResolver] Free-text generation failed for "${label}":`, err);
+      }
     }
   }
 
   // Step 3: LLM Semantic Interpretation & Matching for Ambiguous Wording -> [MATCHED]
-  if (llm) {
+  if (llm && isLlmTierAvailable()) {
     logger.info(`[FormQuestionResolver] Attempting semantic LLM match for ambiguous wording "${label}"...`);
     const semanticMatch = await matchWithLLM(field, careerBrain, llm);
     if (semanticMatch.matched && semanticMatch.answer !== undefined) {
@@ -2904,7 +2966,7 @@ export async function resolveModalFieldWithAudit(
   }
 
   // Step 3d: Subjective/Experience-Based Yes/No Question Inference -> [GENERATED]
-  if (llm && isSubjectiveExperienceYesNoQuestion(field)) {
+  if (llm && isLlmTierAvailable() && isSubjectiveExperienceYesNoQuestion(field)) {
     logger.info(`[FormQuestionResolver] Attempting subjective experience inference for "${label}" from resume...`);
     const subjectiveMatch = await inferSubjectiveExperienceFromResume(field, careerBrain, llm);
     if (subjectiveMatch.matched && subjectiveMatch.answer !== undefined) {
@@ -2975,6 +3037,7 @@ export async function resolveModalFieldWithAudit(
   // For any form field with options (or binary screening), analyze and resolve the qualifying option autonomously
   if (
     llm &&
+    isLlmTierAvailable() &&
     (field.fieldType === 'dropdown' || field.fieldType === 'radio' || (field.options && field.options.length > 0))
   ) {
     logger.info(`[FormQuestionResolver] Analyzing screening choice field "${label}" with LLM...`);

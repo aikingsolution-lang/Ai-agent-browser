@@ -578,13 +578,20 @@ describe('MongoDB → Firebase RTDB migration script', () => {
       requestId: 'llm_req_1',
     });
 
-    // Refund by run id works on migrated ledger entries
-    const refund = await request(app)
-      .post('/api/v1/credits/refund')
-      .set('Authorization', auth)
-      .send({ runId: 'run-9' });
-    expect(refund.status).toBe(200);
-    expect(refund.body.data.refundedAmount).toBe(1000);
+    // Refund by run id works on migrated ledger entries (override cap for 1000-credit fixture)
+    const { env } = await import('../config/env.js');
+    const origCap = env.MAX_DAILY_REFUND_CAP;
+    env.MAX_DAILY_REFUND_CAP = 2000;
+    try {
+      const refund = await request(app)
+        .post('/api/v1/credits/refund')
+        .set('Authorization', auth)
+        .send({ runId: 'run-9' });
+      expect(refund.status).toBe(200);
+      expect(refund.body.data.refundedAmount).toBe(1000);
+    } finally {
+      env.MAX_DAILY_REFUND_CAP = origCap;
+    }
   });
 
   it('re-running is idempotent: migrated users are skipped and nothing is duplicated', async () => {
@@ -605,17 +612,15 @@ describe('MongoDB → Firebase RTDB migration script', () => {
 
   it('an interrupted run is resumed for the same user; native RTDB data is never overwritten without --overwrite', async () => {
     // Interrupted: profile written with this legacyId, marker missing
-    await testDb
-      .ref(paths.userProfile(u1))
-      .set({
-        name: 'Asha',
-        email: 'asha@example.com',
-        role: 'user',
-        status: 'active',
-        legacyId: u1,
-        createdAt: 1,
-        updatedAt: 1,
-      });
+    await testDb.ref(paths.userProfile(u1)).set({
+      name: 'Asha',
+      email: 'asha@example.com',
+      role: 'user',
+      status: 'active',
+      legacyId: u1,
+      createdAt: 1,
+      updatedAt: 1,
+    });
     // Native: u2 already uses the new backend
     await testDb
       .ref(paths.subscription(u2))

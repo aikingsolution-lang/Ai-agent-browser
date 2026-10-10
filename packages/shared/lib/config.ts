@@ -34,6 +34,8 @@ const getEnvBackendUrl = (): string => {
 export const BACKEND_BASE_URL: string = getEnvBackendUrl();
 export const BACKEND_API_URL: string = `${BACKEND_BASE_URL}/api/v1`;
 export const BACKEND_LLM_URL: string = `${BACKEND_BASE_URL}/api/v1/llm`;
+export const MINIMUM_RUN_CREDITS: number = 5;
+export const ENABLE_CREDITS_RECONCILE: boolean = false;
 
 const getEnvGoogleClientId = (): string => {
   try {

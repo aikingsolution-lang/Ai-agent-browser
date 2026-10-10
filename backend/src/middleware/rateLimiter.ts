@@ -8,7 +8,22 @@ export const baseRateLimiter = rateLimit({
   max: 600, // Limit each IP to 600 general requests per 15 minutes
   standardHeaders: true,
   legacyHeaders: false,
-  skip: isTest,
+  skip: req => {
+    if (isTest()) return true;
+    const path = req.path || '';
+    // Exclude LLM completions, profile quota, credits balance/history, and refund endpoints
+    // from global IP limiter since they have dedicated user-keyed or route-specific limiters.
+    // req.path excludes query parameters, preventing query string bypasses.
+    if (
+      path.startsWith('/api/v1/llm') ||
+      path.startsWith('/api/v1/profile/quota') ||
+      path.startsWith('/api/v1/credits')
+    ) {
+      return true;
+    }
+    return false;
+  },
+  keyGenerator: req => req.ip || 'anonymous',
   message: {
     success: false,
     message: 'Too many requests from this IP, please try again later.',
@@ -67,15 +82,18 @@ export const authRegisterRateLimiter = rateLimit({
   },
 });
 
+export const getLlmRateLimiterKey = (req: any): string => req.user?.uid || req.user?._id || req.ip || 'anonymous';
+
 export const llmRateLimiter = rateLimit({
   windowMs: 60 * 1000, // 1 minute
-  max: 60, // Limit each IP to 60 LLM requests per minute
+  max: 60, // Limit each authenticated user to 60 LLM requests per minute
   standardHeaders: true,
   legacyHeaders: false,
   skip: isTest,
+  keyGenerator: getLlmRateLimiterKey,
   message: {
     success: false,
-    message: 'Too many LLM requests from this IP. Please try again after 1 minute.',
+    message: 'Too many LLM requests. Please try again after 1 minute.',
     error: {
       code: 'TOO_MANY_REQUESTS',
     },

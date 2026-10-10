@@ -142,6 +142,19 @@ backendApiClient.retryPendingRefunds().catch(e => {
   logger.warning('Pending refunds retry failed:', e);
 });
 
+// Periodic retry for pending credit refunds via chrome.alarms (every 15 min)
+const REFUND_RETRY_ALARM = 'nanobrowser_refund_retry_alarm';
+if (typeof chrome !== 'undefined' && chrome?.alarms) {
+  chrome.alarms.create(REFUND_RETRY_ALARM, { periodInMinutes: 15 });
+  chrome.alarms.onAlarm.addListener(alarm => {
+    if (alarm.name === REFUND_RETRY_ALARM) {
+      backendApiClient.retryPendingRefunds().catch(e => {
+        logger.warning('Periodic pending refunds retry failed:', e);
+      });
+    }
+  });
+}
+
 // Stream live LinkedIn Queue progress events to Side Panel UI
 queueManager.setProgressCallback((details, isError) => {
   if (currentPort) {
