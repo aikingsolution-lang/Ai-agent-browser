@@ -72,17 +72,18 @@ export function readWebsiteSessionState(storage: KeyValueStorage): WebsiteSessio
   if (loginFlag === null && authRecord === null) return { state: 'signed-out' };
   const flagNormalized = loginFlag ? loginFlag.toLowerCase().trim() : null;
   const isLoginTrue = flagNormalized === 'true' || flagNormalized === '1';
-  if (!isLoginTrue || !authRecord) return { state: 'unknown' };
+  // Also check if UID is present in storage (another candidate indicator used by JobForm)
+  const hasCandidateFlag = isLoginTrue || Boolean(storage.getItem('UID') || storage.getItem('candidate'));
+  if (!hasCandidateFlag || !authRecord) return { state: 'unknown' };
 
   try {
     const user = JSON.parse(authRecord);
     const tokens = user?.stsTokenManager;
-    if (
-      typeof user?.uid === 'string' &&
-      typeof tokens?.accessToken === 'string' &&
-      typeof tokens?.refreshToken === 'string'
-    ) {
-      return { state: 'signed-in', uid: user.uid, idToken: tokens.accessToken, refreshToken: tokens.refreshToken };
+    const uid = user?.uid || user?.id;
+    const idToken = tokens?.accessToken || user?.accessToken || user?.idToken;
+    const refreshToken = tokens?.refreshToken || user?.refreshToken || '';
+    if (typeof uid === 'string' && uid && typeof idToken === 'string' && idToken) {
+      return { state: 'signed-in', uid, idToken, refreshToken };
     }
   } catch {
     // Not a Firebase user record
