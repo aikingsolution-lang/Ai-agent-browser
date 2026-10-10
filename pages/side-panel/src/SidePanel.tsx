@@ -1778,60 +1778,6 @@ const SidePanel = () => {
           </div>
         )}
 
-        {/* First-Run / System Diagnostics Banner */}
-        {diagnosticsReport && !diagnosticsReport.isReadyToApply && !isDismissedDiagnostics && (
-          <div className="mx-3 my-2 p-2.5 rounded-lg border text-xs bg-amber-500/10 border-amber-500/30 text-amber-700 dark:text-amber-300">
-            <div className="flex items-start justify-between gap-2">
-              <div className="flex items-start gap-2">
-                <FiAlertTriangle className="size-4 shrink-0 text-amber-500 mt-0.5" />
-                <div className="space-y-1">
-                  <div className="font-semibold text-[11px] uppercase tracking-wider text-amber-800 dark:text-amber-200">
-                    System Diagnostic Notice
-                  </div>
-                  {!diagnosticsReport.api.isReachable ? (
-                    <div>⚠️ Backend API unreachable ({diagnosticsReport.api.url}). Offline mode active.</div>
-                  ) : !diagnosticsReport.auth.isSignedIn ? (
-                    <div className="flex items-center justify-between gap-2">
-                      <span>⚠️ Not signed in. Sign in via JobForm Automator to use automated applications.</span>
-                      <button
-                        type="button"
-                        onClick={openJobformSignIn}
-                        className="px-2 py-0.5 rounded text-[11px] font-semibold bg-amber-600 text-white hover:bg-amber-700 cursor-pointer transition-colors shrink-0">
-                        Sign in
-                      </button>
-                    </div>
-                  ) : !diagnosticsReport.profile.isValid ? (
-                    <div>⚠️ Incomplete profile. Missing: {diagnosticsReport.profile.missingFields.join(', ')}.</div>
-                  ) : (
-                    <div>{diagnosticsReport.actionableAdvice[0]}</div>
-                  )}
-                  {diagnosticsReport.actionableAdvice.length > 0 && (
-                    <div className="text-[10px] opacity-80">
-                      Recommendation: {diagnosticsReport.actionableAdvice[0]}
-                    </div>
-                  )}
-                </div>
-              </div>
-              <div className="flex items-center gap-1 shrink-0">
-                <button
-                  type="button"
-                  onClick={runDiagnostics}
-                  className="p-1 hover:bg-amber-500/20 rounded cursor-pointer transition-colors"
-                  title="Re-run Diagnostics">
-                  <FiRefreshCw className="size-3" />
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setIsDismissedDiagnostics(true)}
-                  className="p-1 hover:bg-amber-500/20 rounded cursor-pointer transition-colors"
-                  title="Dismiss">
-                  <FiX className="size-3.5" />
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
-
         {/* Failed Refund Audit Notice */}
         <FailedRefundBanner notices={failedRefundNotice} onDismiss={() => setFailedRefundNotice(null)} />
 
