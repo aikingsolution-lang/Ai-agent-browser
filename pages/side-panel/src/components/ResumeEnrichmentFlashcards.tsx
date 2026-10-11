@@ -19,6 +19,7 @@ import {
   FiBookOpen,
 } from 'react-icons/fi';
 import { LocationAutocompleteInput } from './LocationAutocompleteInput';
+import { SkillAutocompleteInput } from './SkillAutocompleteInput';
 
 interface ResumeEnrichmentFlashcardsProps {
   isOpen: boolean;
@@ -440,20 +441,35 @@ export const ResumeEnrichmentFlashcards: React.FC<ResumeEnrichmentFlashcardsProp
                 </p>
               </div>
 
-              {/* Add New Skill Input */}
-              <div className="flex gap-2">
-                <input
-                  type="text"
-                  placeholder="Add missing skill (e.g. Docker, GraphQL)..."
+              {/* Add New Skill Input with 250+ Tech Skills Autocomplete */}
+              <div className="flex gap-2 items-center">
+                <SkillAutocompleteInput
                   value={newSkillInput}
-                  onChange={e => setNewSkillInput(e.target.value)}
-                  onKeyDown={e => e.key === 'Enter' && handleAddNewSkill()}
-                  className="flex-1 px-3 py-2 rounded-xl bg-slate-900 border border-slate-800 text-xs text-white focus:outline-none focus:border-amber-400"
+                  onChange={val => setNewSkillInput(val)}
+                  onSelect={skill => {
+                    const trimmed = skill.trim();
+                    if (!trimmed) return;
+                    setSkillsMap(prev => ({
+                      ...prev,
+                      [trimmed]: Math.max(1, profile.yearsOfExperience || 1),
+                    }));
+                    setNewSkillInput('');
+                  }}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      handleAddNewSkill();
+                    }
+                  }}
+                  placeholder="Type skill (e.g. Python, Docker, React)..."
+                  isDarkMode={true}
+                  containerClassName="relative flex-1"
+                  className="w-full px-3 py-2 rounded-xl bg-slate-900 border border-slate-800 text-xs text-white focus:outline-none focus:border-amber-400 placeholder:text-slate-500"
                 />
                 <button
                   type="button"
                   onClick={handleAddNewSkill}
-                  className="px-3.5 py-2 bg-slate-900 text-amber-400 border border-amber-500/40 rounded-xl text-xs font-semibold hover:bg-slate-800 transition-colors flex items-center gap-1">
+                  className="px-3.5 py-2 bg-slate-900 text-amber-400 border border-amber-500/40 rounded-xl text-xs font-semibold hover:bg-slate-800 transition-colors flex items-center gap-1 shrink-0">
                   <FiPlus className="size-3.5" />
                   <span>Add</span>
                 </button>
