@@ -1638,8 +1638,8 @@ export class NaukriAdapter implements IPlatformAdapter {
                 await puppeteerPage.keyboard.press('Backspace');
                 await new Promise(r => setTimeout(r, 50));
 
-                await puppeteerPage.keyboard.type(answer.value, { delay: 10 });
-                await new Promise(r => setTimeout(r, 100));
+                await puppeteerPage.keyboard.type(answer.value, { delay: 20 });
+                await new Promise(r => setTimeout(r, 150));
 
                 if (fillResult.isChatInput) {
                   logger.info(`[NaukriAdapter] 💬 Pressing Enter key for chat input...`);
@@ -1851,7 +1851,7 @@ export class NaukriAdapter implements IPlatformAdapter {
               await puppeteerPage.keyboard.up('Control');
               await puppeteerPage.keyboard.press('Backspace');
               await new Promise(r => setTimeout(r, 50));
-              await puppeteerPage.keyboard.type(answer.value, { delay: 10 });
+              await puppeteerPage.keyboard.type(answer.value, { delay: 20 });
               await new Promise(r => setTimeout(r, 150));
               await puppeteerPage.keyboard.press('Enter');
               await new Promise(r => setTimeout(r, 200));
@@ -1876,6 +1876,9 @@ export class NaukriAdapter implements IPlatformAdapter {
         if (preHealing.correctedCount > 0) {
           logger.info(`[NaukriAdapter] Self-healed ${preHealing.correctedCount} validation errors before submit.`);
         }
+
+        // Artificial delay (700ms) for React state to re-render footer [ Save ] button from disabled to active
+        await new Promise(r => setTimeout(r, 700));
 
         // 5. Click Save / Submit / Next button (or fallback to Skip if disabled or blocked)
         const submitAction = await puppeteerPage.evaluate((selectors: typeof NAUKRI_SELECTORS) => {
