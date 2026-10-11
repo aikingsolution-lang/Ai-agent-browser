@@ -1063,8 +1063,12 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
             </div>
             <div className="grid grid-cols-2 gap-2">
               <div>
-                <label className="block text-[11px] font-semibold opacity-70 mb-1">
-                  Current Location <span className="text-[9px] text-sky-400 font-normal">(City, State, Country)</span>
+                <label
+                  className={`block text-[11px] font-semibold mb-1 ${isDarkMode ? 'text-slate-200' : 'text-slate-700'}`}>
+                  Current Location{' '}
+                  <span className={`text-[9px] font-normal ${isDarkMode ? 'text-sky-400' : 'text-sky-600'}`}>
+                    (City, State, Country)
+                  </span>
                 </label>
                 <LocationAutocompleteInput
                   value={editForm.currentLocation || ''}
@@ -1089,11 +1093,16 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
             </div>
             <div>
               <div className="flex items-center justify-between mb-1">
-                <label className="block text-[11px] font-semibold opacity-70">
+                <label
+                  className={`block text-[11px] font-semibold ${isDarkMode ? 'text-slate-200' : 'text-slate-700'}`}>
                   Target Preferred Locations{' '}
-                  <span className="text-[9px] text-sky-400 font-normal">(Top 3 Prioritized)</span>
+                  <span className={`text-[9px] font-normal ${isDarkMode ? 'text-sky-400' : 'text-sky-600'}`}>
+                    (Top 3 Prioritized)
+                  </span>
                 </label>
-                <span className="text-[9px] text-gray-400">#1 gets highest priority</span>
+                <span className={`text-[9px] ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>
+                  #1 gets highest priority
+                </span>
               </div>
               <PrioritizedLocationsInput
                 locations={
@@ -1270,31 +1279,45 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
               <FiMapPin className="size-3.5 shrink-0 text-sky-400 mt-0.5" />
               <div className="min-w-0 flex-1 text-xs">
                 <div>
-                  <span className="opacity-70">Current: </span>
-                  <strong className="font-semibold">{profile.currentLocation || 'Not specified'}</strong>
+                  <span className={isDarkMode ? 'text-gray-400' : 'text-gray-600'}>Current: </span>
+                  <strong className={`font-semibold ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>
+                    {profile.currentLocation || 'Not specified'}
+                  </strong>
                 </div>
                 {profile.preferredLocations && profile.preferredLocations.length > 0 ? (
                   <div className="mt-1 space-y-0.5">
-                    <span className="text-[10px] font-semibold text-sky-400">Target Locations (by Priority):</span>
+                    <span className={`text-[10px] font-semibold ${isDarkMode ? 'text-sky-400' : 'text-sky-700'}`}>
+                      Target Locations (by Priority):
+                    </span>
                     {profile.preferredLocations.slice(0, 3).map((loc, i) => (
-                      <div key={i} className="flex items-center gap-1.5 pl-0.5 text-[11px]">
+                      <div
+                        key={i}
+                        className={`flex items-center gap-1.5 pl-0.5 text-[11px] ${isDarkMode ? 'text-slate-200' : 'text-slate-800'}`}>
                         <span
                           className={`text-[9px] font-bold px-1 rounded border ${
                             i === 0
-                              ? 'text-emerald-300 bg-emerald-950/60 border-emerald-800'
+                              ? isDarkMode
+                                ? 'text-emerald-300 bg-emerald-950/60 border-emerald-800'
+                                : 'text-emerald-800 bg-emerald-100 border-emerald-300 font-bold'
                               : i === 1
-                                ? 'text-sky-300 bg-sky-950/60 border-sky-800'
-                                : 'text-purple-300 bg-purple-950/60 border-purple-800'
+                                ? isDarkMode
+                                  ? 'text-sky-300 bg-sky-950/60 border-sky-800'
+                                  : 'text-sky-800 bg-sky-100 border-sky-300 font-bold'
+                                : isDarkMode
+                                  ? 'text-purple-300 bg-purple-950/60 border-purple-800'
+                                  : 'text-purple-800 bg-purple-100 border-purple-300 font-bold'
                           }`}>
                           #{i + 1}
                         </span>
-                        <span className="truncate">{loc}</span>
+                        <span className="truncate font-medium">{loc}</span>
                       </div>
                     ))}
                   </div>
                 ) : (
                   profile.preferredLocation && (
-                    <div className="text-[11px] text-gray-400 mt-0.5">Pref: {profile.preferredLocation}</div>
+                    <div className={`text-[11px] mt-0.5 ${isDarkMode ? 'text-gray-300' : 'text-gray-600'}`}>
+                      Pref: {profile.preferredLocation}
+                    </div>
                   )
                 )}
               </div>

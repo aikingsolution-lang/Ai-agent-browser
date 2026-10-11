@@ -156,10 +156,10 @@ export function LocationAutocompleteInput({
           onKeyDown={handleKeyDown}
           placeholder={placeholder || defaultPlaceholder}
           autoComplete="off"
-          className={`w-full rounded-lg border px-3 py-1.5 text-xs outline-none transition-colors pr-7 !text-white !opacity-100 font-medium ${
+          className={`w-full rounded-lg border px-3 py-1.5 text-xs outline-none transition-colors pr-7 font-medium ${
             isDarkMode
               ? 'border-sky-800 bg-slate-900 text-white placeholder-slate-400 focus:border-sky-400'
-              : 'border-sky-200 bg-white text-gray-900 placeholder-gray-400 focus:border-sky-500'
+              : 'border-sky-200 bg-white text-slate-900 placeholder-slate-400 focus:border-sky-500'
           } ${className}`}
         />
         <div className="absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none">
@@ -179,7 +179,7 @@ export function LocationAutocompleteInput({
       {isOpen && (
         <div
           className={`absolute left-0 right-0 z-50 mt-1 max-h-64 overflow-y-auto rounded-lg border shadow-xl ${
-            isDarkMode ? 'border-sky-800 bg-slate-900 text-white' : 'border-sky-200 bg-white text-gray-900'
+            isDarkMode ? 'border-sky-800 bg-slate-900 text-white' : 'border-sky-200 bg-white text-slate-900'
           }`}>
           {/* Header format badge */}
           <div
@@ -225,11 +225,15 @@ export function LocationAutocompleteInput({
                             loc.category === 'remote' ? 'text-purple-400' : 'text-blue-400'
                           }`}
                         />
-                        <span className="font-semibold text-white tracking-wide truncate">{loc.formatted}</span>
+                        <span
+                          className={`font-semibold tracking-wide truncate ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>
+                          {loc.formatted}
+                        </span>
                         {isExact && <FiCheck className="size-3.5 text-emerald-400 shrink-0" />}
                       </div>
                       {loc.aliases && loc.aliases.length > 0 && (
-                        <div className="text-[10px] text-slate-400 pl-5 truncate">
+                        <div
+                          className={`text-[10px] pl-5 truncate ${isDarkMode ? 'text-slate-400' : 'text-slate-500'}`}>
                           aka {loc.aliases.slice(0, 3).join(', ')}
                         </div>
                       )}

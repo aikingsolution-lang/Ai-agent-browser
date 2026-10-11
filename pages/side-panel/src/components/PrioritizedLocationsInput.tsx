@@ -9,15 +9,42 @@ export interface PrioritizedLocationsInputProps {
   maxLocations?: number;
 }
 
-const PRIORITY_LABELS = [
-  {
-    rank: '1',
-    title: 'Priority 1 (Highest / Primary)',
-    color: 'text-emerald-400 bg-emerald-500/10 border-emerald-500/30',
-  },
-  { rank: '2', title: 'Priority 2 (Secondary)', color: 'text-sky-400 bg-sky-500/10 border-sky-500/30' },
-  { rank: '3', title: 'Priority 3 (Tertiary)', color: 'text-purple-400 bg-purple-500/10 border-purple-500/30' },
-];
+const getPriorityMeta = (index: number, isDarkMode: boolean) => {
+  if (index === 0) {
+    return {
+      rank: '1',
+      title: 'Priority 1 (Highest / Primary)',
+      color: isDarkMode
+        ? 'text-emerald-300 bg-emerald-950/70 border-emerald-800'
+        : 'text-emerald-800 bg-emerald-100 border-emerald-300 font-bold',
+    };
+  }
+  if (index === 1) {
+    return {
+      rank: '2',
+      title: 'Priority 2 (Secondary)',
+      color: isDarkMode
+        ? 'text-sky-300 bg-sky-950/70 border-sky-800'
+        : 'text-sky-800 bg-sky-100 border-sky-300 font-bold',
+    };
+  }
+  if (index === 2) {
+    return {
+      rank: '3',
+      title: 'Priority 3 (Tertiary)',
+      color: isDarkMode
+        ? 'text-purple-300 bg-purple-950/70 border-purple-800'
+        : 'text-purple-800 bg-purple-100 border-purple-300 font-bold',
+    };
+  }
+  return {
+    rank: String(index + 1),
+    title: `Priority ${index + 1}`,
+    color: isDarkMode
+      ? 'text-gray-300 bg-gray-800 border-gray-700'
+      : 'text-gray-800 bg-gray-100 border-gray-300 font-bold',
+  };
+};
 
 /**
  * Multi-Location Input with strict 3-tier Priority Hierarchy.
@@ -75,11 +102,7 @@ export function PrioritizedLocationsInput({
   return (
     <div className="space-y-2">
       {activeLocations.map((loc, index) => {
-        const meta = PRIORITY_LABELS[index] || {
-          rank: String(index + 1),
-          title: `Priority ${index + 1}`,
-          color: 'text-gray-400 bg-gray-500/10 border-gray-500/30',
-        };
+        const meta = getPriorityMeta(index, isDarkMode);
 
         return (
           <div
@@ -88,10 +111,10 @@ export function PrioritizedLocationsInput({
               index === 0
                 ? isDarkMode
                   ? 'border-emerald-900/60 bg-emerald-950/20'
-                  : 'border-emerald-200 bg-emerald-50/40'
+                  : 'border-emerald-200 bg-emerald-50/60'
                 : isDarkMode
                   ? 'border-sky-900/60 bg-slate-900/50'
-                  : 'border-sky-100 bg-white/60'
+                  : 'border-sky-200 bg-sky-50/40'
             }`}>
             <div className="flex items-center justify-between mb-1">
               <span
