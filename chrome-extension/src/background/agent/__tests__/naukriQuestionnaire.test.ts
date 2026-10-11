@@ -218,4 +218,73 @@ describe('Naukri Questionnaire & Drawer Resolvers', () => {
       expect(NAUKRI_SELECTORS.SKIP_QUESTION_BUTTON).toContain('.skip-btn');
     });
   });
+
+  describe('Comprehensive Question Intents & Input Formats', () => {
+    it('resolves relocation preference (Yes)', () => {
+      const res = resolveNaukriQuestion(
+        'Are you ready to relocate for this position?',
+        'radio',
+        ['Yes', 'No'],
+        baseCareerBrain as ICareerBrain,
+      );
+      expect(res.value).toBe('Yes');
+      expect(res.confidence).toBeGreaterThanOrEqual(0.9);
+    });
+
+    it('resolves shift comfort (Night / Rotational Shifts)', () => {
+      const res = resolveNaukriQuestion(
+        'Are you comfortable working in rotational night shifts?',
+        'radio',
+        ['Yes', 'No'],
+        baseCareerBrain as ICareerBrain,
+      );
+      expect(res.value).toBe('Yes');
+    });
+
+    it('resolves education level / degree question', () => {
+      const res = resolveNaukriQuestion(
+        'Are you a graduate in Computer Science, Information Technology, or an equivalent field?',
+        'radio',
+        ['Yes', 'No'],
+        baseCareerBrain as ICareerBrain,
+      );
+      expect(res.value).toBe('Yes');
+    });
+
+    it('resolves professional certification when present in skills', () => {
+      const brainWithCert: ICareerBrain = {
+        ...(baseCareerBrain as ICareerBrain),
+        skills: ['AWS Certified Solutions Architect', 'Docker', 'Kubernetes'],
+      };
+      const res = resolveNaukriQuestion('Are you AWS certified?', 'radio', ['Yes', 'No'], brainWithCert);
+      expect(res.value).toBe('Yes');
+    });
+
+    it('resolves job change reason for textarea/long text', () => {
+      const res = resolveNaukriQuestion(
+        'Why are you leaving your current job?',
+        'text_long',
+        [],
+        baseCareerBrain as ICareerBrain,
+      );
+      expect(res.value).toContain('Looking for better career growth');
+    });
+
+    it('resolves multi-select checkboxes by matching all candidate skills', () => {
+      const brainWithSkills: ICareerBrain = {
+        ...(baseCareerBrain as ICareerBrain),
+        skills: ['Python', 'Docker', 'Kubernetes', 'React'],
+      };
+      const res = resolveNaukriQuestion(
+        'Which of the following technologies do you have experience in?',
+        'checkbox',
+        ['Python', 'Java', 'Docker', 'Ruby', 'Kubernetes'],
+        brainWithSkills,
+      );
+      expect(res.value).toContain('Python');
+      expect(res.value).toContain('Docker');
+      expect(res.value).toContain('Kubernetes');
+      expect(res.value).not.toContain('Java');
+    });
+  });
 });

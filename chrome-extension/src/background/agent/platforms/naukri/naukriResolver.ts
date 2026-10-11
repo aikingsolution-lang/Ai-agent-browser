@@ -85,7 +85,7 @@ export function matchNumericRangeOption(num: number, options: string[]): string 
  */
 export function resolveNaukriQuestion(
   questionText: string,
-  fieldType: 'text' | 'number' | 'radio' | 'dropdown' | 'select' | 'checkbox',
+  fieldType: 'text' | 'text_long' | 'number' | 'radio' | 'dropdown' | 'select' | 'checkbox',
   options: string[] = [],
   careerBrain: ICareerBrain,
   placeholder: string = '',
@@ -102,6 +102,18 @@ export function resolveNaukriQuestion(
     combined.includes('lpa') ||
     combined.includes('lakhs') ||
     combined.includes('lacs');
+
+  // 0. Checkbox multi-select: check all candidate skills/tools against available options directly
+  if (fieldType === 'checkbox' && options.length > 0) {
+    const candidateSkills = (careerBrain.skills || []).map(s => s.toLowerCase());
+    const matched = options.filter(opt => {
+      const oLo = opt.toLowerCase();
+      return candidateSkills.some(cs => oLo.includes(cs) || cs.includes(oLo));
+    });
+    if (matched.length > 0) {
+      return { value: matched.join(', '), confidence: 0.95, source: 'profile' };
+    }
+  }
 
   // 1. High-speed semantic matcher
   const semantic = matchQuestionSemantically(questionText, careerBrain);
@@ -395,7 +407,147 @@ export function resolveNaukriQuestion(
     }
   }
 
-  // 7. Golden answers fallback
+  // 7. Relocation Preference
+  if (
+    q.includes('relocate') ||
+    q.includes('relocation') ||
+    q.includes('ready to relocate') ||
+    q.includes('willing to relocate') ||
+    q.includes('open to relocate')
+  ) {
+    const willRelocate = (careerBrain.willingToRelocate || 'Yes').trim();
+    if (options.length > 0) {
+      const aligned = alignValueToOptions(willRelocate, options, questionText);
+      return {
+        value: aligned ? aligned.matchedOption : options.find(o => /^yes\b/i.test(o)) || options[0],
+        confidence: 0.95,
+        source: 'profile',
+      };
+    }
+    return { value: willRelocate, confidence: 0.95, source: 'profile' };
+  }
+
+  // 8. Shift Comfort (Night / Rotational / Flexible Shifts)
+  if (
+    q.includes('night shift') ||
+    q.includes('rotational') ||
+    q.includes('flexible shift') ||
+    q.includes('work in shift') ||
+    q.includes('shift timing') ||
+    q.includes('24/7') ||
+    (q.includes('shift') && (q.includes('comfort') || q.includes('agree') || q.includes('ready') || q.includes('work')))
+  ) {
+    if (options.length > 0) {
+      const yesOpt = options.find(o => /^yes\b/i.test(o.trim()) || o.toLowerCase() === 'yes');
+      return { value: yesOpt || options[0], confidence: 0.95, source: 'profile' };
+    }
+    return { value: 'Yes', confidence: 0.95, source: 'profile' };
+  }
+
+  // 9. Education Level (Degree, Graduation, B.Tech, Master's)
+  if (
+    q.includes('graduate') ||
+    q.includes('graduation') ||
+    q.includes('b.tech') ||
+    q.includes('btech') ||
+    q.includes('degree') ||
+    q.includes('bachelor') ||
+    q.includes('master') ||
+    q.includes('highest qualification') ||
+    q.includes('highest education') ||
+    q.includes('education level')
+  ) {
+    const candidateEdu = (careerBrain.highestEducation || careerBrain.education || "Bachelor's Degree").trim();
+    if (options.length > 0) {
+      // Check for Yes/No option format (e.g. "Are you a graduate in CS/IT...?")
+      const isYesNo = options.some(o => /^(yes|no)$/i.test(o.trim()));
+      if (isYesNo) {
+        const yesOpt = options.find(o => /^yes/i.test(o.trim())) || 'Yes';
+        return { value: yesOpt, confidence: 0.95, source: 'profile' };
+      }
+      const aligned = alignValueToOptions(candidateEdu, options, questionText);
+      return { value: aligned ? aligned.matchedOption : options[0], confidence: 0.9, source: 'profile' };
+    }
+    return { value: candidateEdu, confidence: 0.9, source: 'profile' };
+  }
+
+  // 10. Certifications (e.g. AWS, Azure, GCP, PMP, Scrum)
+  if (q.includes('certified') || q.includes('certification') || q.includes('certificate')) {
+    const skillsJoined = (careerBrain.skills || []).join(' ').toLowerCase();
+    const resumeTextLower = (careerBrain.resumeText || '').toLowerCase();
+
+    const certSkills = [
+      'aws',
+      'azure',
+      'gcp',
+      'google cloud',
+      'kubernetes',
+      'cka',
+      'ckad',
+      'pmp',
+      'scrum',
+      'cisco',
+      'ccna',
+      'salesforce',
+      'oracle',
+      'java',
+      'python',
+    ];
+    let candidateHasCert = false;
+    for (const cs of certSkills) {
+      if (q.includes(cs) && (skillsJoined.includes(cs) || resumeTextLower.includes(cs))) {
+        candidateHasCert = true;
+        break;
+      }
+    }
+    if (!candidateHasCert && (skillsJoined.includes('certified') || resumeTextLower.includes('certified'))) {
+      candidateHasCert = true;
+    }
+
+    if (options.length > 0) {
+      const isYesNo = options.some(o => /^(yes|no)$/i.test(o.trim()));
+      if (isYesNo) {
+        const target = candidateHasCert ? 'Yes' : 'No';
+        const matched = options.find(o => new RegExp(`^${target}`, 'i').test(o.trim())) || options[0];
+        return { value: matched, confidence: 0.95, source: 'profile' };
+      }
+      return { value: options[0], confidence: 0.7, source: 'profile' };
+    }
+    return { value: candidateHasCert ? 'Yes' : 'No', confidence: 0.9, source: 'profile' };
+  }
+
+  // 11. Reason for Job Change / Leaving current job
+  if (
+    q.includes('why are you leaving') ||
+    q.includes('reason for leaving') ||
+    q.includes('reason for job change') ||
+    q.includes('why leave') ||
+    q.includes('why change') ||
+    q.includes('reason for change') ||
+    q.includes('looking for a change')
+  ) {
+    const defaultReason =
+      'Looking for better career growth opportunities, new technical challenges, and an impactful role to leverage my skills.';
+    if (options.length > 0) {
+      const aligned = alignValueToOptions('Career Growth', options, questionText);
+      return { value: aligned ? aligned.matchedOption : options[0], confidence: 0.9, source: 'profile' };
+    }
+    return { value: defaultReason, confidence: 0.95, source: 'profile' };
+  }
+
+  // 12. Multiple choice checkboxes (match all candidate skills/tools against options)
+  if (fieldType === 'checkbox' && options.length > 0) {
+    const candidateSkills = (careerBrain.skills || []).map(s => s.toLowerCase());
+    const matched = options.filter(opt => {
+      const oLo = opt.toLowerCase();
+      return candidateSkills.some(cs => oLo.includes(cs) || cs.includes(oLo));
+    });
+    if (matched.length > 0) {
+      return { value: matched.join(', '), confidence: 0.95, source: 'profile' };
+    }
+  }
+
+  // 13. Golden answers fallback
   if (Array.isArray(careerBrain.goldenAnswers)) {
     for (const ga of careerBrain.goldenAnswers) {
       if (ga.question && q.includes(ga.question.toLowerCase())) {
@@ -404,8 +556,13 @@ export function resolveNaukriQuestion(
     }
   }
 
-  // 8. Default fallback
-  const fallbackVal = fieldType === 'number' ? '0' : 'Yes';
+  // 14. Default fallback
+  const fallbackVal =
+    fieldType === 'number'
+      ? '0'
+      : fieldType === 'text_long'
+        ? 'Experienced professional dedicated to delivering quality results and continuous learning.'
+        : 'Yes';
   if (options.length > 0) {
     const aligned = alignValueToOptions(fallbackVal, options, questionText);
     return {
@@ -424,7 +581,7 @@ export function resolveNaukriQuestion(
  */
 export async function resolveNaukriWithLLM(
   questionText: string,
-  fieldType: 'text' | 'number' | 'radio' | 'dropdown' | 'select' | 'checkbox',
+  fieldType: 'text' | 'text_long' | 'number' | 'radio' | 'dropdown' | 'select' | 'checkbox',
   options: string[] = [],
   careerBrain: ICareerBrain,
   llm: BaseChatModel,
@@ -449,14 +606,26 @@ export async function resolveNaukriWithLLM(
     const expectedCtc =
       careerBrain.expectedCTC || careerBrain.salaryExpectation || `${Math.round(defaultCtcLakhs * 1.5) * 100000}`;
 
+    const isTextLong = fieldType === 'text_long';
+    const isCheckbox = fieldType === 'checkbox';
+
     const systemPrompt = `You are an expert autonomous job application AI applying on Naukri.com.
 Answer the recruiter's question accurately based strictly on the candidate's verified profile and resume.
 
 STRICT ACCURACY RULES:
 - NEVER FABRICATE OR GUESS RANDOM FACTS. Use ONLY verified facts from candidate's profile, resume, and experience.
-- OUTPUT FORMAT: Output ONLY the concise final answer — exactly ONE WORD, ONE NUMBER, or ONE EXACT OPTION from the options list.
-  - NEVER output sentences, explanations, conversational filler, quotes, or markdown.
-  - For radio / checkbox / dropdown options: Pick the EXACT matching option text from the provided OPTIONS list that qualifies the candidate best.
+- OUTPUT FORMAT:
+${
+  isTextLong
+    ? `  - FOR PARAGRAPH / TEXTAREA QUESTIONS (Reason for leaving, job change reason, about yourself, note to recruiter):
+    Output a professional, polite, 2-sentence response directly addressing the recruiter's question based on the candidate's career history and aspirations. Never exceed 3 sentences.`
+    : isCheckbox
+      ? `  - FOR CHECKBOX QUESTIONS (Multiple choice):
+    Identify ALL matching options from the OPTIONS list that apply to the candidate's skills and experience. Output them as a comma-separated list of exact option names (e.g. "Python, Docker, AWS").`
+      : `  - Output strictly the concise final answer — exactly ONE WORD, ONE NUMBER, or ONE EXACT OPTION from the options list.
+    - NEVER output sentences, explanations, conversational filler, quotes, or markdown.
+    - For radio / dropdown options: Pick the EXACT matching option text from the provided OPTIONS list that qualifies the candidate best.`
+}
 - CTC / SALARY IN LAKHS:
   - If the question asks for CTC "in Lacs" or "in Lakhs" (e.g. "What is your current CTC in Lacs per annum?"):
     Output strictly the single numeric figure in Lakhs (e.g. "7" or "8" or "7.5"). NEVER output 700000 or full currency numbers!
@@ -465,8 +634,8 @@ STRICT ACCURACY RULES:
   - If options exist (e.g. ["6+", "Less than 6"]), choose the option matching the candidate.
 - NOTICE PERIOD:
   - If asking for days, output digits (e.g. "15" or "0"). Otherwise output "15 Days" or "Immediate".
-- QUALIFYING COMMITMENT:
-  - For willingness to relocate, background check, shift flexibility, or mandatory requirements, pick favorable choice ("Yes").
+- QUALIFYING COMMITMENT & SHIFTS:
+  - For willingness to relocate, background check, shift flexibility (night/rotational shifts), or mandatory requirements, pick favorable choice ("Yes").
 ${
   errorHint
     ? `- PLATFORM ERROR HEALING (CRITICAL):
@@ -496,16 +665,42 @@ CANDIDATE PROFILE (Use ONLY these facts):
 - Education: ${careerBrain.education || 'Bachelor Degree'}
 - Resume Summary: ${(careerBrain.resumeText || '').slice(0, 1500)}
 
-FINAL ANSWER (strictly one word, one number, or exact option):`;
+FINAL ANSWER ${isTextLong ? '(2 concise professional sentences)' : isCheckbox ? '(comma-separated matching options)' : '(strictly one word, one number, or exact option)'}:`;
 
     const response = await llm.invoke([new SystemMessage(systemPrompt), new HumanMessage(userPrompt)]);
 
     let raw = response.content.toString().trim();
     // Clean markdown, quotes, trailing punctuation
-    raw = raw
-      .replace(/^["'`]|["'`]$/g, '')
-      .replace(/\n.*$/s, '')
-      .trim();
+    raw = raw.replace(/^["'`]|["'`]$/g, '').trim();
+    if (!isTextLong) {
+      raw = raw.replace(/\n.*$/s, '').trim();
+    }
+
+    // Checkbox multi-option resolution
+    if (isCheckbox && options.length > 0) {
+      const parts = raw
+        .split(/[,;\n]/)
+        .map(s => s.trim())
+        .filter(Boolean);
+      const matchedOpts: string[] = [];
+      for (const p of parts) {
+        const aligned = alignValueToOptions(p, options, questionText);
+        if (aligned && !matchedOpts.includes(aligned.matchedOption)) {
+          matchedOpts.push(aligned.matchedOption);
+        } else {
+          const directMatch = options.find(
+            o => o.toLowerCase() === p.toLowerCase() || o.toLowerCase().includes(p.toLowerCase()),
+          );
+          if (directMatch && !matchedOpts.includes(directMatch)) {
+            matchedOpts.push(directMatch);
+          }
+        }
+      }
+      if (matchedOpts.length > 0) {
+        return { success: true, answer: matchedOpts.join(', ') };
+      }
+      return { success: true, answer: options[0] };
+    }
 
     // If options are provided, align strictly to one of the options
     if (options.length > 0) {

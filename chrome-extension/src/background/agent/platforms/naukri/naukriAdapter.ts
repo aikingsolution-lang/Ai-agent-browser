@@ -930,6 +930,7 @@ export class NaukriAdapter implements IPlatformAdapter {
             const tagName = el.tagName.toLowerCase();
             let fieldType = 'text';
             if (tagName === 'select') fieldType = 'select';
+            else if (tagName === 'textarea') fieldType = 'text_long';
             else if (el.getAttribute('type') === 'radio') fieldType = 'radio';
             else if (el.getAttribute('type') === 'checkbox') fieldType = 'checkbox';
             else if (el.getAttribute('type') === 'number') fieldType = 'number';
@@ -941,13 +942,16 @@ export class NaukriAdapter implements IPlatformAdapter {
                 const t = (o.textContent || '').trim();
                 if (t && !t.toLowerCase().includes('select')) options.push(t);
               }
-            } else if (fieldType === 'radio') {
-              // Extract all options in this radio group
-              const radioName = (el as HTMLInputElement).name;
-              const radioGroup = radioName
-                ? (Array.from(modal.querySelectorAll(`input[type="radio"][name="${radioName}"]`)) as HTMLInputElement[])
+            } else if (fieldType === 'radio' || fieldType === 'checkbox') {
+              // Extract all options in this radio/checkbox group
+              const inputName = (el as HTMLInputElement).name;
+              const inputType = fieldType === 'radio' ? 'radio' : 'checkbox';
+              const inputGroup = inputName
+                ? (Array.from(
+                    modal.querySelectorAll(`input[type="${inputType}"][name="${inputName}"]`),
+                  ) as HTMLInputElement[])
                 : [el as HTMLInputElement];
-              for (const r of radioGroup) {
+              for (const r of inputGroup) {
                 const rLabel =
                   r.closest('label')?.textContent?.trim() ||
                   modal.querySelector(`label[for="${r.id}"]`)?.textContent?.trim() ||
@@ -1292,7 +1296,7 @@ export class NaukriAdapter implements IPlatformAdapter {
                     el.selectedIndex = matchedIdx;
                     el.dispatchEvent(new Event('change', { bubbles: true }));
                   }
-                } else if (fType === 'radio' || fType === 'checkbox') {
+                } else if (fType === 'radio') {
                   let targetRadio = el;
                   const radioName = el.name;
                   if (radioName) {
@@ -1338,6 +1342,66 @@ export class NaukriAdapter implements IPlatformAdapter {
                     radioLabel.dispatchEvent(new MouseEvent('mouseup', mOpts));
                     radioLabel.click?.();
                     radioLabel.dispatchEvent(new MouseEvent('click', mOpts));
+                  }
+                } else if (fType === 'checkbox') {
+                  // Multiple choice checkboxes: check ALL matching options
+                  const inputName = el.name;
+                  const container =
+                    el.closest(
+                      '.form-group, .input-container, div[class*="field" i], div[class*="group" i], div[class*="checkbox" i]',
+                    ) || modal;
+                  const allCheckboxes = inputName
+                    ? (Array.from(
+                        modal.querySelectorAll(`input[type="checkbox"][name="${inputName}"]`),
+                      ) as HTMLInputElement[])
+                    : (Array.from(container.querySelectorAll('input[type="checkbox"]')) as HTMLInputElement[]);
+
+                  const targetValues = val
+                    .split(/[,;\n]/)
+                    .map(s => s.trim().toLowerCase())
+                    .filter(Boolean);
+
+                  const cbsToProcess = allCheckboxes.length > 0 ? allCheckboxes : [el];
+                  for (const cb of cbsToProcess) {
+                    const cbLabel = (
+                      cb.closest('label')?.textContent ||
+                      modal.querySelector(`label[for="${cb.id}"]`)?.textContent ||
+                      cb.parentElement?.textContent ||
+                      cb.value ||
+                      ''
+                    )
+                      .toLowerCase()
+                      .trim();
+
+                    const shouldCheck =
+                      targetValues.length === 0 ||
+                      targetValues.some(tv => cbLabel === tv || cbLabel.includes(tv) || tv.includes(cbLabel));
+
+                    if (shouldCheck) {
+                      try {
+                        const proto = window.HTMLInputElement.prototype;
+                        const desc = Object.getOwnPropertyDescriptor(proto, 'checked')?.set;
+                        if (desc) desc.call(cb, true);
+                        else cb.checked = true;
+                        const tracker = (cb as any)._valueTracker;
+                        if (tracker) tracker.setValue('');
+                      } catch {}
+                      cb.dispatchEvent(new Event('input', { bubbles: true }));
+                      cb.dispatchEvent(new Event('change', { bubbles: true }));
+                      cb.click?.();
+
+                      const cbLabelEl = (cb.closest('label') || cb.parentElement) as HTMLElement | null;
+                      if (cbLabelEl) {
+                        cbLabelEl.focus?.();
+                        const mOpts = { bubbles: true, cancelable: true, view: window };
+                        cbLabelEl.dispatchEvent(new PointerEvent('pointerdown', mOpts));
+                        cbLabelEl.dispatchEvent(new MouseEvent('mousedown', mOpts));
+                        cbLabelEl.dispatchEvent(new PointerEvent('pointerup', mOpts));
+                        cbLabelEl.dispatchEvent(new MouseEvent('mouseup', mOpts));
+                        cbLabelEl.click?.();
+                        cbLabelEl.dispatchEvent(new MouseEvent('click', mOpts));
+                      }
+                    }
                   }
                 } else {
                   // Text / Number / Textarea
