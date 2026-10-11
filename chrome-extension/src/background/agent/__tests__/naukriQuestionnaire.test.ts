@@ -299,7 +299,8 @@ describe('Naukri Questionnaire & Drawer Resolvers', () => {
 
       // Must NOT return numeric "3"
       expect(descRes.value).not.toBe('3');
-      expect(descRes.value.length).toBeGreaterThan(20);
+      expect(descRes.value.length).toBeGreaterThan(100);
+      expect(descRes.value.length).toBeLessThanOrEqual(200);
       expect(descRes.value.toLowerCase()).toContain('experience');
       // Confidence must be <= 0.8 so LLM will be consulted when available
       expect(descRes.confidence).toBeLessThanOrEqual(0.8);

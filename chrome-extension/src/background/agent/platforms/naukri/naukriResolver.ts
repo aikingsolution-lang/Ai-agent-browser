@@ -372,9 +372,9 @@ export function resolveNaukriQuestion(
 
   // 4b. Descriptive Technical / Experience Questions (e.g. "What is your experience with FastAPI/Flask, MLOps/LLMOps, and production deployment?")
   if (isDescriptiveExperience) {
-    const candidateSkills = (careerBrain.skills || []).slice(0, 5).join(', ');
+    const candidateSkills = (careerBrain.skills || []).slice(0, 4).join(', ');
     const yoe = careerBrain.yearsOfExperience ?? 3;
-    const defaultExpAnswer = `I have over ${yoe} years of hands-on experience building and deploying robust solutions with modern technologies including ${candidateSkills || 'backend architectures and cloud deployment'}, delivering scalable production services and reliable automated workflows.`;
+    const defaultExpAnswer = `I have ${yoe}+ years of hands-on experience building and deploying robust solutions with ${candidateSkills || 'modern backend frameworks'}, delivering high-performance production systems.`;
 
     if (options.length > 0) {
       const aligned = alignValueToOptions(defaultExpAnswer, options, questionText);
@@ -663,7 +663,7 @@ STRICT ACCURACY RULES:
 ${
   isDescriptiveQuestion
     ? `  - FOR DESCRIPTIVE QUESTIONS / PARAGRAPH / CHATBOT EXPLANATIONS (Experience descriptions, reason for leaving, about yourself):
-    Output a concise, professional, 1-2 sentence response directly answering the recruiter's question based on the candidate's skills and background. Never exceed 3 sentences.`
+    Output a concise, professional 1-2 sentence response (STRICTLY between 150-200 characters, maximum 2 sentences) directly answering the recruiter's question based on the candidate's skills and background. Keep it tight, impactful, and under 200 characters so it fits chatbot bubbles perfectly without truncation.`
     : isCheckbox
       ? `  - FOR CHECKBOX QUESTIONS (Multiple choice):
     Identify ALL matching options from the OPTIONS list that apply to the candidate's skills and experience. Output them as a comma-separated list of exact option names (e.g. "Python, Docker, AWS").`
@@ -710,7 +710,7 @@ CANDIDATE PROFILE (Use ONLY these facts):
 - Education: ${careerBrain.education || 'Bachelor Degree'}
 - Resume Summary: ${(careerBrain.resumeText || '').slice(0, 1500)}
 
-FINAL ANSWER ${isDescriptiveQuestion ? '(1-2 concise professional sentences)' : isCheckbox ? '(comma-separated matching options)' : '(strictly one word, one number, or exact option)'}:`;
+FINAL ANSWER ${isDescriptiveQuestion ? '(strictly 1-2 sentences, 150-200 characters max)' : isCheckbox ? '(comma-separated matching options)' : '(strictly one word, one number, or exact option)'}:`;
 
     const response = await llm.invoke([new SystemMessage(systemPrompt), new HumanMessage(userPrompt)]);
 
@@ -719,6 +719,20 @@ FINAL ANSWER ${isDescriptiveQuestion ? '(1-2 concise professional sentences)' : 
     raw = raw.replace(/^["'`]|["'`]$/g, '').trim();
     if (!isDescriptiveQuestion) {
       raw = raw.replace(/\n.*$/s, '').trim();
+    } else {
+      // Ensure strictly 150-200 characters (max 2 sentences) for chatbot bubbles
+      if (raw.length > 210) {
+        const sentenceMatch = raw.slice(0, 210).match(/^(.*?\.)(?:\s+[A-Z]|$)/s);
+        if (sentenceMatch && sentenceMatch[1].length >= 100) {
+          raw = sentenceMatch[1].trim();
+        } else {
+          const wordTruncated = raw
+            .slice(0, 195)
+            .replace(/\s+\S*$/, '')
+            .trim();
+          raw = wordTruncated.endsWith('.') ? wordTruncated : `${wordTruncated}.`;
+        }
+      }
     }
 
     // Checkbox multi-option resolution

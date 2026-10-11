@@ -887,22 +887,37 @@ export class NaukriAdapter implements IPlatformAdapter {
           }
 
           // D. Extract standard inputs
+          function isEnabledInput(el: HTMLElement): boolean {
+            return (
+              !(el as HTMLInputElement).disabled &&
+              !el.hasAttribute('disabled') &&
+              el.getAttribute('aria-disabled') !== 'true'
+            );
+          }
+
           let rawInputs = Array.from(
             modal.querySelectorAll(
               'input:not([type="hidden"]):not([type="file"]):not([type="submit"]):not([type="button"]):not([type="reset"]):not([type="image"]), select, textarea',
             ),
           ) as HTMLElement[];
 
+          // Prefer visible and enabled inputs first (fallback to visible if all are currently disabled during animation)
           let inputs = rawInputs.filter(el => isVisible(el));
+          const enabledInputs = inputs.filter(el => isEnabledInput(el));
+          if (enabledInputs.length > 0) {
+            inputs = enabledInputs;
+          }
 
           // If no inputs found inside modal, fallback to checking chatbot inputs in document
           if (inputs.length === 0) {
             const docInputs = Array.from(
               document.querySelectorAll(
-                'input[placeholder*="Type message" i], textarea[placeholder*="Type message" i], input[placeholder*="message" i], textarea[placeholder*="message" i], input[type="text"]:not([type="hidden"]), textarea',
+                'input[placeholder*="Type message" i]:not([disabled]), textarea[placeholder*="Type message" i]:not([disabled]), input[placeholder*="message" i]:not([disabled]), textarea[placeholder*="message" i]:not([disabled]), [contenteditable="true"]:not([aria-disabled="true"]), input[placeholder*="Type message" i], textarea[placeholder*="Type message" i], input[placeholder*="message" i], textarea[placeholder*="message" i], input[type="text"]:not([type="hidden"]):not([disabled]), textarea:not([disabled])',
               ),
             ) as HTMLElement[];
-            inputs = docInputs.filter(el => isVisible(el));
+            const visibleDoc = docInputs.filter(el => isVisible(el));
+            const enabledDoc = visibleDoc.filter(el => isEnabledInput(el));
+            inputs = enabledDoc.length > 0 ? enabledDoc : visibleDoc;
           }
 
           const fields = inputs.map((el, idx) => {
@@ -1329,10 +1344,18 @@ export class NaukriAdapter implements IPlatformAdapter {
                 }
 
                 const el = inputs[idx] as any;
-                if (!el) return { filled: false, error: 'element_not_found', x: 0, y: 0, isChatInput: false };
+                if (!el)
+                  return { filled: false, error: 'element_not_found', x: 0, y: 0, isChatInput: false, sendBtn: null };
 
                 if (el.tagName.toLowerCase() === 'input' && el.type === 'file')
-                  return { filled: false, error: 'file_input', x: 0, y: 0, isChatInput: false };
+                  return { filled: false, error: 'file_input', x: 0, y: 0, isChatInput: false, sendBtn: null };
+
+                // Ensure element is enabled: if loaded disabled, un-disable it
+                try {
+                  if (el.disabled) el.disabled = false;
+                  el.removeAttribute('disabled');
+                  el.removeAttribute('aria-disabled');
+                } catch {}
 
                 el.focus?.();
 
@@ -1548,12 +1571,50 @@ export class NaukriAdapter implements IPlatformAdapter {
                   (el.className || '').toLowerCase().includes('chat') ||
                   el.closest('[class*="chat" i], [class*="bot" i]') !== null;
 
+                // Find Send icon/button next to the chat input (paper airplane, arrow, send button)
+                let sendBtnInfo: { x: number; y: number } | null = null;
+                if (isChatInput) {
+                  const inputContainer =
+                    el.closest(
+                      '.chatbot-input-wrapper, [class*="input" i], [class*="chat" i], [class*="footer" i], form',
+                    ) || el.parentElement;
+                  let sendBtn: HTMLElement | null = null;
+                  if (inputContainer) {
+                    const sendCandidates = Array.from(
+                      inputContainer.querySelectorAll(
+                        'button[class*="send" i], button.send-btn, [aria-label*="send" i], [data-qa*="send" i], button:has(svg), svg[class*="send" i], [role="button"][class*="send" i], span[class*="send" i]',
+                      ),
+                    ) as HTMLElement[];
+                    sendBtn = sendCandidates.find(b => isVisible(b)) || null;
+                  }
+                  if (!sendBtn) {
+                    const docSends = Array.from(
+                      document.querySelectorAll(
+                        'button.send-btn, button[class*="send" i], [aria-label*="send" i], [data-qa*="send" i]',
+                      ),
+                    ) as HTMLElement[];
+                    sendBtn = docSends.find(b => isVisible(b)) || null;
+                  }
+                  if (sendBtn) {
+                    try {
+                      (sendBtn as HTMLButtonElement).disabled = false;
+                      sendBtn.classList.remove('disabled');
+                    } catch {}
+                    const sRect = sendBtn.getBoundingClientRect();
+                    sendBtnInfo = {
+                      x: sRect.left + sRect.width / 2,
+                      y: sRect.top + sRect.height / 2,
+                    };
+                  }
+                }
+
                 return {
                   filled: true,
                   postFillError,
                   x: rect.left + rect.width / 2,
                   y: rect.top + rect.height / 2,
                   isChatInput,
+                  sendBtn: sendBtnInfo,
                 };
               },
               f.index,
@@ -1583,7 +1644,16 @@ export class NaukriAdapter implements IPlatformAdapter {
                 if (fillResult.isChatInput) {
                   logger.info(`[NaukriAdapter] 💬 Pressing Enter key for chat input...`);
                   await puppeteerPage.keyboard.press('Enter');
-                  await new Promise(r => setTimeout(r, 400));
+                  await new Promise(r => setTimeout(r, 200));
+
+                  // In addition to Enter, click the Send icon/button next to the input
+                  if (fillResult.sendBtn?.x && fillResult.sendBtn?.y && puppeteerPage?.mouse) {
+                    logger.info(
+                      `[NaukriAdapter] ✈️ Clicking Send icon/button at (${Math.round(fillResult.sendBtn.x)}, ${Math.round(fillResult.sendBtn.y)})...`,
+                    );
+                    await puppeteerPage.mouse.click(fillResult.sendBtn.x, fillResult.sendBtn.y);
+                    await new Promise(r => setTimeout(r, 300));
+                  }
                 }
               } catch (keyErr) {
                 logger.debug('[NaukriAdapter] Puppeteer keyboard typing failed:', keyErr);
@@ -1673,19 +1743,73 @@ export class NaukriAdapter implements IPlatformAdapter {
               const style = window.getComputedStyle(el);
               return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
             }
+            function isEnabled(el: HTMLElement): boolean {
+              return (
+                !(el as HTMLInputElement).disabled &&
+                !el.hasAttribute('disabled') &&
+                el.getAttribute('aria-disabled') !== 'true'
+              );
+            }
+
+            // Prioritize visible and enabled inputs (:not([disabled]))
             const chatInputs = Array.from(
               document.querySelectorAll(
-                'input[placeholder*="Type message" i], textarea[placeholder*="Type message" i], input[placeholder*="message" i], textarea[placeholder*="message" i], [contenteditable="true"]',
+                'input[placeholder*="Type message" i]:not([disabled]), textarea[placeholder*="Type message" i]:not([disabled]), input[placeholder*="message" i]:not([disabled]), textarea[placeholder*="message" i]:not([disabled]), [contenteditable="true"]:not([aria-disabled="true"]), input[placeholder*="Type message" i], textarea[placeholder*="Type message" i], input[placeholder*="message" i], textarea[placeholder*="message" i], [contenteditable="true"]',
               ),
             ) as HTMLElement[];
-            const activeInput = chatInputs.find(el => isVisible(el));
+            let activeInput =
+              chatInputs.find(el => isVisible(el) && isEnabled(el)) || chatInputs.find(el => isVisible(el));
             if (!activeInput) return null;
 
+            // If loaded disabled, un-disable it before interaction
+            try {
+              (activeInput as HTMLInputElement).disabled = false;
+              activeInput.removeAttribute('disabled');
+              activeInput.removeAttribute('aria-disabled');
+            } catch {}
+
             const rect = activeInput.getBoundingClientRect();
+
+            // Find Send icon/button next to activeInput (paper airplane, arrow, send button)
+            let sendBtnInfo: { x: number; y: number } | null = null;
+            const container =
+              activeInput.closest(
+                '.chatbot-input-wrapper, [class*="input" i], [class*="chat" i], [class*="footer" i], form',
+              ) || activeInput.parentElement;
+            let sendBtn: HTMLElement | null = null;
+            if (container) {
+              const sends = Array.from(
+                container.querySelectorAll(
+                  'button[class*="send" i], button.send-btn, [aria-label*="send" i], [data-qa*="send" i], button:has(svg), svg[class*="send" i], [role="button"][class*="send" i], span[class*="send" i]',
+                ),
+              ) as HTMLElement[];
+              sendBtn = sends.find(b => isVisible(b)) || null;
+            }
+            if (!sendBtn) {
+              const docSends = Array.from(
+                document.querySelectorAll(
+                  'button.send-btn, button[class*="send" i], [aria-label*="send" i], [data-qa*="send" i]',
+                ),
+              ) as HTMLElement[];
+              sendBtn = docSends.find(b => isVisible(b)) || null;
+            }
+            if (sendBtn) {
+              try {
+                (sendBtn as HTMLButtonElement).disabled = false;
+                sendBtn.classList.remove('disabled');
+              } catch {}
+              const sRect = sendBtn.getBoundingClientRect();
+              sendBtnInfo = {
+                x: sRect.left + sRect.width / 2,
+                y: sRect.top + sRect.height / 2,
+              };
+            }
+
             return {
               x: rect.left + rect.width / 2,
               y: rect.top + rect.height / 2,
               placeholder: activeInput.getAttribute('placeholder') || '',
+              sendBtn: sendBtnInfo,
             };
           }, NAUKRI_SELECTORS);
 
@@ -1730,6 +1854,17 @@ export class NaukriAdapter implements IPlatformAdapter {
               await puppeteerPage.keyboard.type(answer.value, { delay: 10 });
               await new Promise(r => setTimeout(r, 150));
               await puppeteerPage.keyboard.press('Enter');
+              await new Promise(r => setTimeout(r, 200));
+
+              // Click Send icon button if present
+              if (directChatInfo.sendBtn?.x && directChatInfo.sendBtn?.y && puppeteerPage?.mouse) {
+                logger.info(
+                  `[NaukriAdapter] ✈️ Clicking Send icon/button at (${Math.round(directChatInfo.sendBtn.x)}, ${Math.round(directChatInfo.sendBtn.y)})...`,
+                );
+                await puppeteerPage.mouse.click(directChatInfo.sendBtn.x, directChatInfo.sendBtn.y);
+                await new Promise(r => setTimeout(r, 300));
+              }
+
               didAnswer = true;
               await new Promise(r => setTimeout(r, 500));
             }
