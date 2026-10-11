@@ -51,7 +51,7 @@ export const NAUKRI_SELECTORS = {
     '.apply-message',
   ],
 
-  // Questionnaire / Popups / Chatbot / Drawer
+  // Questionnaire / Popups / Chatbot / Drawer / Center Modal
   MODAL_CONTAINER: [
     'div.drawer-wrapper',
     'div[class*="drawer-wrapper" i]',
@@ -69,10 +69,25 @@ export const NAUKRI_SELECTORS = {
     'div[class*="bot_container" i]',
     'div[class*="bot-wrapper" i]',
     'div.apply-modal',
+    'div.apply-modal-container',
+    'div[class*="apply-modal" i]',
+    'div[class*="applyModal" i]',
     'div.layer-wrap',
+    'div[class*="layer-wrap" i]',
+    'div[class*="layerWrap" i]',
+    'div.modal-wrapper',
+    'div[class*="modal-wrapper" i]',
+    'div[class*="modalWrapper" i]',
+    'div[class*="dialog-box" i]',
+    'div[class*="dialogBox" i]',
     'div[role="dialog"]',
+    'section[role="dialog"]',
+    'div[aria-modal="true"]',
     'div[class*="modal" i][class*="apply" i]',
     'div[class*="chat" i][class*="wrap" i]',
+    '.chatbot',
+    '.nI-gNb-drawer',
+    'div[class*="quick-apply" i]',
   ],
   SUBMIT_BUTTON: [
     'button.apply-message-btn',
@@ -94,6 +109,8 @@ export const NAUKRI_SELECTORS = {
     'button[class*="chat" i][class*="btn" i]',
     '[role="button"][class*="save" i]',
     '[role="button"][class*="submit" i]',
+    'button[class*="next" i]',
+    'button[class*="continue" i]',
   ],
   SKIP_QUESTION_BUTTON: [
     'button[class*="skip" i]',

@@ -606,7 +606,7 @@ export class NaukriAdapter implements IPlatformAdapter {
     context?: IPlatformExecutionContext,
   ): Promise<{ success: boolean; reason?: string }> {
     try {
-      const MAX_STEPS = 6;
+      const MAX_STEPS = 15;
       let lastQuestionHandled = '';
       let consecutiveRepeats = 0;
 
@@ -1014,10 +1014,10 @@ export class NaukriAdapter implements IPlatformAdapter {
           lastQuestionHandled = currentQuestion;
         }
 
-        // Circuit breaker: If repeated step on same question and Skip is available, click Skip immediately
-        if (consecutiveRepeats >= 1 && stepData.hasSkipBtn) {
+        // Circuit breaker: If stuck on the exact same question for 2 consecutive cycles and Skip is available, click Skip to advance
+        if (consecutiveRepeats >= 2 && stepData.hasSkipBtn) {
           logger.info(
-            `[NaukriAdapter] ⏭️ Repeated step on "${lastQuestionHandled}". Clicking "Skip this question" to advance...`,
+            `[NaukriAdapter] ⏭️ Repeated step on "${lastQuestionHandled}" (${consecutiveRepeats} times). Clicking "Skip this question" to advance...`,
           );
           await puppeteerPage.evaluate((selectors: typeof NAUKRI_SELECTORS) => {
             const skipEls = Array.from(document.querySelectorAll('button, a, span, div')) as HTMLElement[];
@@ -1168,40 +1168,16 @@ export class NaukriAdapter implements IPlatformAdapter {
               }
             }
 
-            if (!answer.value && stepData.hasSkipBtn) {
-              logger.info(`[NaukriAdapter] Field "${qText}" has no resolved value. Clicking "Skip this question"...`);
-              await puppeteerPage.evaluate((selectors: typeof NAUKRI_SELECTORS) => {
-                let modal: HTMLElement | null = null;
-                for (const sel of selectors.MODAL_CONTAINER) {
-                  const el = document.querySelector(sel) as HTMLElement | null;
-                  if (el && (el.offsetParent !== null || window.getComputedStyle(el).display !== 'none')) {
-                    modal = el;
-                    break;
-                  }
-                }
-                const container = modal || document.body;
-                const skipEls = Array.from(container.querySelectorAll('button, a, span, div')) as HTMLElement[];
-                for (const s of skipEls) {
-                  const st = (s.textContent || '').trim().toLowerCase();
-                  if (st.includes('skip this question') || st === 'skip question' || st === 'skip') {
-                    s.click();
-                    return;
-                  }
-                }
-              }, NAUKRI_SELECTORS);
-
-              didAnswer = true;
-              await new Promise(r => setTimeout(r, 2000));
-              break;
-            }
-
-            // Fallback if field is empty and skip is unavailable
+            // Ensure fallback value if not resolved
             if (!answer.value) {
               if (isLakhsQ) {
                 const yoe = careerBrain.yearsOfExperience ?? 3;
                 answer = { value: String(Math.max(3, Math.round(yoe * 2.5))), confidence: 0.8, source: 'default' };
               } else if (f.fieldType === 'number') {
-                answer = { value: '0', confidence: 0.5, source: 'default' };
+                const yoe = careerBrain.yearsOfExperience ?? 3;
+                answer = { value: String(Math.max(1, yoe)), confidence: 0.7, source: 'default' };
+              } else if (f.fieldType === 'select' && f.options.length > 0) {
+                answer = { value: f.options[0], confidence: 0.6, source: 'default' };
               } else {
                 answer = { value: 'Yes', confidence: 0.5, source: 'default' };
               }
@@ -1507,26 +1483,14 @@ export class NaukriAdapter implements IPlatformAdapter {
               actionBtn.classList.contains('disabled') ||
               actionBtn.getAttribute('aria-disabled') === 'true');
 
-          // If button is disabled OR an error is still present, prioritize Skip this question if available!
-          if (isBtnDisabled || hasActiveError || !actionBtn) {
-            const skipEls = Array.from(modal.querySelectorAll('button, a, span, div')) as HTMLElement[];
-            for (const s of skipEls) {
-              const st = (s.textContent || '').trim().toLowerCase();
-              if (st.includes('skip this question') || st === 'skip question' || st === 'skip') {
-                s.click();
-                return { clicked: true, action: 'skip_due_to_validation_or_disabled' };
-              }
-            }
-          }
-
           if (actionBtn) {
-            if (isBtnDisabled) {
-              try {
-                (actionBtn as HTMLButtonElement).disabled = false;
-                actionBtn.classList.remove('disabled');
-                actionBtn.removeAttribute('aria-disabled');
-              } catch {}
-            }
+            // Un-disable button if artificially blocked by frontend state
+            try {
+              (actionBtn as HTMLButtonElement).disabled = false;
+              actionBtn.classList.remove('disabled');
+              actionBtn.removeAttribute('aria-disabled');
+            } catch {}
+
             actionBtn.scrollIntoView({ behavior: 'instant', block: 'center' });
             actionBtn.focus?.();
             const mOpts = { bubbles: true, cancelable: true, view: window };
@@ -1536,6 +1500,16 @@ export class NaukriAdapter implements IPlatformAdapter {
             actionBtn.dispatchEvent(new MouseEvent('mouseup', mOpts));
             actionBtn.click();
             return { clicked: true, action: 'save' };
+          }
+
+          // If no submit button is found at all, check if a skip button exists to advance
+          const skipEls = Array.from(modal.querySelectorAll('button, a, span, div')) as HTMLElement[];
+          for (const s of skipEls) {
+            const st = (s.textContent || '').trim().toLowerCase();
+            if (st.includes('skip this question') || st === 'skip question' || st === 'skip') {
+              s.click();
+              return { clicked: true, action: 'skip_due_to_no_submit_button' };
+            }
           }
 
           return { clicked: false, reason: 'no_action_button' };
