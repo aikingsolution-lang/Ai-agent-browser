@@ -154,12 +154,11 @@ export function LocationAutocompleteInput({
           }}
           onFocus={() => setIsOpen(true)}
           onKeyDown={handleKeyDown}
-          disabled={disabled}
           placeholder={placeholder || defaultPlaceholder}
           autoComplete="off"
-          className={`w-full rounded-lg border px-3 py-1.5 text-xs outline-none transition-colors pr-7 ${
+          className={`w-full rounded-lg border px-3 py-1.5 text-xs outline-none transition-colors pr-7 !text-white !opacity-100 font-medium ${
             isDarkMode
-              ? 'border-sky-800 bg-slate-900 text-white placeholder-gray-500 focus:border-sky-400'
+              ? 'border-sky-800 bg-slate-900 text-white placeholder-slate-400 focus:border-sky-400'
               : 'border-sky-200 bg-white text-gray-900 placeholder-gray-400 focus:border-sky-500'
           } ${className}`}
         />
@@ -210,27 +209,27 @@ export function LocationAutocompleteInput({
                       handleSelect(loc);
                     }}
                     onMouseEnter={() => setSelectedIndex(idx)}
-                    className={`cursor-pointer px-3 py-1.5 text-xs transition-colors flex items-center justify-between gap-2 ${
+                    className={`cursor-pointer px-3 py-2 text-xs transition-colors flex items-center justify-between gap-2 ${
                       isSelected
                         ? isDarkMode
-                          ? 'bg-sky-600/30 text-sky-200'
-                          : 'bg-sky-100 text-sky-900'
+                          ? 'bg-blue-600/40 text-white'
+                          : 'bg-blue-100 text-blue-900'
                         : isDarkMode
-                          ? 'hover:bg-slate-800/80'
-                          : 'hover:bg-gray-50'
+                          ? 'text-white hover:bg-slate-800'
+                          : 'text-slate-800 hover:bg-gray-100'
                     }`}>
                     <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-1.5">
+                      <div className="flex items-center gap-2">
                         <FiMapPin
-                          className={`size-3 shrink-0 ${
-                            loc.category === 'remote' ? 'text-purple-400' : 'text-sky-400'
+                          className={`size-3.5 shrink-0 ${
+                            loc.category === 'remote' ? 'text-purple-400' : 'text-blue-400'
                           }`}
                         />
-                        <span className="font-medium truncate">{loc.formatted}</span>
-                        {isExact && <FiCheck className="size-3 text-emerald-400 shrink-0" />}
+                        <span className="font-semibold text-white tracking-wide truncate">{loc.formatted}</span>
+                        {isExact && <FiCheck className="size-3.5 text-emerald-400 shrink-0" />}
                       </div>
                       {loc.aliases && loc.aliases.length > 0 && (
-                        <div className="text-[10px] text-gray-400 pl-4 truncate">
+                        <div className="text-[10px] text-slate-400 pl-5 truncate">
                           aka {loc.aliases.slice(0, 3).join(', ')}
                         </div>
                       )}

@@ -381,7 +381,7 @@ export const ResumeEnrichmentFlashcards: React.FC<ResumeEnrichmentFlashcardsProp
                 {/* Current City & Preferred City [Rule: Blue = Meaning, Standard Autocomplete] */}
                 <div className="grid grid-cols-2 gap-3">
                   <div>
-                    <label className="block text-[11px] font-medium text-blue-300 mb-1 flex items-center gap-1">
+                    <label className="block text-[11px] font-semibold text-blue-300 mb-1 flex items-center gap-1">
                       <FiMapPin className="size-3 text-blue-400" />
                       <span>Current City</span>
                     </label>
@@ -389,12 +389,12 @@ export const ResumeEnrichmentFlashcards: React.FC<ResumeEnrichmentFlashcardsProp
                       value={currentLocation}
                       onChange={loc => setCurrentLocation(loc)}
                       placeholder="e.g. Kolkata, West Bengal, India"
-                      isDarkMode={isDarkMode}
-                      className="w-full px-3 py-2 rounded-xl bg-slate-900 border border-slate-800 text-xs text-white focus:outline-none focus:border-blue-500"
+                      isDarkMode={true}
+                      className="!bg-slate-900 !border-slate-700 !text-white placeholder:!text-slate-400 font-medium"
                     />
                   </div>
                   <div>
-                    <label className="block text-[11px] font-medium text-blue-300 mb-1 flex items-center gap-1">
+                    <label className="block text-[11px] font-semibold text-blue-300 mb-1 flex items-center gap-1">
                       <FiMapPin className="size-3 text-blue-400" />
                       <span>Preferred City / Remote</span>
                     </label>
@@ -403,8 +403,8 @@ export const ResumeEnrichmentFlashcards: React.FC<ResumeEnrichmentFlashcardsProp
                       onChange={loc => setPreferredLocation(loc)}
                       isPreferred={true}
                       placeholder="e.g. Remote or Bengaluru"
-                      isDarkMode={isDarkMode}
-                      className="w-full px-3 py-2 rounded-xl bg-slate-900 border border-slate-800 text-xs text-white focus:outline-none focus:border-blue-500"
+                      isDarkMode={true}
+                      className="!bg-slate-900 !border-slate-700 !text-white placeholder:!text-slate-400 font-medium"
                     />
                   </div>
                 </div>
