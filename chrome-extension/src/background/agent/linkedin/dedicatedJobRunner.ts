@@ -3799,7 +3799,7 @@ export class DedicatedJobRunner {
     }
 
     let step = 0;
-    const maxSteps = 10;
+    const maxSteps = 15;
     let submitted = false;
 
     // Loop-prevention guards: limit repeat attempts on individual fields and modal steps
