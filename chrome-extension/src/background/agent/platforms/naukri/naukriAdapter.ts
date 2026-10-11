@@ -1097,26 +1097,65 @@ export class NaukriAdapter implements IPlatformAdapter {
                   }
 
                   if (bestEl) {
-                    bestEl.focus?.();
-                    bestEl.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }));
-                    bestEl.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-                    bestEl.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
-                    bestEl.click();
-                    bestEl.dispatchEvent(new Event('click', { bubbles: true }));
-                    bestEl.dispatchEvent(new Event('change', { bubbles: true }));
-                    return true;
+                    // Check native radio/checkbox input if inside or linked to bestEl
+                    const innerInput = (
+                      bestEl.tagName.toLowerCase() === 'input'
+                        ? bestEl
+                        : bestEl.querySelector('input[type="radio"], input[type="checkbox"]')
+                    ) as HTMLInputElement | null;
+                    if (innerInput) {
+                      try {
+                        const proto = window.HTMLInputElement.prototype;
+                        const desc = Object.getOwnPropertyDescriptor(proto, 'checked')?.set;
+                        if (desc) desc.call(innerInput, true);
+                        else innerInput.checked = true;
+                        const tracker = (innerInput as any)._valueTracker;
+                        if (tracker) tracker.setValue('');
+                      } catch {}
+                      innerInput.dispatchEvent(new Event('input', { bubbles: true }));
+                      innerInput.dispatchEvent(new Event('change', { bubbles: true }));
+                      innerInput.click?.();
+                    }
+
+                    // Dispatch full pointer and mouse events on the label or clickable element
+                    const targetLabel = (
+                      bestEl.tagName.toLowerCase() === 'label' ? bestEl : bestEl.closest('label')
+                    ) as HTMLElement | null;
+                    const elToClick = targetLabel || bestEl;
+                    elToClick.scrollIntoView({ behavior: 'instant', block: 'center' });
+                    elToClick.focus?.();
+                    const mOpts = { bubbles: true, cancelable: true, view: window };
+                    elToClick.dispatchEvent(new PointerEvent('pointerdown', mOpts));
+                    elToClick.dispatchEvent(new MouseEvent('mousedown', mOpts));
+                    elToClick.dispatchEvent(new PointerEvent('pointerup', mOpts));
+                    elToClick.dispatchEvent(new MouseEvent('mouseup', mOpts));
+                    elToClick.click();
+                    elToClick.dispatchEvent(new MouseEvent('click', mOpts));
+                    elToClick.dispatchEvent(new Event('change', mOpts));
+
+                    const rect = elToClick.getBoundingClientRect();
+                    return {
+                      success: true,
+                      x: rect.left + rect.width / 2,
+                      y: rect.top + rect.height / 2,
+                    };
                   }
                 }
               }
-              return false;
+              return { success: false, x: 0, y: 0 };
             },
             resolvedChoice.value,
             NAUKRI_SELECTORS,
           );
 
-          if (clickedChoice) {
+          if (clickedChoice?.success) {
             didAnswer = true;
-            await new Promise(r => setTimeout(r, 600));
+            if (clickedChoice.x && clickedChoice.y && puppeteerPage?.mouse) {
+              try {
+                await puppeteerPage.mouse.click(clickedChoice.x, clickedChoice.y);
+              } catch {}
+            }
+            await new Promise(r => setTimeout(r, 800));
           }
         }
 
@@ -1277,11 +1316,29 @@ export class NaukriAdapter implements IPlatformAdapter {
                       }
                     }
                   }
-                  targetRadio.checked = true;
-                  targetRadio.focus?.();
-                  targetRadio.click?.();
-                  targetRadio.dispatchEvent(new Event('click', { bubbles: true }));
+                  try {
+                    const proto = window.HTMLInputElement.prototype;
+                    const desc = Object.getOwnPropertyDescriptor(proto, 'checked')?.set;
+                    if (desc) desc.call(targetRadio, true);
+                    else targetRadio.checked = true;
+                    const tracker = (targetRadio as any)._valueTracker;
+                    if (tracker) tracker.setValue('');
+                  } catch {}
+                  targetRadio.dispatchEvent(new Event('input', { bubbles: true }));
                   targetRadio.dispatchEvent(new Event('change', { bubbles: true }));
+                  targetRadio.click?.();
+
+                  const radioLabel = (targetRadio.closest('label') || targetRadio.parentElement) as HTMLElement | null;
+                  if (radioLabel) {
+                    radioLabel.focus?.();
+                    const mOpts = { bubbles: true, cancelable: true, view: window };
+                    radioLabel.dispatchEvent(new PointerEvent('pointerdown', mOpts));
+                    radioLabel.dispatchEvent(new MouseEvent('mousedown', mOpts));
+                    radioLabel.dispatchEvent(new PointerEvent('pointerup', mOpts));
+                    radioLabel.dispatchEvent(new MouseEvent('mouseup', mOpts));
+                    radioLabel.click?.();
+                    radioLabel.dispatchEvent(new MouseEvent('click', mOpts));
+                  }
                 } else {
                   // Text / Number / Textarea
                   setNative(el, '');
@@ -1424,10 +1481,12 @@ export class NaukriAdapter implements IPlatformAdapter {
 
         // 5. Click Save / Submit / Next button (or fallback to Skip if disabled or blocked)
         const submitAction = await puppeteerPage.evaluate((selectors: typeof NAUKRI_SELECTORS) => {
-          function isVisible(el: HTMLElement): boolean {
+          function isVisible(el: HTMLElement | null): boolean {
             if (!el || el.offsetParent === null) return false;
             const style = window.getComputedStyle(el);
-            return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
+            if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+            const rect = el.getBoundingClientRect();
+            return rect.width > 0 && rect.height > 0;
           }
 
           let modal: HTMLElement | null = null;
@@ -1440,11 +1499,9 @@ export class NaukriAdapter implements IPlatformAdapter {
           }
           if (!modal) modal = document.body;
 
-          // Check if any visible error message exists
-          const errEls = Array.from(modal.querySelectorAll(selectors.ERROR_INDICATORS.join(', '))) as HTMLElement[];
-          const hasActiveError = errEls.some(e => isVisible(e) && (e.textContent || '').trim().length >= 3);
-
           let actionBtn: HTMLElement | null = null;
+
+          // Strategy 1: Look inside modal using SUBMIT_BUTTON selectors
           for (const sel of selectors.SUBMIT_BUTTON) {
             const btn = modal.querySelector(sel) as HTMLElement | null;
             if (btn && isVisible(btn)) {
@@ -1453,10 +1510,15 @@ export class NaukriAdapter implements IPlatformAdapter {
             }
           }
 
+          // Strategy 2: Look inside modal by text
           if (!actionBtn) {
-            const allBtns = Array.from(modal.querySelectorAll('button, a, [role="button"]')) as HTMLElement[];
+            const allBtns = Array.from(
+              modal.querySelectorAll(
+                'button, a, [role="button"], input[type="submit"], input[type="button"], div[class*="btn" i], span[class*="btn" i]',
+              ),
+            ) as HTMLElement[];
             for (const b of allBtns) {
-              const t = (b.textContent || '').trim().toLowerCase();
+              const t = (b.textContent || (b as HTMLInputElement).value || '').trim().toLowerCase();
               if (
                 t === 'save' ||
                 t === 'save & next' ||
@@ -1469,19 +1531,78 @@ export class NaukriAdapter implements IPlatformAdapter {
                 t === 'apply' ||
                 t === 'continue' ||
                 t === 'send' ||
-                t === 'done'
+                t === 'done' ||
+                t.startsWith('save ') ||
+                t.endsWith(' save')
+              ) {
+                if (isVisible(b)) {
+                  actionBtn = b;
+                  break;
+                }
+              }
+            }
+          }
+
+          // Strategy 3: Look in modal's ancestors or document-wide using SUBMIT_BUTTON selectors
+          if (!actionBtn) {
+            for (const sel of selectors.SUBMIT_BUTTON) {
+              const btn = document.querySelector(sel) as HTMLElement | null;
+              if (btn && isVisible(btn)) {
+                actionBtn = btn;
+                break;
+              }
+            }
+          }
+
+          // Strategy 4: Document-wide exact/common button text search
+          if (!actionBtn) {
+            const allDocBtns = Array.from(
+              document.querySelectorAll(
+                'button, [role="button"], a.btn, a[class*="button" i], input[type="submit"], input[type="button"], div[class*="btn" i], span[class*="btn" i]',
+              ),
+            ) as HTMLElement[];
+            for (const b of allDocBtns) {
+              const t = (b.textContent || (b as HTMLInputElement).value || '').trim().toLowerCase();
+              if (
+                t === 'save' ||
+                t === 'save & next' ||
+                t === 'save and next' ||
+                t === 'save and apply' ||
+                t === 'save & continue' ||
+                t === 'save details' ||
+                t === 'next' ||
+                t === 'submit' ||
+                t === 'apply' ||
+                t === 'continue' ||
+                t === 'send' ||
+                t === 'done' ||
+                t.startsWith('save ') ||
+                t.endsWith(' save')
+              ) {
+                if (isVisible(b)) {
+                  actionBtn = b;
+                  break;
+                }
+              }
+            }
+          }
+
+          // Strategy 5: Partial text match for Save (excluding page-level buttons like "save job")
+          if (!actionBtn) {
+            const allDocBtns = Array.from(document.querySelectorAll('button, [role="button"]')) as HTMLElement[];
+            for (const b of allDocBtns) {
+              const t = (b.textContent || '').trim().toLowerCase();
+              if (
+                (t.includes('save') || t.includes('submit')) &&
+                !t.includes('save job') &&
+                !t.includes('saved') &&
+                isVisible(b)
               ) {
                 actionBtn = b;
                 break;
               }
             }
           }
-
-          const isBtnDisabled =
-            actionBtn &&
-            ((actionBtn as HTMLButtonElement).disabled ||
-              actionBtn.classList.contains('disabled') ||
-              actionBtn.getAttribute('aria-disabled') === 'true');
 
           if (actionBtn) {
             // Un-disable button if artificially blocked by frontend state
@@ -1494,21 +1615,49 @@ export class NaukriAdapter implements IPlatformAdapter {
             actionBtn.scrollIntoView({ behavior: 'instant', block: 'center' });
             actionBtn.focus?.();
             const mOpts = { bubbles: true, cancelable: true, view: window };
+            actionBtn.dispatchEvent(new PointerEvent('pointerover', mOpts));
+            actionBtn.dispatchEvent(new PointerEvent('pointerenter', mOpts));
             actionBtn.dispatchEvent(new PointerEvent('pointerdown', mOpts));
             actionBtn.dispatchEvent(new MouseEvent('mousedown', mOpts));
             actionBtn.dispatchEvent(new PointerEvent('pointerup', mOpts));
             actionBtn.dispatchEvent(new MouseEvent('mouseup', mOpts));
             actionBtn.click();
-            return { clicked: true, action: 'save' };
+            actionBtn.dispatchEvent(new MouseEvent('click', mOpts));
+
+            // Also click child text/span element if present
+            const childEl = actionBtn.querySelector('span, div, p') as HTMLElement | null;
+            if (childEl) {
+              childEl.click?.();
+              childEl.dispatchEvent(new MouseEvent('click', mOpts));
+            }
+
+            // Form submit trigger fallback
+            const form = (actionBtn as HTMLButtonElement).form || actionBtn.closest('form');
+            if (form && typeof form.requestSubmit === 'function') {
+              try {
+                form.requestSubmit(actionBtn as HTMLButtonElement);
+              } catch {}
+            }
+
+            const rect = actionBtn.getBoundingClientRect();
+            return {
+              clicked: true,
+              action: 'save',
+              text: (actionBtn.textContent || '').trim(),
+              x: rect.left + rect.width / 2,
+              y: rect.top + rect.height / 2,
+            };
           }
 
           // If no submit button is found at all, check if a skip button exists to advance
-          const skipEls = Array.from(modal.querySelectorAll('button, a, span, div')) as HTMLElement[];
+          const skipEls = Array.from(document.querySelectorAll('button, a, span, div')) as HTMLElement[];
           for (const s of skipEls) {
             const st = (s.textContent || '').trim().toLowerCase();
             if (st.includes('skip this question') || st === 'skip question' || st === 'skip') {
-              s.click();
-              return { clicked: true, action: 'skip_due_to_no_submit_button' };
+              if (isVisible(s)) {
+                s.click();
+                return { clicked: true, action: 'skip_due_to_no_submit_button' };
+              }
             }
           }
 
@@ -1516,6 +1665,18 @@ export class NaukriAdapter implements IPlatformAdapter {
         }, NAUKRI_SELECTORS);
 
         logger.info(`[NaukriAdapter] Step ${step} submit result: ${JSON.stringify(submitAction)}`);
+
+        // Perform trusted Puppeteer mouse click on the Save button coordinates if available
+        if (submitAction?.clicked && submitAction?.x && submitAction?.y && puppeteerPage?.mouse) {
+          try {
+            logger.info(
+              `[NaukriAdapter] 🖱️ Executing trusted mouse click on "${submitAction.text || 'Save'}" button at (${Math.round(submitAction.x)}, ${Math.round(submitAction.y)})`,
+            );
+            await puppeteerPage.mouse.click(submitAction.x, submitAction.y);
+          } catch (mErr) {
+            logger.debug('[NaukriAdapter] Puppeteer mouse.click fallback failed:', mErr);
+          }
+        }
 
         // Wait for modal transition or next question
         await new Promise(r => setTimeout(r, 2500));
@@ -1577,7 +1738,7 @@ export class NaukriAdapter implements IPlatformAdapter {
         }
       }
 
-      // Check final state after loop: Only succeed if modal is ACTUALLY closed
+      // Check final state after loop: Only succeed if modal is ACTUALLY closed or shows success message
       const finalCheck = await puppeteerPage.evaluate((selectors: typeof NAUKRI_SELECTORS) => {
         function isVisible(el: HTMLElement): boolean {
           if (!el || el.offsetParent === null) return false;
@@ -1588,6 +1749,15 @@ export class NaukriAdapter implements IPlatformAdapter {
         for (const sel of selectors.MODAL_CONTAINER) {
           const el = document.querySelector(sel) as HTMLElement | null;
           if (el && isVisible(el)) {
+            const modalText = (el.innerText || '').toLowerCase();
+            if (
+              modalText.includes('successfully applied') ||
+              modalText.includes('application sent') ||
+              modalText.includes('applied successfully') ||
+              modalText.includes('your application has been sent')
+            ) {
+              return true; // Application completed successfully!
+            }
             return false; // Modal is still open!
           }
         }
