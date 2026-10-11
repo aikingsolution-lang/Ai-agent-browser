@@ -53,6 +53,7 @@ import { JobTitleAutocompleteInput } from './JobTitleAutocompleteInput';
 import { MultipleJobRolesInput } from './MultipleJobRolesInput';
 import { LocationAutocompleteInput } from './LocationAutocompleteInput';
 import { PrioritizedLocationsInput } from './PrioritizedLocationsInput';
+import { ResumeEnrichmentFlashcards } from './ResumeEnrichmentFlashcards';
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
@@ -73,6 +74,7 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
   const [isSaving, setIsSaving] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [hasAuth, setHasAuth] = useState<boolean>(true);
+  const [showFlashcards, setShowFlashcards] = useState(false);
 
   useEffect(() => {
     let mounted = true;
@@ -564,6 +566,9 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
               message: `⚠️ "${file.name}" saved, but limited details were extracted. Please check your fields below.`,
             });
           }
+
+          // Trigger Interactive Onboarding Flashcards to calibrate missing fields & skill experience
+          setShowFlashcards(true);
         } else {
           throw new Error(res.message || res.error?.code || 'Failed to extract resume data from server');
         }
@@ -1967,6 +1972,25 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
           <FiExternalLink className="size-3" />
         </button>
       </div>
+
+      {/* AI Resume Enrichment Flashcard Wizard */}
+      <ResumeEnrichmentFlashcards
+        isOpen={showFlashcards}
+        onClose={() => setShowFlashcards(false)}
+        profile={profile}
+        isDarkMode={isDarkMode}
+        onSave={async updates => {
+          const current = await getCareerBrainData();
+          const merged: ICareerBrain = {
+            ...current,
+            ...updates,
+            updatedAt: Date.now(),
+          };
+          await saveCareerBrainData(merged);
+          setProfile(merged);
+          setEditForm(merged);
+        }}
+      />
     </div>
   );
 }
