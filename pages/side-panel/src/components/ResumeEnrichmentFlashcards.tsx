@@ -15,6 +15,7 @@ import {
   FiMapPin,
   FiShield,
 } from 'react-icons/fi';
+import { LocationAutocompleteInput } from './LocationAutocompleteInput';
 
 interface ResumeEnrichmentFlashcardsProps {
   isOpen: boolean;
@@ -260,18 +261,18 @@ export const ResumeEnrichmentFlashcards: React.FC<ResumeEnrichmentFlashcardsProp
                   </div>
                 </div>
 
-                {/* Current & Preferred Location */}
+                {/* Current & Preferred Location with Standardized Autocomplete Dropdown */}
                 <div className="grid grid-cols-2 gap-3">
                   <div>
                     <label className="block text-[11px] font-medium text-slate-300 mb-1 flex items-center gap-1">
                       <FiMapPin className="size-3 text-amber-400" />
                       <span>Current City</span>
                     </label>
-                    <input
-                      type="text"
-                      placeholder="e.g. Bengaluru, Delhi"
+                    <LocationAutocompleteInput
                       value={currentLocation}
-                      onChange={e => setCurrentLocation(e.target.value)}
+                      onChange={loc => setCurrentLocation(loc)}
+                      placeholder="e.g. Kolkata, West Bengal, India"
+                      isDarkMode={isDarkMode}
                       className="w-full px-2.5 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-xs text-slate-200 focus:outline-none focus:border-sky-500"
                     />
                   </div>
@@ -280,11 +281,12 @@ export const ResumeEnrichmentFlashcards: React.FC<ResumeEnrichmentFlashcardsProp
                       <FiMapPin className="size-3 text-amber-400" />
                       <span>Preferred City / Remote</span>
                     </label>
-                    <input
-                      type="text"
-                      placeholder="e.g. Remote or Bengaluru"
+                    <LocationAutocompleteInput
                       value={preferredLocation}
-                      onChange={e => setPreferredLocation(e.target.value)}
+                      onChange={loc => setPreferredLocation(loc)}
+                      isPreferred={true}
+                      placeholder="e.g. Remote or Bengaluru"
+                      isDarkMode={isDarkMode}
                       className="w-full px-2.5 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-xs text-slate-200 focus:outline-none focus:border-sky-500"
                     />
                   </div>
