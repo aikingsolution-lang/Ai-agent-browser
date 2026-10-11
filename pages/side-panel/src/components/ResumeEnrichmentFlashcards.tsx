@@ -137,15 +137,10 @@ export const ResumeEnrichmentFlashcards: React.FC<ResumeEnrichmentFlashcardsProp
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 bg-black/80 backdrop-blur-sm animate-fade-in font-sans">
-      <div
-        className={`relative w-full max-w-lg rounded-2xl border shadow-2xl overflow-hidden transition-all duration-300 flex flex-col max-h-[92vh] ${
-          isDarkMode
-            ? 'bg-slate-950 border-slate-800 text-slate-100 shadow-sky-950/40'
-            : 'bg-white border-slate-200 text-slate-800 shadow-xl'
-        }`}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 bg-black/85 backdrop-blur-sm animate-fade-in font-sans">
+      <div className="relative w-full max-w-lg rounded-2xl border shadow-2xl overflow-hidden transition-all duration-300 flex flex-col max-h-[92vh] bg-slate-950 border-slate-800 text-slate-100 shadow-sky-950/40">
         {/* Header Bar */}
-        <div className="flex items-center justify-between px-5 py-3 border-b border-slate-800 bg-slate-900/90">
+        <div className="flex items-center justify-between px-5 py-3 border-b border-slate-800 bg-slate-900/95">
           <div className="flex items-center gap-2.5">
             <div className="p-1.5 rounded-lg bg-blue-950/80 text-blue-400 border border-blue-700/50">
               <FiZap className="size-4" />
@@ -469,13 +464,10 @@ export const ResumeEnrichmentFlashcards: React.FC<ResumeEnrichmentFlashcardsProp
                 {Object.entries(skillsMap).map(([skill, yrs]) => (
                   <div
                     key={skill}
-                    className={`flex items-center justify-between p-2.5 rounded-xl border transition-all ${
-                      isDarkMode
-                        ? 'bg-slate-900/90 border-slate-800 hover:border-amber-500/40'
-                        : 'bg-slate-50 border-slate-200 hover:border-amber-400'
-                    }`}>
-                    <div className="flex items-center gap-2">
-                      <span className="font-medium text-xs text-white">{skill}</span>
+                    className="flex items-center justify-between p-3 rounded-xl border border-slate-800 bg-slate-900/90 hover:border-amber-500/50 transition-all shadow-sm">
+                    <div className="flex items-center gap-2.5">
+                      <div className="w-2 h-2 rounded-full bg-blue-400" />
+                      <span className="font-semibold text-xs text-white tracking-wide">{skill}</span>
                     </div>
 
                     <div className="flex items-center gap-2">
@@ -485,7 +477,7 @@ export const ResumeEnrichmentFlashcards: React.FC<ResumeEnrichmentFlashcardsProp
                         className="p-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 transition-colors">
                         <FiMinus className="size-3" />
                       </button>
-                      <span className="w-14 text-center text-xs font-bold text-amber-400 font-mono bg-black/60 px-2 py-0.5 rounded border border-amber-500/30">
+                      <span className="w-16 text-center text-xs font-bold text-amber-400 font-mono bg-black px-2.5 py-1 rounded-md border border-amber-500/40 shadow-inner">
                         {yrs} {yrs === 1 ? 'yr' : 'yrs'}
                       </span>
                       <button
