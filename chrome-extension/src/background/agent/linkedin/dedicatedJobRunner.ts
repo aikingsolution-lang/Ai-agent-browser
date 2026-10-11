@@ -2440,7 +2440,7 @@ export class DedicatedJobRunner {
     stats: typeof stats;
   }> {
     const { portToSend, onLiveActivity } = options;
-    const BATCH_CAP = Math.min(options.maxJobs || 10, 10);
+    const BATCH_CAP = Math.min(options.maxJobs || 40, 40);
 
     const targetLocations: string[] = (Array.isArray(location) ? location : [location])
       .map(l => (l || '').trim())
@@ -2559,20 +2559,26 @@ export class DedicatedJobRunner {
       }
     }
 
-    // Scan jobs with retry & auto-scroll to ensure DOM hydration
+    // Scan jobs with retry & progressive auto-scroll to ensure DOM hydration for up to 40 jobs
     let jobs: IJobQueueItem[] = [];
-    for (let attempt = 1; attempt <= 3; attempt++) {
+    for (let attempt = 1; attempt <= 4; attempt++) {
       this.notifyStatus(
         portToSend,
-        `🔍 [Naukri.com] Scanning search results for "${role}" (attempt ${attempt}/3)...`,
+        `🔍 [Naukri.com] Scanning search results for "${role}" (attempt ${attempt}/4)...`,
         'info',
       );
-      await currentPage.puppeteerPage?.evaluate(() => window.scrollBy(0, 500)).catch(() => {});
-      const scanWait = await this.interruptibleSleep(1500);
-      if (scanWait || !this.isRunning) break;
+      // Progressively scroll to trigger lazy loading of search cards
+      for (let s = 1; s <= 3; s++) {
+        await currentPage.puppeteerPage
+          ?.evaluate((step: number) => {
+            window.scrollBy(0, step * 600);
+          }, s)
+          .catch(() => {});
+        await this.interruptibleSleep(500);
+      }
       jobs = await naukriAdapter.extractJobCards(currentPage);
-      if (jobs.length > 0) break;
-      const retryWait = await this.interruptibleSleep(2000);
+      if (jobs.length >= BATCH_CAP) break;
+      const retryWait = await this.interruptibleSleep(1500);
       if (retryWait || !this.isRunning) break;
     }
     stats.totalFound = jobs.length;

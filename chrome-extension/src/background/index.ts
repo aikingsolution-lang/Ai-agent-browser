@@ -1333,7 +1333,7 @@ chrome.runtime.onConnect.addListener(port => {
             dedicatedJobRunner
               .startAutonomousJobLoop({
                 portToSend: port,
-                maxJobs: message.maxJobs || 20,
+                maxJobs: message.maxJobs || 40,
                 platform: message.platform || 'linkedin',
                 runnerMode: message.runnerMode || 'tab',
               })
