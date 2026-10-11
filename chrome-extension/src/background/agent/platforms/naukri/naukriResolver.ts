@@ -315,14 +315,31 @@ export function resolveNaukriQuestion(
     return { value: val, confidence: resolvedConfidence, source: resolvedSource };
   }
 
+  // Check if this is a descriptive experience question asking to explain or describe experience with tools/technologies
+  const isDescriptiveExperience =
+    q.startsWith('what is your experience') ||
+    q.startsWith('how is your experience') ||
+    q.includes('experience with') ||
+    q.includes('describe your experience') ||
+    q.includes('tell us about your experience') ||
+    q.includes('tell me about your experience') ||
+    q.includes('explain your experience') ||
+    q.includes('share your experience') ||
+    q.includes('details of your experience') ||
+    q.includes('hands-on experience with') ||
+    q.includes('hands on experience with');
+
   // 4. Total Experience / Years of experience / Skill experience (e.g. "How many years of experience do you have in Aws Devops?")
   if (
-    q.includes('total experience') ||
-    q.includes('overall experience') ||
-    q.includes('total year') ||
-    q.includes('experiance') ||
-    (q.includes('experience') && (q.includes('years') || q.includes('yoe') || q.includes('how many'))) ||
-    /\b(?:total|overall)?\s*experi[ea]nce\b/i.test(q)
+    !isDescriptiveExperience &&
+    (q.includes('total experience') ||
+      q.includes('overall experience') ||
+      q.includes('total year') ||
+      q.includes('total years') ||
+      q.includes('experiance') ||
+      (q.includes('experience') &&
+        (q.includes('years') || q.includes('yoe') || q.includes('how many') || q.includes('duration'))) ||
+      /\b(?:total|overall)\s*experi[ea]nce\b/i.test(q))
   ) {
     let expYears = careerBrain.yearsOfExperience ?? 1;
 
@@ -351,6 +368,21 @@ export function resolveNaukriQuestion(
     }
 
     return { value: String(expYears), confidence: 0.95, source: 'profile' };
+  }
+
+  // 4b. Descriptive Technical / Experience Questions (e.g. "What is your experience with FastAPI/Flask, MLOps/LLMOps, and production deployment?")
+  if (isDescriptiveExperience) {
+    const candidateSkills = (careerBrain.skills || []).slice(0, 5).join(', ');
+    const yoe = careerBrain.yearsOfExperience ?? 3;
+    const defaultExpAnswer = `I have over ${yoe} years of hands-on experience building and deploying robust solutions with modern technologies including ${candidateSkills || 'backend architectures and cloud deployment'}, delivering scalable production services and reliable automated workflows.`;
+
+    if (options.length > 0) {
+      const aligned = alignValueToOptions(defaultExpAnswer, options, questionText);
+      return { value: aligned ? aligned.matchedOption : options[0], confidence: 0.8, source: 'profile' };
+    }
+
+    // Return with confidence 0.7 so LLM is prioritized when available to craft a tailored 1-2 sentence response
+    return { value: defaultExpAnswer, confidence: 0.7, source: 'profile' };
   }
 
   // 5. Current / Preferred Location (with Priority 1 > Priority 2 > Priority 3)
@@ -608,6 +640,19 @@ export async function resolveNaukriWithLLM(
 
     const isTextLong = fieldType === 'text_long';
     const isCheckbox = fieldType === 'checkbox';
+    const isDescriptiveQuestion =
+      isTextLong ||
+      qLower.startsWith('what is your experience') ||
+      qLower.startsWith('how is your experience') ||
+      qLower.includes('experience with') ||
+      qLower.includes('describe your experience') ||
+      qLower.includes('reason for') ||
+      qLower.includes('why are you') ||
+      qLower.includes('why do you') ||
+      qLower.includes('tell us about') ||
+      qLower.includes('tell me about') ||
+      qLower.includes('briefly describe') ||
+      qLower.includes('explain your');
 
     const systemPrompt = `You are an expert autonomous job application AI applying on Naukri.com.
 Answer the recruiter's question accurately based strictly on the candidate's verified profile and resume.
@@ -616,9 +661,9 @@ STRICT ACCURACY RULES:
 - NEVER FABRICATE OR GUESS RANDOM FACTS. Use ONLY verified facts from candidate's profile, resume, and experience.
 - OUTPUT FORMAT:
 ${
-  isTextLong
-    ? `  - FOR PARAGRAPH / TEXTAREA QUESTIONS (Reason for leaving, job change reason, about yourself, note to recruiter):
-    Output a professional, polite, 2-sentence response directly addressing the recruiter's question based on the candidate's career history and aspirations. Never exceed 3 sentences.`
+  isDescriptiveQuestion
+    ? `  - FOR DESCRIPTIVE QUESTIONS / PARAGRAPH / CHATBOT EXPLANATIONS (Experience descriptions, reason for leaving, about yourself):
+    Output a concise, professional, 1-2 sentence response directly answering the recruiter's question based on the candidate's skills and background. Never exceed 3 sentences.`
     : isCheckbox
       ? `  - FOR CHECKBOX QUESTIONS (Multiple choice):
     Identify ALL matching options from the OPTIONS list that apply to the candidate's skills and experience. Output them as a comma-separated list of exact option names (e.g. "Python, Docker, AWS").`
@@ -665,14 +710,14 @@ CANDIDATE PROFILE (Use ONLY these facts):
 - Education: ${careerBrain.education || 'Bachelor Degree'}
 - Resume Summary: ${(careerBrain.resumeText || '').slice(0, 1500)}
 
-FINAL ANSWER ${isTextLong ? '(2 concise professional sentences)' : isCheckbox ? '(comma-separated matching options)' : '(strictly one word, one number, or exact option)'}:`;
+FINAL ANSWER ${isDescriptiveQuestion ? '(1-2 concise professional sentences)' : isCheckbox ? '(comma-separated matching options)' : '(strictly one word, one number, or exact option)'}:`;
 
     const response = await llm.invoke([new SystemMessage(systemPrompt), new HumanMessage(userPrompt)]);
 
     let raw = response.content.toString().trim();
     // Clean markdown, quotes, trailing punctuation
     raw = raw.replace(/^["'`]|["'`]$/g, '').trim();
-    if (!isTextLong) {
+    if (!isDescriptiveQuestion) {
       raw = raw.replace(/\n.*$/s, '').trim();
     }
 

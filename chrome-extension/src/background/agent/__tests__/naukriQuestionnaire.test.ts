@@ -286,5 +286,29 @@ describe('Naukri Questionnaire & Drawer Resolvers', () => {
       expect(res.value).toContain('Kubernetes');
       expect(res.value).not.toContain('Java');
     });
+
+    it('distinguishes descriptive experience questions from numeric total experience questions', () => {
+      const descriptiveQ = 'What is your experience with FastAPI/Flask, MLOps/LLMOps, and production deployment?';
+      const descRes = resolveNaukriQuestion(
+        descriptiveQ,
+        'text',
+        [],
+        baseCareerBrain as ICareerBrain,
+        'Type message here...',
+      );
+
+      // Must NOT return numeric "3"
+      expect(descRes.value).not.toBe('3');
+      expect(descRes.value.length).toBeGreaterThan(20);
+      expect(descRes.value.toLowerCase()).toContain('experience');
+      // Confidence must be <= 0.8 so LLM will be consulted when available
+      expect(descRes.confidence).toBeLessThanOrEqual(0.8);
+
+      // Meanwhile, explicit numeric question must still return "3"
+      const numericQ = 'How many years of experience do you have in total?';
+      const numRes = resolveNaukriQuestion(numericQ, 'number', [], baseCareerBrain as ICareerBrain);
+      expect(numRes.value).toBe('3');
+      expect(numRes.confidence).toBeGreaterThanOrEqual(0.9);
+    });
   });
 });

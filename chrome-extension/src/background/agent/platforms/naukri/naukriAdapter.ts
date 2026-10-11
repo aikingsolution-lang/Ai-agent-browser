@@ -887,13 +887,23 @@ export class NaukriAdapter implements IPlatformAdapter {
           }
 
           // D. Extract standard inputs
-          const rawInputs = Array.from(
+          let rawInputs = Array.from(
             modal.querySelectorAll(
               'input:not([type="hidden"]):not([type="file"]):not([type="submit"]):not([type="button"]):not([type="reset"]):not([type="image"]), select, textarea',
             ),
           ) as HTMLElement[];
 
-          const inputs = rawInputs.filter(el => isVisible(el));
+          let inputs = rawInputs.filter(el => isVisible(el));
+
+          // If no inputs found inside modal, fallback to checking chatbot inputs in document
+          if (inputs.length === 0) {
+            const docInputs = Array.from(
+              document.querySelectorAll(
+                'input[placeholder*="Type message" i], textarea[placeholder*="Type message" i], input[placeholder*="message" i], textarea[placeholder*="message" i], input[type="text"]:not([type="hidden"]), textarea',
+              ),
+            ) as HTMLElement[];
+            inputs = docInputs.filter(el => isVisible(el));
+          }
 
           const fields = inputs.map((el, idx) => {
             const placeholder = el.getAttribute('placeholder') || '';
@@ -934,6 +944,22 @@ export class NaukriAdapter implements IPlatformAdapter {
             else if (el.getAttribute('type') === 'radio') fieldType = 'radio';
             else if (el.getAttribute('type') === 'checkbox') fieldType = 'checkbox';
             else if (el.getAttribute('type') === 'number') fieldType = 'number';
+
+            // If this is a chat message input and the question is descriptive, treat as text_long
+            const isChatMsgInput =
+              (placeholder || '').toLowerCase().includes('type message') ||
+              (el.className || '').toLowerCase().includes('chat');
+            const qLo = (labelText || '').toLowerCase();
+            const isDescQ =
+              qLo.startsWith('what is your experience') ||
+              qLo.startsWith('how is your experience') ||
+              qLo.includes('experience with') ||
+              qLo.includes('describe your experience') ||
+              qLo.includes('reason for') ||
+              qLo.includes('why are you');
+            if (isChatMsgInput && isDescQ) {
+              fieldType = 'text_long';
+            }
 
             const options: string[] = [];
             if (tagName === 'select') {
@@ -1170,12 +1196,26 @@ export class NaukriAdapter implements IPlatformAdapter {
             let answer = resolveNaukriQuestion(qText, f.fieldType as any, f.options, careerBrain, f.placeholder);
             const isLakhsQ = qText.toLowerCase().includes('lac') || qText.toLowerCase().includes('lakh');
 
-            // Consult LLM if field has error, is low confidence, is CTC/Lakhs, or radio group
+            const isDescriptiveQ =
+              qText.toLowerCase().startsWith('what is your experience') ||
+              qText.toLowerCase().startsWith('how is your experience') ||
+              qText.toLowerCase().includes('experience with') ||
+              qText.toLowerCase().includes('describe your experience') ||
+              qText.toLowerCase().includes('reason for') ||
+              qText.toLowerCase().includes('why are you') ||
+              f.fieldType === 'text_long';
+
+            // Consult LLM if field has error, is low confidence, is CTC/Lakhs, radio group, or descriptive question
             try {
               const llm = context?.scopedLLM || (await getActiveChatModel(context?.runId)) || undefined;
               if (
                 llm &&
-                (!answer.value || answer.confidence < 0.95 || isLakhsQ || f.errorMessage || f.fieldType === 'radio')
+                (!answer.value ||
+                  answer.confidence < 0.95 ||
+                  isLakhsQ ||
+                  isDescriptiveQ ||
+                  f.errorMessage ||
+                  f.fieldType === 'radio')
               ) {
                 logger.info(
                   `[NaukriAdapter] 🧠 Asking LLM for concise answer: "${qText}" ${f.errorMessage ? `(Error Hint: "${f.errorMessage}")` : ''}`,
@@ -1244,19 +1284,55 @@ export class NaukriAdapter implements IPlatformAdapter {
                     break;
                   }
                 }
+                if (!modal) {
+                  const candidates = Array.from(
+                    document.querySelectorAll('div, section, aside, form'),
+                  ) as HTMLElement[];
+                  for (const el of candidates) {
+                    const style = window.getComputedStyle(el);
+                    if ((style.position === 'fixed' || style.position === 'absolute') && isVisible(el)) {
+                      const text = (el.innerText || '').toLowerCase();
+                      if (
+                        text.includes("recruiter's questions") ||
+                        text.includes('kindly answer all') ||
+                        text.includes('type message here') ||
+                        text.includes('how many years of experience') ||
+                        text.includes('skip this question') ||
+                        text.includes('current ctc') ||
+                        text.includes('expected ctc') ||
+                        text.includes('notice period') ||
+                        text.includes('in lacs') ||
+                        (text.includes('save') &&
+                          el.querySelector('input, textarea, [class*="chip" i], [class*="option" i]'))
+                      ) {
+                        modal = el;
+                        break;
+                      }
+                    }
+                  }
+                }
                 if (!modal) modal = document.body;
 
-                const rawInputs = Array.from(
+                let rawInputs = Array.from(
                   modal.querySelectorAll(
                     'input:not([type="hidden"]):not([type="file"]):not([type="submit"]):not([type="button"]):not([type="reset"]):not([type="image"]), select, textarea',
                   ),
                 ) as HTMLElement[];
-                const inputs = rawInputs.filter(el => isVisible(el));
+                let inputs = rawInputs.filter(el => isVisible(el));
+                if (inputs.length === 0) {
+                  const docInputs = Array.from(
+                    document.querySelectorAll(
+                      'input[placeholder*="Type message" i], textarea[placeholder*="Type message" i], input[placeholder*="message" i], textarea[placeholder*="message" i], input[type="text"]:not([type="hidden"]), textarea',
+                    ),
+                  ) as HTMLElement[];
+                  inputs = docInputs.filter(el => isVisible(el));
+                }
+
                 const el = inputs[idx] as any;
-                if (!el) return { filled: false, error: 'element_not_found' };
+                if (!el) return { filled: false, error: 'element_not_found', x: 0, y: 0, isChatInput: false };
 
                 if (el.tagName.toLowerCase() === 'input' && el.type === 'file')
-                  return { filled: false, error: 'file_input' };
+                  return { filled: false, error: 'file_input', x: 0, y: 0, isChatInput: false };
 
                 el.focus?.();
 
@@ -1466,13 +1542,53 @@ export class NaukriAdapter implements IPlatformAdapter {
                   }
                 }
 
-                return { filled: true, postFillError };
+                const rect = el.getBoundingClientRect();
+                const isChatInput =
+                  (el.placeholder || '').toLowerCase().includes('type message') ||
+                  (el.className || '').toLowerCase().includes('chat') ||
+                  el.closest('[class*="chat" i], [class*="bot" i]') !== null;
+
+                return {
+                  filled: true,
+                  postFillError,
+                  x: rect.left + rect.width / 2,
+                  y: rect.top + rect.height / 2,
+                  isChatInput,
+                };
               },
               f.index,
               answer.value,
               f.fieldType,
               NAUKRI_SELECTORS,
             );
+
+            // Execute trusted Puppeteer mouse click & keyboard typing so React controlled component state updates
+            if (fillResult?.x && fillResult?.y && puppeteerPage?.mouse && puppeteerPage?.keyboard) {
+              try {
+                logger.info(
+                  `[NaukriAdapter] ⌨️ Typing answer into field at (${Math.round(fillResult.x)}, ${Math.round(fillResult.y)}) using trusted keyboard...`,
+                );
+                await puppeteerPage.mouse.click(fillResult.x, fillResult.y);
+                await new Promise(r => setTimeout(r, 80));
+
+                await puppeteerPage.keyboard.down('Control');
+                await puppeteerPage.keyboard.press('KeyA');
+                await puppeteerPage.keyboard.up('Control');
+                await puppeteerPage.keyboard.press('Backspace');
+                await new Promise(r => setTimeout(r, 50));
+
+                await puppeteerPage.keyboard.type(answer.value, { delay: 10 });
+                await new Promise(r => setTimeout(r, 100));
+
+                if (fillResult.isChatInput) {
+                  logger.info(`[NaukriAdapter] 💬 Pressing Enter key for chat input...`);
+                  await puppeteerPage.keyboard.press('Enter');
+                  await new Promise(r => setTimeout(r, 400));
+                }
+              } catch (keyErr) {
+                logger.debug('[NaukriAdapter] Puppeteer keyboard typing failed:', keyErr);
+              }
+            }
 
             // Self-heal via LLM if an inline red error alert appeared
             if (fillResult?.postFillError) {
@@ -1525,6 +1641,18 @@ export class NaukriAdapter implements IPlatformAdapter {
                       f.index,
                       answer.value,
                     );
+                    if (fillResult.x && fillResult.y && puppeteerPage?.mouse && puppeteerPage?.keyboard) {
+                      await puppeteerPage.mouse.click(fillResult.x, fillResult.y);
+                      await new Promise(r => setTimeout(r, 60));
+                      await puppeteerPage.keyboard.down('Control');
+                      await puppeteerPage.keyboard.press('KeyA');
+                      await puppeteerPage.keyboard.up('Control');
+                      await puppeteerPage.keyboard.press('Backspace');
+                      await puppeteerPage.keyboard.type(answer.value, { delay: 10 });
+                      if (fillResult.isChatInput) {
+                        await puppeteerPage.keyboard.press('Enter');
+                      }
+                    }
                   }
                 }
               } catch (healErr) {
@@ -1534,6 +1662,77 @@ export class NaukriAdapter implements IPlatformAdapter {
 
             didAnswer = true;
             await new Promise(r => setTimeout(r, 400));
+          }
+        }
+
+        // 3C. Direct Chatbot Input Fallback (if no fields were extracted, but a chat/message input is present on screen)
+        if (!didAnswer) {
+          const directChatInfo = await puppeteerPage.evaluate((selectors: typeof NAUKRI_SELECTORS) => {
+            function isVisible(el: HTMLElement | null): boolean {
+              if (!el || el.offsetParent === null) return false;
+              const style = window.getComputedStyle(el);
+              return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
+            }
+            const chatInputs = Array.from(
+              document.querySelectorAll(
+                'input[placeholder*="Type message" i], textarea[placeholder*="Type message" i], input[placeholder*="message" i], textarea[placeholder*="message" i], [contenteditable="true"]',
+              ),
+            ) as HTMLElement[];
+            const activeInput = chatInputs.find(el => isVisible(el));
+            if (!activeInput) return null;
+
+            const rect = activeInput.getBoundingClientRect();
+            return {
+              x: rect.left + rect.width / 2,
+              y: rect.top + rect.height / 2,
+              placeholder: activeInput.getAttribute('placeholder') || '',
+            };
+          }, NAUKRI_SELECTORS);
+
+          if (directChatInfo && directChatInfo.x && directChatInfo.y) {
+            logger.info(
+              `[NaukriAdapter] 💬 Detected direct chatbot input on screen. Resolving question: "${lastQuestionHandled}"...`,
+            );
+            let answer = resolveNaukriQuestion(
+              lastQuestionHandled,
+              'text',
+              [],
+              careerBrain,
+              directChatInfo.placeholder,
+            );
+            try {
+              const llm = context?.scopedLLM || (await getActiveChatModel(context?.runId)) || undefined;
+              if (llm) {
+                const llmRes = await resolveNaukriWithLLM(
+                  lastQuestionHandled,
+                  'text',
+                  [],
+                  careerBrain,
+                  llm,
+                  directChatInfo.placeholder,
+                );
+                if (llmRes.success && llmRes.answer) {
+                  answer = { value: llmRes.answer, confidence: 0.99, source: 'profile' };
+                }
+              }
+            } catch (llmErr) {
+              logger.warning('[NaukriAdapter] Direct chat LLM resolution error:', llmErr);
+            }
+
+            if (answer.value && puppeteerPage?.mouse && puppeteerPage?.keyboard) {
+              await puppeteerPage.mouse.click(directChatInfo.x, directChatInfo.y);
+              await new Promise(r => setTimeout(r, 100));
+              await puppeteerPage.keyboard.down('Control');
+              await puppeteerPage.keyboard.press('KeyA');
+              await puppeteerPage.keyboard.up('Control');
+              await puppeteerPage.keyboard.press('Backspace');
+              await new Promise(r => setTimeout(r, 50));
+              await puppeteerPage.keyboard.type(answer.value, { delay: 10 });
+              await new Promise(r => setTimeout(r, 150));
+              await puppeteerPage.keyboard.press('Enter');
+              didAnswer = true;
+              await new Promise(r => setTimeout(r, 500));
+            }
           }
         }
 
