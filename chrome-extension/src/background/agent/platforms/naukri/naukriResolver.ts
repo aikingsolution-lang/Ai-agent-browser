@@ -329,7 +329,7 @@ export function resolveNaukriQuestion(
     q.includes('hands-on experience with') ||
     q.includes('hands on experience with');
 
-  // 4. Total Experience / Years of experience / Skill experience (e.g. "How many years of experience do you have in Aws Devops?")
+  // 4. Total Experience / Years of experience / Skill experience (e.g. "How many years of experience do you have in Kubernetes?", "How many years of experience do you have in Aws Devops?")
   if (
     !isDescriptiveExperience &&
     (q.includes('total experience') ||
@@ -343,17 +343,51 @@ export function resolveNaukriQuestion(
   ) {
     let expYears = careerBrain.yearsOfExperience ?? 1;
 
-    // Check if question asks about a specific skill in skillExperience
+    // Check if question asks about a specific skill registered in skillExperience
+    let skillMatched = false;
     if (careerBrain.skillExperience) {
       for (const [skill, yrs] of Object.entries(careerBrain.skillExperience)) {
-        const sLower = skill.toLowerCase();
+        const sLower = skill.toLowerCase().trim();
         if (
-          q.includes(sLower) ||
-          (sLower.includes('aws') && q.includes('aws')) ||
-          (sLower.includes('devops') && q.includes('devops'))
+          sLower &&
+          (q.includes(sLower) ||
+            sLower.includes(
+              q
+                .replace(/how many years of experience do you have in /i, '')
+                .replace(/\?/g, '')
+                .trim(),
+            ))
         ) {
           expYears = Number(yrs);
+          skillMatched = true;
           break;
+        }
+      }
+    }
+
+    // If not matched in skillExperience, check candidate's skills list and resume
+    if (!skillMatched) {
+      const candidateSkills = (careerBrain.skills || []).map(s => s.toLowerCase().trim());
+      // Check if any candidate skill matches the question
+      const hasSkill = candidateSkills.some(
+        cs => cs && (q.includes(cs) || (cs.includes('kube') && q.includes('kube'))),
+      );
+      if (hasSkill) {
+        // Candidate has this skill, use their primary years of experience (or at least 2 years)
+        expYears = Math.max(1, careerBrain.yearsOfExperience ?? 3);
+      } else {
+        // Check if skill appears in workExperience descriptions or titles
+        const workMentions = (careerBrain.workExperience || []).some(w => {
+          const desc = `${w.title || ''} ${w.description || ''} ${w.company || ''}`.toLowerCase();
+          return q
+            .split(/\s+/)
+            .some(
+              word =>
+                word.length >= 4 && !['years', 'experience', 'have', 'many'].includes(word) && desc.includes(word),
+            );
+        });
+        if (workMentions) {
+          expYears = Math.max(1, careerBrain.yearsOfExperience ?? 2);
         }
       }
     }
@@ -675,8 +709,9 @@ ${
   - If the question asks for CTC "in Lacs" or "in Lakhs" (e.g. "What is your current CTC in Lacs per annum?"):
     Output strictly the single numeric figure in Lakhs (e.g. "7" or "8" or "7.5"). NEVER output 700000 or full currency numbers!
 - EXPERIENCE:
-  - For years of experience (total or skill-specific like AWS, DevOps), output only the numeric years (e.g. "${yoe}").
-  - If options exist (e.g. ["6+", "Less than 6"]), choose the option matching the candidate.
+  - For years of experience (total or skill-specific like Kubernetes, AWS, DevOps, Python), output only the numeric years (e.g. "${yoe}").
+  - If options exist (e.g. ["6+", "Less than 6"] or ["1-3", "3-5"]), choose the option matching the candidate's experience.
+  - Never answer "0" or leave blank for a skill the candidate possesses; use the candidate's years of experience or skill experience.
 - NOTICE PERIOD:
   - If asking for days, output digits (e.g. "15" or "0"). Otherwise output "15 Days" or "Immediate".
 - QUALIFYING COMMITMENT & SHIFTS:

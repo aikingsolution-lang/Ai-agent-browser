@@ -201,6 +201,48 @@ describe('Naukri Questionnaire & Drawer Resolvers', () => {
       );
       expect(res.value).toBe('6+');
     });
+
+    it('correctly resolves "How many years of experience do you have in Kubernetes?" when skill is in candidate profile', () => {
+      const brainWithK8s: ICareerBrain = {
+        ...(baseCareerBrain as ICareerBrain),
+        skills: ['Kubernetes', 'Docker', 'AWS', 'Python'],
+        yearsOfExperience: 3,
+      };
+      // Text / Number input: returns candidate's years of experience
+      const resText = resolveNaukriQuestion(
+        'How many years of experience do you have in Kubernetes?',
+        'text',
+        [],
+        brainWithK8s,
+        'Type message here...',
+      );
+      expect(resText.value).toBe('3');
+      expect(resText.confidence).toBeGreaterThanOrEqual(0.9);
+
+      // Radio choice options (e.g. 1-3 vs 3-5 vs 5+)
+      const resRadio = resolveNaukriQuestion(
+        'How many years of experience do you have in Kubernetes?',
+        'radio',
+        ['0-1 Years', '1-3 Years', '3-5 Years', '5+ Years'],
+        brainWithK8s,
+      );
+      expect(resRadio.value).toBe('1-3 Years');
+
+      // Specific skillExperience override (e.g. 4 years in Kubernetes)
+      const brainWithK8sExp: ICareerBrain = {
+        ...brainWithK8s,
+        skillExperience: {
+          kubernetes: 4,
+        },
+      };
+      const resOverride = resolveNaukriQuestion(
+        'How many years of experience do you have in Kubernetes?',
+        'text',
+        [],
+        brainWithK8sExp,
+      );
+      expect(resOverride.value).toBe('4');
+    });
   });
 
   describe('Naukri Red Error Alert Selectors & Healing', () => {
