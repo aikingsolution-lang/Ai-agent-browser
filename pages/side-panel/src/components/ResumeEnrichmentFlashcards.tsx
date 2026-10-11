@@ -47,10 +47,10 @@ export const ResumeEnrichmentFlashcards: React.FC<ResumeEnrichmentFlashcardsProp
 
   // Flashcard steps:
   // Step 0: Welcome & Scan Overview
-  // Step 1: Personal & Date Calibration (Gender, DOB, Education)
+  // Step 1: Personal & Date Update (Gender, DOB, Education)
   // Step 2: Salary, Availability & Work Location (CTC, Notice Period, Cities, Relocation)
   // Step 3: Skill Experience Matrix (Years of experience in each project / internship skill)
-  // Step 4: Success & Calibration Complete
+  // Step 4: Success & Profile Update Complete
   const [currentStep, setCurrentStep] = useState<number>(0);
   const [isSaving, setIsSaving] = useState(false);
 
@@ -184,7 +184,7 @@ export const ResumeEnrichmentFlashcards: React.FC<ResumeEnrichmentFlashcardsProp
             </div>
             <div>
               <h3 className="font-semibold text-sm tracking-wide text-white flex items-center gap-1.5">
-                <span>AI Career Profile Calibration</span>
+                <span>AI Career Profile Quick Update</span>
               </h3>
               <p className="text-[11px] text-slate-400">Step {currentStep + 1} of 5 • Structured Onboarding</p>
             </div>
@@ -215,7 +215,7 @@ export const ResumeEnrichmentFlashcards: React.FC<ResumeEnrichmentFlashcardsProp
               <div className="space-y-1">
                 <h4 className="text-base font-bold text-white">Resume Analysis Complete</h4>
                 <p className="text-xs text-slate-400 max-w-sm mx-auto leading-relaxed">
-                  We scanned your resume and projects. Let’s calibrate your key personal profile fields and skill
+                  We scanned your resume and projects. Let’s update your key personal profile fields and skill
                   experience so recruiter screening popups on Naukri, LinkedIn and Indeed are filled without getting
                   stuck.
                 </p>
@@ -607,14 +607,14 @@ export const ResumeEnrichmentFlashcards: React.FC<ResumeEnrichmentFlashcardsProp
             </div>
           )}
 
-          {/* STEP 4: SUCCESS & CALIBRATION COMPLETE */}
+          {/* STEP 4: SUCCESS & PROFILE UPDATE COMPLETE */}
           {currentStep === 4 && (
             <div className="text-center py-6 space-y-4 animate-fade-in">
               <div className="mx-auto w-16 h-16 rounded-full bg-emerald-950 text-emerald-400 flex items-center justify-center border border-emerald-500/40">
                 <FiCheckCircle className="size-8" />
               </div>
               <div className="space-y-1">
-                <h4 className="text-base font-bold text-white">Career Brain Calibrated & Ready!</h4>
+                <h4 className="text-base font-bold text-white">Career Profile Updated & Ready!</h4>
                 <p className="text-xs text-slate-400 max-w-sm mx-auto leading-relaxed">
                   Your demographic details, salary expectations, and verified skill matrix are saved. Auto-apply agents
                   will now answer all screening questions with maximum precision.
@@ -643,7 +643,7 @@ export const ResumeEnrichmentFlashcards: React.FC<ResumeEnrichmentFlashcardsProp
               type="button"
               onClick={() => setCurrentStep(1)}
               className="ml-auto inline-flex items-center gap-1.5 px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-semibold shadow-lg shadow-blue-900/40 transition-all cursor-pointer">
-              <span>Start Calibration</span>
+              <span>Start Profile Update</span>
               <FiChevronRight className="size-3.5" />
             </button>
           )}

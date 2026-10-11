@@ -211,56 +211,71 @@ export const PremiumPlansModal: React.FC<PremiumPlansModalProps> = ({
 
           {/* Current Subscription & Credit Status Card */}
           <div
-            className={`mt-3 rounded-xl border p-3 ${
-              isDarkMode ? 'border-slate-800 bg-slate-800/60' : 'border-slate-200 bg-white'
+            className={`mt-3 rounded-xl border p-3.5 transition-colors ${
+              isDarkMode
+                ? 'border-indigo-900/60 bg-gradient-to-r from-slate-900 via-slate-850 to-indigo-950/40 text-slate-100 shadow-inner'
+                : 'border-indigo-100 bg-gradient-to-r from-slate-50 via-white to-indigo-50/50 text-slate-800 shadow-xs'
             }`}>
             <div className="flex items-center justify-between text-xs mb-1.5">
               <div className="flex items-center gap-1.5">
                 {currentSubscription?.status === 'ACTIVE' && currentSubscription?.planCodeSnapshot !== 'free-trial' ? (
                   <>
-                    <span className="size-2 rounded-full bg-emerald-500" />
-                    <span className="font-semibold text-slate-800 dark:text-slate-200">
+                    <span className="size-2 rounded-full bg-emerald-500 animate-pulse" />
+                    <span className={`font-bold ${isDarkMode ? 'text-emerald-300' : 'text-emerald-800'}`}>
                       {currentSubscription.planNameSnapshot || 'Pro Automation'} Plan Active
                     </span>
                   </>
                 ) : currentSubscription?.status === 'EXPIRED' ? (
                   <>
                     <span className="size-2 rounded-full bg-amber-500" />
-                    <span className="font-semibold text-amber-700 dark:text-amber-400">Subscription Expired</span>
+                    <span className={`font-bold ${isDarkMode ? 'text-amber-300' : 'text-amber-800'}`}>
+                      Subscription Expired
+                    </span>
                   </>
                 ) : (
                   <>
                     <span className="size-2 rounded-full bg-blue-500" />
-                    <span className="font-semibold text-slate-800 dark:text-slate-200">Free Trial Active</span>
+                    <span className={`font-bold ${isDarkMode ? 'text-slate-100' : 'text-slate-900'}`}>
+                      Free Trial Active
+                    </span>
                   </>
                 )}
               </div>
 
               {/* Credits text */}
-              <span className="font-semibold text-slate-700 dark:text-slate-300">
+              <span className={`font-extrabold ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>
                 {remaining.toLocaleString()}{' '}
-                <span className="font-normal text-slate-400">/ {allocated.toLocaleString()} Credits</span>
+                <span className={`font-normal ${isDarkMode ? 'text-slate-400' : 'text-slate-500'}`}>
+                  / {allocated.toLocaleString()} Credits
+                </span>
               </span>
             </div>
 
             {/* Progress bar */}
-            <div className="w-full h-1.5 rounded-full bg-slate-200 dark:bg-slate-700 overflow-hidden">
+            <div className={`w-full h-2 rounded-full overflow-hidden ${isDarkMode ? 'bg-slate-800' : 'bg-slate-200'}`}>
               <div
                 className={`h-full transition-all duration-500 rounded-full ${
-                  creditPercent < 20 ? 'bg-amber-500' : 'bg-blue-600'
+                  creditPercent < 20
+                    ? 'bg-amber-500'
+                    : isDarkMode
+                      ? 'bg-gradient-to-r from-blue-500 to-indigo-500'
+                      : 'bg-gradient-to-r from-blue-600 to-indigo-600'
                 }`}
                 style={{ width: `${Math.max(creditPercent, 3)}%` }}
               />
             </div>
 
             {/* Validity / Help subtext */}
-            <div className="mt-1.5 flex items-center justify-between text-[11px] text-slate-500 dark:text-slate-400">
+            <div
+              className={`mt-1.5 flex items-center justify-between text-[11px] ${
+                isDarkMode ? 'text-slate-300' : 'text-slate-600'
+              }`}>
               <span>
                 {currentSubscription?.currentPeriodEnd
                   ? `Renews: ${new Date(currentSubscription.currentPeriodEnd).toLocaleDateString()}`
                   : '50-100 free trial credits allocated'}
               </span>
-              <span className="flex items-center gap-1">
+              <span className="flex items-center gap-1 font-medium">
                 <FiZap className="size-3 text-indigo-500" />
                 <span>1 credit = 1 automated step</span>
               </span>
@@ -269,27 +284,43 @@ export const PremiumPlansModal: React.FC<PremiumPlansModalProps> = ({
 
           {/* Billing Switcher (Monthly / Annual) */}
           <div className="mt-3 flex items-center justify-center">
-            <div className="inline-flex items-center p-0.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-100 dark:bg-slate-800">
+            <div
+              className={`inline-flex items-center p-1 rounded-xl border ${
+                isDarkMode ? 'border-slate-800 bg-slate-900' : 'border-slate-200 bg-slate-100'
+              }`}>
               <button
                 type="button"
                 onClick={() => setBillingInterval('monthly')}
-                className={`px-3 py-1 text-xs font-semibold rounded-md transition-all cursor-pointer ${
+                className={`px-3.5 py-1 text-xs font-semibold rounded-lg transition-all cursor-pointer ${
                   billingInterval === 'monthly'
-                    ? 'bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100 shadow-xs'
-                    : 'text-slate-500 dark:text-slate-400 hover:text-slate-900'
+                    ? isDarkMode
+                      ? 'bg-slate-800 text-white shadow-xs'
+                      : 'bg-white text-slate-900 shadow-xs'
+                    : isDarkMode
+                      ? 'text-slate-400 hover:text-white'
+                      : 'text-slate-600 hover:text-slate-900'
                 }`}>
                 Monthly
               </button>
               <button
                 type="button"
                 onClick={() => setBillingInterval('yearly')}
-                className={`px-3 py-1 text-xs font-semibold rounded-md transition-all cursor-pointer flex items-center gap-1 ${
+                className={`px-3.5 py-1 text-xs font-semibold rounded-lg transition-all cursor-pointer flex items-center gap-1.5 ${
                   billingInterval === 'yearly'
-                    ? 'bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100 shadow-xs'
-                    : 'text-slate-500 dark:text-slate-400 hover:text-slate-900'
+                    ? isDarkMode
+                      ? 'bg-slate-800 text-white shadow-xs'
+                      : 'bg-white text-slate-900 shadow-xs'
+                    : isDarkMode
+                      ? 'text-slate-400 hover:text-white'
+                      : 'text-slate-600 hover:text-slate-900'
                 }`}>
                 <span>Annual</span>
-                <span className="text-[10px] font-bold text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/40 px-1.5 py-0.2 rounded-full border border-emerald-200 dark:border-emerald-800">
+                <span
+                  className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full border ${
+                    isDarkMode
+                      ? 'text-emerald-300 bg-emerald-950/60 border-emerald-800'
+                      : 'text-emerald-800 bg-emerald-100 border-emerald-300'
+                  }`}>
                   Save 20%
                 </span>
               </button>
@@ -326,33 +357,33 @@ export const PremiumPlansModal: React.FC<PremiumPlansModalProps> = ({
                 className={`relative rounded-xl border p-4 transition-all cursor-pointer ${
                   isCurrentActivePlan
                     ? isDarkMode
-                      ? 'border-emerald-600/70 bg-emerald-950/20'
-                      : 'border-emerald-500 bg-emerald-50/40'
+                      ? 'border-emerald-500/80 bg-emerald-950/25 ring-1 ring-emerald-500/40 shadow-md shadow-emerald-950/30'
+                      : 'border-emerald-500 bg-emerald-50/80 ring-1 ring-emerald-400/60 shadow-xs'
                     : isSelected
                       ? plan.recommended
                         ? isDarkMode
-                          ? 'border-blue-500 bg-blue-950/20 shadow-xs'
-                          : 'border-blue-600 bg-blue-50/30 shadow-xs'
+                          ? 'border-blue-500 bg-gradient-to-b from-blue-950/40 to-slate-900 ring-1 ring-blue-500/50 shadow-md shadow-blue-950/40'
+                          : 'border-blue-600 bg-gradient-to-b from-blue-50/70 to-white ring-1 ring-blue-500 shadow-sm'
                         : isDarkMode
-                          ? 'border-slate-700 bg-slate-800/80 shadow-xs'
-                          : 'border-slate-400 bg-slate-50/50 shadow-xs'
+                          ? 'border-slate-600 bg-slate-800/90 ring-1 ring-slate-600 shadow-sm'
+                          : 'border-slate-400 bg-slate-50/80 ring-1 ring-slate-400 shadow-xs'
                       : isDarkMode
-                        ? 'border-slate-800 bg-slate-900 hover:border-slate-700'
-                        : 'border-slate-200 bg-white hover:border-slate-300'
+                        ? 'border-slate-800 bg-slate-900/80 hover:border-slate-700 hover:bg-slate-850'
+                        : 'border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50/50'
                 }`}>
                 {/* Plan Badge Pill */}
                 {isCurrentActivePlan ? (
-                  <span className="absolute -top-2.5 right-4 rounded-full bg-emerald-600 px-2.5 py-0.5 text-[10px] font-semibold text-white shadow-xs flex items-center gap-1">
+                  <span className="absolute -top-2.5 right-4 rounded-full bg-emerald-600 px-2.5 py-0.5 text-[10px] font-bold text-white shadow-sm flex items-center gap-1 border border-emerald-400/30">
                     <FiCheck className="size-3" /> Current Plan
                   </span>
                 ) : plan.badge ? (
                   <span
-                    className={`absolute -top-2.5 right-4 rounded-full px-2.5 py-0.5 text-[10px] font-semibold shadow-xs ${
+                    className={`absolute -top-2.5 right-4 rounded-full px-2.5 py-0.5 text-[10px] font-bold shadow-sm ${
                       plan.recommended
-                        ? 'bg-blue-600 text-white'
+                        ? 'bg-blue-600 text-white border border-blue-400/30'
                         : isDarkMode
-                          ? 'bg-slate-700 text-slate-200'
-                          : 'bg-slate-800 text-white'
+                          ? 'bg-slate-700 text-slate-100 border border-slate-600'
+                          : 'bg-slate-800 text-white border border-slate-700'
                     }`}>
                     {plan.badge}
                   </span>
@@ -361,40 +392,66 @@ export const PremiumPlansModal: React.FC<PremiumPlansModalProps> = ({
                 {/* Plan Header */}
                 <div className="flex items-start justify-between">
                   <div>
-                    <h3 className="font-semibold text-sm text-slate-900 dark:text-slate-100 flex items-center gap-2">
+                    <h3
+                      className={`font-bold text-sm flex items-center gap-2 ${
+                        isDarkMode ? 'text-white' : 'text-slate-900'
+                      }`}>
                       <span>{plan.name}</span>
                     </h3>
-                    <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">{plan.tagline}</p>
+                    <p className={`text-xs mt-0.5 ${isDarkMode ? 'text-slate-400' : 'text-slate-600'}`}>
+                      {plan.tagline}
+                    </p>
                   </div>
 
                   <div className="text-right">
                     <div className="flex items-baseline justify-end gap-1">
-                      <span className="text-lg font-bold text-slate-900 dark:text-slate-100">{price}</span>
-                      <span className="text-xs text-slate-500 dark:text-slate-400">/ mo</span>
+                      <span className={`text-lg font-extrabold ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>
+                        {price}
+                      </span>
+                      <span className={`text-xs ${isDarkMode ? 'text-slate-400' : 'text-slate-500'}`}>/ mo</span>
                     </div>
                     {billingInterval === 'yearly' && (
-                      <span className="text-[10px] text-slate-400 block">Billed annually</span>
+                      <span className={`text-[10px] block ${isDarkMode ? 'text-slate-400' : 'text-slate-500'}`}>
+                        Billed annually
+                      </span>
                     )}
                   </div>
                 </div>
 
                 {/* Credits & Limits Spec Pills */}
                 <div className="mt-2.5 flex items-center gap-2 text-xs">
-                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md border border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 font-medium">
+                  <span
+                    className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md border font-semibold ${
+                      isDarkMode
+                        ? 'border-slate-750 bg-slate-800/90 text-slate-200'
+                        : 'border-slate-200 bg-slate-100 text-slate-800'
+                    }`}>
                     <FiZap className="size-3 text-indigo-500" />
                     <span>{plan.credits} Credits / mo</span>
                   </span>
-                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md border border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 font-medium">
-                    <FiClock className="size-3 text-slate-400" />
+                  <span
+                    className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md border font-semibold ${
+                      isDarkMode
+                        ? 'border-slate-750 bg-slate-800/90 text-slate-300'
+                        : 'border-slate-200 bg-slate-100 text-slate-700'
+                    }`}>
+                    <FiClock className={`size-3 ${isDarkMode ? 'text-slate-400' : 'text-slate-500'}`} />
                     <span>{plan.rateLimit}</span>
                   </span>
                 </div>
 
                 {/* Features List */}
-                <div className="mt-3 space-y-1.5 border-t border-slate-100 dark:border-slate-800/80 pt-2.5">
+                <div
+                  className={`mt-3 space-y-1.5 border-t pt-2.5 ${
+                    isDarkMode ? 'border-slate-800/80' : 'border-slate-100'
+                  }`}>
                   {plan.features.map((feat, idx) => (
-                    <div key={idx} className="flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300">
-                      <FiCheck className="size-3.5 text-emerald-600 dark:text-emerald-500 shrink-0" />
+                    <div
+                      key={idx}
+                      className={`flex items-center gap-2 text-xs ${
+                        isDarkMode ? 'text-slate-200' : 'text-slate-700 font-medium'
+                      }`}>
+                      <FiCheck className="size-3.5 text-emerald-500 shrink-0" />
                       <span>{feat}</span>
                     </div>
                   ))}
@@ -403,7 +460,12 @@ export const PremiumPlansModal: React.FC<PremiumPlansModalProps> = ({
                 {/* Primary / Secondary CTA Button */}
                 <div className="mt-3.5">
                   {isCurrentActivePlan ? (
-                    <div className="w-full flex items-center justify-center gap-1.5 rounded-lg py-2 px-3 text-xs font-semibold text-emerald-700 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800 cursor-default">
+                    <div
+                      className={`w-full flex items-center justify-center gap-1.5 rounded-lg py-2 px-3 text-xs font-bold border cursor-default ${
+                        isDarkMode
+                          ? 'text-emerald-300 bg-emerald-950/50 border-emerald-800/80'
+                          : 'text-emerald-800 bg-emerald-100 border-emerald-300'
+                      }`}>
                       <FiCheckCircle className="size-3.5" />
                       <span>Active Subscription</span>
                     </div>
@@ -415,12 +477,12 @@ export const PremiumPlansModal: React.FC<PremiumPlansModalProps> = ({
                         handleCheckout(plan.code);
                       }}
                       disabled={loadingPlanCode === plan.code}
-                      className={`w-full flex items-center justify-center gap-2 rounded-lg py-2 px-4 text-xs font-semibold transition-all cursor-pointer ${
+                      className={`w-full flex items-center justify-center gap-2 rounded-lg py-2 px-4 text-xs font-bold transition-all cursor-pointer ${
                         plan.recommended
-                          ? 'bg-blue-600 hover:bg-blue-700 text-white shadow-xs active:scale-[0.99]'
+                          ? 'bg-blue-600 hover:bg-blue-500 text-white shadow-sm active:scale-[0.99]'
                           : isDarkMode
-                            ? 'bg-slate-800 hover:bg-slate-700 text-slate-100 border border-slate-700'
-                            : 'bg-white hover:bg-slate-50 text-slate-800 border border-slate-300 shadow-xs'
+                            ? 'bg-slate-800 hover:bg-slate-700 text-white border border-slate-700'
+                            : 'bg-white hover:bg-slate-50 text-slate-900 border border-slate-300 shadow-xs'
                       } disabled:opacity-50`}>
                       {loadingPlanCode === plan.code ? (
                         <>

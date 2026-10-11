@@ -599,12 +599,16 @@ export function LinkedInApplyDashboard({
 
             {/* Plan Quota & Subscription Enforced Cap */}
             <div
-              className={`p-2 rounded-lg border text-[11px] flex items-center justify-between ${
-                isDarkMode ? 'border-sky-900/60 bg-slate-900/80' : 'border-sky-100 bg-sky-50/60'
+              className={`p-2.5 rounded-lg border text-[11px] flex items-center justify-between transition-colors ${
+                isDarkMode
+                  ? 'border-indigo-900/60 bg-gradient-to-r from-slate-900 to-indigo-950/40 text-slate-100 shadow-inner'
+                  : 'border-indigo-100 bg-gradient-to-r from-slate-50 to-indigo-50/60 text-slate-800 shadow-xs'
               }`}>
               <div>
-                <span className="font-semibold block text-[10px] opacity-80">Subscription Daily Quota</span>
-                <span className="text-[10px] text-sky-400 font-bold">
+                <span className={`font-semibold block text-[10px] ${isDarkMode ? 'text-slate-300' : 'text-slate-600'}`}>
+                  Subscription Daily Quota
+                </span>
+                <span className={`text-[10px] font-bold ${isDarkMode ? 'text-sky-300' : 'text-sky-700'}`}>
                   {planDetails?.planDisplayName || 'Free Trial'}: {planDetails?.maxDailyApplications ?? 15} jobs / day
                 </span>
               </div>
@@ -612,7 +616,11 @@ export function LinkedInApplyDashboard({
                 <button
                   type="button"
                   onClick={onOpenPlansModal}
-                  className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/20 text-amber-400 border border-amber-500/40 hover:bg-amber-500/30 transition-colors cursor-pointer">
+                  className={`px-2.5 py-1 rounded-md text-[10px] font-bold border transition-all cursor-pointer ${
+                    isDarkMode
+                      ? 'bg-amber-500/20 text-amber-300 border-amber-500/40 hover:bg-amber-500/30'
+                      : 'bg-amber-100 text-amber-900 border-amber-300 hover:bg-amber-200 shadow-2xs'
+                  }`}>
                   Upgrade (up to 75/day)
                 </button>
               )}
