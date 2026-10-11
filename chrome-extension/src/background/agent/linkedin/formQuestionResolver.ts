@@ -1052,11 +1052,26 @@ export function adaptAnswerToFieldFormat(
     }
   }
 
-  // 3. Work Experience / Years Questions
+  // 3. Work Experience / Years Questions & Skill Experience answers with "years" / "yrs"
   const isExpQuestion =
     /how many years|years? of|experi[ea]nce with|years? with|total\s*(?:year|years)?|overall\s*experi[ea]nce|experi[ea]nce/i.test(
       labelLower,
-    );
+    ) || /years?\s*of|experience/i.test(hintLower);
+
+  const yearsUnitMatch = answer.match(/^(\d+(?:\.\d+)?)\s*(?:years?|yrs?)$/i);
+  if (yearsUnitMatch) {
+    const rawNum = yearsUnitMatch[1];
+    const requiresWhole = /whole\s*number/i.test(combinedContext);
+    const num = parseFloat(rawNum);
+    const finalVal = requiresWhole ? String(Math.round(num)) : rawNum;
+    return {
+      valid: true,
+      value: finalVal,
+      wasConverted: true,
+      sourceNote: `[MATCHED] stripped text unit '${answer}' -> ${finalVal}`,
+    };
+  }
+
   if (isExpQuestion) {
     const expMatch = answer.match(/(\d+(?:\.\d+)?)/);
     if (expMatch) {
@@ -1081,6 +1096,11 @@ export function adaptAnswerToFieldFormat(
   if (isNumericField) {
     const cleanDigits = answer.replace(/[,\s]/g, '');
     if (!/^-?\d+(?:\.\d+)?$/.test(cleanDigits)) {
+      // Try extracting digits or decimal number if present (e.g. "1 year" -> "1", "1.5 yrs" -> "1.5")
+      const numExtract = answer.match(/(\d+(?:\.\d+)?)/);
+      if (numExtract) {
+        return { valid: true, value: numExtract[1], wasConverted: true };
+      }
       logger.warning(
         `[FormQuestionResolver] Answer "${answer}" contains non-numeric characters for numeric field "${field.label}". Rejecting to prevent DOM validation error.`,
       );
@@ -2588,10 +2608,11 @@ DECISION RULES:
    - "Are you legally authorized to work?": "Yes".
    - "Will you now or in the future require visa sponsorship?": Match candidate background (${workAuth.toLowerCase().includes('requires sponsorship') ? '"Yes"' : '"No"'}).
 3. NUMERIC EXPERIENCE & SKILL ACCURACY:
+   - For skill or numeric questions (e.g. "SQL *", "Python *", "Years of experience"), output BARE NUMBERS/DIGITS ONLY (e.g. "1", "2", "1.5", "0"). NEVER append words like "years", "yrs", or text!
    - If asked for total professional experience, return "${yoe}".
-   - If asked for years of experience with a SPECIFIC technology, tool, language, or domain (e.g. "MERN Stack", "AI", "DevOps", "Python", "Kubernetes", "AWS"):
+   - If asked for years of experience with a SPECIFIC technology, tool, language, or domain (e.g. "SQL", "MERN Stack", "AI", "DevOps", "Python", "Kubernetes", "AWS"):
      Examine the Candidate Background, Resume, Work History, and Skill Experience above:
-     a) If the candidate actually has verified experience with this skill in their resume or profile, provide the actual/calibrated years (<= ${yoe}).
+     a) If the candidate actually has verified experience with this skill in their resume or profile, provide the actual/calibrated years as bare digits (<= ${yoe}). If the question or field validation requires a decimal number larger than 0.0, output a decimal or whole number >= 1 (e.g. "1" or "1.0").
      b) IF THE CANDIDATE DOES NOT HAVE THIS SKILL or it is not mentioned anywhere in their resume/profile:
         YOU MUST RETURN "0" (for numeric fields) or "0" / lowest bracket / "No" (for options)!
         CRITICAL: NEVER claim ${yoe} or invent years for a skill the candidate never worked with!
@@ -2715,6 +2736,138 @@ OUTPUT STRICTLY VALID JSON ONLY:
   }
 
   return { success: false, reason: 'LLM failed to produce valid answer' };
+}
+
+/**
+ * Dedicated Validation Healer:
+ * Sends the field label, the currently filled invalid value, and the RED ALERT error message to the LLM
+ * to calculate the exact corrected valid value (e.g. converting "1 years" -> "1" or "1.0" for decimal questions).
+ */
+export async function solveValidationErrorWithLLM(
+  field: {
+    id?: string;
+    label: string;
+    currentValue?: string;
+    errorText?: string;
+    fieldType?: string;
+    min?: number;
+    max?: number;
+    placeholder?: string;
+    hintText?: string;
+    options?: string[];
+  },
+  careerBrain: ICareerBrain,
+  llm?: BaseChatModel,
+): Promise<{ success: boolean; answer?: string; reason?: string }> {
+  let activeLLM = llm;
+  if (!activeLLM) {
+    try {
+      activeLLM = (await getActiveChatModel()) ?? undefined;
+    } catch (err) {
+      logger.warning('[FormQuestionResolver] Failed to get active chat model for validation healing:', err);
+    }
+  }
+  if (!activeLLM) {
+    return { success: false, reason: 'No active LLM available' };
+  }
+
+  const cleanLabel = cleanLinkedInText(field.label || 'Form Field');
+  const errorMsg = (field.errorText || 'Enter a valid value').trim();
+  const currentVal = (field.currentValue || '').trim();
+  const yoe = careerBrain.yearsOfExperience ?? 1;
+
+  const prompt = `You are an expert autonomous job application AI debugger.
+A form field in a job application was filled with an invalid value and LinkedIn / the employer portal rejected it with a RED VALIDATION ERROR.
+Your task is to analyze the error message, the rejected value, and candidate profile, and provide the EXACT corrected value that will pass validation and allow submission.
+
+FORM FIELD DETAILS:
+- Field Question / Label: "${cleanLabel}"
+- Currently Filled (REJECTED) Value: "${currentVal || '(empty)'}"
+- RED ALERT VALIDATION ERROR: "${errorMsg}"
+- Field Type: ${field.fieldType || 'text/number'}
+- Hint / Placeholder: ${field.hintText || field.placeholder || 'None'}
+- Options (if any): ${field.options && field.options.length > 0 ? JSON.stringify(field.options) : 'None'}
+
+CANDIDATE BACKGROUND:
+- Total Experience: ${yoe} years
+- Calibrated Skill Experience: ${JSON.stringify(careerBrain.skillExperience || {})}
+- Core Skills: ${(careerBrain.skills || []).slice(0, 15).join(', ')}
+
+CORRECTION INSTRUCTIONS:
+1. DECIMAL / NUMERIC VALIDATION ERRORS (e.g. "Enter a decimal number larger than 0.0", "Enter a whole number", "Please enter a number"):
+   - The field MUST contain numbers only! NEVER return words like "years", "yrs", "days", etc.
+   - If the error states "larger than 0.0" or "greater than 0" and the previous value was "0" or contained words like "1 years":
+     Extract the positive number (e.g. "1" or "1.0") or provide a valid qualifying decimal/number >= 1 (e.g. "1" or "1.0").
+   - Strip ALL alphabetic characters, units, and punctuation (e.g. "1 years" -> "1").
+2. TEXT / REQUIRED FIELD ERRORS:
+   - If the field is empty or missing, provide a truthful, direct answer grounded in the candidate's profile.
+3. DROPDOWN / RADIO SELECTION ERRORS:
+   - Pick the single valid option from the options list that resolves the error.
+
+OUTPUT STRICTLY VALID JSON ONLY:
+{
+  "answer": "the exact corrected string to fill into the DOM",
+  "reason": "explanation of how the red alert validation error was resolved"
+}`;
+
+  try {
+    const res = await activeLLM.invoke([
+      new SystemMessage('You are a job application form validation debugger. Output valid JSON only.'),
+      new HumanMessage(prompt),
+    ]);
+
+    const content = typeof res.content === 'string' ? res.content : JSON.stringify(res.content);
+    const clean = content.replace(/```json\s*|```\s*/gi, '').trim();
+    const match = clean.match(/\{[\s\S]*\}/);
+    if (match) {
+      const parsed = JSON.parse(match[0]);
+      if (parsed.answer !== undefined && parsed.answer !== null && String(parsed.answer).trim() !== '') {
+        let ans = String(parsed.answer).trim();
+
+        // Extra guard: If error is decimal or number, strip any lingering letters
+        if (/decimal|number|larger than|greater than/i.test(errorMsg)) {
+          const numMatch = ans.match(/(\d+(?:\.\d+)?)/);
+          if (numMatch) {
+            ans = numMatch[1];
+            if ((errorMsg.includes('larger than 0') || errorMsg.includes('greater than 0')) && Number(ans) <= 0) {
+              ans = '1';
+            }
+          }
+        }
+
+        logger.info(
+          `[FormQuestionResolver] [VALIDATION HEALED BY LLM] Field "${cleanLabel}" (prev: "${currentVal}", error: "${errorMsg}") -> "${ans}" (${parsed.reason || 'Healed'})`,
+        );
+
+        // Auto-save healed answer to golden answers
+        if (!isGenericWorkExperienceDateField(cleanLabel) && !isSocialMediaOrUrlQuestion(cleanLabel)) {
+          await careerBrainStore.saveGoldenAnswer(cleanLabel, ans, 'Screening').catch(() => {});
+          if (!careerBrain.goldenAnswers) careerBrain.goldenAnswers = [];
+          careerBrain.goldenAnswers.push({
+            id: `ga_${Date.now()}`,
+            question: cleanLabel,
+            answer: ans,
+            category: 'Screening',
+          });
+        }
+
+        recordLlmSuccess();
+        return {
+          success: true,
+          answer: ans,
+          reason: parsed.reason || 'LLM corrected red alert validation error',
+        };
+      }
+    }
+  } catch (err) {
+    if (isNetworkError(err)) {
+      recordLlmNetworkFailure(err);
+    } else {
+      logger.warning(`[FormQuestionResolver] Error in solveValidationErrorWithLLM for "${cleanLabel}":`, err);
+    }
+  }
+
+  return { success: false, reason: 'LLM failed to heal validation error' };
 }
 
 /**

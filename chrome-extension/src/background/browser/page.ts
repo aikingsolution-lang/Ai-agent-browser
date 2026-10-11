@@ -2562,10 +2562,23 @@ export default class Page {
       max?: number;
       placeholder?: string;
       hintText?: string;
+      currentValue?: string;
+      errorText?: string;
+    }>;
+    invalidFieldsWithErrors: Array<{
+      id?: string;
+      label: string;
+      currentValue: string;
+      errorText: string;
+      fieldType: 'text' | 'number' | 'radio' | 'dropdown' | 'checkbox';
+      min?: number;
+      max?: number;
+      placeholder?: string;
+      hintText?: string;
     }>;
   }> {
     if (!this._puppeteerPage) {
-      return { hasErrors: false, errors: [], emptyRequiredFields: [] };
+      return { hasErrors: false, errors: [], emptyRequiredFields: [], invalidFieldsWithErrors: [] };
     }
 
     return this._puppeteerPage
@@ -2699,10 +2712,28 @@ export default class Page {
           max?: number;
           placeholder?: string;
           hintText?: string;
+          currentValue?: string;
+          errorText?: string;
+        }> = [];
+        const invalidFieldsWithErrors: Array<{
+          id?: string;
+          label: string;
+          currentValue: string;
+          errorText: string;
+          fieldType: 'text' | 'number' | 'radio' | 'dropdown' | 'checkbox';
+          min?: number;
+          max?: number;
+          placeholder?: string;
+          hintText?: string;
         }> = [];
 
+        const errorRegex =
+          /decimal|whole\s*number|between\s*\d+|larger\s*than|greater\s*than|more\s*than|number|valid|required|please\s*enter|please\s*make|select\s*an\s*option|choose|failed|must\s*be/i;
+
         // 1. Check elements with aria-invalid="true"
-        const invalidEls = Array.from(modal.querySelectorAll('[aria-invalid="true"]')) as HTMLElement[];
+        const invalidEls = Array.from(
+          modal.querySelectorAll('[aria-invalid="true"], .artdeco-text-input--error input'),
+        ) as HTMLElement[];
         for (const el of invalidEls) {
           let label = '';
           const id = el.getAttribute('id');
@@ -2711,9 +2742,11 @@ export default class Page {
             if (lbl) label = cleanElementText(lbl);
           }
           if (!label) {
-            const closestFieldset = el.closest('fieldset');
-            if (closestFieldset) {
-              const legend = closestFieldset.querySelector('legend');
+            const closestContainer = el.closest(
+              '.fb-dash-form-element, .jobs-easy-apply-form-element, fieldset, div[data-test-form-element]',
+            );
+            if (closestContainer) {
+              const legend = closestContainer.querySelector('legend, label');
               if (legend) label = cleanElementText(legend);
             }
           }
@@ -2724,19 +2757,36 @@ export default class Page {
           let errorMsg = '';
           const describedBy = el.getAttribute('aria-describedby');
           if (describedBy) {
-            const descEl = modal.querySelector(`#${describedBy}`);
-            if (descEl) errorMsg = (descEl.textContent || '').trim();
+            const ids = describedBy.split(/\s+/);
+            for (const did of ids) {
+              if (!did) continue;
+              try {
+                const descEl = modal.querySelector(`[id="${CSS.escape(did)}"]`) || document.getElementById(did);
+                if (descEl) {
+                  const t = cleanElementText(descEl);
+                  if (t) {
+                    errorMsg = t;
+                    break;
+                  }
+                }
+              } catch {}
+            }
           }
           if (!errorMsg) {
-            const parent = el.parentElement;
-            const feedback = parent?.querySelector?.(
-              '.artdeco-inline-feedback--error, [class*="error"], [id*="error"]',
+            const container =
+              el.closest(
+                '.fb-dash-form-element, .jobs-easy-apply-form-element, fieldset, div[data-test-form-element]',
+              ) ||
+              el.parentElement?.parentElement ||
+              el.parentElement;
+            const feedback = container?.querySelector?.(
+              '.artdeco-inline-feedback, .artdeco-inline-feedback--error, .artdeco-inline-feedback__message, .inline-feedback, [class*="error" i], [role="alert"]',
             );
-            if (feedback) errorMsg = (feedback.textContent || '').trim();
+            if (feedback) errorMsg = cleanElementText(feedback);
           }
           errors.push({ fieldLabel: label || 'Form Field', errorText: errorMsg || 'Field is invalid' });
 
-          // Include invalid element in emptyRequiredFields so the runner re-resolves it with correct format
+          // Include invalid element in emptyRequiredFields and invalidFieldsWithErrors so runner re-resolves it
           if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement) {
             const isSelect = el.tagName.toLowerCase() === 'select';
             const placeholder = el.getAttribute('placeholder') || '';
@@ -2745,14 +2795,114 @@ export default class Page {
             const isNumeric =
               (el as HTMLInputElement).type === 'number' ||
               el.inputMode === 'numeric' ||
-              /number|between|larger than|greater than/i.test(errorMsg);
+              el.inputMode === 'decimal' ||
+              /decimal|number|between|larger than|greater than/i.test(errorMsg);
             const isCheckbox = (el as HTMLInputElement).type === 'checkbox';
             const isRadio = (el as HTMLInputElement).type === 'radio';
 
-            emptyRequiredFields.push({
+            const fieldType: 'text' | 'number' | 'radio' | 'dropdown' | 'checkbox' = isSelect
+              ? 'dropdown'
+              : isCheckbox
+                ? 'checkbox'
+                : isRadio
+                  ? 'radio'
+                  : isNumeric
+                    ? 'number'
+                    : 'text';
+
+            const curVal = (el.value || '').trim();
+            const minVal = /larger\s*than\s*0(?:\.0)?|greater\s*than\s*0(?:\.0)?/i.test(errorMsg)
+              ? 1
+              : rawMin !== null && !isNaN(Number(rawMin))
+                ? Number(rawMin)
+                : undefined;
+
+            const invalidDesc = {
               id: el.id || undefined,
               label: label || 'Form Field',
-              fieldType: isSelect
+              currentValue: curVal,
+              errorText: errorMsg || 'Invalid field',
+              fieldType,
+              options: isSelect
+                ? Array.from((el as HTMLSelectElement).options)
+                    .map(o => cleanDuplicateString(o.text.trim()))
+                    .filter(t => !/select an option/i.test(t))
+                : undefined,
+              min: minVal,
+              max: rawMax !== null && !isNaN(Number(rawMax)) ? Number(rawMax) : undefined,
+              placeholder: placeholder || undefined,
+              hintText: errorMsg || undefined,
+            };
+
+            if (!invalidFieldsWithErrors.some(e => e.label === invalidDesc.label)) {
+              invalidFieldsWithErrors.push(invalidDesc);
+            }
+            if (!emptyRequiredFields.some(e => e.label === invalidDesc.label)) {
+              emptyRequiredFields.push(invalidDesc);
+            }
+          }
+        }
+
+        // 2. Check inline error feedback elements & red alerts
+        const errorEls = Array.from(
+          modal.querySelectorAll(
+            '.artdeco-inline-feedback, .artdeco-inline-feedback--error, .artdeco-inline-feedback__message, .inline-feedback, .inline-feedback--error, [class*="inline-feedback" i], p[id*="error" i], span[id*="error" i], [class*="error-message" i], [data-test-form-element-error-message], [data-test-form-builder-error], [role="alert"]',
+          ),
+        ) as HTMLElement[];
+
+        for (const errEl of errorEls) {
+          const txt = cleanElementText(errEl);
+          if (!txt || txt.length < 3) continue;
+          if (
+            errorRegex.test(txt) ||
+            errEl.classList.contains('artdeco-inline-feedback--error') ||
+            errEl.closest('.artdeco-inline-feedback--error')
+          ) {
+            let label = '';
+            const container =
+              errEl.closest(
+                'div.fb-dash-form-element, div.jobs-easy-apply-form-element, fieldset, div[data-test-form-element], .jobs-easy-apply-form-section__grouping',
+              ) ||
+              errEl.parentElement?.parentElement ||
+              errEl.parentElement;
+
+            const inputEl = container
+              ? (container.querySelector('input, select, textarea') as
+                  | HTMLInputElement
+                  | HTMLSelectElement
+                  | HTMLTextAreaElement
+                  | null)
+              : null;
+
+            if (container) {
+              const lbl = container.querySelector('label, legend');
+              if (lbl) label = cleanElementText(lbl);
+            }
+            if (!label && inputEl) {
+              const id = inputEl.getAttribute('id');
+              if (id) {
+                const lbl = modal.querySelector(`label[for="${id}"]`);
+                if (lbl) label = cleanElementText(lbl);
+              }
+              if (!label) label = cleanDuplicateString(inputEl.getAttribute('aria-label') || '');
+            }
+
+            if (!errors.some(e => e.errorText === txt)) {
+              errors.push({ fieldLabel: label || 'Field', errorText: txt });
+            }
+
+            if (inputEl) {
+              const curVal = (inputEl.value || '').trim();
+              const isSelect = inputEl.tagName.toLowerCase() === 'select';
+              const isNumeric =
+                (inputEl as HTMLInputElement).type === 'number' ||
+                inputEl.inputMode === 'numeric' ||
+                inputEl.inputMode === 'decimal' ||
+                /decimal|number|larger than|greater than/i.test(txt);
+              const isCheckbox = (inputEl as HTMLInputElement).type === 'checkbox';
+              const isRadio = (inputEl as HTMLInputElement).type === 'radio';
+
+              const fieldType: 'text' | 'number' | 'radio' | 'dropdown' | 'checkbox' = isSelect
                 ? 'dropdown'
                 : isCheckbox
                   ? 'checkbox'
@@ -2760,50 +2910,32 @@ export default class Page {
                     ? 'radio'
                     : isNumeric
                       ? 'number'
-                      : 'text',
-              options: isSelect
-                ? Array.from((el as HTMLSelectElement).options)
-                    .map(o => cleanDuplicateString(o.text.trim()))
-                    .filter(t => !/select an option/i.test(t))
-                : undefined,
-              min:
-                rawMin !== null && !isNaN(Number(rawMin))
+                      : 'text';
+
+              const rawMin = inputEl.getAttribute('min');
+              const minVal = /larger\s*than\s*0(?:\.0)?|greater\s*than\s*0(?:\.0)?/i.test(txt)
+                ? 1
+                : rawMin !== null && !isNaN(Number(rawMin))
                   ? Number(rawMin)
-                  : /larger than 0|greater than 0/i.test(errorMsg)
-                    ? 1
-                    : undefined,
-              max: rawMax !== null && !isNaN(Number(rawMax)) ? Number(rawMax) : undefined,
-              placeholder: placeholder || undefined,
-              hintText: errorMsg || undefined,
-            });
-          }
-        }
+                  : undefined;
 
-        // 2. Check inline error feedback elements
-        const errorEls = Array.from(
-          modal.querySelectorAll(
-            '.artdeco-inline-feedback--error, .inline-feedback--error, [class*="inline-feedback--error"], p[id*="error"], [role="alert"]',
-          ),
-        ) as HTMLElement[];
+              const errDesc = {
+                id: inputEl.id || undefined,
+                label: label || 'Form Field',
+                currentValue: curVal,
+                errorText: txt,
+                fieldType,
+                min: minVal,
+                placeholder: inputEl.getAttribute('placeholder') || undefined,
+                hintText: txt,
+              };
 
-        const errorRegex =
-          /enter a whole number|between 0 and 99|please make a selection|please enter|required|enter a valid|select an option/i;
-
-        for (const errEl of errorEls) {
-          const txt = (errEl.textContent || '').trim();
-          if (!txt) continue;
-          if (errorRegex.test(txt) || errEl.classList.contains('artdeco-inline-feedback--error')) {
-            let label = '';
-            const container =
-              errEl.closest(
-                'div.fb-dash-form-element, div.jobs-easy-apply-form-element, fieldset, div[data-test-form-element]',
-              ) || errEl.parentElement;
-            if (container) {
-              const lbl = container.querySelector('label, legend');
-              if (lbl) label = cleanElementText(lbl);
-            }
-            if (!errors.some(e => e.errorText === txt)) {
-              errors.push({ fieldLabel: label || 'Field', errorText: txt });
+              if (!invalidFieldsWithErrors.some(e => e.label === errDesc.label && e.errorText === txt)) {
+                invalidFieldsWithErrors.push(errDesc);
+              }
+              if (!emptyRequiredFields.some(e => e.label === errDesc.label)) {
+                emptyRequiredFields.push(errDesc);
+              }
             }
           }
         }
@@ -2951,9 +3083,13 @@ export default class Page {
             const lbl = modal.querySelector(`label[for="${id}"]`);
             if (lbl) label = cleanElementText(lbl);
           }
-          const parentEl = input.closest(
-            'div.fb-dash-form-element, div.jobs-easy-apply-form-element, div[data-test-form-element], .artdeco-text-input',
-          );
+          const parentEl =
+            input.closest(
+              'div.fb-dash-form-element, div.jobs-easy-apply-form-element, div[data-test-form-element], .jobs-easy-apply-form-section__grouping, fieldset, div[class*="form-element" i]',
+            ) ||
+            input.parentElement?.parentElement ||
+            input.parentElement;
+
           if (!label && parentEl) {
             const lbl = parentEl.querySelector('label');
             if (lbl) label = cleanElementText(lbl);
@@ -2988,7 +3124,7 @@ export default class Page {
           }
           // Also check for inline error text right next to the input
           const errEl = parentEl?.querySelector(
-            '.artdeco-inline-feedback--error, .inline-feedback--error, [class*="inline-feedback--error"], p[id*="error"], [role="alert"]',
+            '.artdeco-inline-feedback, .artdeco-inline-feedback--error, .artdeco-inline-feedback__message, .inline-feedback, [class*="error" i], [role="alert"], [data-test-form-element-error-message]',
           );
           const activeErrorText = errEl ? cleanElementText(errEl) : '';
           if (activeErrorText) {
@@ -3020,7 +3156,8 @@ export default class Page {
             parsedMin = Math.max(1, parsedMin || 1);
           }
 
-          const hasActiveError = Boolean(activeErrorText);
+          const hasActiveError =
+            Boolean(activeErrorText) && (errorRegex.test(activeErrorText) || activeErrorText.length > 5);
           const isInvalidValue =
             hasActiveError || (!val && (isRequired || isSkillOrNumeric)) || (isSelect && /select an option/i.test(val));
 
@@ -3043,28 +3180,43 @@ export default class Page {
                 .filter(t => !/select an option/i.test(t));
             }
 
-            emptyRequiredFields.push({
+            const fieldDesc = {
               id: input.id || undefined,
-              label,
+              label: label || 'Form Field',
               fieldType,
               options,
               min: parsedMin !== undefined ? parsedMin : fieldType === 'number' ? 0 : undefined,
               max: parsedMax !== undefined ? parsedMax : /0 and 99/i.test(combinedHint) ? 99 : undefined,
               placeholder: placeholder || undefined,
               hintText: hintText || undefined,
-            });
+              currentValue: val,
+              errorText: activeErrorText || undefined,
+            };
+
+            if (!emptyRequiredFields.some(e => e.label === fieldDesc.label)) {
+              emptyRequiredFields.push(fieldDesc);
+            }
+
+            if (hasActiveError && !invalidFieldsWithErrors.some(e => e.label === fieldDesc.label)) {
+              invalidFieldsWithErrors.push({
+                ...fieldDesc,
+                currentValue: val,
+                errorText: activeErrorText,
+              });
+            }
           }
         }
 
         return {
-          hasErrors: errors.length > 0 || emptyRequiredFields.length > 0,
+          hasErrors: errors.length > 0 || emptyRequiredFields.length > 0 || invalidFieldsWithErrors.length > 0,
           errors,
           emptyRequiredFields,
+          invalidFieldsWithErrors,
         };
       })
       .catch(err => {
         logger.warning('validateModalFormState check error:', err);
-        return { hasErrors: false, errors: [], emptyRequiredFields: [] };
+        return { hasErrors: false, errors: [], emptyRequiredFields: [], invalidFieldsWithErrors: [] };
       });
   }
 

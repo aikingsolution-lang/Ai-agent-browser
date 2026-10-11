@@ -41,6 +41,7 @@ import {
   cleanLinkedInJobTitle,
   adaptAnswerToFieldFormat,
   solveQuestionAutonomousWithLLM,
+  solveValidationErrorWithLLM,
   matchRuleBased,
 } from './formQuestionResolver';
 import {
@@ -4105,6 +4106,43 @@ export class DedicatedJobRunner {
         // Re-check validation
         const recheck = await page.validateModalFormState();
         if (recheck.hasErrors) {
+          // If there are explicit red alert errors or invalid fields with errors, heal them with LLM immediately!
+          const invalidFieldsToHeal = recheck.invalidFieldsWithErrors || [];
+          if (invalidFieldsToHeal.length > 0) {
+            logger.info(
+              `[DedicatedJobRunner] Detected ${invalidFieldsToHeal.length} fields with red alert validation errors. Healing with LLM...`,
+            );
+            for (const invF of invalidFieldsToHeal) {
+              if (!checkFieldRepeat(invF as any)) {
+                return {
+                  success: false,
+                  reason: `Validation auto-heal field "${invF.label}" repeated ${MAX_FIELD_ATTEMPTS} times (validation loop detected)`,
+                };
+              }
+              try {
+                this.notifyStatus(
+                  portToSend,
+                  `🤖 Fixing validation error for "${invF.label}": "${invF.errorText}" (was "${invF.currentValue}")...`,
+                  'info',
+                );
+                const healed = await solveValidationErrorWithLLM(invF, careerBrain, scopedLLM);
+                if (healed.success && healed.answer !== undefined) {
+                  const adapted = adaptAnswerToFieldFormat(healed.answer, invF as any);
+                  const fillVal = adapted.valid ? adapted.value : healed.answer;
+                  const fillSuccess = await page.fillModalFieldDirect(invF, fillVal);
+                  onAuditLog(
+                    'GENERATED',
+                    invF.label,
+                    fillVal,
+                    `Red alert validation heal | Prev: "${invF.currentValue}" | Error: "${invF.errorText}" | Fill: ${fillSuccess ? 'SUCCESS' : 'FAILED'}`,
+                  );
+                }
+              } catch (healErr) {
+                logger.warning(`[DedicatedJobRunner] Failed to heal field "${invF.label}":`, healErr);
+              }
+            }
+          }
+
           if (recheck.emptyRequiredFields && recheck.emptyRequiredFields.length > 0) {
             logger.info(
               `[DedicatedJobRunner] Attempting emergency resolution for ${recheck.emptyRequiredFields.length} invalid/unfilled fields...`,
@@ -4117,6 +4155,23 @@ export class DedicatedJobRunner {
                 };
               }
               try {
+                // If it has an active red alert error, prioritize solveValidationErrorWithLLM
+                if (reqF.errorText) {
+                  const healed = await solveValidationErrorWithLLM(reqF, careerBrain, scopedLLM);
+                  if (healed.success && healed.answer !== undefined) {
+                    const adapted = adaptAnswerToFieldFormat(healed.answer, reqF);
+                    const fillVal = adapted.valid ? adapted.value : healed.answer;
+                    const fillSuccess = await page.fillModalFieldDirect(reqF, fillVal);
+                    onAuditLog(
+                      'GENERATED',
+                      reqF.label,
+                      fillVal,
+                      `Red alert validation heal | Fill: ${fillSuccess ? 'SUCCESS' : 'FAILED'}`,
+                    );
+                    continue;
+                  }
+                }
+
                 // Try rule-based adaptation first (with newly detected error/numeric context in hintText)
                 const ruleMatch = matchRuleBased(reqF, careerBrain);
                 if (ruleMatch.matched && ruleMatch.answer) {
@@ -4170,7 +4225,7 @@ export class DedicatedJobRunner {
               if (!postAdvanceCheck.hasErrors || postAdvanceCheck.emptyRequiredFields.length === 0) {
                 continue; // Modal advanced successfully!
               }
-              // Self-heal form validation errors
+              // Self-heal form validation errors via DOM heuristics
               const healing = await inspectAndHealFormErrors(page, '.jobs-easy-apply-modal');
               if (healing.correctedCount > 0) {
                 logger.info(
@@ -4180,6 +4235,22 @@ export class DedicatedJobRunner {
                 await new Promise(r => setTimeout(r, 1500));
                 continue;
               }
+
+              // Also try LLM-based healing on remaining invalid fields
+              if (postAdvanceCheck.invalidFieldsWithErrors && postAdvanceCheck.invalidFieldsWithErrors.length > 0) {
+                for (const invF of postAdvanceCheck.invalidFieldsWithErrors) {
+                  const healed = await solveValidationErrorWithLLM(invF, careerBrain, scopedLLM);
+                  if (healed.success && healed.answer) {
+                    const adapted = adaptAnswerToFieldFormat(healed.answer, invF as any);
+                    const fillVal = adapted.valid ? adapted.value : healed.answer;
+                    await page.fillModalFieldDirect(invF, fillVal);
+                  }
+                }
+                await page.clickModalForwardButton();
+                await new Promise(r => setTimeout(r, 1500));
+                continue;
+              }
+
               // If errors still block the exact same fields, don't increment step; re-try on this step
               const retries = (stepRetryCounts.get(step) || 0) + 1;
               stepRetryCounts.set(step, retries);
@@ -4236,6 +4307,30 @@ export class DedicatedJobRunner {
           };
         }
         await new Promise(r => setTimeout(r, 1500));
+
+        // Post-advance validation check: Check if forward navigation was rejected by red alert errors!
+        const postFwdValidation = await page.validateModalFormState();
+        if (postFwdValidation.hasErrors && postFwdValidation.invalidFieldsWithErrors.length > 0) {
+          logger.warning(
+            `[DedicatedJobRunner] Forward navigation was rejected by ${postFwdValidation.invalidFieldsWithErrors.length} red alert validation errors. Auto-healing with LLM...`,
+          );
+          for (const invF of postFwdValidation.invalidFieldsWithErrors) {
+            const healed = await solveValidationErrorWithLLM(invF, careerBrain, scopedLLM);
+            if (healed.success && healed.answer) {
+              const adapted = adaptAnswerToFieldFormat(healed.answer, invF as any);
+              const fillVal = adapted.valid ? adapted.value : healed.answer;
+              const fillSuccess = await page.fillModalFieldDirect(invF, fillVal);
+              onAuditLog(
+                'GENERATED',
+                invF.label,
+                fillVal,
+                `Post-forward validation heal | Prev: "${invF.currentValue}" | Error: "${invF.errorText}" | Fill: ${fillSuccess ? 'SUCCESS' : 'FAILED'}`,
+              );
+            }
+          }
+          // Do not waste a step iteration when blocked on current step
+          step = Math.max(0, step - 1);
+        }
       } else {
         // Neither submit nor forward button found
         const modalOpen = await page.isEasyApplyModalOpen();
