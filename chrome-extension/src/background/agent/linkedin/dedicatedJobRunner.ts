@@ -1717,6 +1717,14 @@ export class DedicatedJobRunner {
 
       const currentPage = await this.browserContext.getCurrentPage();
       await this.markRunnerTabVisually(currentPage);
+      try {
+        if (currentPage.tabId && typeof chrome !== 'undefined' && chrome.tabs?.setZoom) {
+          await chrome.tabs.setZoom(currentPage.tabId, 0.75);
+          logger.info(`[DedicatedJobRunner] Set runner tab ${currentPage.tabId} zoom to 75%`);
+        }
+      } catch (zoomErr) {
+        logger.debug('[DedicatedJobRunner] Could not set tab zoom to 75%:', zoomErr);
+      }
       const devtoolsNotice =
         '⚠️ DevTools detected on job tab - this may cause a disconnect if DevTools is kept open or toggled.';
       this.notifyStatus(portToSend, devtoolsNotice, 'info');
@@ -2517,6 +2525,14 @@ export class DedicatedJobRunner {
 
     const currentPage = await this.browserContext!.getCurrentPage();
     await this.markRunnerTabVisually(currentPage);
+    try {
+      if (currentPage.tabId && typeof chrome !== 'undefined' && chrome.tabs?.setZoom) {
+        await chrome.tabs.setZoom(currentPage.tabId, 0.75);
+        logger.info(`[DedicatedJobRunner] Set Naukri runner tab ${currentPage.tabId} zoom to 75%`);
+      }
+    } catch (zoomErr) {
+      logger.debug('[DedicatedJobRunner] Could not set Naukri tab zoom to 75%:', zoomErr);
+    }
 
     // Session / Login check
     let session = await naukriAdapter.validateSession(currentPage);
@@ -3002,6 +3018,14 @@ export class DedicatedJobRunner {
 
     const currentPage = await this.browserContext!.getCurrentPage();
     await this.markRunnerTabVisually(currentPage);
+    try {
+      if (currentPage.tabId && typeof chrome !== 'undefined' && chrome.tabs?.setZoom) {
+        await chrome.tabs.setZoom(currentPage.tabId, 0.75);
+        logger.info(`[DedicatedJobRunner] Set Indeed runner tab ${currentPage.tabId} zoom to 75%`);
+      }
+    } catch (zoomErr) {
+      logger.debug('[DedicatedJobRunner] Could not set Indeed tab zoom to 75%:', zoomErr);
+    }
 
     const checkAndHandleSearchCaptcha = async (title: string = 'Indeed Search') => {
       if (
