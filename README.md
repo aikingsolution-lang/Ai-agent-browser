@@ -1,110 +1,64 @@
 <h1 align="center">
     <img src="https://github.com/user-attachments/assets/ec60b0c4-87ba-48f4-981a-c55ed0e8497b" height="100" width="375" alt="banner" /><br>
+    JobPilot AI — Autonomous Multi-Platform Job Application Agent
 </h1>
 
-
 <div align="center">
 
-[![GitHub](https://img.shields.io/badge/GitHub-181717?style=for-the-badge&logo=github&logoColor=white)](https://github.com/nanobrowser)
-[![Twitter](https://img.shields.io/badge/Twitter-000000?style=for-the-badge&logo=x&logoColor=white)](https://x.com/nanobrowser_ai)
-[![Discord](https://img.shields.io/badge/Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/NN3ABHggMK)
-[<img src="https://deepwiki.com/badge.svg" height="28" alt="Ask DeepWiki">](https://deepwiki.com/nanobrowser/nanobrowser)
-[![Sponsor](https://img.shields.io/badge/Sponsor-ff69b4?style=for-the-badge&logo=githubsponsors&logoColor=white)](https://github.com/sponsors/alexchenzl)
+[![Extension](https://img.shields.io/badge/Chrome_Extension-Manifest_V3-4285F4?style=for-the-badge&logo=googlechrome&logoColor=white)](#-manually-install-latest-version)
+[![Backend](https://img.shields.io/badge/Backend-Google_Cloud_Run-34A853?style=for-the-badge&logo=googlecloud&logoColor=white)](./docs/GOOGLE_CLOUD_DEPLOYMENT_GUIDE.md)
+[![Database](https://img.shields.io/badge/Database-Firebase_RTDB-FFCA28?style=for-the-badge&logo=firebase&logoColor=black)](./docs/DATABASE.md)
+[![LLM](https://img.shields.io/badge/LLM-AWS_Bedrock_Nova_Lite-FF9900?style=for-the-badge&logo=amazonwebservices&logoColor=white)](./docs/AI-SYSTEM.md)
+[![Tests](https://img.shields.io/badge/Tests-Vitest_Passing-brightgreen?style=for-the-badge&logo=vitest&logoColor=white)](./docs/TESTING.md)
 
 </div>
 
-## 🌐 Nanobrowser
+## 🌐 JobPilot AI (Powered by NanoBrowser)
 
-Nanobrowser is an open-source AI web automation tool that runs in your browser. A free alternative to OpenAI Operator with flexible LLM options and multi-agent system.
+**JobPilot AI** is an autonomous, open-source AI job application and web automation suite that runs directly inside your browser. Built on top of NanoBrowser's multi-agent architecture (Planner + Navigator), JobPilot AI automates end-to-end job discovery, form filling, questionnaire solving, and 1-click applications across major job portals.
 
-⬇️ Get [Nanobrowser from Chrome Web Store](https://chromewebstore.google.com/detail/nanobrowser/imbddededgmcgfhfpcjmijokokekbkal) for free
-
-👏 Join the community in [Discord](https://discord.gg/NN3ABHggMK) | [X](https://x.com/nanobrowser_ai)
-
-🌟 Loving Nanobrowser? Give us a star  and help spread the word!
-
-❤️ Support the project by [sponsoring us](https://github.com/sponsors/alexchenzl) - every contribution helps keep Nanobrowser free and open source!
+📦 **Ready-to-Use Extension Artifact:** [`JobPilot-AI-Extension-Latest.zip`](./JobPilot-AI-Extension-Latest.zip) (No build required — unzip and load directly into Chrome!)
 
 <div align="center">
-<img src="https://github.com/user-attachments/assets/112c4385-7b03-4b81-a352-4f348093351b" width="600" alt="Nanobrowser Demo GIF" />
-<p><em>Nanobrowser's multi-agent system analyzing HuggingFace in real-time, with the Planner intelligently self-correcting when encountering obstacles and dynamically instructing the Navigator to adjust its approach—all running locally in your browser.</em></p>
+<img src="https://github.com/user-attachments/assets/112c4385-7b03-4b81-a352-4f348093351b" width="600" alt="JobPilot AI Demo GIF" />
+<p><em>Autonomous agent analyzing job forms in real-time: Planner intelligently extracts experience & CTC from candidate profile and instructs Navigator to fill modals with sub-second precision.</em></p>
 </div>
 
-## 🔥Why Nanobrowser?
+## 🔥 Why JobPilot AI?
 
-Looking for a powerful AI browser agent without the $200/month price tag of OpenAI Operator? **Nanobrowser** , as a chrome extension, delivers premium web automation capabilities while keeping you in complete control:
-
-- **100% Free** - No subscription fees or hidden costs. Just install and use your own API keys, and you only pay what you use with your own API keys.
-- **Privacy-Focused** - Everything runs in your local browser. Your credentials stay with you, never shared with any cloud service.
-- **Flexible LLM Options** - Connect to your preferred LLM providers with the freedom to choose different models for different agents.
-- **Fully Open Source** - Complete transparency in how your browser is automated. No black boxes or hidden processes.
-
-> **Note:** We currently support OpenAI, Anthropic, Gemini, Ollama, Groq, Cerebras, Llama and custom OpenAI-Compatible providers, more providers will be supported.
-
+- **Multi-Platform Automation**: Native support for **LinkedIn Easy Apply**, **Naukri.com (1-Click & Custom Questionnaires)**, **Indeed**, and **Wellfound / AngelList**.
+- **High Throughput Batching**: Scale applications up to **40 jobs per batch** with automated progressive scrolling and smart duplicate skipping.
+- **Intelligent Questionnaire Resolver**: Accurately computes experience for specific technical skills (e.g. FastAPI, MLOps, Kubernetes, Docker, AWS), notice periods, current/expected CTC, and relocation preferences directly from candidate profiles.
+- **Privacy-Focused & Hybrid AI**: Extension runs locally in your browser. Connect directly to AWS Bedrock, OpenAI, Anthropic, Gemini, Groq, Ollama, or our dedicated Cloud Run backend.
+- **Production-Ready Backend**: Complete SaaS backend deployed on Google Cloud Run with Firebase Realtime Database and Razorpay billing.
 
 ## 📊 Key Features
 
-- **Multi-agent System**: Specialized AI agents collaborate to accomplish complex web workflows
-- **Interactive Side Panel**: Intuitive chat interface with real-time status updates
-- **Task Automation**: Seamlessly automate repetitive web automation tasks across websites
-- **Follow-up Questions**: Ask contextual follow-up questions about completed tasks
-- **Conversation History**: Easily access and manage your AI agent interaction history
-- **Multiple LLM Support**: Connect your preferred LLM providers and assign different models to different agents
-
+- **🚀 LinkedIn Easy Apply Engine**: Multi-step modal navigation, contact verification, document upload, and questionnaire auto-fill.
+- **⚡ Naukri Fast Apply & Questionnaire Resolver**: 1-Click fast apply combined with deep form resolvers that handle skill-specific experience calculations, radio buttons, dropdowns, and numeric inputs with 20ms human-like micro-delays and DOM state settlement.
+- **📈 Scalable Batch Runner (40 Jobs/Batch)**: High-speed queue processing that progressively scrolls job feeds, collects listings, and applies without manual intervention.
+- **🧠 Multi-Agent System**: Specialized Planner and Navigator agents collaborate to handle unexpected modal dialogs and dynamic UI states.
+- **💬 Interactive Side Panel**: Intuitive Chrome side panel with live job counters, progress bars, real-time logs, and history tracking.
+- **💳 SaaS Infrastructure**: Google Cloud Run backend, Firebase Realtime Database for real-time sync, JWT authentication, and Razorpay subscription tiers.
 
 ## 🌐 Browser Support
 
 **Officially Supported:**
-- **Chrome** - Full support with all features
-- **Edge** - Full support with all features
+- **Google Chrome** (Recommended) — Full support with Chrome Manifest V3
+- **Microsoft Edge** — Full Chromium compatibility
 
-**Not Supported:**
-- Firefox, Safari, and other Chromium variants (Opera, Arc, etc.)
+## 🚀 Quick Start: Install Extension
 
-> **Note**: While Nanobrowser may function on other Chromium-based browsers, we recommend using Chrome or Edge for the best experience and guaranteed compatibility.
+### ⚡ Option 1: Load Pre-Built Package (Instant — No Build Needed)
 
+1. **Download:** Download [`JobPilot-AI-Extension-Latest.zip`](./JobPilot-AI-Extension-Latest.zip) from this repository root.
+2. **Extract:** Unzip the `.zip` file into a folder on your computer.
+3. **Open Extensions Page:** Open Google Chrome and navigate to `chrome://extensions/`.
+4. **Enable Developer Mode:** Toggle **Developer mode** in the top-right corner.
+5. **Load Unpacked:** Click **Load unpacked** (top-left) and select the extracted folder.
+6. **Open Side Panel:** Click the JobPilot AI icon in your browser toolbar to open the automation panel.
 
-## 🚀 Quick Start
-
-1. **Install from Chrome Web Store** (Stable Version):
-   * Visit the [Nanobrowser Chrome Web Store page](https://chromewebstore.google.com/detail/nanobrowser/imbddededgmcgfhfpcjmijokokekbkal)
-   * Click "Add to Chrome" button
-   * Confirm the installation when prompted
-
-> **Important Note**: For latest features, install from ["Manually Install Latest Version"](#-manually-install-latest-version) below, as Chrome Web Store version may be delayed due to review process.
-
-2. **Configure Agent Models**:
-   * Click the Nanobrowser icon in your toolbar to open the sidebar
-   * Click the `Settings` icon (top right)
-   * Add your LLM API keys
-   * Choose which model to use for different agents (Navigator, Planner)
-
-## 🔧 Manually Install Latest Version
-
-To get the most recent version with all the latest features:
-
-1. **Download**
-    * Download the latest `nanobrowser.zip` file from the official Github [release page](https://github.com/nanobrowser/nanobrowser/releases).
-
-2. **Install**:
-    * Unzip `nanobrowser.zip`.
-    * Open `chrome://extensions/` in Chrome
-    * Enable `Developer mode` (top right)
-    * Click `Load unpacked` (top left)
-    * Select the unzipped `nanobrowser` folder.
-
-3. **Configure Agent Models**
-    * Click the Nanobrowser icon in your toolbar to open the sidebar
-    * Click the `Settings` icon (top right).
-    * Add your LLM API keys.
-    * Choose which model to use for different agents (Navigator, Planner)
-
-4. **Upgrading**:
-    * Download the latest `nanobrowser.zip` file from the release page.
-    * Unzip and replace your existing Nanobrowser files with the new ones.
-    * Go to `chrome://extensions/` in Chrome and click the refresh icon on the Nanobrowser card.
-
-## 🛠️ Build from Source
+### 🛠️ Option 2: Build from Source
 
 If you prefer to build Nanobrowser yourself, follow these steps:
 
@@ -241,6 +195,21 @@ Nanobrowser builds on top of other awesome open-source projects:
 - [LangChain](https://github.com/langchain-ai/langchainjs)
 
 Huge thanks to their creators and contributors!
+
+## 🧪 Testing & Verification
+
+JobPilot AI includes comprehensive Vitest unit test coverage for job form question resolution, platform adapters, and profile experience calculations:
+
+```bash
+# Run Naukri questionnaire resolver test suite (26 tests passing)
+pnpm vitest run src/background/agent/__tests__/naukriQuestionnaire.test.ts
+
+# Run full project type checking
+pnpm type-check
+
+# Run all unit tests
+pnpm test
+```
 
 ## 📚 Engineering Documentation
 
