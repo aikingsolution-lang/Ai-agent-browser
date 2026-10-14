@@ -223,27 +223,24 @@ Detailed architectural specifications, system diagrams, and deployment guides fo
 - [Security Audit & Controls](./docs/SECURITY-AUDIT.md)
 - [Testing & QA Suite](./docs/TESTING.md)
 
+---
+
+## 👨‍💻 Author & Engineering Portfolio
+
+Developed and maintained by **Mubasshir Ali** as an advanced full-stack AI engineering and autonomous browser automation project.
+
+* **GitHub:** [@MUBASSHIRALI0710](https://github.com/MUBASSHIRALI0710)
+* **Repository:** [nanobrowser-saas](https://github.com/MUBASSHIRALI0710/nanobrowser-saas)
+* **Email:** [mubasshirali0710@gmail.com](mailto:mubasshirali0710@gmail.com)
+
+### 🏆 Key Engineering Achievements Demonstrated:
+1. **Multi-Agent Orchestration:** Implemented a two-tiered Planner + Navigator autonomous architecture capable of dynamic reasoning, self-correction, and state settlement.
+2. **High-Performance Automation:** Scaled job batch throughput from 10 to **40 jobs per batch** with automated infinite scrolling and DOM hydration.
+3. **Resilient Form Question Resolver:** Solved complex technical questionnaires (FastAPI, Kubernetes, MLOps, AWS, notice periods, and CTC) matching candidate profile data with 20ms human-like micro-delays.
+4. **Cloud-Native SaaS Infrastructure:** Google Cloud Run backend with Firebase Realtime Database for sub-50ms synchronization, Razorpay subscription billing, and AWS Bedrock LLM inference.
+5. **Production Quality:** 100% test pass rate across 26 Vitest test suites, full TypeScript strict mode across 16 monorepo packages.
+
 ## 📄 License
 
 This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
-
-Made with ❤️ by the Nanobrowser Team. 
-
-Like Nanobrowser? Give us a star 🌟 and join us in [Discord](https://discord.gg/NN3ABHggMK) | [X](https://x.com/nanobrowser_ai)
-
-## 🔗 Our Other Products
-
-- [DSH Plugin Directory](https://dsh.directory/): Discover installable community plugins for DeepSeek Harness by category, popularity, and activity.
-
-## ⚠️ DISCLAIMER ON DERIVATIVE PROJECTS
-
-**We explicitly *DO NOT* endorse, support, or participate in any** projects involving cryptocurrencies, tokens, NFTs, or other blockchain-related applications **based on this codebase.**
-
-**Any such derivative projects are NOT Affiliated with, or maintained by, or in any way connected to the official Nanobrowser project or its core team.**
-
-**We assume NO LIABILITY for any losses, damages, or issues arising from the use of third-party derivative projects. Users interact with these projects at their own risk.**
-
-**We reserve the right to publicly distance ourselves from any misuse or misleading use of our name, codebase, or brand.**
-
-We encourage open-source innovation but urge our community to be discerning and cautious. Please ensure you understand the risks before using any software or service built upon our codebase by independent developers.
 
