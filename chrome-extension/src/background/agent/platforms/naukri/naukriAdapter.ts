@@ -696,7 +696,27 @@ export class NaukriAdapter implements IPlatformAdapter {
 
         if (status.state === 'closed') {
           if (step > 1) {
-            logger.info(`[NaukriAdapter] Modal closed after step ${step - 1}. Application presumed complete.`);
+            // Re-verify after a short wait in case the modal is mid-transition/re-rendering between questions
+            await new Promise(r => setTimeout(r, 1500));
+            const recheck = await puppeteerPage.evaluate((selectors: typeof NAUKRI_SELECTORS) => {
+              for (const sel of selectors.MODAL_CONTAINER) {
+                const el = document.querySelector(sel) as HTMLElement | null;
+                if (el && el.offsetParent !== null) return true;
+              }
+              const inputs = document.querySelectorAll(
+                'input[placeholder*="Type message" i], textarea[placeholder*="Type message" i], .chatbot-container, [class*="custom-question" i], [class*="chatbot" i]',
+              );
+              return inputs.length > 0;
+            }, NAUKRI_SELECTORS);
+
+            if (recheck) {
+              logger.info(`[NaukriAdapter] Modal or inputs re-appeared after transition. Continuing step ${step}...`);
+              continue;
+            }
+
+            logger.info(
+              `[NaukriAdapter] Modal confirmed closed after step ${step - 1}. Application presumed complete.`,
+            );
             return { success: true };
           }
           logger.info(`[NaukriAdapter] Modal was closed on step 1.`);
@@ -2082,7 +2102,7 @@ export class NaukriAdapter implements IPlatformAdapter {
         // Wait for modal transition or next question
         await new Promise(r => setTimeout(r, 2500));
 
-        // 6. Check if modal has closed or application succeeded
+        // 6. Check if application has explicitly completed or modal closed
         const postSubmitCheck = await puppeteerPage.evaluate((selectors: typeof NAUKRI_SELECTORS) => {
           function isVisible(el: HTMLElement): boolean {
             if (!el || el.offsetParent === null) return false;
@@ -2108,33 +2128,96 @@ export class NaukriAdapter implements IPlatformAdapter {
             return true;
           }
 
-          let modalOpen = false;
-          for (const sel of selectors.MODAL_CONTAINER) {
+          function findModal(): HTMLElement | null {
+            for (const sel of selectors.MODAL_CONTAINER) {
+              const els = Array.from(document.querySelectorAll(sel)) as HTMLElement[];
+              for (const el of els) {
+                if (isVisible(el)) return el;
+              }
+            }
+            const candidates = Array.from(document.querySelectorAll('div, section, aside, form')) as HTMLElement[];
+            for (const el of candidates) {
+              const style = window.getComputedStyle(el);
+              if ((style.position === 'fixed' || style.position === 'absolute') && isVisible(el)) {
+                const text = (el.innerText || '').toLowerCase();
+                if (
+                  text.includes("recruiter's questions") ||
+                  text.includes('kindly answer all') ||
+                  text.includes('type message here') ||
+                  text.includes('how many years of experience') ||
+                  text.includes('skip this question') ||
+                  text.includes('current ctc') ||
+                  text.includes('expected ctc') ||
+                  text.includes('notice period') ||
+                  text.includes('in lacs') ||
+                  (text.includes('save') && el.querySelector('input, textarea, [class*="chip" i], [class*="option" i]'))
+                ) {
+                  return el;
+                }
+              }
+            }
+            return null;
+          }
+
+          // A. Explicit success message anywhere in modal or page
+          const bodyText = (document.body.innerText || '').toLowerCase();
+          const hasSuccessMsg =
+            selectors.SUCCESS_INDICATORS.some(ind => bodyText.includes(ind)) ||
+            bodyText.includes('successfully applied') ||
+            bodyText.includes('application sent') ||
+            bodyText.includes('applied successfully') ||
+            bodyText.includes('your application has been sent');
+
+          if (hasSuccessMsg) {
+            return { finished: true, reason: 'success_message_detected' };
+          }
+
+          // B. Check primary apply button state
+          for (const sel of selectors.PRIMARY_APPLY_BUTTON) {
             const el = document.querySelector(sel) as HTMLElement | null;
             if (el && isVisible(el)) {
-              modalOpen = true;
-              const modalText = (el.innerText || '').toLowerCase();
+              const bt = (el.textContent || '').trim().toLowerCase();
               if (
-                modalText.includes('successfully applied') ||
-                modalText.includes('application sent') ||
-                modalText.includes('applied successfully') ||
-                modalText.includes('your application has been sent')
+                bt === 'applied' ||
+                bt === 'already applied' ||
+                bt.startsWith('applied on') ||
+                el.classList.contains('applied') ||
+                el.classList.contains('already-applied')
               ) {
-                return { finished: true };
+                return { finished: true, reason: 'primary_button_applied' };
               }
-              break;
             }
           }
 
-          if (!modalOpen) {
-            return { finished: true };
+          const modal = findModal();
+          if (modal) {
+            const modalText = (modal.innerText || '').toLowerCase();
+            if (
+              modalText.includes('successfully applied') ||
+              modalText.includes('application sent') ||
+              modalText.includes('applied successfully') ||
+              modalText.includes('your application has been sent')
+            ) {
+              return { finished: true, reason: 'modal_success_text' };
+            }
+
+            // Check if modal STILL has active inputs or choice options
+            const inputs = modal.querySelectorAll('input:not([type="hidden"]), select, textarea');
+            const choices = modal.querySelectorAll(
+              selectors.CHATBOT_OPTIONS.join(', ') + ', [role="radio"], [role="checkbox"]',
+            );
+            if (inputs.length > 0 || choices.length > 0) {
+              return { finished: false, reason: 'more_questions_in_modal' };
+            }
           }
 
-          return { finished: false };
+          // If no modal found right now, DO NOT prematurely declare finished!
+          // We let the next loop iteration check or confirm after transition
+          return { finished: false, reason: 'modal_transitioning_or_unconfirmed' };
         }, NAUKRI_SELECTORS);
 
         if (postSubmitCheck.finished) {
-          logger.info(`[NaukriAdapter] Application finished after step ${step}. Modal closed.`);
+          logger.info(`[NaukriAdapter] Application finished after step ${step} (${postSubmitCheck.reason}).`);
           return { success: true };
         }
       }
