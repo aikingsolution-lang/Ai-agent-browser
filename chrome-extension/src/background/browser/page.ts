@@ -2142,9 +2142,9 @@ export default class Page {
           const text = (btn.innerText || btn.textContent || '').trim().toLowerCase();
           const aria = (btn.getAttribute('aria-label') || '').trim().toLowerCase();
           return (
-            btn.classList.contains('jobs-apply-button') ||
             /\beasy\s*apply\b/i.test(text) ||
-            /\beasy\s*apply\b/i.test(aria)
+            /\beasy\s*apply\b/i.test(aria) ||
+            btn.querySelector('svg[data-test-icon*="easy-apply"], .jobs-apply-button__label') !== null
           );
         });
 
@@ -2155,9 +2155,18 @@ export default class Page {
               'button.jobs-apply-button, button[aria-label*="Easy Apply" i], button[data-control-name*="apply" i]',
             ),
           ) as HTMLElement[];
-          easyApplyBtn = globalCandidates.find(
-            btn => !btn.closest('.jobs-search-results-list, .scaffold-layout__list, [data-view-name="job-card"]'),
-          );
+          easyApplyBtn = globalCandidates.find(btn => {
+            if (btn.closest('.jobs-search-results-list, .scaffold-layout__list, [data-view-name="job-card"]')) {
+              return false;
+            }
+            const text = (btn.innerText || btn.textContent || '').trim().toLowerCase();
+            const aria = (btn.getAttribute('aria-label') || '').trim().toLowerCase();
+            return (
+              /\beasy\s*apply\b/i.test(text) ||
+              /\beasy\s*apply\b/i.test(aria) ||
+              btn.querySelector('svg[data-test-icon*="easy-apply"], .jobs-apply-button__label') !== null
+            );
+          });
         }
 
         if (easyApplyBtn) {
@@ -2169,6 +2178,10 @@ export default class Page {
           easyApplyBtn.dispatchEvent(new PointerEvent('pointerup', opts));
           easyApplyBtn.dispatchEvent(new MouseEvent('mouseup', opts));
           easyApplyBtn.click();
+          const innerSpan = easyApplyBtn.querySelector('span, .artdeco-button__text') as HTMLElement;
+          if (innerSpan) {
+            innerSpan.click();
+          }
           return { clicked: true };
         }
         return { clicked: false, reason: 'Easy Apply button not found in active job details' };
@@ -2226,6 +2239,15 @@ export default class Page {
           function isGenuineVisibleModal(dialog: HTMLElement): boolean {
             if (!dialog || !dialog.isConnected) return false;
 
+            // Direct match: If it is explicitly marked as the Easy Apply modal, always accept!
+            if (
+              dialog.classList.contains('jobs-easy-apply-modal') ||
+              dialog.querySelector('.jobs-easy-apply-content, [data-easy-apply-modal]')
+            ) {
+              const style = window.getComputedStyle(dialog);
+              return style.display !== 'none' && style.visibility !== 'hidden';
+            }
+
             // 1. Exclude global navigation, headers, footers, search list, or messaging docks/flyouts
             if (
               dialog.closest(
@@ -2236,15 +2258,14 @@ export default class Page {
             }
 
             // 2. Exclude notification badges, counters, or alert flyouts (e.g. "0 notifications")
-            const text = (dialog.innerText || dialog.textContent || '').trim().toLowerCase();
             const aria = (dialog.getAttribute('aria-label') || '').trim().toLowerCase();
             if (
-              /notifications?/i.test(text) ||
-              /notifications?/i.test(aria) ||
               dialog.classList.contains('notification-badge') ||
               dialog.closest(
                 '.notifications-badge, .nav-item--notifications, [data-test-global-nav-link="notifications"]',
-              )
+              ) ||
+              /notifications\s+dialog/i.test(aria) ||
+              dialog.id.includes('notifications')
             ) {
               return false;
             }
@@ -2264,9 +2285,9 @@ export default class Page {
               return false;
             }
 
-            // 5. Must have genuine modal dimensions (minimum 250px width, 150px height)
+            // 5. Must have genuine modal dimensions (minimum 200px width, 100px height)
             const rect = dialog.getBoundingClientRect();
-            if (rect.width < 250 || rect.height < 150) {
+            if (rect.width < 200 || rect.height < 100) {
               return false;
             }
 
@@ -4083,9 +4104,9 @@ export default class Page {
             const btnText = (btn.textContent || '').trim();
             const ariaLabel = (btn.getAttribute('aria-label') || '').trim();
             if (
-              btn.classList.contains('jobs-apply-button') ||
               /easy\s*apply/i.test(btnText) ||
-              /easy\s*apply/i.test(ariaLabel)
+              /easy\s*apply/i.test(ariaLabel) ||
+              btn.querySelector('svg[data-test-icon*="easy-apply"]') !== null
             ) {
               hasEasyApply = true;
               break;
