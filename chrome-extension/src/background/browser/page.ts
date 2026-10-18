@@ -1362,14 +1362,22 @@ export default class Page {
         try {
           target.focus();
           if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
+            if (target instanceof HTMLInputElement && target.type === 'file') {
+              return;
+            }
             // Use native prototype setter to ensure React / Angular / Polymer / Vue state updates
             const prototype =
               target instanceof HTMLInputElement ? HTMLInputElement.prototype : HTMLTextAreaElement.prototype;
             const nativeSetter = Object.getOwnPropertyDescriptor(prototype, 'value')?.set;
-            if (nativeSetter) {
-              nativeSetter.call(target, value);
-            } else {
-              target.value = value;
+            try {
+              if (nativeSetter) {
+                nativeSetter.call(target, value);
+              } else {
+                target.value = value;
+              }
+            } catch (err) {
+              console.warn('[Page] Error setting input value:', err);
+              return;
             }
 
             target.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
@@ -3130,11 +3138,12 @@ export default class Page {
         // 4. Text and numeric inputs
         const textInputs = Array.from(
           modal.querySelectorAll(
-            'input:not([type="hidden"]):not([type="radio"]):not([type="checkbox"]):not([type="submit"]), textarea, select',
+            'input:not([type="hidden"]):not([type="radio"]):not([type="checkbox"]):not([type="submit"]):not([type="button"]):not([type="file"]), textarea, select',
           ),
         ) as (HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement)[];
 
         for (const input of textInputs) {
+          if (input instanceof HTMLInputElement && input.type === 'file') continue;
           const val = (input.value || '').trim();
           const isSelect = input.tagName.toLowerCase() === 'select';
           const isRequired =
@@ -3514,14 +3523,14 @@ export default class Page {
                     targetEl = document.getElementById(forId);
                   }
                 }
-                if (!targetEl) targetEl = l.querySelector('input, select, textarea');
+                if (!targetEl) targetEl = l.querySelector('input:not([type="file"]), select, textarea');
                 if (!targetEl) {
                   const parent = l.closest(
                     '.fb-dash-form-element, div[data-test-form-element], .jobs-easy-apply-form-element, .artdeco-dropdown',
                   );
                   if (parent) {
                     targetEl = parent.querySelector(
-                      'select, input, textarea, button[aria-haspopup="listbox"], button.artdeco-dropdown__trigger, [role="combobox"]',
+                      'select, input:not([type="file"]), textarea, button[aria-haspopup="listbox"], button.artdeco-dropdown__trigger, [role="combobox"]',
                     );
                   }
                 }
@@ -3602,18 +3611,27 @@ export default class Page {
             }
             return targetEl.checked;
           }
+        } else if (targetEl instanceof HTMLInputElement && targetEl.type === 'file') {
+          // File input elements can only accept an empty string programmatically in web browsers
+          // for security reasons. Never attempt to set non-empty string on input[type="file"].
+          return false;
         } else if (targetEl instanceof HTMLInputElement || targetEl instanceof HTMLTextAreaElement) {
-          targetEl.focus();
           const proto =
             targetEl instanceof HTMLInputElement ? HTMLInputElement.prototype : HTMLTextAreaElement.prototype;
           const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
-          if (setter) {
-            setter.call(targetEl, val);
-          } else {
-            targetEl.value = val;
+          try {
+            targetEl.focus();
+            if (setter) {
+              setter.call(targetEl, val);
+            } else {
+              targetEl.value = val;
+            }
+            targetEl.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+            targetEl.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+          } catch (fillErr) {
+            console.warn('[Page] fillModalFieldDirect value setter caught error:', fillErr);
+            return false;
           }
-          targetEl.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
-          targetEl.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
 
           // Autocomplete / typeahead suggestion selection (e.g. Location (city), School/University, Company, Title)
           const isLocationField =

@@ -2202,7 +2202,7 @@ export class NaukriAdapter implements IPlatformAdapter {
             }
 
             // Check if modal STILL has active inputs or choice options
-            const inputs = modal.querySelectorAll('input:not([type="hidden"]), select, textarea');
+            const inputs = modal.querySelectorAll('input:not([type="hidden"]):not([type="file"]), select, textarea');
             const choices = modal.querySelectorAll(
               selectors.CHATBOT_OPTIONS.join(', ') + ', [role="radio"], [role="checkbox"]',
             );

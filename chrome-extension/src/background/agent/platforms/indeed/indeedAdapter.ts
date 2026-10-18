@@ -2909,26 +2909,31 @@ export class IndeedAdapter implements IPlatformAdapter {
         }
 
         function setReactInputValue(input: HTMLInputElement | HTMLTextAreaElement, value: string) {
-          input.focus();
-          input.dispatchEvent(new Event('focus', { bubbles: true }));
-          const tracker = (input as any)._valueTracker;
-          if (tracker) {
-            tracker.setValue('');
+          if (input instanceof HTMLInputElement && input.type === 'file') return;
+          try {
+            input.focus();
+            input.dispatchEvent(new Event('focus', { bubbles: true }));
+            const tracker = (input as any)._valueTracker;
+            if (tracker) {
+              tracker.setValue('');
+            }
+            const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
+              input instanceof HTMLTextAreaElement
+                ? window.HTMLTextAreaElement.prototype
+                : window.HTMLInputElement.prototype,
+              'value',
+            )?.set;
+            if (nativeInputValueSetter) {
+              nativeInputValueSetter.call(input, value);
+            } else {
+              input.value = value;
+            }
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+            input.dispatchEvent(new Event('change', { bubbles: true }));
+            input.dispatchEvent(new Event('blur', { bubbles: true }));
+          } catch (err) {
+            console.warn('[IndeedAdapter] Error setting input value:', err);
           }
-          const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
-            input instanceof HTMLTextAreaElement
-              ? window.HTMLTextAreaElement.prototype
-              : window.HTMLInputElement.prototype,
-            'value',
-          )?.set;
-          if (nativeInputValueSetter) {
-            nativeInputValueSetter.call(input, value);
-          } else {
-            input.value = value;
-          }
-          input.dispatchEvent(new Event('input', { bubbles: true }));
-          input.dispatchEvent(new Event('change', { bubbles: true }));
-          input.dispatchEvent(new Event('blur', { bubbles: true }));
         }
 
         let el = document.querySelector(`[data-nano-field-idx="${targetIdx}"]`) as
