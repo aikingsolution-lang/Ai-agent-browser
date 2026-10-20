@@ -2381,6 +2381,18 @@ export class DedicatedJobRunner {
           logger.info('[DedicatedJobRunner] Application flow stopped by user.');
           break;
         }
+
+        // Inter-job pacing & anti-bot safety jitter
+        if (this.isRunning && i + 1 < queue.length) {
+          const jitterMs = 3500 + Math.floor(Math.random() * 3000); // 3.5s - 6.5s randomized cadence
+          this.notifyStatus(
+            portToSend,
+            `⏳ Pacing safety delay (${Math.round(jitterMs / 100) / 10}s) before next candidate job...`,
+            'info',
+          );
+          const jitterAborted = await this.interruptibleSleep(jitterMs);
+          if (jitterAborted || !this.isRunning) break;
+        }
       }
 
       // 6. Final Summary
@@ -3839,12 +3851,19 @@ export class DedicatedJobRunner {
         break;
       }
 
-      // 1b. Smart Resume Auto-Select on resume selection screen
-      if (bestResume && typeof page.selectResumeInModal === 'function') {
+      // 1b. Smart Resume Auto-Select on resume selection screen (Multi-Tier Ground Truth Match)
+      if (typeof page.selectResumeInModal === 'function') {
         try {
-          const resSel = await page.selectResumeInModal(bestResume.fileName, bestResume.focusTags);
+          const primaryTarget =
+            careerBrain.resumes?.find(r => r.isDefault)?.fileName || careerBrain.resumeFileName || bestResume?.fileName;
+          const altTargets = (candidateResumes || []).map(r => r.fileName);
+          const resSel = await page.selectResumeInModal(
+            primaryTarget,
+            altTargets,
+            bestResume?.focusTags || careerBrain.skills || [],
+          );
           if (resSel.selected) {
-            onAuditLog('MATCHED', 'Resume Selected in Form', bestResume.fileName, resSel.label);
+            onAuditLog('MATCHED', 'Resume Selected in Form', primaryTarget || 'Resume', resSel.label);
           }
         } catch (selErr) {
           logger.warning('[DedicatedJobRunner] selectResumeInModal non-blocking warning:', selErr);
@@ -3896,7 +3915,7 @@ export class DedicatedJobRunner {
             );
             unresolvedFields.push(field);
           }
-          await new Promise(r => setTimeout(r, 400));
+          await new Promise(r => setTimeout(r, 500));
         }
 
         // Phase B: Handle unresolved fields via candidate prompt or autonomous LLM resolution
@@ -4029,7 +4048,7 @@ export class DedicatedJobRunner {
             } catch (err: any) {
               unresolvedReqFields.push(reqField);
             }
-            await new Promise(r => setTimeout(r, 400));
+            await new Promise(r => setTimeout(r, 500));
           }
 
           if (unresolvedReqFields.length > 0 && this.isRunning) {
@@ -4226,7 +4245,11 @@ export class DedicatedJobRunner {
             );
             const testAdvance = await page.clickModalForwardButton();
             if (testAdvance.clicked) {
-              await new Promise(r => setTimeout(r, 1500));
+              if (typeof page.waitForDomSettlement === 'function') {
+                await page.waitForDomSettlement();
+              } else {
+                await new Promise(r => setTimeout(r, 1200));
+              }
               const postAdvanceCheck = await page.validateModalFormState();
               if (!postAdvanceCheck.hasErrors || postAdvanceCheck.emptyRequiredFields.length === 0) {
                 continue; // Modal advanced successfully!
@@ -4238,7 +4261,11 @@ export class DedicatedJobRunner {
                   `[DedicatedJobRunner] Self-healed ${healing.correctedCount} validation errors in modal. Re-clicking forward...`,
                 );
                 await page.clickModalForwardButton();
-                await new Promise(r => setTimeout(r, 1500));
+                if (typeof page.waitForDomSettlement === 'function') {
+                  await page.waitForDomSettlement();
+                } else {
+                  await new Promise(r => setTimeout(r, 1200));
+                }
                 continue;
               }
 
@@ -4253,7 +4280,11 @@ export class DedicatedJobRunner {
                   }
                 }
                 await page.clickModalForwardButton();
-                await new Promise(r => setTimeout(r, 1500));
+                if (typeof page.waitForDomSettlement === 'function') {
+                  await page.waitForDomSettlement();
+                } else {
+                  await new Promise(r => setTimeout(r, 1200));
+                }
                 continue;
               }
 
@@ -4312,7 +4343,11 @@ export class DedicatedJobRunner {
             reason: 'Failed to advance to next modal step',
           };
         }
-        await new Promise(r => setTimeout(r, 1500));
+        if (typeof page.waitForDomSettlement === 'function') {
+          await page.waitForDomSettlement();
+        } else {
+          await new Promise(r => setTimeout(r, 1200));
+        }
 
         // Post-advance validation check: Check if forward navigation was rejected by red alert errors!
         const postFwdValidation = await page.validateModalFormState();
@@ -4354,6 +4389,9 @@ export class DedicatedJobRunner {
 
     if (submitted) {
       // Dismiss any lingering thank-you confirmation overlay
+      if (typeof page.dismissPostSubmitModal === 'function') {
+        await page.dismissPostSubmitModal().catch(() => {});
+      }
       await page.dismissEasyApplyModal(3000).catch(() => {});
       return { success: true };
     }

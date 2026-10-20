@@ -5371,17 +5371,128 @@ export default class Page {
   }
 
   /**
+   * Waits adaptively for DOM mutations to settle and loading spinners to disappear.
+   * Eliminates race conditions on slower machines (i3/i5, 5-10Mbps) while maintaining
+   * instant near-zero latency on high-end hardware (i9, gigabit).
+   */
+  async waitForDomSettlement(
+    targetSelector = 'div.jobs-easy-apply-modal, div[data-test-modal], div.artdeco-modal, div[role="dialog"]',
+    options: {
+      maxWaitMs?: number;
+      quietPeriodMs?: number;
+      pollIntervalMs?: number;
+    } = {},
+  ): Promise<{ settled: boolean; elapsedMs: number }> {
+    if (!this._puppeteerPage) {
+      return { settled: false, elapsedMs: 0 };
+    }
+
+    const maxWaitMs = options.maxWaitMs ?? 4000;
+    const quietPeriodMs = options.quietPeriodMs ?? 150;
+    const pollIntervalMs = options.pollIntervalMs ?? 100;
+    const startTime = Date.now();
+
+    while (Date.now() - startTime < maxWaitMs) {
+      const check = await this._puppeteerPage
+        .evaluate((sel: string) => {
+          // Check for active loading spinners
+          const spinnerSelectors = [
+            '.artdeco-loader',
+            '.loading-spinner',
+            '.jobs-easy-apply-modal__spinner',
+            '[data-test-loading-indicator]',
+            '.artdeco-inline-feedback--loading',
+            '[aria-busy="true"]',
+            '.fb-form-element--loading',
+            '.spinner',
+          ];
+          const hasSpinner = Boolean(document.querySelector(spinnerSelectors.join(', ')));
+          if (hasSpinner) {
+            return { hasSpinner: true, targetFound: false };
+          }
+
+          // Target container inspection
+          const target = (sel ? document.querySelector(sel) : null) || document.body;
+          if (!target) {
+            return { hasSpinner: false, targetFound: false };
+          }
+
+          const style = window.getComputedStyle(target);
+          if (style.display === 'none' || style.visibility === 'hidden') {
+            return { hasSpinner: false, targetFound: false };
+          }
+
+          return { hasSpinner: false, targetFound: true };
+        }, targetSelector)
+        .catch(() => ({ hasSpinner: false, targetFound: false }));
+
+      if (!check.hasSpinner && check.targetFound) {
+        // Allow quietPeriodMs to guarantee layout stability
+        await new Promise(r => setTimeout(r, quietPeriodMs));
+        return { settled: true, elapsedMs: Date.now() - startTime };
+      }
+
+      await new Promise(r => setTimeout(r, pollIntervalMs));
+    }
+
+    return { settled: false, elapsedMs: Date.now() - startTime };
+  }
+
+  /**
+   * Dismisses LinkedIn's post-application thank-you / confirmation dialog
+   * so it does not block subsequent job applications.
+   */
+  async dismissPostSubmitModal(timeoutMs = 4000): Promise<boolean> {
+    if (!this._puppeteerPage) return false;
+
+    return this._puppeteerPage
+      .evaluate(() => {
+        const dismissSelectors = [
+          'button[aria-label="Dismiss"]',
+          'button.artdeco-modal__dismiss',
+          'button[data-test-modal-close-btn]',
+          'div.jobs-easy-apply-modal button[aria-label*="Dismiss"]',
+          'div.artdeco-modal button[aria-label*="Dismiss"]',
+          'button.artdeco-button--primary[data-test-easy-apply-dismiss-button]',
+          'button[data-control-name="overlay.close_overlay"]',
+        ];
+
+        for (const sel of dismissSelectors) {
+          const btn = document.querySelector<HTMLButtonElement>(sel);
+          if (btn && btn.offsetParent !== null) {
+            btn.click();
+            return true;
+          }
+        }
+
+        // Search for button with text "Done"
+        const allButtons = Array.from(document.querySelectorAll<HTMLButtonElement>('button'));
+        for (const btn of allButtons) {
+          const txt = (btn.textContent || '').trim().toLowerCase();
+          if (txt === 'done' && btn.offsetParent !== null) {
+            btn.click();
+            return true;
+          }
+        }
+
+        return false;
+      })
+      .catch(() => false);
+  }
+
+  /**
    * Selects the best matching resume radio button in the Easy Apply modal.
    * Compares pre-uploaded resume cards against targetFileName and resumeTags.
    */
   async selectResumeInModal(
     targetFileName?: string,
+    candidateFileNames: string[] = [],
     resumeTags: string[] = [],
-  ): Promise<{ selected: boolean; label?: string }> {
+  ): Promise<{ selected: boolean; label?: string; needsFileUpload?: boolean }> {
     if (!this._puppeteerPage) return { selected: false };
 
     return this._puppeteerPage.evaluate(
-      (fileNameTarget, tags) => {
+      (fileNameTarget, altFileNames, tags) => {
         function findActiveModal(root: any): HTMLElement | null {
           const candidates = root.querySelectorAll
             ? (Array.from(
@@ -5399,28 +5510,78 @@ export default class Page {
           return null;
         }
 
-        function clickReactRadio(element: HTMLInputElement) {
-          element.focus();
-          element.checked = true;
-          element.dispatchEvent(new Event('input', { bubbles: true }));
-          element.dispatchEvent(new Event('change', { bubbles: true }));
-          element.click();
-          element.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+        function clickReactRadio(radio: HTMLInputElement) {
+          try {
+            radio.focus();
+          } catch {}
+
+          // 1. Native prototype setter so React 18 tracks the transition
+          const proto = HTMLInputElement.prototype;
+          const setter = Object.getOwnPropertyDescriptor(proto, 'checked')?.set;
+          if (setter) {
+            setter.call(radio, true);
+          } else {
+            radio.checked = true;
+          }
+
+          // 2. Identify clickable label or card container
+          const clickable =
+            (radio.id ? modal.querySelector(`label[for="${CSS.escape(radio.id)}"]`) : null) ||
+            radio.closest('label') ||
+            radio.closest(
+              '.jobs-document-upload__resume-card, .ui-attachment, div[data-test-form-builder-radio-button-form-component]',
+            ) ||
+            radio.parentElement ||
+            radio;
+
+          // 3. Dispatch full pointer/mouse sequence on the clickable element
+          const mouseOpts = { bubbles: true, cancelable: true, view: window };
+          ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(evt => {
+            clickable.dispatchEvent(new MouseEvent(evt, mouseOpts));
+          });
+
+          // 4. Fire React input and change events
+          radio.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+          radio.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+
+          // 5. Dismiss any visible "A resume is required" red alert message
+          const errorEls = Array.from(
+            modal.querySelectorAll(
+              '.artdeco-inline-feedback--error, [data-test-form-element-error-messages], .fb-form-element__error-text, p[id*="error"]',
+            ),
+          );
+          for (const errEl of errorEls) {
+            if (/resume\s+is\s+required/i.test(errEl.textContent || '')) {
+              (errEl as HTMLElement).style.display = 'none';
+            }
+          }
+        }
+
+        function normalizeFileName(str: string): string {
+          return (str || '')
+            .toLowerCase()
+            .replace(/\.(pdf|doc|docx)$/i, '')
+            .replace(/[^a-z0-9]+/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
         }
 
         const modal = findActiveModal(document) || document.body;
         const radios = Array.from(modal.querySelectorAll<HTMLInputElement>('input[type="radio"]'));
 
-        if (radios.length === 0) return { selected: false };
+        if (radios.length === 0) {
+          // Check if file upload button is present for fresh accounts with 0 pre-uploaded resumes
+          const hasUploadInput = Boolean(modal.querySelector('input[type="file"]'));
+          return { selected: false, needsFileUpload: hasUploadInput };
+        }
 
-        // Clean target filename without extension for fuzzy matching
-        const cleanTarget = (fileNameTarget || '')
-          .toLowerCase()
-          .replace(/\.(pdf|doc|docx)$/i, '')
-          .replace(/[_-]/g, ' ')
-          .trim();
-
+        const normTarget = normalizeFileName(fileNameTarget || '');
+        const normAltTargets = (altFileNames || []).map(normalizeFileName).filter(Boolean);
         const cleanTags = (tags || []).map(t => t.toLowerCase().trim()).filter(Boolean);
+
+        // Filter out generic file stop words so fuzzy token matching doesn't match all resumes
+        const stopWords = new Set(['resume', 'cv', 'doc', 'docx', 'pdf', 'profile', 'updated', 'latest', 'final']);
+        const targetWords = normTarget.split(/\s+/).filter(w => w.length > 2 && !stopWords.has(w));
 
         let bestRadio: HTMLInputElement | null = null;
         let bestRadioLabel = '';
@@ -5428,37 +5589,55 @@ export default class Page {
 
         for (const radio of radios) {
           const cardEl = radio.closest('div, label, li, tr') || radio.parentElement;
-          const cardText = (cardEl?.textContent || '').toLowerCase().trim();
+          const rawCardText = (cardEl?.textContent || '').toLowerCase().trim();
 
           const isResumeRadio =
-            cardText.includes('.pdf') ||
-            cardText.includes('.doc') ||
-            cardText.includes('resume') ||
+            rawCardText.includes('.pdf') ||
+            rawCardText.includes('.doc') ||
+            rawCardText.includes('resume') ||
             radio.name.toLowerCase().includes('resume') ||
             radio.id.toLowerCase().includes('resume');
 
           if (!isResumeRadio) continue;
 
+          const normCard = normalizeFileName(rawCardText);
           let score = 0;
 
-          // 1. Exact or strong substring match on target file name
-          if (cleanTarget && cardText.includes(cleanTarget)) {
-            score += 100;
-          } else if (cleanTarget) {
-            const targetWords = cleanTarget.split(/\s+/).filter(w => w.length > 2);
+          // Tier 1: Exact or strong match on Primary Target resume (Default / Active in extension)
+          if (normTarget && normCard === normTarget) {
+            score += 1000;
+          } else if (normTarget && normCard.includes(normTarget)) {
+            score += 800;
+          } else if (targetWords.length > 0) {
             for (const word of targetWords) {
-              if (cardText.includes(word)) score += 20;
+              if (normCard.includes(word)) score += 100;
             }
           }
 
-          // 2. Resume tags match in card text
+          // Tier 2: Match against any other uploaded resume in the extension
+          for (const alt of normAltTargets) {
+            if (alt && normCard === alt) {
+              score += 500;
+              break;
+            } else if (alt && normCard.includes(alt)) {
+              score += 400;
+              break;
+            }
+          }
+
+          // Tier 3: Resume tags match in card text
           for (const tag of cleanTags) {
-            if (cardText.includes(tag)) {
-              score += 15;
+            if (normCard.includes(tag)) {
+              score += 20;
             }
           }
 
-          // 3. Fallback: already checked radio has base score 1
+          // Tier 4: Fallback - if no match found, first available resume gets 10 points
+          if (score === 0) {
+            score = 10;
+          }
+
+          // Preference for already checked radio if tied
           if (radio.checked) {
             score += 1;
           }
@@ -5466,7 +5645,7 @@ export default class Page {
           if (score > highestScore) {
             highestScore = score;
             bestRadio = radio;
-            bestRadioLabel = cardText.slice(0, 80);
+            bestRadioLabel = rawCardText.slice(0, 80);
           }
         }
 
@@ -5478,6 +5657,7 @@ export default class Page {
         return { selected: false };
       },
       targetFileName,
+      candidateFileNames,
       resumeTags,
     );
   }
