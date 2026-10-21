@@ -3815,6 +3815,118 @@ export class DedicatedJobRunner {
     return { solved: false, aborted: false };
   }
 
+  /**
+   * Checkpoint Guardian for New Accounts:
+   * When an account is new and has 0 resumes uploaded to the LinkedIn server,
+   * pauses automation, guides the user via Live Activity to click 'Upload resume',
+   * and auto-resumes as soon as the file is attached and recognized.
+   */
+  private async waitForManualResumeUpload(
+    page: any,
+    portToSend?: chrome.runtime.Port | null,
+    onLiveActivity?: (activity: any) => void,
+    jobTitle = 'LinkedIn Job',
+    companyName = 'Company',
+    primaryTarget?: string,
+    altTargets: string[] = [],
+    tags: string[] = [],
+    timeoutMs = 90000,
+  ): Promise<{ selected: boolean; label?: string }> {
+    const startTime = Date.now();
+    const pollIntervalMs = 2000;
+
+    const alertMsg =
+      '📄 New LinkedIn Account: Please click "Upload resume" in the modal to upload your resume once — JobPilot will auto-resume immediately!';
+    this.notifyStatus(portToSend, alertMsg, 'info');
+    this.notifyActivity(portToSend, onLiveActivity, {
+      jobId: this.activeJobId || 'resume_upload',
+      url: '',
+      title: jobTitle,
+      company: companyName,
+      status: 'needs_verification',
+      reason: alertMsg,
+      creditsUsed: 0,
+    });
+
+    while (Date.now() - startTime < timeoutMs) {
+      if (!this.isRunning) {
+        return { selected: false };
+      }
+
+      const aborted = await this.interruptibleSleep(pollIntervalMs);
+      if (aborted || !this.isRunning) {
+        return { selected: false };
+      }
+
+      if (typeof page.selectResumeInModal === 'function') {
+        try {
+          const res = await page.selectResumeInModal(primaryTarget, altTargets, tags);
+          if (res.selected) {
+            this.notifyStatus(
+              portToSend,
+              `✅ Resume uploaded & detected (${res.label || 'Resume'})! Resuming application automatically...`,
+              'ok',
+            );
+            await this.interruptibleSleep(1000);
+            return res;
+          }
+        } catch {}
+      }
+    }
+
+    this.notifyStatus(
+      portToSend,
+      '⏳ Resume upload window (90s) expired. Proceeding to discover any form fields...',
+      'info',
+    );
+    return { selected: false };
+  }
+
+  /**
+   * Tier 2 Fallback: Enriches missing CareerBrain fields from platform page DOM
+   * strictly if not already populated in extension (Tier 1 Priority).
+   */
+  private async enrichMissingCareerBrainFromPlatform(page: any, careerBrain: ICareerBrain): Promise<ICareerBrain> {
+    try {
+      if (!careerBrain.fullName || !careerBrain.currentTitle) {
+        const platformMeta = await page
+          .evaluate(() => {
+            const meImg = document.querySelector(
+              '.global-nav__me-photo, img.feed-identity-module__member-photo',
+            ) as HTMLImageElement;
+            const nameFromImg = meImg?.alt?.trim() || '';
+            const nameEl = document.querySelector(
+              '.feed-identity-module__actor-meta a, .identity-headline, .feed-identity-module a',
+            ) as HTMLElement;
+            const headlineEl = document.querySelector(
+              '.identity-headline, .feed-identity-module__headline',
+            ) as HTMLElement;
+            return {
+              name: nameFromImg || nameEl?.innerText?.trim() || '',
+              headline: headlineEl?.innerText?.trim() || '',
+            };
+          })
+          .catch(() => null);
+
+        if (platformMeta) {
+          if (!careerBrain.fullName && platformMeta.name) {
+            careerBrain.fullName = platformMeta.name;
+            logger.info(`[DedicatedJobRunner] Tier 2: Enriched missing fullName from platform: "${platformMeta.name}"`);
+          }
+          if (!careerBrain.currentTitle && platformMeta.headline) {
+            careerBrain.currentTitle = platformMeta.headline;
+            logger.info(
+              `[DedicatedJobRunner] Tier 2: Enriched missing currentTitle from platform: "${platformMeta.headline}"`,
+            );
+          }
+        }
+      }
+    } catch (enrichErr) {
+      logger.warning('[DedicatedJobRunner] Platform enrichment skipped:', enrichErr);
+    }
+    return careerBrain;
+  }
+
   private async fillAndSubmitModal(
     page: any,
     job: { jobId: string; title: string; company: string; url: string },
@@ -3823,6 +3935,7 @@ export class DedicatedJobRunner {
     onLiveActivity?: (activity: any) => void,
   ): Promise<{ success: boolean; reason?: string }> {
     let careerBrain = await careerBrainStore.getCareerBrain();
+    careerBrain = await this.enrichMissingCareerBrainFromPlatform(page, careerBrain);
     const scopedLLM = await getJobScopedLLM(jobRunId);
 
     const onAuditLog = (
@@ -3941,6 +4054,23 @@ export class DedicatedJobRunner {
           );
           if (resSel.selected) {
             onAuditLog('MATCHED', 'Resume Selected in Form', primaryTarget || 'Resume', resSel.label);
+          } else if (resSel.needsFileUpload) {
+            logger.info(
+              '[DedicatedJobRunner] New account detected (0 resumes on LinkedIn server). Waiting for manual resume upload...',
+            );
+            const uploadRes = await this.waitForManualResumeUpload(
+              page,
+              portToSend,
+              onLiveActivity,
+              job.title,
+              job.company,
+              primaryTarget,
+              altTargets,
+              bestResume?.focusTags || careerBrain.skills || [],
+            );
+            if (uploadRes.selected) {
+              onAuditLog('MATCHED', 'Resume Uploaded & Selected', primaryTarget || 'Resume', uploadRes.label);
+            }
           }
         } catch (selErr) {
           logger.warning('[DedicatedJobRunner] selectResumeInModal non-blocking warning:', selErr);

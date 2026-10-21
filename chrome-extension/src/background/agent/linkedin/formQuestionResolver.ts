@@ -1602,6 +1602,35 @@ export function matchRuleBased(
   if (isEmailQuestion && careerBrain.email) {
     return { matched: true, answer: careerBrain.email, sourceDetail: 'profile: email' };
   }
+
+  // First Name / Given Name (Essential for fresh LinkedIn / Job portal accounts with empty contact fields)
+  const isFirstName = !isBinaryOrSelect && /(?:\bfirst\s*name\b|\bgiven\s*name\b|\bforename\b)/i.test(labelLower);
+  if (isFirstName && careerBrain.fullName) {
+    const parts = careerBrain.fullName.trim().split(/\s+/);
+    const firstName = parts[0] || '';
+    if (firstName) {
+      return { matched: true, answer: firstName, sourceDetail: 'profile: firstName' };
+    }
+  }
+
+  // Last Name / Surname / Family Name
+  const isLastName = !isBinaryOrSelect && /(?:\blast\s*name\b|\bsurname\b|\bfamily\s*name\b)/i.test(labelLower);
+  if (isLastName && careerBrain.fullName) {
+    const parts = careerBrain.fullName.trim().split(/\s+/);
+    const lastName = parts.length > 1 ? parts.slice(1).join(' ') : parts[0] || '';
+    if (lastName) {
+      return { matched: true, answer: lastName, sourceDetail: 'profile: lastName' };
+    }
+  }
+
+  // Full Name
+  const isFullName =
+    !isBinaryOrSelect &&
+    /(?:\bfull\s*name\b|\bcandidate\s*name\b|\byour\s*name\b)/i.test(labelLower) &&
+    !/(?:company|employer|organization|manager|recruiter|referrer)\s*name/i.test(labelLower);
+  if (isFullName && careerBrain.fullName) {
+    return { matched: true, answer: careerBrain.fullName.trim(), sourceDetail: 'profile: fullName' };
+  }
   // Location Willingness, Commute, Relocation, and Hybrid/Client Location questions
   if (
     /comfortable\s*(?:with)?|willing\s*(?:to)?|open\s*to|able\s*to\s*commute|can\s*you\s*work|work\s*from|relocate|commute|onsite/i.test(
@@ -2730,9 +2759,10 @@ OUTPUT STRICTLY VALID JSON ONLY:
           }
         }
 
-        // Auto-save to goldenAnswers for future encounters
+        // Auto-save to goldenAnswers and customAnswers for instantaneous 0-credit future reuse
         if (!isGenericWorkExperienceDateField(cleanLabel) && !isSocialMediaOrUrlQuestion(cleanLabel)) {
           await careerBrainStore.saveGoldenAnswer(cleanLabel, ans, 'Screening').catch(() => {});
+          await careerBrainStore.setCustomAnswer(cleanLabel, ans).catch(() => {});
           if (!careerBrain.goldenAnswers) careerBrain.goldenAnswers = [];
           careerBrain.goldenAnswers.push({
             id: `ga_${Date.now()}`,
@@ -2740,6 +2770,8 @@ OUTPUT STRICTLY VALID JSON ONLY:
             answer: ans,
             category: 'Screening',
           });
+          if (!careerBrain.customAnswers) careerBrain.customAnswers = {};
+          careerBrain.customAnswers[cleanLabel] = ans;
         }
 
         logger.info(

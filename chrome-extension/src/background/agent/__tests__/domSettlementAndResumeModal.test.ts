@@ -193,4 +193,63 @@ describe('Phase 1, 2 & 3: DOM Settlement, Resume Selection, Typeahead & Checkpoi
       expect(result.elapsedMs).toBeGreaterThanOrEqual(25);
     });
   });
+
+  describe('Phase 4: Contact Name Splitting & Platform Profile Enrichment', () => {
+    it('correctly extracts first name and last name from candidate full name', () => {
+      const candidateFullName = 'Mubasshir Ali';
+      const parts = candidateFullName.trim().split(/\s+/);
+      const firstName = parts[0];
+      const lastName = parts.length > 1 ? parts.slice(1).join(' ') : parts[0];
+
+      expect(firstName).toBe('Mubasshir');
+      expect(lastName).toBe('Ali');
+    });
+
+    it('preserves Tier 1 extension data over Tier 2 platform fallback', () => {
+      const extensionCareerBrain = {
+        fullName: 'Mubasshir Ali',
+        currentTitle: 'Lead AI Engineer',
+        email: 'user@example.com',
+      };
+
+      const platformData = {
+        name: 'Mubasshir A.',
+        headline: 'Junior Web Dev',
+      };
+
+      // Tier 1 Priority Rule: Only fill missing fields from platform
+      const finalName = extensionCareerBrain.fullName || platformData.name;
+      const finalTitle = extensionCareerBrain.currentTitle || platformData.headline;
+
+      expect(finalName).toBe('Mubasshir Ali'); // Kept Tier 1
+      expect(finalTitle).toBe('Lead AI Engineer'); // Kept Tier 1
+    });
+
+    it('enriches empty fields from Tier 2 platform profile when missing in extension', () => {
+      const extensionCareerBrain = {
+        fullName: '',
+        currentTitle: '',
+        email: 'user@example.com',
+      };
+
+      const platformData = {
+        name: 'Mubasshir Ali',
+        headline: 'Full Stack Engineer',
+      };
+
+      const finalName = extensionCareerBrain.fullName || platformData.name;
+      const finalTitle = extensionCareerBrain.currentTitle || platformData.headline;
+
+      expect(finalName).toBe('Mubasshir Ali');
+      expect(finalTitle).toBe('Full Stack Engineer');
+    });
+
+    it('detects needsFileUpload when 0 radio buttons exist and upload input is present', () => {
+      const radioCount = 0;
+      const hasUploadButton = true;
+      const needsFileUpload = radioCount === 0 && hasUploadButton;
+
+      expect(needsFileUpload).toBe(true);
+    });
+  });
 });

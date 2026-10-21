@@ -5732,7 +5732,14 @@ export default class Page {
           return { selected: true, label: bestRadioLabel };
         }
 
-        return { selected: false };
+        // Check if modal contains an active file upload input or button (fresh LinkedIn account with 0 prior resumes)
+        const hasUploadUploader = Boolean(
+          modal.querySelector(
+            'input[type="file"], button[aria-label*="Upload resume"], .jobs-document-upload__upload-button, [data-test-form-builder-document-upload-button], label[for*="jobs-document-upload"]',
+          ),
+        );
+
+        return { selected: false, needsFileUpload: hasUploadUploader };
       },
       targetFileName,
       candidateFileNames,
