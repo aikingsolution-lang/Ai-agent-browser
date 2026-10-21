@@ -2045,6 +2045,15 @@ export function matchRuleBased(
     };
   }
 
+  // n) Gender / Sex
+  if (/\b(?:gender|sex)\b/i.test(labelLower) && !/preference|pronoun/i.test(labelLower)) {
+    return {
+      matched: true,
+      answer: careerBrain.gender || 'Male',
+      sourceDetail: 'profile: gender',
+    };
+  }
+
   // n) Previously employed at this company / Currently employed
   if (/previously\s*worked|previous\s*employee|worked\s*(?:at|for)\s*(?:this\s*)?company/i.test(labelLower)) {
     return {
