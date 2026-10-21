@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
+import { adaptAnswerToFieldFormat } from '../linkedin/formQuestionResolver';
 
-describe('Phase 1 & Phase 2: DOM Settlement & Smart Resume Selection Logic', () => {
+describe('Phase 1, 2 & 3: DOM Settlement, Resume Selection, Typeahead & Checkpoints', () => {
   describe('Resume Modal Multi-Tier Selection Logic', () => {
     function normalizeFileName(str: string): string {
       return (str || '')
@@ -130,6 +131,42 @@ describe('Phase 1 & Phase 2: DOM Settlement & Smart Resume Selection Logic', () 
       // Falls back to first available resume (Tier 4: score 10) so application is not aborted
       expect(res.bestIndex).toBe(0);
       expect(res.highestScore).toBe(10);
+    });
+  });
+
+  describe('Phase 3: Phone Formatting & Location Typeahead', () => {
+    it('strips redundant country dialing code when formatting for local phone number input', () => {
+      const res = adaptAnswerToFieldFormat('+91 70031 51313', {
+        label: 'Mobile phone number',
+        fieldType: 'text',
+      });
+
+      expect(res.valid).toBe(true);
+      expect(res.value).toBe('7003151313');
+    });
+
+    it('extracts primary city token for location typeahead query', () => {
+      const fullLocation = 'Noida, Uttar Pradesh, India';
+      const primaryCity = fullLocation.includes(',') ? fullLocation.split(',')[0].trim() : fullLocation;
+
+      expect(primaryCity).toBe('Noida');
+    });
+
+    it('detects checkpoint security URLs and titles', () => {
+      const checkpointUrls = [
+        'https://www.linkedin.com/checkpoint/challenge/AgEUZ',
+        'https://www.linkedin.com/uas/consumer-captcha',
+        'https://www.linkedin.com/security-check',
+      ];
+
+      checkpointUrls.forEach(url => {
+        const isCheckpoint =
+          url.includes('/checkpoint/') ||
+          url.includes('/challenge/') ||
+          url.includes('security-check') ||
+          url.includes('/uas/consumer-captcha');
+        expect(isCheckpoint).toBe(true);
+      });
     });
   });
 

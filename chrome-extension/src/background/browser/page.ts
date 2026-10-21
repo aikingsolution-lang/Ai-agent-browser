@@ -3679,9 +3679,21 @@ export default class Page {
           }
 
           if (isTypeahead) {
+            // For location typeaheads with state/country, type primary city first so LinkedIn's remote typeahead API responds
+            const typeQuery = isLocationField && cleanVal.includes(',') ? cleanVal.split(',')[0].trim() : cleanVal;
+            if (typeQuery && typeQuery !== targetEl.value) {
+              if (setter) {
+                setter.call(targetEl, typeQuery);
+              } else {
+                targetEl.value = typeQuery;
+              }
+              targetEl.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+              targetEl.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+            }
+
             // Dispatch key events to activate LinkedIn's typeahead listener
-            targetEl.dispatchEvent(new KeyboardEvent('keydown', { key: cleanVal.slice(-1) || 'a', bubbles: true }));
-            targetEl.dispatchEvent(new KeyboardEvent('keyup', { key: cleanVal.slice(-1) || 'a', bubbles: true }));
+            targetEl.dispatchEvent(new KeyboardEvent('keydown', { key: typeQuery.slice(-1) || 'a', bubbles: true }));
+            targetEl.dispatchEvent(new KeyboardEvent('keyup', { key: typeQuery.slice(-1) || 'a', bubbles: true }));
 
             const listboxSelectors = [
               'div[role="listbox"]',
@@ -5368,6 +5380,72 @@ export default class Page {
       await new Promise(r => setTimeout(r, 600));
     }
     return { confirmed: false, message: 'Submission confirmation was not observed within timeout' };
+  }
+
+  /**
+   * Checks passively whether the current tab presents a Security Checkpoint,
+   * CAPTCHA / Arkose challenge, or SMS/Phone OTP verification wall.
+   */
+  async detectSecurityCheckpoint(): Promise<{
+    isCheckpoint: boolean;
+    type?: 'captcha' | 'otp' | 'challenge' | 'unknown';
+    title?: string;
+  }> {
+    if (!this._puppeteerPage) return { isCheckpoint: false };
+
+    return this._puppeteerPage
+      .evaluate(() => {
+        const url = (window.location.href || '').toLowerCase();
+        const title = (document.title || '').toLowerCase();
+
+        // 1. URL Checkpoint patterns
+        if (
+          url.includes('/checkpoint/') ||
+          url.includes('/challenge/') ||
+          url.includes('security-check') ||
+          url.includes('/uas/consumer-captcha') ||
+          url.includes('arkose')
+        ) {
+          return { isCheckpoint: true, type: 'challenge' as const, title: document.title };
+        }
+
+        // 2. Title security keywords
+        if (
+          title.includes('security verification') ||
+          title.includes('quick verification') ||
+          title.includes('phone verification') ||
+          title.includes('verify your identity') ||
+          title.includes("verify you're human") ||
+          title.includes('just a moment') ||
+          title.includes('attention required')
+        ) {
+          return { isCheckpoint: true, type: 'challenge' as const, title: document.title };
+        }
+
+        // 3. CAPTCHA / Arkose iframes & containers
+        const captchaElements = document.querySelectorAll(
+          'iframe[src*="arkose"], iframe[src*="funcaptcha"], iframe[src*="recaptcha"], iframe[src*="captcha"], #captcha-internal, div.checkpoint-container, div.challenge-dialog',
+        );
+        for (const el of Array.from(captchaElements)) {
+          const style = window.getComputedStyle(el);
+          if (style.display !== 'none' && style.visibility !== 'hidden') {
+            return { isCheckpoint: true, type: 'captcha' as const, title: document.title };
+          }
+        }
+
+        // 4. SMS / Phone OTP verification inputs
+        const otpInputs = document.querySelectorAll<HTMLInputElement>(
+          'input[name="pin"], input[id*="verification-code"], input[id*="phone-pin"], input[autocomplete="one-time-code"]',
+        );
+        for (const inp of Array.from(otpInputs)) {
+          if (inp.offsetParent !== null) {
+            return { isCheckpoint: true, type: 'otp' as const, title: document.title };
+          }
+        }
+
+        return { isCheckpoint: false };
+      })
+      .catch(() => ({ isCheckpoint: false }));
   }
 
   /**

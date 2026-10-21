@@ -2033,6 +2033,19 @@ export class DedicatedJobRunner {
           continue;
         }
 
+        // 4a-1. Checkpoint Guardian: Inspect for security verification or OTP challenge
+        if (typeof currentPage.detectSecurityCheckpoint === 'function') {
+          const checkpointCheck = await currentPage.detectSecurityCheckpoint().catch(() => ({ isCheckpoint: false }));
+          if (checkpointCheck.isCheckpoint) {
+            const chkRes = await this.waitForManualCheckpointResolution(currentPage, portToSend, onLiveActivity);
+            if (chkRes.aborted || !this.isRunning) break;
+            if (!chkRes.solved) {
+              stats.skipped++;
+              continue;
+            }
+          }
+        }
+
         // 4b. Pure DOM 0-Credit Skip Checks
         if (topCard.isClosed) {
           this.notifyStatus(
@@ -3752,6 +3765,56 @@ export class DedicatedJobRunner {
     this.cleanupRun();
   }
 
+  /**
+   * Checkpoint Guardian: Passively pauses automation when an Arkose challenge,
+   * CAPTCHA, or Phone/SMS OTP verification appears, notifying the user and auto-resuming.
+   */
+  private async waitForManualCheckpointResolution(
+    page: any,
+    portToSend?: chrome.runtime.Port | null,
+    onLiveActivity?: (activity: any) => void,
+    timeoutMs = 90000,
+  ): Promise<{ solved: boolean; aborted: boolean }> {
+    const startTime = Date.now();
+    const pollIntervalMs = 2000;
+
+    const alertMsg =
+      '🛡️ Security checkpoint / OTP detected. Please complete it in the runner tab — automation will resume automatically once solved.';
+    this.notifyStatus(portToSend, alertMsg, 'info');
+    this.notifyActivity(portToSend, onLiveActivity, {
+      jobId: this.activeJobId || 'checkpoint',
+      url: '',
+      title: 'Security Verification Detected',
+      company: 'Runner Tab',
+      status: 'needs_verification',
+      reason: alertMsg,
+      creditsUsed: 0,
+    });
+
+    while (Date.now() - startTime < timeoutMs) {
+      if (!this.isRunning) {
+        return { solved: false, aborted: true };
+      }
+
+      const aborted = await this.interruptibleSleep(pollIntervalMs);
+      if (aborted || !this.isRunning) {
+        return { solved: false, aborted: true };
+      }
+
+      if (typeof page.detectSecurityCheckpoint === 'function') {
+        const check = await page.detectSecurityCheckpoint().catch(() => ({ isCheckpoint: false }));
+        if (!check.isCheckpoint) {
+          this.notifyStatus(portToSend, '✅ Security verification completed! Resuming application...', 'ok');
+          await this.interruptibleSleep(1500);
+          return { solved: true, aborted: false };
+        }
+      }
+    }
+
+    this.notifyStatus(portToSend, '⏳ Security verification window (90s) expired. Skipping job cleanly...', 'info');
+    return { solved: false, aborted: false };
+  }
+
   private async fillAndSubmitModal(
     page: any,
     job: { jobId: string; title: string; company: string; url: string },
@@ -3843,6 +3906,20 @@ export class DedicatedJobRunner {
     while (step < maxSteps && this.isRunning) {
       step++;
       this.notifyStatus(portToSend, `📄 Reviewing Step ${step} of the application...`, 'info');
+
+      // 0. Check for security checkpoint or OTP challenge during modal filling
+      if (typeof page.detectSecurityCheckpoint === 'function') {
+        const stepCheckpoint = await page.detectSecurityCheckpoint().catch(() => ({ isCheckpoint: false }));
+        if (stepCheckpoint.isCheckpoint) {
+          const chkRes = await this.waitForManualCheckpointResolution(page, portToSend, onLiveActivity);
+          if (chkRes.aborted || !this.isRunning) {
+            return { success: false, reason: 'Application stopped during security verification' };
+          }
+          if (!chkRes.solved) {
+            return { success: false, reason: 'Security checkpoint encountered and not resolved within window' };
+          }
+        }
+      }
 
       // 1. Check if application was already confirmed sent
       const preCheck = await page.verifyApplicationConfirmation();

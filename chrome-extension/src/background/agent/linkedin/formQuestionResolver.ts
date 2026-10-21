@@ -977,6 +977,32 @@ export function adaptAnswerToFieldFormat(
     };
   }
 
+  // 1b. Phone Number formatting: Strip redundant international dialing prefix if filling local input
+  const isPhoneField =
+    /(?:\bphone\b|\btelephone\b|\bcell\b|\bmobile\b|\bcontact\s*number\b)/i.test(labelLower) &&
+    !/country\s*code|dialing|region/i.test(labelLower) &&
+    (field.fieldType === 'text' || field.fieldType === 'number');
+
+  if (isPhoneField) {
+    const rawPhone = answer.trim();
+    let digitsOnly = rawPhone.replace(/\D/g, '');
+    if (rawPhone.startsWith('+91') && digitsOnly.length > 10) {
+      digitsOnly = digitsOnly.slice(-10);
+    } else if (rawPhone.startsWith('+1') && digitsOnly.length > 10) {
+      digitsOnly = digitsOnly.slice(-10);
+    } else if (digitsOnly.length === 12 && digitsOnly.startsWith('91')) {
+      digitsOnly = digitsOnly.slice(2);
+    }
+    if (digitsOnly && digitsOnly.length >= 7) {
+      return {
+        valid: true,
+        value: digitsOnly,
+        wasConverted: digitsOnly !== rawPhone,
+        sourceNote: digitsOnly !== rawPhone ? `[MATCHED] formatted phone number for input: ${digitsOnly}` : undefined,
+      };
+    }
+  }
+
   // 2. CTC / Salary in INR or LPA
   const isCTCQuestion =
     /(?:current|present|existing|fixed|annual|expected|target|desired|seeking)?\s*(?:ctc|salary|compensation)\b/i.test(
