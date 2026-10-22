@@ -294,6 +294,30 @@ export function LinkedInApplyDashboard({
 
   const lastBackendSyncRef = useRef<number>(0);
 
+  // Switch to the runner tab (LinkedIn/Indeed/Naukri/Checkpoint) so the user can easily solve OTP/Captcha or upload resume
+  const handleFocusRunnerTab = useCallback(async () => {
+    try {
+      if (typeof chrome === 'undefined' || !chrome.tabs) return;
+      const allTabs = await chrome.tabs.query({});
+      const runnerTab = allTabs.find(
+        t =>
+          t.url?.includes('linkedin.com') ||
+          t.url?.includes('indeed.com') ||
+          t.url?.includes('naukri.com') ||
+          t.url?.includes('checkpoint') ||
+          t.url?.includes('challenge'),
+      );
+      if (runnerTab?.id) {
+        await chrome.tabs.update(runnerTab.id, { active: true });
+        if (runnerTab.windowId && chrome.windows) {
+          await chrome.windows.update(runnerTab.windowId, { focused: true });
+        }
+      }
+    } catch (err) {
+      console.warn('[LinkedInApplyDashboard] Failed to focus runner tab:', err);
+    }
+  }, []);
+
   // Sync quota from storage & backend (event-driven + 60s background sync)
   const loadQuota = useCallback(async (forceBackend = false) => {
     try {
@@ -946,6 +970,14 @@ export function LinkedInApplyDashboard({
                   platformPauseInfo.reason ||
                   'Auto-apply is paused for today to protect your account.'}
               </p>
+              {isWaitingVerification && (
+                <button
+                  type="button"
+                  onClick={handleFocusRunnerTab}
+                  className="w-full flex items-center justify-center gap-1.5 rounded-lg py-2 px-3 text-xs font-bold bg-amber-500 hover:bg-amber-600 text-slate-950 transition shadow-sm cursor-pointer active:scale-98">
+                  <span>👉 Switch to Runner Tab to Solve</span>
+                </button>
+              )}
             </div>
           );
         })()}

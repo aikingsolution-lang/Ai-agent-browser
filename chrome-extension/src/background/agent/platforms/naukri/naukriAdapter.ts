@@ -227,6 +227,77 @@ export class NaukriAdapter implements IPlatformAdapter {
     }
   }
 
+  /**
+   * Helper: Monitors for manual OTP or CAPTCHA resolution on Naukri.
+   * Auto-resumes as soon as the verification wall or OTP modal clears.
+   */
+  public async waitForManualVerification(
+    puppeteerPage: any,
+    context: IPlatformExecutionContext,
+    job: IJobQueueItem,
+    timeoutMs: number = 90000,
+  ): Promise<boolean> {
+    const startTime = Date.now();
+    logger.info(`[NaukriAdapter] 🛡️ Waiting up to ${timeoutMs / 1000}s for manual OTP / verification check...`);
+
+    if (context.onLiveActivity) {
+      context.onLiveActivity({
+        jobId: job.jobId,
+        url: job.url,
+        title: job.title,
+        company: job.company,
+        status: 'needs_verification',
+        reason:
+          'Naukri requested OTP or CAPTCHA verification. Please complete it in the runner tab — JobPilot AI will auto-resume!',
+      });
+    }
+
+    while (Date.now() - startTime < timeoutMs) {
+      if (context.signal?.aborted) {
+        logger.info('[NaukriAdapter] Abort signal received while waiting for verification.');
+        return false;
+      }
+
+      await new Promise(r => setTimeout(r, 2500));
+
+      const isStillPresent = await puppeteerPage
+        .evaluate((selectors: typeof NAUKRI_SELECTORS) => {
+          for (const sel of selectors.VERIFICATION_SELECTORS) {
+            const el = document.querySelector(sel);
+            if (el && (el as HTMLElement).offsetParent !== null) return true;
+          }
+          const text = (document.body.innerText || '').toLowerCase();
+          return (
+            text.includes('enter the otp') ||
+            text.includes('verify your mobile') ||
+            text.includes('verify your email') ||
+            text.includes('complete the security check') ||
+            text.includes('suspicious activity')
+          );
+        }, NAUKRI_SELECTORS)
+        .catch(() => false);
+
+      if (!isStillPresent) {
+        logger.info(`[NaukriAdapter] ✅ Verification wall cleared! Resuming application for "${job.title}".`);
+        if (context.onLiveActivity) {
+          context.onLiveActivity({
+            jobId: job.jobId,
+            url: job.url,
+            title: job.title,
+            company: job.company,
+            status: 'running',
+            reason: 'Verification completed. Resuming application...',
+          });
+        }
+        await new Promise(r => setTimeout(r, 2000));
+        return true;
+      }
+    }
+
+    logger.warning(`[NaukriAdapter] Verification wait timed out after ${timeoutMs / 1000}s.`);
+    return false;
+  }
+
   public async applyToJob(job: IJobQueueItem, context: IPlatformExecutionContext): Promise<IApplicationResult> {
     const { page, careerBrain, portToSend, onLiveActivity, runId } = context;
 
@@ -270,21 +341,16 @@ export class NaukriAdapter implements IPlatformAdapter {
       }, NAUKRI_SELECTORS);
 
       if (hasVerificationWall) {
-        logger.warning(`[NaukriAdapter] 🛑 Verification wall / OTP detected for "${job.title}". Pausing.`);
-        if (onLiveActivity) {
-          onLiveActivity({
-            jobId: job.jobId,
-            url: job.url,
-            title: job.title,
-            company: job.company,
-            status: 'needs_verification',
-            reason: 'Naukri requested OTP or CAPTCHA verification. Please complete it in the runner tab.',
-          });
+        logger.warning(
+          `[NaukriAdapter] 🛑 Verification wall / OTP detected for "${job.title}". Pausing for manual completion...`,
+        );
+        const solved = await this.waitForManualVerification(puppeteerPage, context, job, 90000);
+        if (!solved) {
+          return {
+            status: 'skipped',
+            reason: 'Naukri requested OTP or CAPTCHA verification. Timed out waiting for manual completion.',
+          };
         }
-        return {
-          status: 'skipped',
-          reason: 'Naukri requested OTP or CAPTCHA verification. Complete it manually.',
-        };
       }
 
       // 3. Check if already applied

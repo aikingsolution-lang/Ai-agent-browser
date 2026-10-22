@@ -1814,6 +1814,31 @@ export class IndeedAdapter implements IPlatformAdapter {
       // 1. Handle resume picker step if present
       await this.handleResumeStep(activeTabId, puppeteerPage, context.careerBrain);
 
+      // 1b. Check if fresh account needs manual resume upload
+      const needsResumeUpload = await this.detectResumeUploadRequirement(activeTabId, puppeteerPage);
+      if (needsResumeUpload) {
+        logger.info(
+          `[IndeedAdapter] Fresh Indeed account requires resume upload for "${job.title}". Pausing for user.`,
+        );
+        await this.waitForManualUserAction({
+          tabId: activeTabId,
+          puppeteerPage,
+          context,
+          jobTitle: job.title,
+          userMessage: `📄 New Indeed Account: Please click 'Upload resume' on Indeed once — JobPilot AI will auto-resume!`,
+          actionType: 'login',
+          statusLabel: 'Waiting for Resume Upload',
+          timeoutMs: this.otpManualSolveTimeoutMs,
+          pollIntervalMs: this.otpPollIntervalMs,
+          isStillPresent: async () => {
+            return await this.detectResumeUploadRequirement(activeTabId, puppeteerPage);
+          },
+          onSuccessMessage: `✅ Resume detected on Indeed! Resuming application for "${job.title}".`,
+        });
+        // Re-try handleResumeStep in case newly uploaded resume created a selectable card/radio
+        await this.handleResumeStep(activeTabId, puppeteerPage, context.careerBrain);
+      }
+
       // 2. Scan and fill all unfilled fields on current step BEFORE looking for progression buttons
       const filledCount = await this.scanAndFillCurrentStepFields(activeTabId, puppeteerPage, context, job);
       if (filledCount > 0) {
@@ -2352,6 +2377,60 @@ export class IndeedAdapter implements IPlatformAdapter {
     if (typeof chrome !== 'undefined' && chrome.scripting && tabId) {
       const res = await chrome.scripting
         .executeScript({ target: { tabId, allFrames: true }, func: evaluateResumeDOM })
+        .catch(() => []);
+      return Boolean(res?.some(r => r.result === true));
+    }
+    return false;
+  }
+
+  /**
+   * Helper: Detects if Indeed currently demands a manual resume upload
+   * (e.g. for brand new accounts with 0 uploaded resumes, or explicit file upload forms).
+   */
+  public async detectResumeUploadRequirement(tabId: number, puppeteerPage?: any): Promise<boolean> {
+    const evaluateNeedsUpload = () => {
+      const bodyText = (document.body?.innerText || '').toLowerCase();
+
+      // Look for explicit missing resume prompts or errors
+      const hasResumeError =
+        bodyText.includes('please upload a resume') ||
+        bodyText.includes('a resume is required') ||
+        bodyText.includes('upload a resume to continue') ||
+        bodyText.includes('upload your resume') ||
+        bodyText.includes('add a resume to apply');
+
+      // Check for file inputs or upload buttons
+      const hasFileInput = !!document.querySelector('input[type="file"]');
+      const hasUploadBtn = Array.from(document.querySelectorAll('button, a, label')).some(el => {
+        const t = (el.textContent || '').trim().toLowerCase();
+        return t === 'upload resume' || t === 'upload your resume' || t === 'add a resume';
+      });
+
+      // Check if user already has an active selected resume
+      const hasSelectedRadio = !!document.querySelector(
+        'input[type="radio"]:checked, [role="radio"][aria-checked="true"], .ia-ResumeCard.selected',
+      );
+
+      // If already selected, upload is not required
+      if (hasSelectedRadio) return false;
+
+      // If error message or (file input/upload button exists AND no resume radio is present)
+      const hasRadioAtAll = !!document.querySelector(
+        'input[type="radio"][name*="resume" i], [data-testid*="ResumeCard"], .ia-ResumeCard',
+      );
+
+      if (hasResumeError) return true;
+      if (!hasRadioAtAll && (hasFileInput || hasUploadBtn)) return true;
+
+      return false;
+    };
+
+    if (puppeteerPage && tabId === puppeteerPage.target?.()?.tabId) {
+      return await puppeteerPage.evaluate(evaluateNeedsUpload).catch(() => false);
+    }
+    if (typeof chrome !== 'undefined' && chrome.scripting && tabId) {
+      const res = await chrome.scripting
+        .executeScript({ target: { tabId, allFrames: true }, func: evaluateNeedsUpload })
         .catch(() => []);
       return Boolean(res?.some(r => r.result === true));
     }
