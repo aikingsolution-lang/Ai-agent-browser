@@ -5476,8 +5476,8 @@ export default class Page {
             return { hasSpinner: true, targetFound: false };
           }
 
-          // Target container inspection
-          const target = (sel ? document.querySelector(sel) : null) || document.body;
+          // Target container inspection: If sel is provided, we MUST find sel; do NOT fall back to document.body
+          const target = sel ? document.querySelector(sel) : document.body;
           if (!target) {
             return { hasSpinner: false, targetFound: false };
           }

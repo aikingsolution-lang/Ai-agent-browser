@@ -1710,18 +1710,18 @@ export class DedicatedJobRunner {
 
       const currentPage = await this.browserContext.getCurrentPage();
 
-      // Dynamically wait for page load & DOM settlement (blazing fast on fast PC/network, graceful on slower)
+      // Allow Chrome tab navigation to load the LinkedIn search page
+      const navWaitAborted = await this.interruptibleSleep(3000);
+      if (navWaitAborted || !this.isRunning) {
+        this.cleanupRun('Stopped by user', stats);
+        return { status: 'stopped', message: 'Stopped by user', stats };
+      }
+
       if (typeof currentPage.waitForDomSettlement === 'function') {
         await currentPage.waitForDomSettlement(
           '.jobs-search-results-list, .scaffold-layout__list, [data-view-name="job-card"]',
-          { maxWaitMs: 3500, quietPeriodMs: 150 },
+          { maxWaitMs: 5000, quietPeriodMs: 200 },
         );
-      } else {
-        const navWaitAborted = await this.interruptibleSleep(1500);
-        if (navWaitAborted || !this.isRunning) {
-          this.cleanupRun();
-          return { status: 'stopped', message: 'Stopped by user', stats };
-        }
       }
       await this.markRunnerTabVisually(currentPage);
       const devtoolsNotice =
@@ -1824,14 +1824,13 @@ export class DedicatedJobRunner {
               await (currentPage as any).navigateTo(nextSearchUrl);
             }
           } catch {}
+          const sleepAborted = await this.interruptibleSleep(2500);
+          if (sleepAborted || !this.isRunning) break;
           if (typeof currentPage.waitForDomSettlement === 'function') {
             await currentPage.waitForDomSettlement(
               '.jobs-search-results-list, .scaffold-layout__list, [data-view-name="job-card"]',
-              { maxWaitMs: 3000, quietPeriodMs: 150 },
+              { maxWaitMs: 4000, quietPeriodMs: 200 },
             );
-          } else {
-            const sleepAborted = await this.interruptibleSleep(1200);
-            if (sleepAborted || !this.isRunning) break;
           }
         }
 
@@ -1847,7 +1846,7 @@ export class DedicatedJobRunner {
           );
           jobCards = await currentPage.readJobListFromSearchPane(readAttempts);
           if (jobCards.length === 0 && readAttempts < 3) {
-            const sleepAborted = await this.interruptibleSleep(600);
+            const sleepAborted = await this.interruptibleSleep(1200);
             if (sleepAborted || !this.isRunning) break;
           }
         }
@@ -1892,7 +1891,7 @@ export class DedicatedJobRunner {
         const noJobsMsg =
           'No jobs found across target locations. Please check your role/location criteria or search filters.';
         this.notifyStatus(portToSend, `⚠️ ${noJobsMsg}`, 'fail');
-        this.cleanupRun();
+        this.cleanupRun(noJobsMsg, stats);
         return { status: 'error', message: noJobsMsg, stats };
       }
 
@@ -4692,7 +4691,16 @@ export class DedicatedJobRunner {
     }
   }
 
-  private cleanupRun(): void {
+  private cleanupRun(summaryMsg?: string, stats?: any): void {
+    if (this.activePort) {
+      try {
+        this.activePort.postMessage({
+          type: 'LINKEDIN_RUN_FINISHED',
+          summary: summaryMsg || 'Auto Apply session ended',
+          stats: stats || { totalFound: 0, applied: 0, skipped: 0, failed: 0 },
+        });
+      } catch {}
+    }
     if (this.abortController) {
       try {
         this.abortController.abort();
