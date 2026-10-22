@@ -2668,6 +2668,10 @@ export default class Page {
       placeholder?: string;
       hintText?: string;
     }>;
+    unfulfilledMandatoryFileUpload?: {
+      label: string;
+      documentType: string;
+    };
   }> {
     if (!this._puppeteerPage) {
       return { hasErrors: false, errors: [], emptyRequiredFields: [], invalidFieldsWithErrors: [] };
@@ -3330,16 +3334,62 @@ export default class Page {
           }
         }
 
+        let unfulfilledMandatoryFileUpload: { label: string; documentType: string } | undefined = undefined;
+
+        // Check for mandatory file upload elements (Cover Letter, Portfolio, Custom Attachment)
+        const fileInputs = Array.from(modal.querySelectorAll('input[type="file"]')) as HTMLInputElement[];
+        for (const fi of fileInputs) {
+          const isRequired =
+            fi.required ||
+            fi.hasAttribute('required') ||
+            fi.getAttribute('aria-required') === 'true' ||
+            Boolean(fi.closest('.jobs-document-upload--required, [data-test-document-upload-required]'));
+          const hasFiles = fi.files && fi.files.length > 0;
+          const container = fi.closest('.jobs-document-upload, .fb-dash-form-element, section, div');
+          const hasError = container?.querySelector(
+            '.artdeco-inline-feedback--error, [aria-live="assertive"], .inline-feedback, [class*="error" i]',
+          );
+          const errText = (hasError?.textContent || '').trim();
+          const isUploadError =
+            /upload (?:a |your )?(?:cover letter|resume|portfolio|file|document)|document is required|file is required/i.test(
+              errText,
+            );
+
+          if ((isRequired || isUploadError) && !hasFiles) {
+            const rawLabel =
+              cleanElementText(container?.querySelector('h3, h4, label, legend') || null) || 'Document Upload';
+            const docType =
+              /cover\s*letter/i.test(rawLabel) || /cover\s*letter/i.test(errText)
+                ? 'Cover Letter'
+                : /portfolio/i.test(rawLabel) || /portfolio/i.test(errText)
+                  ? 'Portfolio'
+                  : 'Custom Attachment';
+            unfulfilledMandatoryFileUpload = { label: rawLabel, documentType: docType };
+            break;
+          }
+        }
+
         return {
-          hasErrors: errors.length > 0 || emptyRequiredFields.length > 0 || invalidFieldsWithErrors.length > 0,
+          hasErrors:
+            errors.length > 0 ||
+            emptyRequiredFields.length > 0 ||
+            invalidFieldsWithErrors.length > 0 ||
+            Boolean(unfulfilledMandatoryFileUpload),
           errors,
           emptyRequiredFields,
           invalidFieldsWithErrors,
+          unfulfilledMandatoryFileUpload,
         };
       })
       .catch(err => {
         logger.warning('validateModalFormState check error:', err);
-        return { hasErrors: false, errors: [], emptyRequiredFields: [], invalidFieldsWithErrors: [] };
+        return {
+          hasErrors: false,
+          errors: [],
+          emptyRequiredFields: [],
+          invalidFieldsWithErrors: [],
+          unfulfilledMandatoryFileUpload: undefined,
+        };
       });
   }
 
@@ -3698,12 +3748,40 @@ export default class Page {
           const proto =
             targetEl instanceof HTMLInputElement ? HTMLInputElement.prototype : HTMLTextAreaElement.prototype;
           const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+
+          let finalVal = val;
+          if (
+            targetEl instanceof HTMLInputElement &&
+            (targetEl.type === 'number' || targetEl.inputMode === 'numeric' || targetEl.inputMode === 'decimal')
+          ) {
+            let numStr = String(val).replace(/,/g, '').trim();
+            const minAttr = targetEl.getAttribute('min');
+            const minNum = minAttr !== null ? parseFloat(minAttr) : NaN;
+            const minRequiresPositive = !isNaN(minNum) && minNum > 0;
+
+            if (/^(immediate|immediately|now|none|0\s*days?)$/i.test(numStr)) {
+              numStr = minRequiresPositive ? String(Math.max(1, minNum)) : '0';
+            } else {
+              const numMatch = numStr.match(/-?\d+(?:\.\d+)?/);
+              if (numMatch) {
+                let parsed = parseFloat(numMatch[0]);
+                if (minRequiresPositive && parsed < minNum) {
+                  parsed = minNum;
+                }
+                numStr = String(parsed);
+              } else {
+                numStr = minRequiresPositive ? String(Math.max(1, minNum)) : '0';
+              }
+            }
+            finalVal = numStr;
+          }
+
           try {
             targetEl.focus();
             if (setter) {
-              setter.call(targetEl, val);
+              setter.call(targetEl, finalVal);
             } else {
-              targetEl.value = val;
+              targetEl.value = finalVal;
             }
             targetEl.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
             targetEl.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
@@ -3905,6 +3983,15 @@ export default class Page {
 
           return true;
         } else if (targetEl instanceof HTMLSelectElement) {
+          // If select is currently disabled or options haven't hydrated yet (cascading parent -> child AJAX delay),
+          // poll up to 1200ms for options to load
+          for (let poll = 0; poll < 6; poll++) {
+            if (!targetEl.disabled && targetEl.options.length > 1) {
+              break;
+            }
+            await new Promise(r => setTimeout(r, 200));
+          }
+
           const options = Array.from(targetEl.options);
           const normVal = val.toLowerCase().trim();
           const isAffirmative = /^(yes|true|1|y|immediate|available|agree|authorized)$/i.test(normVal);
@@ -3932,17 +4019,38 @@ export default class Page {
             }
           }
 
-          // 3. City token match (e.g. "Bengaluru, India" matching "Bangalore" or "Bengaluru")
+          // 3. City token match & common geographic synonyms (e.g. Bengaluru <-> Bangalore, Mumbai <-> Bombay)
           if (!opt && normVal.length > 3) {
-            const tokens = normVal.split(/[\s,/-]+/).filter(t => t.length > 2);
-            opt = options.find(o => {
-              const optText = cleanDuplicateString(o.text).toLowerCase();
-              return (
-                tokens.some(t => optText.includes(t)) ||
-                (normVal.includes('bengaluru') && optText.includes('bangalore')) ||
-                (normVal.includes('bangalore') && optText.includes('bengaluru'))
-              );
-            });
+            const citySynonyms: Record<string, string[]> = {
+              bengaluru: ['bangalore', 'bengaluru'],
+              bangalore: ['bengaluru', 'bangalore'],
+              mumbai: ['bombay', 'mumbai'],
+              bombay: ['mumbai', 'bombay'],
+              kolkata: ['calcutta', 'kolkata'],
+              calcutta: ['kolkata', 'calcutta'],
+              chennai: ['madras', 'chennai'],
+              madras: ['chennai', 'madras'],
+              gurugram: ['gurgaon', 'gurugram'],
+              gurgaon: ['gurugram', 'gurgaon'],
+            };
+
+            for (const [key, aliases] of Object.entries(citySynonyms)) {
+              if (normVal.includes(key)) {
+                opt = options.find(o => {
+                  const optText = cleanDuplicateString(o.text).toLowerCase();
+                  return aliases.some(a => optText.includes(a));
+                });
+                if (opt) break;
+              }
+            }
+
+            if (!opt) {
+              const tokens = normVal.split(/[\s,/-]+/).filter(t => t.length > 2);
+              opt = options.find(o => {
+                const optText = cleanDuplicateString(o.text).toLowerCase();
+                return tokens.some(t => optText.includes(t));
+              });
+            }
           }
 
           if (opt) {
@@ -5743,6 +5851,53 @@ export default class Page {
         return { isCheckpoint: false };
       })
       .catch(() => ({ isCheckpoint: false }));
+  }
+
+  /**
+   * Detects LinkedIn daily/weekly Easy Apply rate limits and maximum application warnings.
+   */
+  async detectPlatformRateLimit(): Promise<{ isLimited: boolean; reason?: string }> {
+    if (!this._puppeteerPage) return { isLimited: false };
+
+    return this._puppeteerPage
+      .evaluate(() => {
+        const bodyText = (
+          document.body ? document.body.innerText || document.body.textContent || '' : ''
+        ).toLowerCase();
+        const limitPatterns = [
+          /maximum number of applications/i,
+          /reached the (?:application )?limit/i,
+          /reached your (?:application )?limit/i,
+          /applications are temporarily limited/i,
+          /try again tomorrow/i,
+          /exceeded the application limit/i,
+          /submitted the maximum/i,
+        ];
+
+        for (const pattern of limitPatterns) {
+          if (pattern.test(bodyText)) {
+            const limitEl = document.querySelector(
+              '.artdeco-modal, [role="alertdialog"], [role="alert"], .jobs-easy-apply-modal, .artdeco-inline-feedback--error, .feed-shared-banner',
+            );
+            if (limitEl) {
+              const elText = (limitEl.textContent || '').toLowerCase();
+              if (pattern.test(elText)) {
+                return { isLimited: true, reason: (limitEl.textContent || '').trim().slice(0, 150) };
+              }
+            }
+            const headerOrDialog = Array.from(
+              document.querySelectorAll('h1, h2, h3, [role="dialog"], [role="alertdialog"]'),
+            );
+            for (const hd of headerOrDialog) {
+              if (pattern.test((hd.textContent || '').toLowerCase())) {
+                return { isLimited: true, reason: (hd.textContent || '').trim().slice(0, 150) };
+              }
+            }
+          }
+        }
+        return { isLimited: false };
+      })
+      .catch(() => ({ isLimited: false }));
   }
 
   /**

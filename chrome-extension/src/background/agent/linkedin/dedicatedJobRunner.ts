@@ -2284,9 +2284,55 @@ export class DedicatedJobRunner {
           clickRes = await currentPage.clickEasyApplyButton();
         }
 
+        // Check immediately for LinkedIn daily/weekly application limit banner or dialog
+        if (typeof currentPage.detectPlatformRateLimit === 'function') {
+          const rateCheck = await currentPage
+            .detectPlatformRateLimit()
+            .catch(() => ({ isLimited: false as const, reason: undefined }));
+          if (rateCheck.isLimited) {
+            const limitMsg = `🛑 LinkedIn Application Limit Reached: ${rateCheck.reason || 'Maximum Easy Apply limit reached for today/week'}. Pausing auto-apply run cleanly.`;
+            logger.error(`[DedicatedJobRunner] ${limitMsg}`);
+            this.notifyStatus(portToSend, limitMsg, 'fail');
+            this.notifyActivity(portToSend, onLiveActivity, {
+              jobId: job.jobId,
+              url: job.url,
+              title: displayTitle,
+              company: displayCompany,
+              status: 'skipped',
+              reason: limitMsg,
+              creditsUsed: 0,
+            });
+            this.isRunning = false;
+            break;
+          }
+        }
+
         // Poll for modal with generous timeout for low-speed connections
         let modalRes = await currentPage.waitForEasyApplyModal(8000, 300);
         if (!modalRes.opened) {
+          // Re-check if a rate limit dialog appeared instead of the Easy Apply modal
+          if (typeof currentPage.detectPlatformRateLimit === 'function') {
+            const rateCheck = await currentPage
+              .detectPlatformRateLimit()
+              .catch(() => ({ isLimited: false as const, reason: undefined }));
+            if (rateCheck.isLimited) {
+              const limitMsg = `🛑 LinkedIn Application Limit Reached: ${rateCheck.reason || 'Maximum Easy Apply limit reached for today/week'}. Pausing auto-apply run cleanly.`;
+              logger.error(`[DedicatedJobRunner] ${limitMsg}`);
+              this.notifyStatus(portToSend, limitMsg, 'fail');
+              this.notifyActivity(portToSend, onLiveActivity, {
+                jobId: job.jobId,
+                url: job.url,
+                title: displayTitle,
+                company: displayCompany,
+                status: 'skipped',
+                reason: limitMsg,
+                creditsUsed: 0,
+              });
+              this.isRunning = false;
+              break;
+            }
+          }
+
           // Retry clicking one more time
           logger.warning(`[DedicatedJobRunner] Modal did not open on first attempt. Retrying click...`);
           const modalSleepAborted = await this.interruptibleSleep(1200);
@@ -4257,6 +4303,35 @@ export class DedicatedJobRunner {
 
       // 3. Pre-advance validation check (checks required empty fields & aria-invalid)
       const validation = await page.validateModalFormState();
+
+      // Guard against unfulfillable mandatory file uploads (Cover Letter, Portfolio, Custom Certificate)
+      if (validation.unfulfilledMandatoryFileUpload) {
+        const docType = validation.unfulfilledMandatoryFileUpload.documentType;
+        const docLabel = validation.unfulfilledMandatoryFileUpload.label;
+        logger.warning(
+          `[DedicatedJobRunner] Unfulfilled mandatory file upload detected: ${docType} ("${docLabel}"). Candidate has no matching file configured.`,
+        );
+        this.notifyStatus(
+          portToSend,
+          `⚠️ Mandatory ${docType} required by employer ("${docLabel}"), but no document is configured. Skipping cleanly to preserve credits...`,
+          'info',
+        );
+        this.notifyActivity(portToSend, onLiveActivity, {
+          jobId: job.jobId,
+          url: job.url,
+          title: job.title,
+          company: job.company,
+          status: 'skipped',
+          reason: `Mandatory ${docType} required by employer`,
+          creditsUsed: 0,
+        });
+        await page.dismissEasyApplyModal(4000);
+        return {
+          success: false,
+          reason: `Mandatory ${docType} required by recruiter`,
+        };
+      }
+
       if (validation.hasErrors) {
         if (validation.emptyRequiredFields.length > 0) {
           this.notifyStatus(
