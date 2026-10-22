@@ -1968,16 +1968,29 @@ export class DedicatedJobRunner {
         });
 
         // 4a. Click Job in Left Pane to Load Details in Right Pane
-        const clicked = await currentPage.clickJobInSearchList(job.jobId);
+        let clicked = await currentPage.clickJobInSearchList(job.jobId);
         if (!clicked) {
-          logger.warning(
-            `[DedicatedJobRunner] Could not click job card for ${job.jobId}. Retrying via direct anchor...`,
+          logger.info(
+            `[DedicatedJobRunner] Could not select job card for ${job.jobId} in current search list view. Navigating directly to ${job.url}...`,
           );
+          try {
+            if (currentPage.puppeteerPage) {
+              await currentPage.puppeteerPage.goto(job.url, { waitUntil: 'domcontentloaded', timeout: 35000 });
+            } else if ((currentPage as any).navigateTo) {
+              await (currentPage as any).navigateTo(job.url);
+            }
+          } catch (navErr) {
+            logger.warning(`[DedicatedJobRunner] Direct navigation to job URL failed:`, navErr);
+          }
+          await currentPage.waitForDomSettlement?.(
+            '.jobs-unified-top-card, [data-view-name="job-details-top-card"], .jobs-details__main-content',
+            { maxWaitMs: 3500 },
+          );
+        } else {
+          // Wait 2.5s for split pane details to render
+          const waitAborted = await this.interruptibleSleep(2500);
+          if (waitAborted || !this.isRunning) break;
         }
-
-        // Wait 2.5s for split pane details to render
-        const waitAborted = await this.interruptibleSleep(2500);
-        if (waitAborted || !this.isRunning) break;
 
         // 4b. Pure DOM Top-Card Extraction + Max-2 Retry Guard
         let topCard = await currentPage.extractJobTopCardContext(5000);
@@ -2252,15 +2265,15 @@ export class DedicatedJobRunner {
           clickRes = await currentPage.clickEasyApplyButton();
         }
 
-        // Poll for modal
-        let modalRes = await currentPage.waitForEasyApplyModal(6000, 300);
+        // Poll for modal with generous timeout for low-speed connections
+        let modalRes = await currentPage.waitForEasyApplyModal(8000, 300);
         if (!modalRes.opened) {
           // Retry clicking one more time
           logger.warning(`[DedicatedJobRunner] Modal did not open on first attempt. Retrying click...`);
-          const modalSleepAborted = await this.interruptibleSleep(1000);
+          const modalSleepAborted = await this.interruptibleSleep(1200);
           if (modalSleepAborted || !this.isRunning) break;
           await currentPage.clickEasyApplyButton();
-          modalRes = await currentPage.waitForEasyApplyModal(5000, 300);
+          modalRes = await currentPage.waitForEasyApplyModal(8000, 300);
         }
 
         // 4d. Handle Modal Form-Filling & Verified Submission

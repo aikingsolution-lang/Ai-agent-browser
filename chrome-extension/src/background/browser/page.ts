@@ -2119,7 +2119,7 @@ export default class Page {
 
   /**
    * Clicks the Easy Apply button in the active job details pane.
-   * Scoped specifically to details pane in split-view to avoid clicking search result cards.
+   * Scoped specifically to details pane in split-view or standalone view.
    */
   async clickEasyApplyButton(): Promise<{ success: boolean; error?: string }> {
     if (!this._puppeteerPage) {
@@ -2129,9 +2129,11 @@ export default class Page {
     try {
       const clickResult = await this._puppeteerPage.evaluate(() => {
         function isVisible(el: HTMLElement): boolean {
-          if (!el || el.offsetParent === null) return false;
+          if (!el) return false;
           const style = window.getComputedStyle(el);
-          return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
+          if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+          const rect = el.getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0;
         }
 
         // Find active details container in split view or standalone
@@ -2144,11 +2146,22 @@ export default class Page {
           document.querySelector('.job-details-jobs-unified-top-card__container--two-pane') ||
           document.body;
 
-        const candidates = Array.from(
-          detailsContainer.querySelectorAll(
-            'button.jobs-apply-button, button.jobs-apply-button--top-card, button[data-control-name="jobdetails_topcard_inapply"], button[data-live-test-easy-apply-button], .jobs-s-apply button, button',
-          ),
-        ) as HTMLElement[];
+        const candidateSelectors = [
+          'button.jobs-apply-button',
+          'button.jobs-apply-button--top-card',
+          'button[data-control-name="jobdetails_topcard_inapply"]',
+          'button[data-live-test-easy-apply-button]',
+          '.jobs-s-apply button',
+          '.jobs-apply-button--top-card button',
+          '[data-view-name="job-details-top-card"] button',
+          'button[aria-label*="Easy Apply" i]',
+          'button[data-job-id]',
+          'button',
+          'a.jobs-apply-button',
+          '[role="button"][aria-label*="Easy Apply" i]',
+        ].join(', ');
+
+        const candidates = Array.from(detailsContainer.querySelectorAll(candidateSelectors)) as HTMLElement[];
 
         let easyApplyBtn = candidates.find(btn => {
           if (btn.closest('.jobs-search-results-list, .scaffold-layout__list, [data-view-name="job-card"]')) {
@@ -2166,11 +2179,7 @@ export default class Page {
 
         // Global fallback if not found in detailsContainer
         if (!easyApplyBtn) {
-          const globalCandidates = Array.from(
-            document.querySelectorAll(
-              'button.jobs-apply-button, button[aria-label*="Easy Apply" i], button[data-control-name*="apply" i], button.jobs-apply-button--top-card, .jobs-s-apply button, [data-view-name="job-details-top-card"] button, button',
-            ),
-          ) as HTMLElement[];
+          const globalCandidates = Array.from(document.querySelectorAll(candidateSelectors)) as HTMLElement[];
           easyApplyBtn = globalCandidates.find(btn => {
             if (btn.closest('.jobs-search-results-list, .scaffold-layout__list, [data-view-name="job-card"]')) {
               return false;
@@ -2195,27 +2204,10 @@ export default class Page {
           easyApplyBtn.dispatchEvent(new PointerEvent('pointerup', opts));
           easyApplyBtn.dispatchEvent(new MouseEvent('mouseup', opts));
           easyApplyBtn.click();
-          const innerSpan = easyApplyBtn.querySelector('span, .artdeco-button__text') as HTMLElement;
-          if (innerSpan) {
-            innerSpan.click();
-          }
-          const rect = easyApplyBtn.getBoundingClientRect();
-          return {
-            clicked: true,
-            x: rect.left + rect.width / 2,
-            y: rect.top + rect.height / 2,
-          };
+          return { clicked: true, reason: '' };
         }
-        return { clicked: false, reason: 'Easy Apply button not found in active job details', x: 0, y: 0 };
+        return { clicked: false, reason: 'Easy Apply button not found in active job details' };
       });
-
-      if (clickResult.clicked && clickResult.x && clickResult.y && this._puppeteerPage?.mouse) {
-        try {
-          await this._puppeteerPage.mouse.click(clickResult.x, clickResult.y);
-        } catch (mErr) {
-          logger.debug('[Page] Puppeteer mouse.click on Easy Apply button failed:', mErr);
-        }
-      }
 
       return { success: clickResult.clicked, error: clickResult.reason };
     } catch (err) {
@@ -2287,8 +2279,18 @@ export default class Page {
               return false;
             }
 
-            // 2. Exclude notification badges, counters, or alert flyouts (e.g. "0 notifications")
+            // Exclude messaging overlay / chat dock specifically
             const aria = (dialog.getAttribute('aria-label') || '').trim().toLowerCase();
+            if (
+              dialog.classList.contains('msg-overlay-container') ||
+              dialog.id.includes('msg-overlay') ||
+              /messaging/i.test(aria) ||
+              /chat/i.test(aria)
+            ) {
+              return false;
+            }
+
+            // 2. Exclude notification badges, counters, or alert flyouts (e.g. "0 notifications")
             if (
               dialog.classList.contains('notification-badge') ||
               dialog.closest(
@@ -2335,8 +2337,57 @@ export default class Page {
 
           const dialogs = rawDialogs.filter(isGenuineVisibleModal);
 
-          let unknownCandidate: { title: string; inShadow: boolean } | null = null;
+          // Pass 1: Direct check for Easy Apply modal
+          for (const dialog of dialogs) {
+            const text = (dialog.innerText || dialog.textContent || '').trim();
+            const titleEl = dialog.querySelector('h1, h2, h3, [id*="header"], [class*="header"]');
+            const title = (titleEl?.textContent || text.slice(0, 100)).trim();
 
+            const formInputs = dialog.querySelectorAll(
+              'input:not([type="hidden"]), textarea, select, [contenteditable="true"]',
+            );
+            const buttons = Array.from(dialog.querySelectorAll('button'));
+            const hasNavButtons = buttons.some(b => {
+              const bt = (b.textContent || '').trim().toLowerCase();
+              return bt.includes('next') || bt.includes('review') || bt.includes('submit') || bt.includes('continue');
+            });
+
+            const isEasyApply =
+              dialog.classList.contains('jobs-easy-apply-modal') ||
+              dialog.querySelector('.jobs-easy-apply-modal') !== null ||
+              dialog.querySelector('.jobs-easy-apply-content') !== null ||
+              dialog.querySelector('[data-easy-apply-modal]') !== null ||
+              dialog.querySelector('.jobs-easy-apply-form-section') !== null ||
+              dialog.querySelector('.jobs-easy-apply-form-element') !== null ||
+              /easy apply/i.test(title) ||
+              /easy apply/i.test(text) ||
+              /apply to/i.test(title) ||
+              /apply for/i.test(title) ||
+              /apply\b/i.test(title) ||
+              /application/i.test(title) ||
+              /contact info/i.test(text) ||
+              /resume/i.test(text) ||
+              /additional questions/i.test(text) ||
+              /screening questions/i.test(text) ||
+              /home address/i.test(text) ||
+              /work experience/i.test(text) ||
+              /voluntary self-identification/i.test(text) ||
+              (formInputs.length > 0 && hasNavButtons) ||
+              (formInputs.length > 0 && /apply|job|intern/i.test(title));
+
+            if (isEasyApply) {
+              return {
+                modalFound: true,
+                inShadow: root instanceof ShadowRoot,
+                dialogTitle: title,
+                inputsCount: formInputs.length,
+                buttonsCount: buttons.length,
+                hasClosedShadow: false,
+              };
+            }
+          }
+
+          // Pass 2: Check for known intermediate dialogs (Continue, Safety, Discard)
           for (const dialog of dialogs) {
             const text = (dialog.innerText || dialog.textContent || '').trim();
             const titleEl = dialog.querySelector('h1, h2, h3, [id*="header"], [class*="header"]');
@@ -2398,70 +2449,6 @@ export default class Page {
                 };
               }
             }
-
-            // Check if dialog contains form fields or application step navigation
-            const formInputs = dialog.querySelectorAll(
-              'input:not([type="hidden"]), textarea, select, [contenteditable="true"]',
-            );
-            const hasFormFields = formInputs.length > 0;
-            const buttons = Array.from(dialog.querySelectorAll('button'));
-            const hasNavButtons = buttons.some(b => {
-              const bt = (b.textContent || '').trim().toLowerCase();
-              return bt.includes('next') || bt.includes('review') || bt.includes('submit') || bt.includes('continue');
-            });
-
-            // Is it the actual Easy Apply modal?
-            const isEasyApply =
-              dialog.classList.contains('jobs-easy-apply-modal') ||
-              dialog.querySelector('.jobs-easy-apply-modal') !== null ||
-              dialog.querySelector('.jobs-easy-apply-content') !== null ||
-              dialog.querySelector('[data-easy-apply-modal]') !== null ||
-              dialog.querySelector('.jobs-easy-apply-form-section') !== null ||
-              dialog.querySelector('.jobs-easy-apply-form-element') !== null ||
-              /easy apply/i.test(title) ||
-              /easy apply/i.test(text) ||
-              /apply to/i.test(title) ||
-              /apply for/i.test(title) ||
-              /apply\b/i.test(title) ||
-              /application/i.test(title) ||
-              /contact info/i.test(text) ||
-              /resume/i.test(text) ||
-              /additional questions/i.test(text) ||
-              /screening questions/i.test(text) ||
-              /home address/i.test(text) ||
-              /work experience/i.test(text) ||
-              /voluntary self-identification/i.test(text) ||
-              (hasFormFields && hasNavButtons) ||
-              (hasFormFields && /apply|job|intern/i.test(title));
-
-            if (isEasyApply) {
-              return {
-                modalFound: true,
-                inShadow: root instanceof ShadowRoot,
-                dialogTitle: title,
-                inputsCount: formInputs.length,
-                buttonsCount: buttons.length,
-                hasClosedShadow: false,
-              };
-            }
-
-            // Record as unknown candidate only if no Easy Apply or known intermediate is found and it has NO form fields
-            if (!unknownCandidate && !hasFormFields) {
-              unknownCandidate = { title, inShadow: root instanceof ShadowRoot };
-            }
-          }
-
-          if (unknownCandidate) {
-            return {
-              modalFound: false,
-              inShadow: unknownCandidate.inShadow,
-              dialogTitle: unknownCandidate.title,
-              isIntermediate: true,
-              intermediateAction: 'unknown',
-              inputsCount: 0,
-              buttonsCount: 0,
-              hasClosedShadow: false,
-            };
           }
 
           // Check for shadow roots (e.g. #interop-outlet)
