@@ -1708,14 +1708,21 @@ export class DedicatedJobRunner {
         }
       });
 
-      // Wait 4s for initial page load & navigation
-      const navWaitAborted = await this.interruptibleSleep(4000);
-      if (navWaitAborted || !this.isRunning) {
-        this.cleanupRun();
-        return { status: 'stopped', message: 'Stopped by user', stats };
-      }
-
       const currentPage = await this.browserContext.getCurrentPage();
+
+      // Dynamically wait for page load & DOM settlement (blazing fast on fast PC/network, graceful on slower)
+      if (typeof currentPage.waitForDomSettlement === 'function') {
+        await currentPage.waitForDomSettlement(
+          '.jobs-search-results-list, .scaffold-layout__list, [data-view-name="job-card"]',
+          { maxWaitMs: 3500, quietPeriodMs: 150 },
+        );
+      } else {
+        const navWaitAborted = await this.interruptibleSleep(1500);
+        if (navWaitAborted || !this.isRunning) {
+          this.cleanupRun();
+          return { status: 'stopped', message: 'Stopped by user', stats };
+        }
+      }
       await this.markRunnerTabVisually(currentPage);
       const devtoolsNotice =
         '⚠️ DevTools detected on job tab - this may cause a disconnect if DevTools is kept open or toggled.';
@@ -1817,8 +1824,15 @@ export class DedicatedJobRunner {
               await (currentPage as any).navigateTo(nextSearchUrl);
             }
           } catch {}
-          const sleepAborted = await this.interruptibleSleep(3500);
-          if (sleepAborted || !this.isRunning) break;
+          if (typeof currentPage.waitForDomSettlement === 'function') {
+            await currentPage.waitForDomSettlement(
+              '.jobs-search-results-list, .scaffold-layout__list, [data-view-name="job-card"]',
+              { maxWaitMs: 3000, quietPeriodMs: 150 },
+            );
+          } else {
+            const sleepAborted = await this.interruptibleSleep(1200);
+            if (sleepAborted || !this.isRunning) break;
+          }
         }
 
         let jobCards: Array<{ jobId: string; title: string; company: string; url: string }> = [];
@@ -1833,7 +1847,7 @@ export class DedicatedJobRunner {
           );
           jobCards = await currentPage.readJobListFromSearchPane(readAttempts);
           if (jobCards.length === 0 && readAttempts < 3) {
-            const sleepAborted = await this.interruptibleSleep(2000);
+            const sleepAborted = await this.interruptibleSleep(600);
             if (sleepAborted || !this.isRunning) break;
           }
         }
@@ -1987,13 +2001,19 @@ export class DedicatedJobRunner {
             { maxWaitMs: 3500 },
           );
         } else {
-          // Wait 2.5s for split pane details to render
-          const waitAborted = await this.interruptibleSleep(2500);
-          if (waitAborted || !this.isRunning) break;
+          if (typeof currentPage.waitForDomSettlement === 'function') {
+            await currentPage.waitForDomSettlement(
+              '.jobs-search__job-details--container, .jobs-details__main-content, .jobs-unified-top-card, [data-view-name="job-details-top-card"]',
+              { maxWaitMs: 2500, quietPeriodMs: 150 },
+            );
+          } else {
+            const waitAborted = await this.interruptibleSleep(1200);
+            if (waitAborted || !this.isRunning) break;
+          }
         }
 
         // 4b. Pure DOM Top-Card Extraction + Max-2 Retry Guard
-        let topCard = await currentPage.extractJobTopCardContext(5000);
+        let topCard = await currentPage.extractJobTopCardContext(4000);
         let retryCount = 0;
         while (
           (!topCard.title || !topCard.company) &&
@@ -2004,9 +2024,9 @@ export class DedicatedJobRunner {
         ) {
           retryCount++;
           this.notifyStatus(portToSend, `Checking job details for ${job.jobId} (attempt ${retryCount}/2)...`, 'info');
-          const retrySleepAborted = await this.interruptibleSleep(1500);
+          const retrySleepAborted = await this.interruptibleSleep(600);
           if (retrySleepAborted || !this.isRunning) break;
-          topCard = await currentPage.extractJobTopCardContext(4000);
+          topCard = await currentPage.extractJobTopCardContext(3000);
         }
 
         const displayTitle = topCard.title || job.title;
@@ -2408,9 +2428,9 @@ export class DedicatedJobRunner {
           break;
         }
 
-        // Inter-job pacing & anti-bot safety jitter
+        // Inter-job pacing & anti-bot safety jitter (natural human cadence without sluggish lag)
         if (this.isRunning && i + 1 < queue.length) {
-          const jitterMs = 3500 + Math.floor(Math.random() * 3000); // 3.5s - 6.5s randomized cadence
+          const jitterMs = 1500 + Math.floor(Math.random() * 1000); // 1.5s - 2.5s natural human cadence
           this.notifyStatus(
             portToSend,
             `⏳ Pacing safety delay (${Math.round(jitterMs / 100) / 10}s) before next candidate job...`,
