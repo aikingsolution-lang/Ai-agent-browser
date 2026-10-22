@@ -2460,10 +2460,15 @@ export default class Page {
               }
             }
 
-            // Known intermediate dialog 3: "Save this application?" -> Discard
-            if (/save this application/i.test(title) || /save application/i.test(title) || /discard/i.test(text)) {
+            // Known intermediate dialog 3: "Save this application?" from an old unsubmitted draft -> Discard old draft
+            if (
+              (/save this application/i.test(title) ||
+                /save application/i.test(title) ||
+                /discard draft/i.test(title)) &&
+              !/easy apply/i.test(title)
+            ) {
               const buttons = Array.from(dialog.querySelectorAll('button'));
-              const discardBtn = buttons.find(b => /discard/i.test(b.textContent || ''));
+              const discardBtn = buttons.find(b => /^\s*discard\s*$/i.test((b.textContent || '').trim()));
               if (discardBtn) {
                 discardBtn.click();
                 return {
@@ -2674,7 +2679,7 @@ export default class Page {
           const candidates = root.querySelectorAll
             ? (Array.from(
                 root.querySelectorAll(
-                  '.jobs-easy-apply-modal, [data-test-modal-id="easy-apply-modal"], div.artdeco-modal[role="dialog"], div.artdeco-modal, div[role="dialog"][aria-modal="true"], div[role="dialog"]',
+                  '.jobs-easy-apply-modal, [data-test-modal-id="easy-apply-modal"], [data-easy-apply-modal], div.artdeco-modal[role="dialog"], div.artdeco-modal, div[role="dialog"][aria-modal="true"], div[role="dialog"], [data-test-modal]',
                 ),
               ) as HTMLElement[])
             : [];
@@ -2700,17 +2705,28 @@ export default class Page {
             const rect = c.getBoundingClientRect();
             if (rect.width < 200 || rect.height < 100) continue;
 
-            const isEasyApply =
+            if (
               c.classList.contains('jobs-easy-apply-modal') ||
+              c.hasAttribute('data-easy-apply-modal') ||
+              c.getAttribute('data-test-modal-id') === 'easy-apply-modal' ||
               c.querySelector(
-                '.jobs-easy-apply-content, .jobs-easy-apply-form-section, .jobs-easy-apply-form-element, form.jobs-easy-apply-form, [data-easy-apply-modal], [data-test-modal-id="easy-apply-modal"]',
-              ) !== null ||
-              (c.querySelector(
-                'button[aria-label*="next" i], button[aria-label*="submit" i], button[aria-label*="review" i], footer button',
-              ) !== null &&
-                c.querySelector('input, textarea, select, [contenteditable="true"], .jobs-document-upload') !== null);
+                '.jobs-easy-apply-modal, .jobs-easy-apply-modal__content, .jobs-easy-apply-modal__header, .jobs-easy-apply-modal__footer, .jobs-easy-apply-content, .jobs-easy-apply-form-section, .jobs-easy-apply-form-element, form.jobs-easy-apply-form, [data-easy-apply-modal], [data-test-modal-id="easy-apply-modal"], h2.jobs-easy-apply-modal__title',
+              ) !== null
+            ) {
+              return c;
+            }
 
-            if (isEasyApply) return c;
+            const titleEl = c.querySelector('h1, h2, h3, [id*="header"], [class*="header"]');
+            const titleText = (titleEl?.textContent || text.slice(0, 100)).toLowerCase();
+            const hasApplyTitle = /apply|application|job/i.test(titleText);
+            const hasPrimaryBtn =
+              c.querySelector(
+                'button.artdeco-button--primary, button[data-easy-apply-next-button], button[aria-label*="next" i], button[aria-label*="submit" i], button[aria-label*="review" i], button[aria-label*="continue" i]',
+              ) !== null;
+
+            if (hasApplyTitle || hasPrimaryBtn) {
+              return c;
+            }
           }
 
           const all = root.querySelectorAll ? root.querySelectorAll('*') : [];
@@ -3420,7 +3436,7 @@ export default class Page {
           const candidates = root.querySelectorAll
             ? (Array.from(
                 root.querySelectorAll(
-                  '.jobs-easy-apply-modal, [data-test-modal-id="easy-apply-modal"], div.artdeco-modal[role="dialog"], div.artdeco-modal, div[role="dialog"][aria-modal="true"], div[role="dialog"]',
+                  '.jobs-easy-apply-modal, [data-test-modal-id="easy-apply-modal"], [data-easy-apply-modal], div.artdeco-modal[role="dialog"], div.artdeco-modal, div[role="dialog"][aria-modal="true"], div[role="dialog"], [data-test-modal]',
                 ),
               ) as HTMLElement[])
             : [];
@@ -3446,17 +3462,28 @@ export default class Page {
             const rect = c.getBoundingClientRect();
             if (rect.width < 200 || rect.height < 100) continue;
 
-            const isEasyApply =
+            if (
               c.classList.contains('jobs-easy-apply-modal') ||
+              c.hasAttribute('data-easy-apply-modal') ||
+              c.getAttribute('data-test-modal-id') === 'easy-apply-modal' ||
               c.querySelector(
-                '.jobs-easy-apply-content, .jobs-easy-apply-form-section, .jobs-easy-apply-form-element, form.jobs-easy-apply-form, [data-easy-apply-modal], [data-test-modal-id="easy-apply-modal"]',
-              ) !== null ||
-              (c.querySelector(
-                'button[aria-label*="next" i], button[aria-label*="submit" i], button[aria-label*="review" i], footer button',
-              ) !== null &&
-                c.querySelector('input, textarea, select, [contenteditable="true"], .jobs-document-upload') !== null);
+                '.jobs-easy-apply-modal, .jobs-easy-apply-modal__content, .jobs-easy-apply-modal__header, .jobs-easy-apply-modal__footer, .jobs-easy-apply-content, .jobs-easy-apply-form-section, .jobs-easy-apply-form-element, form.jobs-easy-apply-form, [data-easy-apply-modal], [data-test-modal-id="easy-apply-modal"], h2.jobs-easy-apply-modal__title',
+              ) !== null
+            ) {
+              return c;
+            }
 
-            if (isEasyApply) return c;
+            const titleEl = c.querySelector('h1, h2, h3, [id*="header"], [class*="header"]');
+            const titleText = (titleEl?.textContent || text.slice(0, 100)).toLowerCase();
+            const hasApplyTitle = /apply|application|job/i.test(titleText);
+            const hasPrimaryBtn =
+              c.querySelector(
+                'button.artdeco-button--primary, button[data-easy-apply-next-button], button[aria-label*="next" i], button[aria-label*="submit" i], button[aria-label*="review" i], button[aria-label*="continue" i]',
+              ) !== null;
+
+            if (hasApplyTitle || hasPrimaryBtn) {
+              return c;
+            }
           }
 
           const all = root.querySelectorAll ? root.querySelectorAll('*') : [];
@@ -4677,7 +4704,7 @@ export default class Page {
           const candidates = root.querySelectorAll
             ? (Array.from(
                 root.querySelectorAll(
-                  '.jobs-easy-apply-modal, [data-test-modal-id="easy-apply-modal"], div.artdeco-modal[role="dialog"], div.artdeco-modal, div[role="dialog"][aria-modal="true"], div[role="dialog"]',
+                  '.jobs-easy-apply-modal, [data-test-modal-id="easy-apply-modal"], [data-easy-apply-modal], div.artdeco-modal[role="dialog"], div.artdeco-modal, div[role="dialog"][aria-modal="true"], div[role="dialog"], [data-test-modal]',
                 ),
               ) as HTMLElement[])
             : [];
@@ -4703,17 +4730,28 @@ export default class Page {
             const rect = c.getBoundingClientRect();
             if (rect.width < 200 || rect.height < 100) continue;
 
-            const isEasyApply =
+            if (
               c.classList.contains('jobs-easy-apply-modal') ||
+              c.hasAttribute('data-easy-apply-modal') ||
+              c.getAttribute('data-test-modal-id') === 'easy-apply-modal' ||
               c.querySelector(
-                '.jobs-easy-apply-content, .jobs-easy-apply-form-section, .jobs-easy-apply-form-element, form.jobs-easy-apply-form, [data-easy-apply-modal], [data-test-modal-id="easy-apply-modal"]',
-              ) !== null ||
-              (c.querySelector(
-                'button[aria-label*="next" i], button[aria-label*="submit" i], button[aria-label*="review" i], footer button',
-              ) !== null &&
-                c.querySelector('input, textarea, select, [contenteditable="true"], .jobs-document-upload') !== null);
+                '.jobs-easy-apply-modal, .jobs-easy-apply-modal__content, .jobs-easy-apply-modal__header, .jobs-easy-apply-modal__footer, .jobs-easy-apply-content, .jobs-easy-apply-form-section, .jobs-easy-apply-form-element, form.jobs-easy-apply-form, [data-easy-apply-modal], [data-test-modal-id="easy-apply-modal"], h2.jobs-easy-apply-modal__title',
+              ) !== null
+            ) {
+              return c;
+            }
 
-            if (isEasyApply) return c;
+            const titleEl = c.querySelector('h1, h2, h3, [id*="header"], [class*="header"]');
+            const titleText = (titleEl?.textContent || text.slice(0, 100)).toLowerCase();
+            const hasApplyTitle = /apply|application|job/i.test(titleText);
+            const hasPrimaryBtn =
+              c.querySelector(
+                'button.artdeco-button--primary, button[data-easy-apply-next-button], button[aria-label*="next" i], button[aria-label*="submit" i], button[aria-label*="review" i], button[aria-label*="continue" i]',
+              ) !== null;
+
+            if (hasApplyTitle || hasPrimaryBtn) {
+              return c;
+            }
           }
 
           const all = root.querySelectorAll ? root.querySelectorAll('*') : [];
@@ -5192,7 +5230,7 @@ export default class Page {
           const candidates = root.querySelectorAll
             ? (Array.from(
                 root.querySelectorAll(
-                  '.jobs-easy-apply-modal, [data-test-modal-id="easy-apply-modal"], div.artdeco-modal[role="dialog"], div.artdeco-modal, div[role="dialog"][aria-modal="true"], div[role="dialog"]',
+                  '.jobs-easy-apply-modal, [data-test-modal-id="easy-apply-modal"], [data-easy-apply-modal], div.artdeco-modal[role="dialog"], div.artdeco-modal, div[role="dialog"][aria-modal="true"], div[role="dialog"], [data-test-modal]',
                 ),
               ) as HTMLElement[])
             : [];
@@ -5216,17 +5254,28 @@ export default class Page {
             const rect = c.getBoundingClientRect();
             if (rect.width < 200 || rect.height < 100) continue;
 
-            const isEasyApply =
+            if (
               c.classList.contains('jobs-easy-apply-modal') ||
+              c.hasAttribute('data-easy-apply-modal') ||
+              c.getAttribute('data-test-modal-id') === 'easy-apply-modal' ||
               c.querySelector(
-                '.jobs-easy-apply-content, .jobs-easy-apply-form-section, .jobs-easy-apply-form-element, form.jobs-easy-apply-form, [data-easy-apply-modal], [data-test-modal-id="easy-apply-modal"]',
-              ) !== null ||
-              (c.querySelector(
-                'button[aria-label*="next" i], button[aria-label*="submit" i], button[aria-label*="review" i], footer button',
-              ) !== null &&
-                c.querySelector('input, textarea, select, [contenteditable="true"], .jobs-document-upload') !== null);
+                '.jobs-easy-apply-modal, .jobs-easy-apply-modal__content, .jobs-easy-apply-modal__header, .jobs-easy-apply-modal__footer, .jobs-easy-apply-content, .jobs-easy-apply-form-section, .jobs-easy-apply-form-element, form.jobs-easy-apply-form, [data-easy-apply-modal], [data-test-modal-id="easy-apply-modal"], h2.jobs-easy-apply-modal__title',
+              ) !== null
+            ) {
+              return c;
+            }
 
-            if (isEasyApply) return c;
+            const titleEl = c.querySelector('h1, h2, h3, [id*="header"], [class*="header"]');
+            const titleText = (titleEl?.textContent || text.slice(0, 100)).toLowerCase();
+            const hasApplyTitle = /apply|application|job/i.test(titleText);
+            const hasPrimaryBtn =
+              c.querySelector(
+                'button.artdeco-button--primary, button[data-easy-apply-next-button], button[aria-label*="next" i], button[aria-label*="submit" i], button[aria-label*="review" i], button[aria-label*="continue" i]',
+              ) !== null;
+
+            if (hasApplyTitle || hasPrimaryBtn) {
+              return c;
+            }
           }
 
           const all = root.querySelectorAll ? root.querySelectorAll('*') : [];
@@ -5241,22 +5290,65 @@ export default class Page {
 
         const modal = findActiveModal(document);
         if (!modal) return { hasNext: false, hasReview: false, hasSubmit: false };
-        const buttons = Array.from(modal.querySelectorAll('button')) as HTMLButtonElement[];
+        const buttons = Array.from(modal.querySelectorAll('button, [role="button"]')) as HTMLButtonElement[];
 
         let hasNext = false;
         let hasReview = false;
         let hasSubmit = false;
 
         for (const btn of buttons) {
-          const text = (btn.textContent || '').trim();
-          const aria = (btn.getAttribute('aria-label') || '').trim();
+          const text = (btn.innerText || btn.textContent || '').trim().toLowerCase();
+          const aria = (btn.getAttribute('aria-label') || '').trim().toLowerCase();
+          const dataControl = (btn.getAttribute('data-control-name') || '').trim().toLowerCase();
 
-          if (/submit application|submit/i.test(aria) || /^\s*submit(\s*application)?\s*$/i.test(text)) {
+          if (
+            aria.includes('submit application') ||
+            aria.includes('submit') ||
+            text === 'submit' ||
+            text === 'submit application' ||
+            text.includes('submit application') ||
+            dataControl.includes('submit')
+          ) {
             hasSubmit = true;
-          } else if (/review/i.test(aria) || /^\s*review\s*$/i.test(text)) {
+          } else if (
+            aria.includes('review your application') ||
+            aria.includes('review') ||
+            text === 'review' ||
+            text === 'review application' ||
+            text.includes('review your application') ||
+            dataControl.includes('review')
+          ) {
             hasReview = true;
-          } else if (/next|continue/i.test(aria) || /^\s*(next|continue)\s*$/i.test(text)) {
+          } else if (
+            aria.includes('continue to next step') ||
+            aria.includes('next') ||
+            aria.includes('continue') ||
+            text === 'next' ||
+            text === 'continue' ||
+            text.includes('next') ||
+            text.includes('continue to next step') ||
+            btn.hasAttribute('data-easy-apply-next-button') ||
+            dataControl.includes('continue')
+          ) {
             hasNext = true;
+          }
+        }
+
+        // Robust fallback: Check primary button in modal
+        if (!hasNext && !hasReview && !hasSubmit) {
+          const primaryBtn = modal.querySelector(
+            '.jobs-easy-apply-modal__footer button.artdeco-button--primary, footer button.artdeco-button--primary, button.artdeco-button--primary',
+          ) as HTMLButtonElement | null;
+          if (primaryBtn) {
+            const pText = (primaryBtn.innerText || primaryBtn.textContent || '').trim().toLowerCase();
+            const pAria = (primaryBtn.getAttribute('aria-label') || '').trim().toLowerCase();
+            if (pText.includes('submit') || pAria.includes('submit')) {
+              hasSubmit = true;
+            } else if (pText.includes('review') || pAria.includes('review')) {
+              hasReview = true;
+            } else if (!pText.includes('dismiss') && !pText.includes('cancel')) {
+              hasNext = true;
+            }
           }
         }
 
@@ -5277,7 +5369,7 @@ export default class Page {
           const candidates = root.querySelectorAll
             ? (Array.from(
                 root.querySelectorAll(
-                  '.jobs-easy-apply-modal, [data-test-modal-id="easy-apply-modal"], div.artdeco-modal[role="dialog"], div.artdeco-modal, div[role="dialog"][aria-modal="true"], div[role="dialog"]',
+                  '.jobs-easy-apply-modal, [data-test-modal-id="easy-apply-modal"], [data-easy-apply-modal], div.artdeco-modal[role="dialog"], div.artdeco-modal, div[role="dialog"][aria-modal="true"], div[role="dialog"], [data-test-modal]',
                 ),
               ) as HTMLElement[])
             : [];
@@ -5301,17 +5393,28 @@ export default class Page {
             const rect = c.getBoundingClientRect();
             if (rect.width < 200 || rect.height < 100) continue;
 
-            const isEasyApply =
+            if (
               c.classList.contains('jobs-easy-apply-modal') ||
+              c.hasAttribute('data-easy-apply-modal') ||
+              c.getAttribute('data-test-modal-id') === 'easy-apply-modal' ||
               c.querySelector(
-                '.jobs-easy-apply-content, .jobs-easy-apply-form-section, .jobs-easy-apply-form-element, form.jobs-easy-apply-form, [data-easy-apply-modal], [data-test-modal-id="easy-apply-modal"]',
-              ) !== null ||
-              (c.querySelector(
-                'button[aria-label*="next" i], button[aria-label*="submit" i], button[aria-label*="review" i], footer button',
-              ) !== null &&
-                c.querySelector('input, textarea, select, [contenteditable="true"], .jobs-document-upload') !== null);
+                '.jobs-easy-apply-modal, .jobs-easy-apply-modal__content, .jobs-easy-apply-modal__header, .jobs-easy-apply-modal__footer, .jobs-easy-apply-content, .jobs-easy-apply-form-section, .jobs-easy-apply-form-element, form.jobs-easy-apply-form, [data-easy-apply-modal], [data-test-modal-id="easy-apply-modal"], h2.jobs-easy-apply-modal__title',
+              ) !== null
+            ) {
+              return c;
+            }
 
-            if (isEasyApply) return c;
+            const titleEl = c.querySelector('h1, h2, h3, [id*="header"], [class*="header"]');
+            const titleText = (titleEl?.textContent || text.slice(0, 100)).toLowerCase();
+            const hasApplyTitle = /apply|application|job/i.test(titleText);
+            const hasPrimaryBtn =
+              c.querySelector(
+                'button.artdeco-button--primary, button[data-easy-apply-next-button], button[aria-label*="next" i], button[aria-label*="submit" i], button[aria-label*="review" i], button[aria-label*="continue" i]',
+              ) !== null;
+
+            if (hasApplyTitle || hasPrimaryBtn) {
+              return c;
+            }
           }
 
           const all = root.querySelectorAll ? root.querySelectorAll('*') : [];
@@ -5326,7 +5429,7 @@ export default class Page {
 
         const modal = findActiveModal(document);
         if (!modal) return { clicked: false };
-        const buttons = Array.from(modal.querySelectorAll('button')) as HTMLButtonElement[];
+        const buttons = Array.from(modal.querySelectorAll('button, [role="button"]')) as HTMLButtonElement[];
 
         function dispatchFullClick(el: HTMLElement) {
           el.scrollIntoView({ behavior: 'instant', block: 'center' });
@@ -5339,23 +5442,60 @@ export default class Page {
           el.click();
         }
 
-        // Try Review first
+        // 1. Try Review
         for (const btn of buttons) {
-          const text = (btn.textContent || '').trim();
-          const aria = (btn.getAttribute('aria-label') || '').trim();
-          if (/review/i.test(aria) || /^\s*review\s*$/i.test(text)) {
+          const text = (btn.innerText || btn.textContent || '').trim().toLowerCase();
+          const aria = (btn.getAttribute('aria-label') || '').trim().toLowerCase();
+          const dataControl = (btn.getAttribute('data-control-name') || '').trim().toLowerCase();
+          if (
+            aria.includes('review') ||
+            text === 'review' ||
+            text.includes('review') ||
+            dataControl.includes('review')
+          ) {
             dispatchFullClick(btn);
             return { clicked: true, type: 'review' as const };
           }
         }
 
-        // Try Next / Continue
+        // 2. Try Next / Continue
         for (const btn of buttons) {
-          const text = (btn.textContent || '').trim();
-          const aria = (btn.getAttribute('aria-label') || '').trim();
-          if (/next|continue/i.test(aria) || /^\s*(next|continue)\s*$/i.test(text)) {
+          const text = (btn.innerText || btn.textContent || '').trim().toLowerCase();
+          const aria = (btn.getAttribute('aria-label') || '').trim().toLowerCase();
+          const dataControl = (btn.getAttribute('data-control-name') || '').trim().toLowerCase();
+          if (
+            aria.includes('continue to next step') ||
+            aria.includes('next') ||
+            aria.includes('continue') ||
+            text === 'next' ||
+            text === 'continue' ||
+            text.includes('next') ||
+            text.includes('continue to next step') ||
+            btn.hasAttribute('data-easy-apply-next-button') ||
+            dataControl.includes('continue')
+          ) {
             dispatchFullClick(btn);
             return { clicked: true, type: 'next' as const };
+          }
+        }
+
+        // 3. Fallback to primary button in modal
+        const primaryBtn = modal.querySelector(
+          '.jobs-easy-apply-modal__footer button.artdeco-button--primary, footer button.artdeco-button--primary, button.artdeco-button--primary',
+        ) as HTMLElement | null;
+        if (primaryBtn) {
+          const pText = (primaryBtn.innerText || primaryBtn.textContent || '').trim().toLowerCase();
+          const pAria = (primaryBtn.getAttribute('aria-label') || '').trim().toLowerCase();
+          if (
+            !pText.includes('dismiss') &&
+            !pText.includes('cancel') &&
+            !pAria.includes('dismiss') &&
+            !pAria.includes('cancel')
+          ) {
+            dispatchFullClick(primaryBtn);
+            const actionType: 'next' | 'review' =
+              pText.includes('review') || pAria.includes('review') ? 'review' : 'next';
+            return { clicked: true, type: actionType };
           }
         }
 
@@ -5376,7 +5516,7 @@ export default class Page {
           const candidates = root.querySelectorAll
             ? (Array.from(
                 root.querySelectorAll(
-                  '.jobs-easy-apply-modal, [data-test-modal-id="easy-apply-modal"], div.artdeco-modal[role="dialog"], div.artdeco-modal, div[role="dialog"][aria-modal="true"], div[role="dialog"]',
+                  '.jobs-easy-apply-modal, [data-test-modal-id="easy-apply-modal"], [data-easy-apply-modal], div.artdeco-modal[role="dialog"], div.artdeco-modal, div[role="dialog"][aria-modal="true"], div[role="dialog"], [data-test-modal]',
                 ),
               ) as HTMLElement[])
             : [];
@@ -5400,17 +5540,28 @@ export default class Page {
             const rect = c.getBoundingClientRect();
             if (rect.width < 200 || rect.height < 100) continue;
 
-            const isEasyApply =
+            if (
               c.classList.contains('jobs-easy-apply-modal') ||
+              c.hasAttribute('data-easy-apply-modal') ||
+              c.getAttribute('data-test-modal-id') === 'easy-apply-modal' ||
               c.querySelector(
-                '.jobs-easy-apply-content, .jobs-easy-apply-form-section, .jobs-easy-apply-form-element, form.jobs-easy-apply-form, [data-easy-apply-modal], [data-test-modal-id="easy-apply-modal"]',
-              ) !== null ||
-              (c.querySelector(
-                'button[aria-label*="next" i], button[aria-label*="submit" i], button[aria-label*="review" i], footer button',
-              ) !== null &&
-                c.querySelector('input, textarea, select, [contenteditable="true"], .jobs-document-upload') !== null);
+                '.jobs-easy-apply-modal, .jobs-easy-apply-modal__content, .jobs-easy-apply-modal__header, .jobs-easy-apply-modal__footer, .jobs-easy-apply-content, .jobs-easy-apply-form-section, .jobs-easy-apply-form-element, form.jobs-easy-apply-form, [data-easy-apply-modal], [data-test-modal-id="easy-apply-modal"], h2.jobs-easy-apply-modal__title',
+              ) !== null
+            ) {
+              return c;
+            }
 
-            if (isEasyApply) return c;
+            const titleEl = c.querySelector('h1, h2, h3, [id*="header"], [class*="header"]');
+            const titleText = (titleEl?.textContent || text.slice(0, 100)).toLowerCase();
+            const hasApplyTitle = /apply|application|job/i.test(titleText);
+            const hasPrimaryBtn =
+              c.querySelector(
+                'button.artdeco-button--primary, button[data-easy-apply-next-button], button[aria-label*="next" i], button[aria-label*="submit" i], button[aria-label*="review" i], button[aria-label*="continue" i]',
+              ) !== null;
+
+            if (hasApplyTitle || hasPrimaryBtn) {
+              return c;
+            }
           }
 
           const all = root.querySelectorAll ? root.querySelectorAll('*') : [];
@@ -5447,26 +5598,52 @@ export default class Page {
           }
         }
 
-        const buttons = Array.from(modal.querySelectorAll('button')) as HTMLButtonElement[];
+        const buttons = Array.from(modal.querySelectorAll('button, [role="button"]')) as HTMLButtonElement[];
+
+        function dispatchFullClick(el: HTMLElement) {
+          el.scrollIntoView({ behavior: 'instant', block: 'center' });
+          el.focus();
+          const opts = { bubbles: true, cancelable: true, view: window };
+          el.dispatchEvent(new PointerEvent('pointerdown', opts));
+          el.dispatchEvent(new MouseEvent('mousedown', opts));
+          el.dispatchEvent(new PointerEvent('pointerup', opts));
+          el.dispatchEvent(new MouseEvent('mouseup', opts));
+          el.click();
+        }
 
         for (const btn of buttons) {
-          const text = (btn.textContent || '').trim();
-          const aria = (btn.getAttribute('aria-label') || '').trim();
+          const text = (btn.innerText || btn.textContent || '').trim().toLowerCase();
+          const aria = (btn.getAttribute('aria-label') || '').trim().toLowerCase();
+          const dataControl = (btn.getAttribute('data-control-name') || '').trim().toLowerCase();
           const isSubmit =
-            /submit application/i.test(aria) ||
-            /^\s*submit(\s*application)?\s*$/i.test(text) ||
-            btn.getAttribute('data-control-name') === 'submit_unify' ||
-            (btn.hasAttribute('data-easy-apply-next-button') && /submit/i.test(text));
+            aria.includes('submit application') ||
+            aria.includes('submit') ||
+            text === 'submit application' ||
+            text === 'submit' ||
+            text.includes('submit application') ||
+            dataControl === 'submit_unify' ||
+            (btn.hasAttribute('data-easy-apply-next-button') && text.includes('submit'));
 
           if (isSubmit) {
-            btn.scrollIntoView({ behavior: 'instant', block: 'center' });
-            btn.focus();
-            const opts = { bubbles: true, cancelable: true, view: window };
-            btn.dispatchEvent(new PointerEvent('pointerdown', opts));
-            btn.dispatchEvent(new MouseEvent('mousedown', opts));
-            btn.dispatchEvent(new PointerEvent('pointerup', opts));
-            btn.dispatchEvent(new MouseEvent('mouseup', opts));
-            btn.click();
+            dispatchFullClick(btn);
+            return { clicked: true };
+          }
+        }
+
+        // Primary button fallback on review step
+        const primaryBtn = modal.querySelector(
+          '.jobs-easy-apply-modal__footer button.artdeco-button--primary, footer button.artdeco-button--primary, button.artdeco-button--primary',
+        ) as HTMLElement | null;
+        if (primaryBtn) {
+          const pText = (primaryBtn.innerText || primaryBtn.textContent || '').trim().toLowerCase();
+          const pAria = (primaryBtn.getAttribute('aria-label') || '').trim().toLowerCase();
+          if (
+            !pText.includes('dismiss') &&
+            !pText.includes('cancel') &&
+            !pAria.includes('dismiss') &&
+            !pAria.includes('cancel')
+          ) {
+            dispatchFullClick(primaryBtn);
             return { clicked: true };
           }
         }
@@ -5695,7 +5872,7 @@ export default class Page {
           const candidates = root.querySelectorAll
             ? (Array.from(
                 root.querySelectorAll(
-                  '.jobs-easy-apply-modal, [data-test-modal-id="easy-apply-modal"], div.artdeco-modal[role="dialog"], div.artdeco-modal, div[role="dialog"][aria-modal="true"], div[role="dialog"]',
+                  '.jobs-easy-apply-modal, [data-test-modal-id="easy-apply-modal"], [data-easy-apply-modal], div.artdeco-modal[role="dialog"], div.artdeco-modal, div[role="dialog"][aria-modal="true"], div[role="dialog"], [data-test-modal]',
                 ),
               ) as HTMLElement[])
             : [];
@@ -5712,17 +5889,30 @@ export default class Page {
             const rect = c.getBoundingClientRect();
             if (rect.width < 200 || rect.height < 100) continue;
 
-            const isEasyApply =
+            if (
               c.classList.contains('jobs-easy-apply-modal') ||
+              c.hasAttribute('data-easy-apply-modal') ||
+              c.getAttribute('data-test-modal-id') === 'easy-apply-modal' ||
               c.querySelector(
-                '.jobs-easy-apply-content, .jobs-easy-apply-form-section, .jobs-easy-apply-form-element, form.jobs-easy-apply-form, [data-easy-apply-modal], [data-test-modal-id="easy-apply-modal"]',
-              ) !== null ||
-              (c.querySelector(
-                'button[aria-label*="next" i], button[aria-label*="submit" i], button[aria-label*="review" i], footer button',
-              ) !== null &&
-                c.querySelector('input, textarea, select, [contenteditable="true"], .jobs-document-upload') !== null);
+                '.jobs-easy-apply-modal, .jobs-easy-apply-modal__content, .jobs-easy-apply-modal__header, .jobs-easy-apply-modal__footer, .jobs-easy-apply-content, .jobs-easy-apply-form-section, .jobs-easy-apply-form-element, form.jobs-easy-apply-form, [data-easy-apply-modal], [data-test-modal-id="easy-apply-modal"], h2.jobs-easy-apply-modal__title',
+              ) !== null
+            ) {
+              return c;
+            }
 
-            if (isEasyApply) return c;
+            const titleEl = c.querySelector('h1, h2, h3, [id*="header"], [class*="header"]');
+            const titleText = (
+              titleEl?.textContent || (c.innerText || c.textContent || '').slice(0, 100)
+            ).toLowerCase();
+            const hasApplyTitle = /apply|application|job/i.test(titleText);
+            const hasPrimaryBtn =
+              c.querySelector(
+                'button.artdeco-button--primary, button[data-easy-apply-next-button], button[aria-label*="next" i], button[aria-label*="submit" i], button[aria-label*="review" i], button[aria-label*="continue" i]',
+              ) !== null;
+
+            if (hasApplyTitle || hasPrimaryBtn) {
+              return c;
+            }
           }
           return null;
         }
