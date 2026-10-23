@@ -1038,14 +1038,16 @@ export class DedicatedJobRunner {
       let allowFallback = false;
       if (quota.reason === 'error') {
         const localQuota = await DailyQuotaManager.getQuotaData().catch(() => null);
-        const remaining = (localQuota?.maxDailyQuota ?? 10) - (localQuota?.appliedCount ?? 0);
-        if (localQuota && remaining > 0 && !localQuota.isPausedDueToQuota) {
+        const applied = localQuota?.appliedCount ?? 0;
+        const maxQ = localQuota?.maxDailyQuota || 10;
+        const remaining = maxQ - applied;
+        if (remaining > 0 && !localQuota?.isPausedDueToQuota) {
           logger.warning(
-            `[DedicatedJobRunner] Server quota verification slow/unavailable; proceeding with local quota fallback (${localQuota.appliedCount}/${localQuota.maxDailyQuota}).`,
+            `[DedicatedJobRunner] Server quota verification slow/unavailable; proceeding with local quota fallback (${applied}/${maxQ}).`,
           );
           this.notify(
             portToSend,
-            `⚠️ Server quota check was slow/unavailable. Continuing with local quota (${localQuota.appliedCount}/${localQuota.maxDailyQuota} used).`,
+            `⚠️ Server quota check was slow/unavailable. Continuing with local quota (${applied}/${maxQ} used).`,
             false,
           );
           allowFallback = true;
@@ -2043,14 +2045,16 @@ export class DedicatedJobRunner {
           let allowFallback = false;
           if (quota.reason === 'error') {
             const localQuota = await DailyQuotaManager.getQuotaData().catch(() => null);
-            const remaining = (localQuota?.maxDailyQuota ?? 10) - (localQuota?.appliedCount ?? 0);
-            if (localQuota && remaining > 0 && !localQuota.isPausedDueToQuota) {
+            const applied = localQuota?.appliedCount ?? 0;
+            const maxQ = localQuota?.maxDailyQuota || 10;
+            const remaining = maxQ - applied;
+            if (remaining > 0 && !localQuota?.isPausedDueToQuota) {
               logger.warning(
-                `[DedicatedJobRunner] Server quota verification slow/unavailable for ${job.jobId}; proceeding with local quota fallback (${localQuota.appliedCount}/${localQuota.maxDailyQuota}).`,
+                `[DedicatedJobRunner] Server quota verification slow/unavailable for ${job.jobId}; proceeding with local quota fallback (${applied}/${maxQ}).`,
               );
               this.notifyStatus(
                 portToSend,
-                `⚠️ Server quota check was slow/unavailable. Continuing with local quota (${localQuota.appliedCount}/${localQuota.maxDailyQuota} used).`,
+                `⚠️ Server quota check was slow/unavailable. Continuing with local quota (${applied}/${maxQ} used).`,
                 'info',
               );
               allowFallback = true;
@@ -2425,11 +2429,14 @@ export class DedicatedJobRunner {
         // 4d. Click Easy Apply & Verify Modal Opens
         this.notifyStatus(portToSend, `🚀 Opening Easy Apply for "${displayTitle}"...`, 'info');
         let clickRes = await currentPage.clickEasyApplyButton();
+        logger.info(`[DedicatedJobRunner] clickEasyApplyButton attempt 1:`, clickRes);
         if (!clickRes.success) {
+          logger.warning(`[DedicatedJobRunner] Easy Apply click attempt 1 failed (${clickRes.error}). Retrying...`);
           // Retry click once
           const clickSleepAborted = await this.interruptibleSleep(1200);
           if (clickSleepAborted || !this.isRunning) break;
           clickRes = await currentPage.clickEasyApplyButton();
+          logger.info(`[DedicatedJobRunner] clickEasyApplyButton attempt 2:`, clickRes);
         }
 
         // Check immediately for LinkedIn daily/weekly application limit banner or dialog
@@ -2885,14 +2892,16 @@ export class DedicatedJobRunner {
         let allowFallback = false;
         if (quota.reason === 'error') {
           const localQuota = await DailyQuotaManager.getQuotaData().catch(() => null);
-          const remaining = (localQuota?.maxDailyQuota ?? 10) - (localQuota?.appliedCount ?? 0);
-          if (localQuota && remaining > 0 && !localQuota.isPausedDueToQuota) {
+          const applied = localQuota?.appliedCount ?? 0;
+          const maxQ = localQuota?.maxDailyQuota || 10;
+          const remaining = maxQ - applied;
+          if (remaining > 0 && !localQuota?.isPausedDueToQuota) {
             logger.warning(
-              `[DedicatedJobRunner] Server quota verification slow/unavailable for ${job.jobId}; proceeding with local quota fallback (${localQuota.appliedCount}/${localQuota.maxDailyQuota}).`,
+              `[DedicatedJobRunner] Server quota verification slow/unavailable for ${job.jobId}; proceeding with local quota fallback (${applied}/${maxQ}).`,
             );
             this.notifyStatus(
               portToSend,
-              `⚠️ Server quota check was slow/unavailable. Continuing with local quota (${localQuota.appliedCount}/${localQuota.maxDailyQuota} used).`,
+              `⚠️ Server quota check was slow/unavailable. Continuing with local quota (${applied}/${maxQ} used).`,
               'info',
             );
             allowFallback = true;
@@ -3665,14 +3674,16 @@ export class DedicatedJobRunner {
         let allowFallback = false;
         if (quota.reason === 'error') {
           const localQuota = await DailyQuotaManager.getQuotaData().catch(() => null);
-          const remaining = (localQuota?.maxDailyQuota ?? 10) - (localQuota?.appliedCount ?? 0);
-          if (localQuota && remaining > 0 && !localQuota.isPausedDueToQuota) {
+          const applied = localQuota?.appliedCount ?? 0;
+          const maxQ = localQuota?.maxDailyQuota || 10;
+          const remaining = maxQ - applied;
+          if (remaining > 0 && !localQuota?.isPausedDueToQuota) {
             logger.warning(
-              `[DedicatedJobRunner] Server quota verification slow/unavailable for ${job.jobId}; proceeding with local quota fallback (${localQuota.appliedCount}/${localQuota.maxDailyQuota}).`,
+              `[DedicatedJobRunner] Server quota verification slow/unavailable for ${job.jobId}; proceeding with local quota fallback (${applied}/${maxQ}).`,
             );
             this.notifyStatus(
               portToSend,
-              `⚠️ Server quota check was slow/unavailable. Continuing with local quota (${localQuota.appliedCount}/${localQuota.maxDailyQuota} used).`,
+              `⚠️ Server quota check was slow/unavailable. Continuing with local quota (${applied}/${maxQ} used).`,
               'info',
             );
             allowFallback = true;

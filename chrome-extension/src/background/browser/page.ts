@@ -2139,11 +2139,16 @@ export default class Page {
 
       function isFilterOrNav(el: HTMLElement): boolean {
         if (!el) return true;
+        // Exclude global nav, search header, messaging overlays, and filter dropdowns
         if (
           el.closest(
-            'header, nav, #global-nav, .global-nav, .jobs-search-box, .search-reusables__filter-list, .search-reusables__filter-pill-button, .search-reusables__primary-filter, .artdeco-pill, [data-view-name="search-filter-pills"], .scaffold-layout__header, .jobs-search-results-list, .scaffold-layout__list, [data-view-name="job-card"], .msg-overlay-container, #msg-overlay',
+            'header, nav, #global-nav, .global-nav, .jobs-search-box, .search-reusables__filter-list, .search-reusables__filter-pill-button, .search-reusables__primary-filter, .artdeco-pill, [data-view-name="search-filter-pills"], .scaffold-layout__header, .msg-overlay-container, #msg-overlay',
           )
         ) {
+          return true;
+        }
+        // Exclude left-pane search results list items
+        if (el.closest('.jobs-search-results-list, .scaffold-layout__list, ul.scaffold-layout__list-container')) {
           return true;
         }
         if (el.classList.contains('artdeco-pill')) return true;
@@ -2152,6 +2157,18 @@ export default class Page {
         const id = (el.getAttribute('id') || '').trim().toLowerCase();
         if (text.includes('filter') || aria.includes('filter') || id.includes('filter')) return true;
         return false;
+      }
+
+      function isEasyApplyMatch(btn: HTMLElement): boolean {
+        if (isFilterOrNav(btn) || !isVisible(btn)) return false;
+        const text = (btn.innerText || btn.textContent || '').trim().toLowerCase();
+        const aria = (btn.getAttribute('aria-label') || '').trim().toLowerCase();
+        return (
+          btn.classList.contains('jobs-apply-button') ||
+          /\beasy\s*apply\b/i.test(text) ||
+          /\beasy\s*apply\b/i.test(aria) ||
+          btn.querySelector('svg[data-test-icon*="easy-apply"], .jobs-apply-button__label') !== null
+        );
       }
 
       // Find active details container in split view or standalone
@@ -2181,42 +2198,37 @@ export default class Page {
 
       let easyApplyBtn: HTMLElement | null = null;
 
-      // 1. Prioritize searching inside detailsContainer first
+      // 1. Search inside detailsContainer first
       if (detailsContainer) {
         for (const sel of candidateSelectors) {
           const matches = Array.from(detailsContainer.querySelectorAll(sel)) as HTMLElement[];
           for (const btn of matches) {
-            if (isFilterOrNav(btn) || !isVisible(btn)) continue;
-            const text = (btn.innerText || btn.textContent || '').trim().toLowerCase();
-            const aria = (btn.getAttribute('aria-label') || '').trim().toLowerCase();
-            if (
-              btn.classList.contains('jobs-apply-button') ||
-              /\beasy\s*apply\b/i.test(text) ||
-              /\beasy\s*apply\b/i.test(aria) ||
-              btn.querySelector('svg[data-test-icon*="easy-apply"], .jobs-apply-button__label') !== null
-            ) {
+            if (isEasyApplyMatch(btn)) {
               easyApplyBtn = btn;
               break;
             }
           }
           if (easyApplyBtn) break;
         }
+
+        // Generic button/a search inside detailsContainer
+        if (!easyApplyBtn) {
+          const allBtns = Array.from(detailsContainer.querySelectorAll('button, [role="button"], a')) as HTMLElement[];
+          for (const btn of allBtns) {
+            if (isEasyApplyMatch(btn)) {
+              easyApplyBtn = btn;
+              break;
+            }
+          }
+        }
       }
 
-      // 2. Global fallback strictly excluding nav/filters
+      // 2. Global fallback across document
       if (!easyApplyBtn) {
         for (const sel of candidateSelectors) {
           const matches = Array.from(document.querySelectorAll(sel)) as HTMLElement[];
           for (const btn of matches) {
-            if (isFilterOrNav(btn) || !isVisible(btn)) continue;
-            const text = (btn.innerText || btn.textContent || '').trim().toLowerCase();
-            const aria = (btn.getAttribute('aria-label') || '').trim().toLowerCase();
-            if (
-              btn.classList.contains('jobs-apply-button') ||
-              /\beasy\s*apply\b/i.test(text) ||
-              /\beasy\s*apply\b/i.test(aria) ||
-              btn.querySelector('svg[data-test-icon*="easy-apply"], .jobs-apply-button__label') !== null
-            ) {
+            if (isEasyApplyMatch(btn)) {
               easyApplyBtn = btn;
               break;
             }
@@ -2225,15 +2237,27 @@ export default class Page {
         }
       }
 
+      // 3. Generic button/a search globally
+      if (!easyApplyBtn) {
+        const allBtns = Array.from(document.querySelectorAll('button, [role="button"], a')) as HTMLElement[];
+        for (const btn of allBtns) {
+          if (isEasyApplyMatch(btn)) {
+            easyApplyBtn = btn;
+            break;
+          }
+        }
+      }
+
       if (easyApplyBtn) {
-        easyApplyBtn.scrollIntoView({ behavior: 'instant', block: 'center' });
-        easyApplyBtn.focus();
+        const target = (easyApplyBtn.closest('button, [role="button"], a') || easyApplyBtn) as HTMLElement;
+        target.scrollIntoView({ behavior: 'instant', block: 'center' });
+        target.focus();
         const opts = { bubbles: true, cancelable: true, view: window };
-        easyApplyBtn.dispatchEvent(new PointerEvent('pointerdown', opts));
-        easyApplyBtn.dispatchEvent(new MouseEvent('mousedown', opts));
-        easyApplyBtn.dispatchEvent(new PointerEvent('pointerup', opts));
-        easyApplyBtn.dispatchEvent(new MouseEvent('mouseup', opts));
-        easyApplyBtn.click();
+        target.dispatchEvent(new PointerEvent('pointerdown', opts));
+        target.dispatchEvent(new MouseEvent('mousedown', opts));
+        target.dispatchEvent(new PointerEvent('pointerup', opts));
+        target.dispatchEvent(new MouseEvent('mouseup', opts));
+        target.click();
         return { clicked: true, reason: '' };
       }
       return { clicked: false, reason: 'Easy Apply button not found in active job details' };
@@ -2291,250 +2315,283 @@ export default class Page {
     error?: string;
   }> {
     if (!this._puppeteerPage) {
-      return { opened: false, error: 'Puppeteer not connected' };
+      await this.attachPuppeteer().catch(() => false);
     }
 
     const startTime = Date.now();
     let attempt = 0;
     let lastUnknownDialog: string | null = null;
 
-    while (Date.now() - startTime < maxWaitMs) {
-      attempt++;
+    const checkInPage = () => {
+      function inspectRoot(root: any): {
+        modalFound: boolean;
+        inShadow: boolean;
+        dialogTitle?: string;
+        isIntermediate?: boolean;
+        intermediateAction?: 'continue' | 'safety' | 'discard' | 'unknown';
+        inputsCount: number;
+        buttonsCount: number;
+        hasClosedShadow: boolean;
+      } {
+        // Helper to ensure an element is a genuine visible modal dialog
+        function isGenuineVisibleModal(dialog: HTMLElement): boolean {
+          if (!dialog || !dialog.isConnected) return false;
 
-      const checkResult = await this._puppeteerPage.evaluate(() => {
-        function inspectRoot(root: any): {
-          modalFound: boolean;
-          inShadow: boolean;
-          dialogTitle?: string;
-          isIntermediate?: boolean;
-          intermediateAction?: 'continue' | 'safety' | 'discard' | 'unknown';
-          inputsCount: number;
-          buttonsCount: number;
-          hasClosedShadow: boolean;
-        } {
-          // Helper to ensure an element is a genuine visible modal dialog
-          function isGenuineVisibleModal(dialog: HTMLElement): boolean {
-            if (!dialog || !dialog.isConnected) return false;
-
-            // Direct match: If it is explicitly marked as the Easy Apply modal, always accept!
-            if (
-              dialog.classList.contains('jobs-easy-apply-modal') ||
-              dialog.querySelector('.jobs-easy-apply-content, [data-easy-apply-modal]')
-            ) {
-              const style = window.getComputedStyle(dialog);
-              return style.display !== 'none' && style.visibility !== 'hidden';
-            }
-
-            // 1. Exclude global navigation, headers, footers, search list, filter list, or messaging docks/flyouts
-            if (
-              dialog.closest(
-                'nav, header, #global-nav, .global-nav, .global-nav__nav, .msg-overlay-container, #msg-overlay, .msg-overlay-bubble-header, .artdeco-dropdown, .artdeco-dropdown__content, .jobs-search-results-list, .scaffold-layout__list, [data-view-name="job-card"], [role="tooltip"], .tooltip, .search-reusables__filter-list, .search-reusables__filter-dropdown, .search-reusables__primary-filter, [data-view-name="search-filter-pills"], .artdeco-pill, .scaffold-layout__header, .jobs-search-box',
-              )
-            ) {
-              return false;
-            }
-
-            // Exclude messaging overlay / chat dock specifically
-            const aria = (dialog.getAttribute('aria-label') || '').trim().toLowerCase();
-            if (
-              dialog.classList.contains('msg-overlay-container') ||
-              dialog.id.includes('msg-overlay') ||
-              /messaging/i.test(aria) ||
-              /chat/i.test(aria)
-            ) {
-              return false;
-            }
-
-            // 2. Exclude notification badges, counters, or alert flyouts (e.g. "0 notifications")
-            if (
-              dialog.classList.contains('notification-badge') ||
-              dialog.closest(
-                '.notifications-badge, .nav-item--notifications, [data-test-global-nav-link="notifications"]',
-              ) ||
-              /notifications\s+dialog/i.test(aria) ||
-              dialog.id.includes('notifications')
-            ) {
-              return false;
-            }
-
-            // 3. Exclude tooltips, dropdowns, and toast messages
-            if (
-              dialog.getAttribute('role') === 'tooltip' ||
-              dialog.classList.contains('artdeco-toast') ||
-              dialog.classList.contains('artdeco-hoverable-content')
-            ) {
-              return false;
-            }
-
-            // 4. Must be genuinely visible (not display: none, visibility: hidden, opacity ~ 0)
+          // Direct match: If it is explicitly marked as the Easy Apply modal, always accept!
+          if (
+            dialog.classList.contains('jobs-easy-apply-modal') ||
+            dialog.querySelector(
+              '.jobs-easy-apply-content, [data-easy-apply-modal], form.jobs-easy-apply-form, [data-test-modal-id="easy-apply-modal"]',
+            )
+          ) {
             const style = window.getComputedStyle(dialog);
-            if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity || '1') <= 0.05) {
-              return false;
-            }
-
-            // 5. Must have genuine modal dimensions (minimum 200px width, 100px height)
-            const rect = dialog.getBoundingClientRect();
-            if (rect.width < 200 || rect.height < 100) {
-              return false;
-            }
-
-            return true;
+            return style.display !== 'none' && style.visibility !== 'hidden';
           }
 
-          // Check for dialogs (scoped strictly to genuine visible modals)
-          const rawDialogs = root.querySelectorAll
-            ? (Array.from(
-                root.querySelectorAll(
-                  'div.jobs-easy-apply-modal, div[data-test-modal], div.artdeco-modal, dialog[open], div[role="dialog"], [aria-modal="true"]',
-                ),
-              ) as HTMLElement[])
-            : [];
+          // 1. Exclude global navigation, headers, footers, search list, filter list, or messaging docks/flyouts
+          if (
+            dialog.closest(
+              'nav, header, #global-nav, .global-nav, .global-nav__nav, .msg-overlay-container, #msg-overlay, .msg-overlay-bubble-header, .artdeco-dropdown, .artdeco-dropdown__content, .jobs-search-results-list, .scaffold-layout__list, [role="tooltip"], .tooltip, .search-reusables__filter-list, .search-reusables__filter-dropdown, .search-reusables__primary-filter, [data-view-name="search-filter-pills"], .artdeco-pill, .scaffold-layout__header, .jobs-search-box',
+            )
+          ) {
+            return false;
+          }
 
-          const dialogs = rawDialogs.filter(isGenuineVisibleModal);
+          // Exclude messaging overlay / chat dock specifically
+          const aria = (dialog.getAttribute('aria-label') || '').trim().toLowerCase();
+          if (
+            dialog.classList.contains('msg-overlay-container') ||
+            dialog.id.includes('msg-overlay') ||
+            /messaging/i.test(aria) ||
+            /chat/i.test(aria)
+          ) {
+            return false;
+          }
 
-          // Pass 1: Direct check for Easy Apply modal
-          for (const dialog of dialogs) {
-            const text = (dialog.innerText || dialog.textContent || '').trim();
-            const titleEl = dialog.querySelector('h1, h2, h3, [id*="header"], [class*="header"]');
-            const title = (titleEl?.textContent || text.slice(0, 100)).trim();
+          // 2. Exclude notification badges, counters, or alert flyouts (e.g. "0 notifications")
+          if (
+            dialog.classList.contains('notification-badge') ||
+            dialog.closest(
+              '.notifications-badge, .nav-item--notifications, [data-test-global-nav-link="notifications"]',
+            ) ||
+            /notifications\s+dialog/i.test(aria) ||
+            dialog.id.includes('notifications')
+          ) {
+            return false;
+          }
 
-            const formInputs = dialog.querySelectorAll(
-              'input:not([type="hidden"]), textarea, select, [contenteditable="true"]',
+          // 3. Exclude tooltips, dropdowns, and toast messages
+          if (
+            dialog.getAttribute('role') === 'tooltip' ||
+            dialog.classList.contains('artdeco-toast') ||
+            dialog.classList.contains('artdeco-hoverable-content')
+          ) {
+            return false;
+          }
+
+          // 4. Must be genuinely visible (not display: none, visibility: hidden, opacity ~ 0)
+          const style = window.getComputedStyle(dialog);
+          if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity || '1') <= 0.05) {
+            return false;
+          }
+
+          // 5. Must have genuine modal dimensions (minimum 200px width, 100px height)
+          const rect = dialog.getBoundingClientRect();
+          if (rect.width < 200 || rect.height < 100) {
+            return false;
+          }
+
+          return true;
+        }
+
+        // Check for dialogs (scoped strictly to genuine visible modals)
+        const rawDialogs = root.querySelectorAll
+          ? (Array.from(
+              root.querySelectorAll(
+                'div.jobs-easy-apply-modal, div[data-test-modal], div.artdeco-modal, dialog[open], div[role="dialog"], [aria-modal="true"]',
+              ),
+            ) as HTMLElement[])
+          : [];
+
+        const dialogs = rawDialogs.filter(isGenuineVisibleModal);
+
+        // Pass 1: Direct check for Easy Apply modal
+        for (const dialog of dialogs) {
+          const text = (dialog.innerText || dialog.textContent || '').trim();
+          const titleEl = dialog.querySelector('h1, h2, h3, [id*="header"], [class*="header"]');
+          const title = (titleEl?.textContent || text.slice(0, 100)).trim();
+
+          const formInputs = dialog.querySelectorAll(
+            'input:not([type="hidden"]), textarea, select, [contenteditable="true"]',
+          );
+          const buttons = Array.from(dialog.querySelectorAll('button'));
+          const hasNavButtons = buttons.some(b => {
+            const bt = (b.textContent || '').trim().toLowerCase();
+            const bAria = (b.getAttribute('aria-label') || '').toLowerCase();
+            return (
+              bt.includes('next') ||
+              bt.includes('review') ||
+              bt.includes('submit') ||
+              bt.includes('continue to next step') ||
+              bAria.includes('next') ||
+              bAria.includes('review') ||
+              bAria.includes('submit') ||
+              bAria.includes('continue to next step')
             );
+          });
+          const hasDocumentUpload =
+            dialog.querySelector('.jobs-document-upload, [type="file"], .ui-attachment') !== null;
+          const hasExplicitEasyApplyClass =
+            dialog.classList.contains('jobs-easy-apply-modal') ||
+            dialog.querySelector(
+              '.jobs-easy-apply-modal, .jobs-easy-apply-content, [data-easy-apply-modal], .jobs-easy-apply-form-section, .jobs-easy-apply-form-element, form.jobs-easy-apply-form, [data-test-modal-id="easy-apply-modal"]',
+            ) !== null;
+
+          const isEasyApply =
+            hasExplicitEasyApplyClass ||
+            dialog.querySelector('.jobs-easy-apply-content, [data-easy-apply-modal], form.jobs-easy-apply-form') !==
+              null ||
+            ((formInputs.length > 0 || hasDocumentUpload) && hasNavButtons) ||
+            ((formInputs.length > 0 || hasDocumentUpload) &&
+              (/easy apply/i.test(title) ||
+                /apply to/i.test(title) ||
+                /apply for/i.test(title) ||
+                /contact info/i.test(title) ||
+                /home address/i.test(title) ||
+                /resume/i.test(title)));
+
+          if (isEasyApply) {
+            return {
+              modalFound: true,
+              inShadow: root instanceof ShadowRoot,
+              dialogTitle: title,
+              inputsCount: formInputs.length,
+              buttonsCount: buttons.length,
+              hasClosedShadow: false,
+            };
+          }
+        }
+
+        // Pass 2: Check for known intermediate dialogs (Continue, Safety, Discard)
+        for (const dialog of dialogs) {
+          const text = (dialog.innerText || dialog.textContent || '').trim();
+          const titleEl = dialog.querySelector('h1, h2, h3, [id*="header"], [class*="header"]');
+          const title = (titleEl?.textContent || text.slice(0, 100)).trim();
+
+          // Known intermediate dialog 1: "Continue applying?"
+          if (/continue applying/i.test(title) || /continue applying/i.test(text)) {
             const buttons = Array.from(dialog.querySelectorAll('button'));
-            const hasNavButtons = buttons.some(b => {
-              const bt = (b.textContent || '').trim().toLowerCase();
-              const bAria = (b.getAttribute('aria-label') || '').toLowerCase();
-              return (
-                bt.includes('next') ||
-                bt.includes('review') ||
-                bt.includes('submit') ||
-                bt.includes('continue to next step') ||
-                bAria.includes('next') ||
-                bAria.includes('review') ||
-                bAria.includes('submit') ||
-                bAria.includes('continue to next step')
-              );
-            });
-            const hasDocumentUpload =
-              dialog.querySelector('.jobs-document-upload, [type="file"], .ui-attachment') !== null;
-            const hasExplicitEasyApplyClass =
-              dialog.classList.contains('jobs-easy-apply-modal') ||
-              dialog.querySelector(
-                '.jobs-easy-apply-modal, .jobs-easy-apply-content, [data-easy-apply-modal], .jobs-easy-apply-form-section, .jobs-easy-apply-form-element, form.jobs-easy-apply-form, [data-test-modal-id="easy-apply-modal"]',
-              ) !== null;
-
-            const isEasyApply =
-              hasExplicitEasyApplyClass ||
-              ((formInputs.length > 0 || hasDocumentUpload) && hasNavButtons) ||
-              ((formInputs.length > 0 || hasDocumentUpload) &&
-                (/easy apply/i.test(title) || /apply to/i.test(title) || /apply for/i.test(title)));
-
-            if (isEasyApply) {
+            const continueBtn = buttons.find(b => /continue/i.test(b.textContent || ''));
+            if (continueBtn) {
+              continueBtn.click();
               return {
-                modalFound: true,
+                modalFound: false,
                 inShadow: root instanceof ShadowRoot,
                 dialogTitle: title,
-                inputsCount: formInputs.length,
-                buttonsCount: buttons.length,
+                isIntermediate: true,
+                intermediateAction: 'continue',
+                inputsCount: 0,
+                buttonsCount: 0,
                 hasClosedShadow: false,
               };
             }
           }
 
-          // Pass 2: Check for known intermediate dialogs (Continue, Safety, Discard)
-          for (const dialog of dialogs) {
-            const text = (dialog.innerText || dialog.textContent || '').trim();
-            const titleEl = dialog.querySelector('h1, h2, h3, [id*="header"], [class*="header"]');
-            const title = (titleEl?.textContent || text.slice(0, 100)).trim();
-
-            // Known intermediate dialog 1: "Continue applying?"
-            if (/continue applying/i.test(title) || /continue applying/i.test(text)) {
-              const buttons = Array.from(dialog.querySelectorAll('button'));
-              const continueBtn = buttons.find(b => /continue/i.test(b.textContent || ''));
-              if (continueBtn) {
-                continueBtn.click();
-                return {
-                  modalFound: false,
-                  inShadow: root instanceof ShadowRoot,
-                  dialogTitle: title,
-                  isIntermediate: true,
-                  intermediateAction: 'continue',
-                  inputsCount: 0,
-                  buttonsCount: 0,
-                  hasClosedShadow: false,
-                };
-              }
-            }
-
-            // Known intermediate dialog 2: "Job search safety reminder"
-            if (/job search safety/i.test(title) || /safety reminder/i.test(title) || /safety reminder/i.test(text)) {
-              const buttons = Array.from(dialog.querySelectorAll('button'));
-              const okBtn = buttons.find(b => /continue|got it|dismiss|understand/i.test(b.textContent || ''));
-              if (okBtn) {
-                okBtn.click();
-                return {
-                  modalFound: false,
-                  inShadow: root instanceof ShadowRoot,
-                  dialogTitle: title,
-                  isIntermediate: true,
-                  intermediateAction: 'safety',
-                  inputsCount: 0,
-                  buttonsCount: 0,
-                  hasClosedShadow: false,
-                };
-              }
-            }
-
-            // Known intermediate dialog 3: "Save this application?" from an old unsubmitted draft -> Discard old draft
-            if (
-              (/save this application/i.test(title) ||
-                /save application/i.test(title) ||
-                /discard draft/i.test(title)) &&
-              !/easy apply/i.test(title)
-            ) {
-              const buttons = Array.from(dialog.querySelectorAll('button'));
-              const discardBtn = buttons.find(b => /^\s*discard\s*$/i.test((b.textContent || '').trim()));
-              if (discardBtn) {
-                discardBtn.click();
-                return {
-                  modalFound: false,
-                  inShadow: root instanceof ShadowRoot,
-                  dialogTitle: title,
-                  isIntermediate: true,
-                  intermediateAction: 'discard',
-                  inputsCount: 0,
-                  buttonsCount: 0,
-                  hasClosedShadow: false,
-                };
-              }
+          // Known intermediate dialog 2: "Job search safety reminder"
+          if (/job search safety/i.test(title) || /safety reminder/i.test(title) || /safety reminder/i.test(text)) {
+            const buttons = Array.from(dialog.querySelectorAll('button'));
+            const okBtn = buttons.find(b => /continue|got it|dismiss|understand/i.test(b.textContent || ''));
+            if (okBtn) {
+              okBtn.click();
+              return {
+                modalFound: false,
+                inShadow: root instanceof ShadowRoot,
+                dialogTitle: title,
+                isIntermediate: true,
+                intermediateAction: 'safety',
+                inputsCount: 0,
+                buttonsCount: 0,
+                hasClosedShadow: false,
+              };
             }
           }
 
-          // Check for shadow roots (e.g. #interop-outlet)
-          let foundClosed = false;
-          const allEls = root.querySelectorAll ? root.querySelectorAll('*') : [];
-          for (let i = 0; i < allEls.length; i++) {
-            const el = allEls[i];
-            if (el.shadowRoot) {
-              const res = inspectRoot(el.shadowRoot);
-              if (res.modalFound || res.isIntermediate) return res;
-            } else if (el.tagName && el.tagName.includes('-')) {
-              foundClosed = true;
+          // Known intermediate dialog 3: "Save this application?" from an old unsubmitted draft -> Discard old draft
+          if (
+            (/save this application/i.test(title) || /save application/i.test(title) || /discard draft/i.test(title)) &&
+            !/easy apply/i.test(title)
+          ) {
+            const buttons = Array.from(dialog.querySelectorAll('button'));
+            const discardBtn = buttons.find(b => /^\s*discard\s*$/i.test((b.textContent || '').trim()));
+            if (discardBtn) {
+              discardBtn.click();
+              return {
+                modalFound: false,
+                inShadow: root instanceof ShadowRoot,
+                dialogTitle: title,
+                isIntermediate: true,
+                intermediateAction: 'discard',
+                inputsCount: 0,
+                buttonsCount: 0,
+                hasClosedShadow: false,
+              };
             }
           }
-
-          return {
-            modalFound: false,
-            inShadow: false,
-            inputsCount: 0,
-            buttonsCount: 0,
-            hasClosedShadow: foundClosed,
-          };
         }
 
-        return inspectRoot(document);
-      });
+        // Check for shadow roots (e.g. #interop-outlet)
+        let foundClosed = false;
+        const allEls = root.querySelectorAll ? root.querySelectorAll('*') : [];
+        for (let i = 0; i < allEls.length; i++) {
+          const el = allEls[i];
+          if (el.shadowRoot) {
+            const res = inspectRoot(el.shadowRoot);
+            if (res.modalFound || res.isIntermediate) return res;
+          } else if (el.tagName && el.tagName.includes('-')) {
+            foundClosed = true;
+          }
+        }
+
+        return {
+          modalFound: false,
+          inShadow: false,
+          inputsCount: 0,
+          buttonsCount: 0,
+          hasClosedShadow: foundClosed,
+        };
+      }
+
+      return inspectRoot(document);
+    };
+
+    while (Date.now() - startTime < maxWaitMs) {
+      attempt++;
+
+      let checkResult: any = null;
+      if (this._puppeteerPage) {
+        try {
+          checkResult = await this._puppeteerPage.evaluate(checkInPage);
+        } catch (pErr) {
+          checkResult = null;
+        }
+      }
+
+      if (!checkResult && this._tabId && typeof chrome !== 'undefined' && chrome.scripting?.executeScript) {
+        try {
+          const results = await chrome.scripting.executeScript({
+            target: { tabId: this._tabId },
+            func: checkInPage,
+          });
+          checkResult = results?.[0]?.result || null;
+        } catch (sErr) {
+          checkResult = null;
+        }
+      }
+
+      if (!checkResult) {
+        await new Promise(r => setTimeout(r, pollIntervalMs));
+        continue;
+      }
 
       if (checkResult.isIntermediate) {
         if (checkResult.intermediateAction === 'unknown') {
