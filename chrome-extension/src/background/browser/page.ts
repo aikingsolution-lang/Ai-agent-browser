@@ -2106,7 +2106,9 @@ export default class Page {
     const checkInPage = () => {
       function check(root: any): boolean {
         const dialog = root.querySelector
-          ? root.querySelector('div[role="dialog"], .jobs-easy-apply-modal, [aria-modal="true"]')
+          ? root.querySelector(
+              '.jobs-easy-apply-modal, [data-test-modal-id="easy-apply-modal"], [data-easy-apply-modal], div.artdeco-modal, .artdeco-modal, [role="dialog"], [aria-modal="true"], dialog[open], [data-test-modal]',
+            )
           : null;
         if (dialog) return true;
         const all = root.querySelectorAll ? root.querySelectorAll('*') : [];
@@ -2792,258 +2794,353 @@ export default class Page {
       documentType: string;
     };
   }> {
-    if (!this._puppeteerPage) {
-      return { hasErrors: false, errors: [], emptyRequiredFields: [], invalidFieldsWithErrors: [] };
-    }
+    const validateInPage = () => {
+      function findActiveModal(root: any): HTMLElement | null {
+        const candidates = root.querySelectorAll
+          ? (Array.from(
+              root.querySelectorAll(
+                '.jobs-easy-apply-modal, [data-test-modal-id="easy-apply-modal"], [data-easy-apply-modal], div.artdeco-modal[role="dialog"], div.artdeco-modal, div[role="dialog"][aria-modal="true"], div[role="dialog"], [data-test-modal]',
+              ),
+            ) as HTMLElement[])
+          : [];
 
-    return this._puppeteerPage
-      .evaluate(() => {
-        function findActiveModal(root: any): HTMLElement | null {
-          const candidates = root.querySelectorAll
-            ? (Array.from(
-                root.querySelectorAll(
-                  '.jobs-easy-apply-modal, [data-test-modal-id="easy-apply-modal"], [data-easy-apply-modal], div.artdeco-modal[role="dialog"], div.artdeco-modal, div[role="dialog"][aria-modal="true"], div[role="dialog"], [data-test-modal]',
-                ),
-              ) as HTMLElement[])
-            : [];
+        for (const c of candidates) {
+          if (
+            c.closest(
+              'nav, header, #global-nav, .global-nav, .msg-overlay-container, #msg-overlay, .artdeco-dropdown, .search-reusables__filter-list, .search-reusables__filter-dropdown, .jobs-search-box, .scaffold-layout__header, .jobs-search-results-list, .scaffold-layout__list, .artdeco-pill',
+            )
+          ) {
+            continue;
+          }
+          const aria = (c.getAttribute('aria-label') || '').toLowerCase();
+          if (aria.includes('messaging') || aria.includes('chat') || aria.includes('notification')) {
+            continue;
+          }
+          const text = (c.innerText || c.textContent || '').trim().toLowerCase();
+          if (/^\d+\s*notifications?$/i.test(text) || c.closest('.notifications-badge')) {
+            continue;
+          }
+          const style = window.getComputedStyle(c);
+          if (style.display === 'none' || style.visibility === 'hidden') continue;
+          const rect = c.getBoundingClientRect();
+          if (rect.width < 200 || rect.height < 100) continue;
 
-          for (const c of candidates) {
-            if (
-              c.closest(
-                'nav, header, #global-nav, .global-nav, .msg-overlay-container, #msg-overlay, .artdeco-dropdown, .search-reusables__filter-list, .search-reusables__filter-dropdown, .jobs-search-box, .scaffold-layout__header, .jobs-search-results-list, .scaffold-layout__list, [data-view-name="job-card"], .artdeco-pill',
-              )
-            ) {
-              continue;
-            }
-            const aria = (c.getAttribute('aria-label') || '').toLowerCase();
-            if (aria.includes('messaging') || aria.includes('chat') || aria.includes('notification')) {
-              continue;
-            }
-            const text = (c.innerText || c.textContent || '').trim().toLowerCase();
-            if (/^\d+\s*notifications?$/i.test(text) || c.closest('.notifications-badge')) {
-              continue;
-            }
-            const style = window.getComputedStyle(c);
-            if (style.display === 'none' || style.visibility === 'hidden') continue;
-            const rect = c.getBoundingClientRect();
-            if (rect.width < 200 || rect.height < 100) continue;
-
-            if (
-              c.classList.contains('jobs-easy-apply-modal') ||
-              c.hasAttribute('data-easy-apply-modal') ||
-              c.getAttribute('data-test-modal-id') === 'easy-apply-modal' ||
-              c.querySelector(
-                '.jobs-easy-apply-modal, .jobs-easy-apply-modal__content, .jobs-easy-apply-modal__header, .jobs-easy-apply-modal__footer, .jobs-easy-apply-content, .jobs-easy-apply-form-section, .jobs-easy-apply-form-element, form.jobs-easy-apply-form, [data-easy-apply-modal], [data-test-modal-id="easy-apply-modal"], h2.jobs-easy-apply-modal__title',
-              ) !== null
-            ) {
-              return c;
-            }
-
-            const titleEl = c.querySelector('h1, h2, h3, [id*="header"], [class*="header"]');
-            const titleText = (titleEl?.textContent || text.slice(0, 100)).toLowerCase();
-            const hasApplyTitle = /apply|application|job/i.test(titleText);
-            const hasPrimaryBtn =
-              c.querySelector(
-                'button.artdeco-button--primary, button[data-easy-apply-next-button], button[aria-label*="next" i], button[aria-label*="submit" i], button[aria-label*="review" i], button[aria-label*="continue" i]',
-              ) !== null;
-
-            if (hasApplyTitle || hasPrimaryBtn) {
-              return c;
-            }
+          if (
+            c.classList.contains('jobs-easy-apply-modal') ||
+            c.hasAttribute('data-easy-apply-modal') ||
+            c.getAttribute('data-test-modal-id') === 'easy-apply-modal' ||
+            c.querySelector(
+              '.jobs-easy-apply-modal, .jobs-easy-apply-modal__content, .jobs-easy-apply-modal__header, .jobs-easy-apply-modal__footer, .jobs-easy-apply-content, .jobs-easy-apply-form-section, .jobs-easy-apply-form-element, form.jobs-easy-apply-form, [data-easy-apply-modal], [data-test-modal-id="easy-apply-modal"], h2.jobs-easy-apply-modal__title',
+            ) !== null
+          ) {
+            return c;
           }
 
-          const all = root.querySelectorAll ? root.querySelectorAll('*') : [];
-          for (let i = 0; i < all.length; i++) {
-            if (all[i].shadowRoot) {
-              const found = findActiveModal(all[i].shadowRoot);
-              if (found) return found;
-            }
+          const titleEl = c.querySelector('h1, h2, h3, [id*="header"], [class*="header"]');
+          const titleText = (titleEl?.textContent || text.slice(0, 100)).toLowerCase();
+          const hasApplyTitle = /apply|application|job/i.test(titleText);
+          const hasPrimaryBtn =
+            c.querySelector(
+              'button.artdeco-button--primary, button[data-easy-apply-next-button], button[aria-label*="next" i], button[aria-label*="submit" i], button[aria-label*="review" i], button[aria-label*="continue" i]',
+            ) !== null;
+
+          if (hasApplyTitle || hasPrimaryBtn) {
+            return c;
           }
-          return null;
         }
 
-        function cleanDuplicateText(rawText: string): string {
-          if (!rawText) return '';
-          let text = rawText
+        const all = root.querySelectorAll ? root.querySelectorAll('*') : [];
+        for (let i = 0; i < all.length; i++) {
+          if (all[i].shadowRoot) {
+            const found = findActiveModal(all[i].shadowRoot);
+            if (found) return found;
+          }
+        }
+        return null;
+      }
+
+      function cleanDuplicateText(rawText: string): string {
+        if (!rawText) return '';
+        let text = rawText
+          .replace(/[\n\r\t]+/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim();
+        if (text.length <= 4) return text;
+
+        // 1. Direct concatenation without separator: "Question?Question?"
+        if (text.length % 2 === 0) {
+          const half = text.slice(0, text.length / 2);
+          if (half + half === text) return half;
+        }
+
+        // 2. Space-separated exact duplication: "Question? Question?"
+        const mid = Math.floor(text.length / 2);
+        if (text[mid] === ' ') {
+          const left = text.slice(0, mid).trim();
+          const right = text.slice(mid + 1).trim();
+          if (left === right) return left;
+        }
+
+        // 3. Word-based even split:
+        const words = text.split(/\s+/);
+        if (words.length >= 4 && words.length % 2 === 0) {
+          const halfLen = words.length / 2;
+          const w1 = words.slice(0, halfLen).join(' ');
+          const w2 = words.slice(halfLen).join(' ');
+          if (w1 === w2) return w1;
+        }
+
+        // 4. Repeated sentence split on punctuation:
+        const punctMatch = text.match(/^(.+?[?.!*])\s+(.+)$/);
+        if (punctMatch) {
+          const p1 = punctMatch[1].trim();
+          const p2 = punctMatch[2].trim();
+          const normP1 = p1.replace(/[*?.\s]/g, '').toLowerCase();
+          const normP2 = p2.replace(/[*?.\s]/g, '').toLowerCase();
+          if (normP1 && (normP1 === normP2 || normP2.startsWith(normP1))) return p1;
+        }
+
+        // 5. General substring repetition search:
+        for (let len = Math.floor(text.length / 2); len >= 8; len--) {
+          const candidate = text.slice(0, len).trim();
+          const remainder = text.slice(len).trim();
+          if (candidate.length > 6) {
+            const normC = candidate.replace(/[*?.\s]/g, '').toLowerCase();
+            const normR = remainder.replace(/[*?.\s]/g, '').toLowerCase();
+            if (normC.length > 6 && (normC === normR || normR.startsWith(normC))) {
+              return candidate;
+            }
+          }
+        }
+
+        return text;
+      }
+
+      function cleanElementText(el: Element | null): string {
+        if (!el) return '';
+        const clone = el.cloneNode(true) as HTMLElement;
+        const hidden = clone.querySelectorAll(
+          '.visually-hidden, [aria-hidden="true"], .sr-only, .u-screen-reader-only',
+        );
+        hidden.forEach(h => h.remove());
+        let txt = (clone.textContent || '')
+          .replace(/[\n\r\t]+/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim();
+        if (!txt) {
+          txt = (el.textContent || '')
             .replace(/[\n\r\t]+/g, ' ')
             .replace(/\s+/g, ' ')
             .trim();
-          if (text.length <= 4) return text;
-
-          // 1. Direct concatenation without separator: "Question?Question?"
-          if (text.length % 2 === 0) {
-            const half = text.slice(0, text.length / 2);
-            if (half + half === text) return half;
-          }
-
-          // 2. Space-separated exact duplication: "Question? Question?"
-          const mid = Math.floor(text.length / 2);
-          if (text[mid] === ' ') {
-            const left = text.slice(0, mid).trim();
-            const right = text.slice(mid + 1).trim();
-            if (left === right) return left;
-          }
-
-          // 3. Word-based even split:
-          const words = text.split(/\s+/);
-          if (words.length >= 4 && words.length % 2 === 0) {
-            const halfLen = words.length / 2;
-            const w1 = words.slice(0, halfLen).join(' ');
-            const w2 = words.slice(halfLen).join(' ');
-            if (w1 === w2) return w1;
-          }
-
-          // 4. Repeated sentence split on punctuation:
-          const punctMatch = text.match(/^(.+?[?.!*])\s+(.+)$/);
-          if (punctMatch) {
-            const p1 = punctMatch[1].trim();
-            const p2 = punctMatch[2].trim();
-            const normP1 = p1.replace(/[*?.\s]/g, '').toLowerCase();
-            const normP2 = p2.replace(/[*?.\s]/g, '').toLowerCase();
-            if (normP1 && (normP1 === normP2 || normP2.startsWith(normP1))) return p1;
-          }
-
-          // 5. General substring repetition search:
-          for (let len = Math.floor(text.length / 2); len >= 8; len--) {
-            const candidate = text.slice(0, len).trim();
-            const remainder = text.slice(len).trim();
-            if (candidate.length > 6) {
-              const normC = candidate.replace(/[*?.\s]/g, '').toLowerCase();
-              const normR = remainder.replace(/[*?.\s]/g, '').toLowerCase();
-              if (normC.length > 6 && (normC === normR || normR.startsWith(normC))) {
-                return candidate;
-              }
-            }
-          }
-
-          return text;
         }
+        return cleanDuplicateText(txt);
+      }
 
-        function cleanElementText(el: Element | null): string {
-          if (!el) return '';
-          const clone = el.cloneNode(true) as HTMLElement;
-          const hidden = clone.querySelectorAll(
-            '.visually-hidden, [aria-hidden="true"], .sr-only, .u-screen-reader-only',
+      function cleanDuplicateString(text: string): string {
+        return cleanDuplicateText(text);
+      }
+
+      const modal = findActiveModal(document);
+      if (!modal) {
+        return { hasErrors: false, errors: [], emptyRequiredFields: [], invalidFieldsWithErrors: [] };
+      }
+      const errors: Array<{ fieldLabel: string; errorText: string }> = [];
+      const emptyRequiredFields: Array<{
+        id?: string;
+        label: string;
+        fieldType: 'text' | 'number' | 'radio' | 'dropdown' | 'checkbox';
+        options?: string[];
+        min?: number;
+        max?: number;
+        placeholder?: string;
+        hintText?: string;
+        currentValue?: string;
+        errorText?: string;
+      }> = [];
+      const invalidFieldsWithErrors: Array<{
+        id?: string;
+        label: string;
+        currentValue: string;
+        errorText: string;
+        fieldType: 'text' | 'number' | 'radio' | 'dropdown' | 'checkbox';
+        min?: number;
+        max?: number;
+        placeholder?: string;
+        hintText?: string;
+      }> = [];
+
+      const errorRegex =
+        /decimal|whole\s*number|between\s*\d+|larger\s*than|greater\s*than|more\s*than|number|valid|required|please\s*enter|please\s*make|select\s*an\s*option|choose|failed|must\s*be/i;
+
+      // 1. Check elements with aria-invalid="true"
+      const invalidEls = Array.from(
+        modal.querySelectorAll('[aria-invalid="true"], .artdeco-text-input--error input'),
+      ) as HTMLElement[];
+      for (const el of invalidEls) {
+        let label = '';
+        const id = el.getAttribute('id');
+        if (id) {
+          const lbl = modal.querySelector(`label[for="${id}"]`);
+          if (lbl) label = cleanElementText(lbl);
+        }
+        if (!label) {
+          const closestContainer = el.closest(
+            '.fb-dash-form-element, .jobs-easy-apply-form-element, fieldset, div[data-test-form-element]',
           );
-          hidden.forEach(h => h.remove());
-          let txt = (clone.textContent || '')
-            .replace(/[\n\r\t]+/g, ' ')
-            .replace(/\s+/g, ' ')
-            .trim();
-          if (!txt) {
-            txt = (el.textContent || '')
-              .replace(/[\n\r\t]+/g, ' ')
-              .replace(/\s+/g, ' ')
-              .trim();
+          if (closestContainer) {
+            const legend = closestContainer.querySelector('legend, label');
+            if (legend) label = cleanElementText(legend);
           }
-          return cleanDuplicateText(txt);
+        }
+        if (!label) {
+          label = cleanDuplicateString(el.getAttribute('aria-label') || '');
         }
 
-        function cleanDuplicateString(text: string): string {
-          return cleanDuplicateText(text);
+        let errorMsg = '';
+        const describedBy = el.getAttribute('aria-describedby');
+        if (describedBy) {
+          const ids = describedBy.split(/\s+/);
+          for (const did of ids) {
+            if (!did) continue;
+            try {
+              const descEl = modal.querySelector(`[id="${CSS.escape(did)}"]`) || document.getElementById(did);
+              if (descEl) {
+                const t = cleanElementText(descEl);
+                if (t) {
+                  errorMsg = t;
+                  break;
+                }
+              }
+            } catch {}
+          }
         }
-
-        const modal = findActiveModal(document);
-        if (!modal) {
-          return { hasErrors: false, errors: [], emptyRequiredFields: [], invalidFieldsWithErrors: [] };
+        if (!errorMsg) {
+          const container =
+            el.closest('.fb-dash-form-element, .jobs-easy-apply-form-element, fieldset, div[data-test-form-element]') ||
+            el.parentElement?.parentElement ||
+            el.parentElement;
+          const feedback = container?.querySelector?.(
+            '.artdeco-inline-feedback, .artdeco-inline-feedback--error, .artdeco-inline-feedback__message, .inline-feedback, [class*="error" i], [role="alert"]',
+          );
+          if (feedback) errorMsg = cleanElementText(feedback);
         }
-        const errors: Array<{ fieldLabel: string; errorText: string }> = [];
-        const emptyRequiredFields: Array<{
-          id?: string;
-          label: string;
-          fieldType: 'text' | 'number' | 'radio' | 'dropdown' | 'checkbox';
-          options?: string[];
-          min?: number;
-          max?: number;
-          placeholder?: string;
-          hintText?: string;
-          currentValue?: string;
-          errorText?: string;
-        }> = [];
-        const invalidFieldsWithErrors: Array<{
-          id?: string;
-          label: string;
-          currentValue: string;
-          errorText: string;
-          fieldType: 'text' | 'number' | 'radio' | 'dropdown' | 'checkbox';
-          min?: number;
-          max?: number;
-          placeholder?: string;
-          hintText?: string;
-        }> = [];
+        errors.push({ fieldLabel: label || 'Form Field', errorText: errorMsg || 'Field is invalid' });
 
-        const errorRegex =
-          /decimal|whole\s*number|between\s*\d+|larger\s*than|greater\s*than|more\s*than|number|valid|required|please\s*enter|please\s*make|select\s*an\s*option|choose|failed|must\s*be/i;
+        // Include invalid element in emptyRequiredFields and invalidFieldsWithErrors so runner re-resolves it
+        if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement) {
+          const isSelect = el.tagName.toLowerCase() === 'select';
+          const placeholder = el.getAttribute('placeholder') || '';
+          const rawMin = el.getAttribute('min');
+          const rawMax = el.getAttribute('max');
+          const isNumeric =
+            (el as HTMLInputElement).type === 'number' ||
+            el.inputMode === 'numeric' ||
+            el.inputMode === 'decimal' ||
+            /decimal|number|between|larger than|greater than/i.test(errorMsg);
+          const isCheckbox = (el as HTMLInputElement).type === 'checkbox';
+          const isRadio = (el as HTMLInputElement).type === 'radio';
 
-        // 1. Check elements with aria-invalid="true"
-        const invalidEls = Array.from(
-          modal.querySelectorAll('[aria-invalid="true"], .artdeco-text-input--error input'),
-        ) as HTMLElement[];
-        for (const el of invalidEls) {
+          const fieldType: 'text' | 'number' | 'radio' | 'dropdown' | 'checkbox' = isSelect
+            ? 'dropdown'
+            : isCheckbox
+              ? 'checkbox'
+              : isRadio
+                ? 'radio'
+                : isNumeric
+                  ? 'number'
+                  : 'text';
+
+          const curVal = (el.value || '').trim();
+          const minVal = /larger\s*than\s*0(?:\.0)?|greater\s*than\s*0(?:\.0)?/i.test(errorMsg)
+            ? 1
+            : rawMin !== null && !isNaN(Number(rawMin))
+              ? Number(rawMin)
+              : undefined;
+
+          const invalidDesc = {
+            id: el.id || undefined,
+            label: label || 'Form Field',
+            currentValue: curVal,
+            errorText: errorMsg || 'Invalid field',
+            fieldType,
+            options: isSelect
+              ? Array.from((el as HTMLSelectElement).options)
+                  .map(o => cleanDuplicateString(o.text.trim()))
+                  .filter(t => !/select an option/i.test(t))
+              : undefined,
+            min: minVal,
+            max: rawMax !== null && !isNaN(Number(rawMax)) ? Number(rawMax) : undefined,
+            placeholder: placeholder || undefined,
+            hintText: errorMsg || undefined,
+          };
+
+          if (!invalidFieldsWithErrors.some(e => e.label === invalidDesc.label)) {
+            invalidFieldsWithErrors.push(invalidDesc);
+          }
+          if (!emptyRequiredFields.some(e => e.label === invalidDesc.label)) {
+            emptyRequiredFields.push(invalidDesc);
+          }
+        }
+      }
+
+      // 2. Check inline error feedback elements & red alerts
+      const errorEls = Array.from(
+        modal.querySelectorAll(
+          '.artdeco-inline-feedback, .artdeco-inline-feedback--error, .artdeco-inline-feedback__message, .inline-feedback, .inline-feedback--error, [class*="inline-feedback" i], p[id*="error" i], span[id*="error" i], [class*="error-message" i], [data-test-form-element-error-message], [data-test-form-builder-error], [role="alert"]',
+        ),
+      ) as HTMLElement[];
+
+      for (const errEl of errorEls) {
+        const txt = cleanElementText(errEl);
+        if (!txt || txt.length < 3) continue;
+        if (
+          errorRegex.test(txt) ||
+          errEl.classList.contains('artdeco-inline-feedback--error') ||
+          errEl.closest('.artdeco-inline-feedback--error')
+        ) {
           let label = '';
-          const id = el.getAttribute('id');
-          if (id) {
-            const lbl = modal.querySelector(`label[for="${id}"]`);
+          const container =
+            errEl.closest(
+              'div.fb-dash-form-element, div.jobs-easy-apply-form-element, fieldset, div[data-test-form-element], .jobs-easy-apply-form-section__grouping',
+            ) ||
+            errEl.parentElement?.parentElement ||
+            errEl.parentElement;
+
+          const inputEl = container
+            ? (container.querySelector('input, select, textarea') as
+                | HTMLInputElement
+                | HTMLSelectElement
+                | HTMLTextAreaElement
+                | null)
+            : null;
+
+          if (container) {
+            const lbl = container.querySelector('label, legend');
             if (lbl) label = cleanElementText(lbl);
           }
-          if (!label) {
-            const closestContainer = el.closest(
-              '.fb-dash-form-element, .jobs-easy-apply-form-element, fieldset, div[data-test-form-element]',
-            );
-            if (closestContainer) {
-              const legend = closestContainer.querySelector('legend, label');
-              if (legend) label = cleanElementText(legend);
+          if (!label && inputEl) {
+            const id = inputEl.getAttribute('id');
+            if (id) {
+              const lbl = modal.querySelector(`label[for="${id}"]`);
+              if (lbl) label = cleanElementText(lbl);
             }
-          }
-          if (!label) {
-            label = cleanDuplicateString(el.getAttribute('aria-label') || '');
+            if (!label) label = cleanDuplicateString(inputEl.getAttribute('aria-label') || '');
           }
 
-          let errorMsg = '';
-          const describedBy = el.getAttribute('aria-describedby');
-          if (describedBy) {
-            const ids = describedBy.split(/\s+/);
-            for (const did of ids) {
-              if (!did) continue;
-              try {
-                const descEl = modal.querySelector(`[id="${CSS.escape(did)}"]`) || document.getElementById(did);
-                if (descEl) {
-                  const t = cleanElementText(descEl);
-                  if (t) {
-                    errorMsg = t;
-                    break;
-                  }
-                }
-              } catch {}
-            }
+          if (!errors.some(e => e.errorText === txt)) {
+            errors.push({ fieldLabel: label || 'Field', errorText: txt });
           }
-          if (!errorMsg) {
-            const container =
-              el.closest(
-                '.fb-dash-form-element, .jobs-easy-apply-form-element, fieldset, div[data-test-form-element]',
-              ) ||
-              el.parentElement?.parentElement ||
-              el.parentElement;
-            const feedback = container?.querySelector?.(
-              '.artdeco-inline-feedback, .artdeco-inline-feedback--error, .artdeco-inline-feedback__message, .inline-feedback, [class*="error" i], [role="alert"]',
-            );
-            if (feedback) errorMsg = cleanElementText(feedback);
-          }
-          errors.push({ fieldLabel: label || 'Form Field', errorText: errorMsg || 'Field is invalid' });
 
-          // Include invalid element in emptyRequiredFields and invalidFieldsWithErrors so runner re-resolves it
-          if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement) {
-            const isSelect = el.tagName.toLowerCase() === 'select';
-            const placeholder = el.getAttribute('placeholder') || '';
-            const rawMin = el.getAttribute('min');
-            const rawMax = el.getAttribute('max');
+          if (inputEl) {
+            const curVal = (inputEl.value || '').trim();
+            const isSelect = inputEl.tagName.toLowerCase() === 'select';
             const isNumeric =
-              (el as HTMLInputElement).type === 'number' ||
-              el.inputMode === 'numeric' ||
-              el.inputMode === 'decimal' ||
-              /decimal|number|between|larger than|greater than/i.test(errorMsg);
-            const isCheckbox = (el as HTMLInputElement).type === 'checkbox';
-            const isRadio = (el as HTMLInputElement).type === 'radio';
+              (inputEl as HTMLInputElement).type === 'number' ||
+              inputEl.inputMode === 'numeric' ||
+              inputEl.inputMode === 'decimal' ||
+              /decimal|number|larger than|greater than/i.test(txt);
+            const isCheckbox = (inputEl as HTMLInputElement).type === 'checkbox';
+            const isRadio = (inputEl as HTMLInputElement).type === 'radio';
 
             const fieldType: 'text' | 'number' | 'radio' | 'dropdown' | 'checkbox' = isSelect
               ? 'dropdown'
@@ -3055,672 +3152,65 @@ export default class Page {
                     ? 'number'
                     : 'text';
 
-            const curVal = (el.value || '').trim();
-            const minVal = /larger\s*than\s*0(?:\.0)?|greater\s*than\s*0(?:\.0)?/i.test(errorMsg)
+            const rawMin = inputEl.getAttribute('min');
+            const minVal = /larger\s*than\s*0(?:\.0)?|greater\s*than\s*0(?:\.0)?/i.test(txt)
               ? 1
               : rawMin !== null && !isNaN(Number(rawMin))
                 ? Number(rawMin)
                 : undefined;
 
-            const invalidDesc = {
-              id: el.id || undefined,
+            const errDesc = {
+              id: inputEl.id || undefined,
               label: label || 'Form Field',
               currentValue: curVal,
-              errorText: errorMsg || 'Invalid field',
+              errorText: txt,
               fieldType,
-              options: isSelect
-                ? Array.from((el as HTMLSelectElement).options)
-                    .map(o => cleanDuplicateString(o.text.trim()))
-                    .filter(t => !/select an option/i.test(t))
-                : undefined,
               min: minVal,
-              max: rawMax !== null && !isNaN(Number(rawMax)) ? Number(rawMax) : undefined,
-              placeholder: placeholder || undefined,
-              hintText: errorMsg || undefined,
+              placeholder: inputEl.getAttribute('placeholder') || undefined,
+              hintText: txt,
             };
 
-            if (!invalidFieldsWithErrors.some(e => e.label === invalidDesc.label)) {
-              invalidFieldsWithErrors.push(invalidDesc);
+            if (!invalidFieldsWithErrors.some(e => e.label === errDesc.label && e.errorText === txt)) {
+              invalidFieldsWithErrors.push(errDesc);
             }
-            if (!emptyRequiredFields.some(e => e.label === invalidDesc.label)) {
-              emptyRequiredFields.push(invalidDesc);
-            }
-          }
-        }
-
-        // 2. Check inline error feedback elements & red alerts
-        const errorEls = Array.from(
-          modal.querySelectorAll(
-            '.artdeco-inline-feedback, .artdeco-inline-feedback--error, .artdeco-inline-feedback__message, .inline-feedback, .inline-feedback--error, [class*="inline-feedback" i], p[id*="error" i], span[id*="error" i], [class*="error-message" i], [data-test-form-element-error-message], [data-test-form-builder-error], [role="alert"]',
-          ),
-        ) as HTMLElement[];
-
-        for (const errEl of errorEls) {
-          const txt = cleanElementText(errEl);
-          if (!txt || txt.length < 3) continue;
-          if (
-            errorRegex.test(txt) ||
-            errEl.classList.contains('artdeco-inline-feedback--error') ||
-            errEl.closest('.artdeco-inline-feedback--error')
-          ) {
-            let label = '';
-            const container =
-              errEl.closest(
-                'div.fb-dash-form-element, div.jobs-easy-apply-form-element, fieldset, div[data-test-form-element], .jobs-easy-apply-form-section__grouping',
-              ) ||
-              errEl.parentElement?.parentElement ||
-              errEl.parentElement;
-
-            const inputEl = container
-              ? (container.querySelector('input, select, textarea') as
-                  | HTMLInputElement
-                  | HTMLSelectElement
-                  | HTMLTextAreaElement
-                  | null)
-              : null;
-
-            if (container) {
-              const lbl = container.querySelector('label, legend');
-              if (lbl) label = cleanElementText(lbl);
-            }
-            if (!label && inputEl) {
-              const id = inputEl.getAttribute('id');
-              if (id) {
-                const lbl = modal.querySelector(`label[for="${id}"]`);
-                if (lbl) label = cleanElementText(lbl);
-              }
-              if (!label) label = cleanDuplicateString(inputEl.getAttribute('aria-label') || '');
-            }
-
-            if (!errors.some(e => e.errorText === txt)) {
-              errors.push({ fieldLabel: label || 'Field', errorText: txt });
-            }
-
-            if (inputEl) {
-              const curVal = (inputEl.value || '').trim();
-              const isSelect = inputEl.tagName.toLowerCase() === 'select';
-              const isNumeric =
-                (inputEl as HTMLInputElement).type === 'number' ||
-                inputEl.inputMode === 'numeric' ||
-                inputEl.inputMode === 'decimal' ||
-                /decimal|number|larger than|greater than/i.test(txt);
-              const isCheckbox = (inputEl as HTMLInputElement).type === 'checkbox';
-              const isRadio = (inputEl as HTMLInputElement).type === 'radio';
-
-              const fieldType: 'text' | 'number' | 'radio' | 'dropdown' | 'checkbox' = isSelect
-                ? 'dropdown'
-                : isCheckbox
-                  ? 'checkbox'
-                  : isRadio
-                    ? 'radio'
-                    : isNumeric
-                      ? 'number'
-                      : 'text';
-
-              const rawMin = inputEl.getAttribute('min');
-              const minVal = /larger\s*than\s*0(?:\.0)?|greater\s*than\s*0(?:\.0)?/i.test(txt)
-                ? 1
-                : rawMin !== null && !isNaN(Number(rawMin))
-                  ? Number(rawMin)
-                  : undefined;
-
-              const errDesc = {
-                id: inputEl.id || undefined,
-                label: label || 'Form Field',
-                currentValue: curVal,
-                errorText: txt,
-                fieldType,
-                min: minVal,
-                placeholder: inputEl.getAttribute('placeholder') || undefined,
-                hintText: txt,
-              };
-
-              if (!invalidFieldsWithErrors.some(e => e.label === errDesc.label && e.errorText === txt)) {
-                invalidFieldsWithErrors.push(errDesc);
-              }
-              if (!emptyRequiredFields.some(e => e.label === errDesc.label)) {
-                emptyRequiredFields.push(errDesc);
-              }
+            if (!emptyRequiredFields.some(e => e.label === errDesc.label)) {
+              emptyRequiredFields.push(errDesc);
             }
           }
         }
+      }
 
-        // 3. Check radio groups and checkbox groups
-        const fieldsets = Array.from(
-          modal.querySelectorAll('fieldset, div[role="radiogroup"], div[role="group"]'),
-        ) as HTMLElement[];
-        for (const fs of fieldsets) {
-          const radios = Array.from(fs.querySelectorAll('input[type="radio"]')) as HTMLInputElement[];
-          const checkboxes = Array.from(fs.querySelectorAll('input[type="checkbox"]')) as HTMLInputElement[];
+      // 3. Check radio groups and checkbox groups
+      const fieldsets = Array.from(
+        modal.querySelectorAll('fieldset, div[role="radiogroup"], div[role="group"]'),
+      ) as HTMLElement[];
+      for (const fs of fieldsets) {
+        const radios = Array.from(fs.querySelectorAll('input[type="radio"]')) as HTMLInputElement[];
+        const checkboxes = Array.from(fs.querySelectorAll('input[type="checkbox"]')) as HTMLInputElement[];
 
-          if (radios.length > 0) {
-            const legend = fs.querySelector('legend, [role="heading"], label');
-            const legendText = cleanElementText(legend);
-            const anyChecked = radios.some(r => r.checked);
+        if (radios.length > 0) {
+          const legend = fs.querySelector('legend, [role="heading"], label');
+          const legendText = cleanElementText(legend);
+          const anyChecked = radios.some(r => r.checked);
 
-            // Check if explicitly marked optional by LinkedIn
-            const isExplicitlyOptional =
-              /\boptional\b/i.test(legendText) ||
-              Boolean(
-                fs.querySelector(
-                  '.fb-dash-form-element__label-title--optional, [data-test-form-element-optional], .artdeco-form__label--optional',
-                ) || fs.closest('.fb-dash-form-element--optional, [data-test-form-element-optional]'),
-              );
-
-            // In LinkedIn Easy Apply modals, radio groups are required screening questions unless explicitly marked optional
-            if (!anyChecked && !isExplicitlyOptional) {
-              const options = radios
-                .map(r => {
-                  const rId = r.getAttribute('id');
-                  let rLbl: HTMLElement | null = null;
-                  if (rId) {
-                    try {
-                      rLbl = fs.querySelector(`label[for="${CSS.escape(rId)}"]`);
-                    } catch {
-                      const allLabels = Array.from(fs.querySelectorAll('label'));
-                      rLbl = allLabels.find(l => l.getAttribute('for') === rId) || null;
-                    }
-                  }
-                  if (!rLbl) {
-                    rLbl = r.closest('label') || (r.parentElement?.querySelector('label') as HTMLElement | null);
-                  }
-                  return cleanElementText(rLbl) || (r.value || '').trim();
-                })
-                .filter(Boolean);
-
-              emptyRequiredFields.push({
-                label: legendText,
-                fieldType: 'radio',
-                options,
-              });
-            }
-          } else if (checkboxes.length > 0) {
-            const legend = fs.querySelector('legend, [role="heading"], label');
-            const legendText = cleanElementText(legend);
-            const anyChecked = checkboxes.some(c => c.checked);
-
-            const isExplicitlyOptional =
-              /\boptional\b/i.test(legendText) ||
-              Boolean(
-                fs.querySelector(
-                  '.fb-dash-form-element__label-title--optional, [data-test-form-element-optional], .artdeco-form__label--optional',
-                ) || fs.closest('.fb-dash-form-element--optional, [data-test-form-element-optional]'),
-              );
-
-            if (!anyChecked && !isExplicitlyOptional) {
-              const options = checkboxes
-                .map(c => {
-                  const cId = c.getAttribute('id');
-                  let cLbl: HTMLElement | null = null;
-                  if (cId) {
-                    try {
-                      cLbl = fs.querySelector(`label[for="${CSS.escape(cId)}"]`);
-                    } catch {
-                      const allLabels = Array.from(fs.querySelectorAll('label'));
-                      cLbl = allLabels.find(l => l.getAttribute('for') === cId) || null;
-                    }
-                  }
-                  if (!cLbl) {
-                    cLbl = c.closest('label') || (c.parentElement?.querySelector('label') as HTMLElement | null);
-                  }
-                  return cleanElementText(cLbl) || (c.value || '').trim();
-                })
-                .filter(Boolean);
-
-              emptyRequiredFields.push({
-                label: legendText,
-                fieldType: 'checkbox',
-                options,
-              });
-            }
-          }
-        }
-
-        // 3b. Standalone required checkboxes
-        const standaloneCheckboxes = Array.from(modal.querySelectorAll('input[type="checkbox"]')) as HTMLInputElement[];
-        for (const cb of standaloneCheckboxes) {
-          if (cb.closest('fieldset, div[role="radiogroup"], div[role="group"]')) continue;
-          if (cb.checked) continue;
-
-          let label = '';
-          const id = cb.getAttribute('id');
-          if (id) {
-            const lbl = modal.querySelector(`label[for="${id}"]`);
-            if (lbl) label = cleanElementText(lbl);
-          }
-          if (!label) {
-            const parent = cb.closest('.fb-dash-form-element, div[data-test-form-element], label');
-            if (parent) label = cleanElementText(parent);
-          }
-          if (!label) label = cleanDuplicateString(cb.getAttribute('aria-label') || '');
-
-          const isRequired =
-            cb.hasAttribute('required') ||
-            cb.getAttribute('aria-required') === 'true' ||
-            /agree|terms|certify|acknowledge|consent|confirm/i.test(label);
-
-          if (isRequired && label) {
-            emptyRequiredFields.push({
-              id: cb.id || undefined,
-              label,
-              fieldType: 'checkbox',
-              options: ['Yes', 'No'],
-            });
-          }
-        }
-
-        // 4. Text and numeric inputs
-        const textInputs = Array.from(
-          modal.querySelectorAll(
-            'input:not([type="hidden"]):not([type="radio"]):not([type="checkbox"]):not([type="submit"]):not([type="button"]):not([type="file"]), textarea, select',
-          ),
-        ) as (HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement)[];
-
-        for (const input of textInputs) {
-          if (input instanceof HTMLInputElement && input.type === 'file') continue;
-          const val = (input.value || '').trim();
-          const isSelect = input.tagName.toLowerCase() === 'select';
-          const isRequired =
-            input.required || input.hasAttribute('required') || input.getAttribute('aria-required') === 'true';
-
-          let label = '';
-          const id = input.getAttribute('id');
-          if (id) {
-            const lbl = modal.querySelector(`label[for="${id}"]`);
-            if (lbl) label = cleanElementText(lbl);
-          }
-          const parentEl =
-            input.closest(
-              'div.fb-dash-form-element, div.jobs-easy-apply-form-element, div[data-test-form-element], .jobs-easy-apply-form-section__grouping, fieldset, div[class*="form-element" i]',
-            ) ||
-            input.parentElement?.parentElement ||
-            input.parentElement;
-
-          if (!label && parentEl) {
-            const lbl = parentEl.querySelector('label');
-            if (lbl) label = cleanElementText(lbl);
-          }
-          if (!label) {
-            label = cleanDuplicateString(input.getAttribute('aria-label') || '');
-          }
-
-          const placeholder = cleanDuplicateString(input.getAttribute('placeholder') || '');
-          let hintText = '';
-          const describedBy = input.getAttribute('aria-describedby');
-          if (describedBy) {
-            const ids = describedBy.split(/\s+/);
-            const parts: string[] = [];
-            for (const did of ids) {
-              if (!did) continue;
-              try {
-                const el = modal.querySelector(`[id="${CSS.escape(did)}"]`) || document.getElementById(did);
-                if (el) {
-                  const t = cleanElementText(el);
-                  if (t) parts.push(t);
-                }
-              } catch {}
-            }
-            if (parts.length > 0) hintText = parts.join(' ');
-          }
-          if (!hintText && parentEl) {
-            const hintEl = parentEl.querySelector(
-              '.fb-dash-form-element__hint, .artdeco-text-input--hint, .artdeco-form-element__sub-text, span.t-12, [id*="hint"], [id*="helper"], [data-test-form-element-hint]',
-            );
-            if (hintEl) hintText = cleanElementText(hintEl);
-          }
-          // Also check for inline error text right next to the input
-          const errEl = parentEl?.querySelector(
-            '.artdeco-inline-feedback, .artdeco-inline-feedback--error, .artdeco-inline-feedback__message, .inline-feedback, [class*="error" i], [role="alert"], [data-test-form-element-error-message]',
-          );
-          const activeErrorText = errEl ? cleanElementText(errEl) : '';
-          if (activeErrorText) {
-            hintText = hintText ? `${hintText} ${activeErrorText}` : activeErrorText;
-          }
-
-          const rawMin = input.getAttribute('min');
-          const rawMax = input.getAttribute('max');
-          let parsedMin = rawMin !== null && !isNaN(Number(rawMin)) ? Number(rawMin) : undefined;
-          const parsedMax = rawMax !== null && !isNaN(Number(rawMax)) ? Number(rawMax) : undefined;
-
-          const combinedHint = (placeholder + ' ' + hintText).toLowerCase();
-          const isSkillOrNumeric =
-            /how many years|experience|years|\bdays\b|\bmonths\b|whole\s*number|only\s*(?:whole\s*)?numbers|in\s*inr|in\s*lpa|ctc|decimal\s*number|larger\s*than|greater\s*than/i.test(
-              label + ' ' + combinedHint,
-            ) ||
-            input.type === 'number' ||
-            input.inputMode === 'numeric' ||
-            input.inputMode === 'decimal' ||
-            input.getAttribute('data-test-fb-numeric-input') === 'true' ||
-            input.getAttribute('data-test-fb-decimal-input') === 'true' ||
-            input.hasAttribute('step') ||
-            /example:\s*\d+/i.test(combinedHint) ||
-            /whole\s*number|decimal\s*number|between \d+ and \d+|larger than \d+|greater than \d+|0 and 99/i.test(
-              combinedHint,
+          // Check if explicitly marked optional by LinkedIn
+          const isExplicitlyOptional =
+            /\boptional\b/i.test(legendText) ||
+            Boolean(
+              fs.querySelector(
+                '.fb-dash-form-element__label-title--optional, [data-test-form-element-optional], .artdeco-form__label--optional',
+              ) || fs.closest('.fb-dash-form-element--optional, [data-test-form-element-optional]'),
             );
 
-          if (/larger\s*than\s*0(?:\.0)?|greater\s*than\s*0(?:\.0)?/i.test(combinedHint)) {
-            parsedMin = Math.max(1, parsedMin || 1);
-          }
-
-          const hasActiveError =
-            Boolean(activeErrorText) && (errorRegex.test(activeErrorText) || activeErrorText.length > 5);
-          const isInvalidValue =
-            hasActiveError || (!val && (isRequired || isSkillOrNumeric)) || (isSelect && /select an option/i.test(val));
-
-          if (isInvalidValue) {
-            let fieldType: 'text' | 'number' | 'dropdown' = 'text';
-            if (isSelect) {
-              fieldType = 'dropdown';
-            } else if (
-              input.type === 'number' ||
-              isSkillOrNumeric ||
-              /decimal\s*number|whole\s*number|larger than|greater than/i.test(combinedHint)
-            ) {
-              fieldType = 'number';
-            }
-
-            let options: string[] | undefined = undefined;
-            if (isSelect) {
-              options = Array.from((input as HTMLSelectElement).options)
-                .map(o => cleanDuplicateString(o.text.trim()))
-                .filter(t => !/select an option/i.test(t));
-            }
-
-            const fieldDesc = {
-              id: input.id || undefined,
-              label: label || 'Form Field',
-              fieldType,
-              options,
-              min: parsedMin !== undefined ? parsedMin : fieldType === 'number' ? 0 : undefined,
-              max: parsedMax !== undefined ? parsedMax : /0 and 99/i.test(combinedHint) ? 99 : undefined,
-              placeholder: placeholder || undefined,
-              hintText: hintText || undefined,
-              currentValue: val,
-              errorText: activeErrorText || undefined,
-            };
-
-            if (!emptyRequiredFields.some(e => e.label === fieldDesc.label)) {
-              emptyRequiredFields.push(fieldDesc);
-            }
-
-            if (hasActiveError && !invalidFieldsWithErrors.some(e => e.label === fieldDesc.label)) {
-              invalidFieldsWithErrors.push({
-                ...fieldDesc,
-                currentValue: val,
-                errorText: activeErrorText,
-              });
-            }
-          }
-        }
-
-        let unfulfilledMandatoryFileUpload: { label: string; documentType: string } | undefined = undefined;
-
-        // Check for mandatory file upload elements (Cover Letter, Portfolio, Custom Attachment)
-        const fileInputs = Array.from(modal.querySelectorAll('input[type="file"]')) as HTMLInputElement[];
-        for (const fi of fileInputs) {
-          const isRequired =
-            fi.required ||
-            fi.hasAttribute('required') ||
-            fi.getAttribute('aria-required') === 'true' ||
-            Boolean(fi.closest('.jobs-document-upload--required, [data-test-document-upload-required]'));
-          const hasFiles = fi.files && fi.files.length > 0;
-          const container = fi.closest('.jobs-document-upload, .fb-dash-form-element, section, div');
-          const hasError = container?.querySelector(
-            '.artdeco-inline-feedback--error, [aria-live="assertive"], .inline-feedback, [class*="error" i]',
-          );
-          const errText = (hasError?.textContent || '').trim();
-          const isUploadError =
-            /upload (?:a |your )?(?:cover letter|resume|portfolio|file|document)|document is required|file is required/i.test(
-              errText,
-            );
-
-          if ((isRequired || isUploadError) && !hasFiles) {
-            const rawLabel =
-              cleanElementText(container?.querySelector('h3, h4, label, legend') || null) || 'Document Upload';
-            const docType =
-              /cover\s*letter/i.test(rawLabel) || /cover\s*letter/i.test(errText)
-                ? 'Cover Letter'
-                : /portfolio/i.test(rawLabel) || /portfolio/i.test(errText)
-                  ? 'Portfolio'
-                  : 'Custom Attachment';
-            unfulfilledMandatoryFileUpload = { label: rawLabel, documentType: docType };
-            break;
-          }
-        }
-
-        return {
-          hasErrors:
-            errors.length > 0 ||
-            emptyRequiredFields.length > 0 ||
-            invalidFieldsWithErrors.length > 0 ||
-            Boolean(unfulfilledMandatoryFileUpload),
-          errors,
-          emptyRequiredFields,
-          invalidFieldsWithErrors,
-          unfulfilledMandatoryFileUpload,
-        };
-      })
-      .catch(err => {
-        logger.warning('validateModalFormState check error:', err);
-        return {
-          hasErrors: false,
-          errors: [],
-          emptyRequiredFields: [],
-          invalidFieldsWithErrors: [],
-          unfulfilledMandatoryFileUpload: undefined,
-        };
-      });
-  }
-
-  /**
-   * Sets value for a form element directly inside the active modal
-   */
-  async fillModalFieldDirect(identifier: { id?: string; label?: string }, value: string): Promise<boolean> {
-    if (!this._puppeteerPage) return false;
-
-    return this._puppeteerPage.evaluate(
-      async (ident, val) => {
-        function cleanDuplicateText(rawText: string): string {
-          if (!rawText) return '';
-          let text = rawText
-            .replace(/[\n\r\t]+/g, ' ')
-            .replace(/\s+/g, ' ')
-            .trim();
-          if (text.length <= 4) return text;
-
-          // 1. Direct concatenation without separator: "Question?Question?"
-          if (text.length % 2 === 0) {
-            const half = text.slice(0, text.length / 2);
-            if (half + half === text) return half;
-          }
-
-          // 2. Space-separated exact duplication: "Question? Question?"
-          const mid = Math.floor(text.length / 2);
-          if (text[mid] === ' ') {
-            const left = text.slice(0, mid).trim();
-            const right = text.slice(mid + 1).trim();
-            if (left === right) return left;
-          }
-
-          // 3. Word-based even split:
-          const words = text.split(/\s+/);
-          if (words.length >= 4 && words.length % 2 === 0) {
-            const halfLen = words.length / 2;
-            const w1 = words.slice(0, halfLen).join(' ');
-            const w2 = words.slice(halfLen).join(' ');
-            if (w1 === w2) return w1;
-          }
-
-          // 4. Repeated sentence split on punctuation:
-          const punctMatch = text.match(/^(.+?[?.!*])\s+(.+)$/);
-          if (punctMatch) {
-            const p1 = punctMatch[1].trim();
-            const p2 = punctMatch[2].trim();
-            const normP1 = p1.replace(/[*?.\s]/g, '').toLowerCase();
-            const normP2 = p2.replace(/[*?.\s]/g, '').toLowerCase();
-            if (normP1 && (normP1 === normP2 || normP2.startsWith(normP1))) return p1;
-          }
-
-          // 5. General substring repetition search:
-          for (let len = Math.floor(text.length / 2); len >= 8; len--) {
-            const candidate = text.slice(0, len).trim();
-            const remainder = text.slice(len).trim();
-            if (candidate.length > 6) {
-              const normC = candidate.replace(/[*?.\s]/g, '').toLowerCase();
-              const normR = remainder.replace(/[*?.\s]/g, '').toLowerCase();
-              if (normC.length > 6 && (normC === normR || normR.startsWith(normC))) {
-                return candidate;
-              }
-            }
-          }
-
-          return text;
-        }
-
-        function cleanElementText(el: Element | null): string {
-          if (!el) return '';
-          const clone = el.cloneNode(true) as HTMLElement;
-          const hidden = clone.querySelectorAll(
-            '.visually-hidden, [aria-hidden="true"], .sr-only, .u-screen-reader-only',
-          );
-          hidden.forEach(h => h.remove());
-          let txt = (clone.textContent || '')
-            .replace(/[\n\r\t]+/g, ' ')
-            .replace(/\s+/g, ' ')
-            .trim();
-          if (!txt) {
-            txt = (el.textContent || '')
-              .replace(/[\n\r\t]+/g, ' ')
-              .replace(/\s+/g, ' ')
-              .trim();
-          }
-          return cleanDuplicateText(txt);
-        }
-
-        function cleanDuplicateString(text: string): string {
-          return cleanDuplicateText(text);
-        }
-
-        function findActiveModal(root: any): HTMLElement | null {
-          const candidates = root.querySelectorAll
-            ? (Array.from(
-                root.querySelectorAll(
-                  '.jobs-easy-apply-modal, [data-test-modal-id="easy-apply-modal"], [data-easy-apply-modal], div.artdeco-modal[role="dialog"], div.artdeco-modal, div[role="dialog"][aria-modal="true"], div[role="dialog"], [data-test-modal]',
-                ),
-              ) as HTMLElement[])
-            : [];
-
-          for (const c of candidates) {
-            if (
-              c.closest(
-                'nav, header, #global-nav, .global-nav, .msg-overlay-container, #msg-overlay, .artdeco-dropdown, .search-reusables__filter-list, .search-reusables__filter-dropdown, .jobs-search-box, .scaffold-layout__header, .jobs-search-results-list, .scaffold-layout__list, [data-view-name="job-card"], .artdeco-pill',
-              )
-            ) {
-              continue;
-            }
-            const aria = (c.getAttribute('aria-label') || '').toLowerCase();
-            if (aria.includes('messaging') || aria.includes('chat') || aria.includes('notification')) {
-              continue;
-            }
-            const text = (c.innerText || c.textContent || '').trim().toLowerCase();
-            if (/^\d+\s*notifications?$/i.test(text) || c.closest('.notifications-badge')) {
-              continue;
-            }
-            const style = window.getComputedStyle(c);
-            if (style.display === 'none' || style.visibility === 'hidden') continue;
-            const rect = c.getBoundingClientRect();
-            if (rect.width < 200 || rect.height < 100) continue;
-
-            if (
-              c.classList.contains('jobs-easy-apply-modal') ||
-              c.hasAttribute('data-easy-apply-modal') ||
-              c.getAttribute('data-test-modal-id') === 'easy-apply-modal' ||
-              c.querySelector(
-                '.jobs-easy-apply-modal, .jobs-easy-apply-modal__content, .jobs-easy-apply-modal__header, .jobs-easy-apply-modal__footer, .jobs-easy-apply-content, .jobs-easy-apply-form-section, .jobs-easy-apply-form-element, form.jobs-easy-apply-form, [data-easy-apply-modal], [data-test-modal-id="easy-apply-modal"], h2.jobs-easy-apply-modal__title',
-              ) !== null
-            ) {
-              return c;
-            }
-
-            const titleEl = c.querySelector('h1, h2, h3, [id*="header"], [class*="header"]');
-            const titleText = (titleEl?.textContent || text.slice(0, 100)).toLowerCase();
-            const hasApplyTitle = /apply|application|job/i.test(titleText);
-            const hasPrimaryBtn =
-              c.querySelector(
-                'button.artdeco-button--primary, button[data-easy-apply-next-button], button[aria-label*="next" i], button[aria-label*="submit" i], button[aria-label*="review" i], button[aria-label*="continue" i]',
-              ) !== null;
-
-            if (hasApplyTitle || hasPrimaryBtn) {
-              return c;
-            }
-          }
-
-          const all = root.querySelectorAll ? root.querySelectorAll('*') : [];
-          for (let i = 0; i < all.length; i++) {
-            if (all[i].shadowRoot) {
-              const found = findActiveModal(all[i].shadowRoot);
-              if (found) return found;
-            }
-          }
-          return null;
-        }
-
-        const modal = findActiveModal(document);
-        if (!modal) return false;
-        let targetEl: HTMLElement | null = null;
-        let targetRadioLabel: HTMLElement | null = null;
-
-        if (ident.id) {
-          try {
-            targetEl =
-              document.getElementById(ident.id) ||
-              (modal.querySelector ? modal.querySelector(`[id="${CSS.escape(ident.id)}"]`) : null);
-          } catch {
-            targetEl = document.getElementById(ident.id);
-          }
-        }
-
-        function labelsMatch(a: string, b: string): boolean {
-          if (!a || !b) return false;
-          if (a === b || a.includes(b) || b.includes(a)) return true;
-          const normA = a
-            .replace(/[^\w\s]/g, ' ')
-            .replace(/\s+/g, ' ')
-            .trim();
-          const normB = b
-            .replace(/[^\w\s]/g, ' ')
-            .replace(/\s+/g, ' ')
-            .trim();
-          if (normA && normB && (normA === normB || normA.includes(normB) || normB.includes(normA))) return true;
-          return false;
-        }
-
-        if (!targetEl && ident.label) {
-          const cleanLabel = cleanDuplicateString(ident.label).toLowerCase().trim();
-
-          // 1. Check radio and checkbox groups (fieldsets / role="radiogroup") first
-          const fieldsets = Array.from(
-            modal.querySelectorAll('fieldset, div[role="radiogroup"], div[role="group"]'),
-          ) as HTMLElement[];
-          for (const fs of fieldsets) {
-            const legend = fs.querySelector('legend, [role="heading"], label');
-            const legendText = cleanElementText(legend).toLowerCase().trim();
-            if (legendText && labelsMatch(legendText, cleanLabel)) {
-              const radios = Array.from(fs.querySelectorAll('input[type="radio"]')) as HTMLInputElement[];
-              const checkboxes = Array.from(fs.querySelectorAll('input[type="checkbox"]')) as HTMLInputElement[];
-              const items = radios.length > 0 ? radios : checkboxes;
-              const normVal = val.toLowerCase().trim();
-              const isTargetYes = /^(yes|true|1|y|immediate|available|agree|authorized)$/i.test(normVal);
-              const isTargetNo = /^(no|false|0|n|not)$/i.test(normVal);
-
-              for (const r of items) {
+          // In LinkedIn Easy Apply modals, radio groups are required screening questions unless explicitly marked optional
+          if (!anyChecked && !isExplicitlyOptional) {
+            const options = radios
+              .map(r => {
                 const rId = r.getAttribute('id');
                 let rLbl: HTMLElement | null = null;
                 if (rId) {
                   try {
-                    rLbl =
-                      fs.querySelector(`label[for="${CSS.escape(rId)}"]`) ||
-                      modal.querySelector(`label[for="${CSS.escape(rId)}"]`);
+                    rLbl = fs.querySelector(`label[for="${CSS.escape(rId)}"]`);
                   } catch {
                     const allLabels = Array.from(fs.querySelectorAll('label'));
                     rLbl = allLabels.find(l => l.getAttribute('for') === rId) || null;
@@ -3729,525 +3219,1062 @@ export default class Page {
                 if (!rLbl) {
                   rLbl = r.closest('label') || (r.parentElement?.querySelector('label') as HTMLElement | null);
                 }
+                return cleanElementText(rLbl) || (r.value || '').trim();
+              })
+              .filter(Boolean);
 
-                const rawLblText = cleanElementText(rLbl).toLowerCase().trim();
-                const rawVal = (r.value || '').toLowerCase().trim();
-
-                let matched = false;
-                if (isTargetYes && (/\byes\b/i.test(rawLblText) || /^(true|1|yes|y)$/i.test(rawVal))) {
-                  matched = true;
-                } else if (isTargetNo && (/\bno\b/i.test(rawLblText) || /^(false|0|no|n)$/i.test(rawVal))) {
-                  matched = true;
-                } else if (
-                  rawLblText &&
-                  (rawLblText === normVal || rawLblText.includes(normVal) || normVal.includes(rawLblText))
-                ) {
-                  matched = true;
-                } else if (rawVal && (rawVal === normVal || rawVal.includes(normVal) || normVal.includes(rawVal))) {
-                  matched = true;
-                }
-
-                if (matched) {
-                  targetEl = r;
-                  targetRadioLabel = rLbl;
-                  break;
-                }
-              }
-            }
-            if (targetEl) break;
+            emptyRequiredFields.push({
+              label: legendText,
+              fieldType: 'radio',
+              options,
+            });
           }
+        } else if (checkboxes.length > 0) {
+          const legend = fs.querySelector('legend, [role="heading"], label');
+          const legendText = cleanElementText(legend);
+          const anyChecked = checkboxes.some(c => c.checked);
 
-          // 2. If not found in fieldset, check standard labels
-          if (!targetEl) {
-            const labels = Array.from(modal.querySelectorAll('label')) as HTMLElement[];
-            for (const l of labels) {
-              const lText = cleanElementText(l).toLowerCase().trim();
-              if (lText && labelsMatch(lText, cleanLabel)) {
-                const forId = l.getAttribute('for');
-                if (forId) {
+          const isExplicitlyOptional =
+            /\boptional\b/i.test(legendText) ||
+            Boolean(
+              fs.querySelector(
+                '.fb-dash-form-element__label-title--optional, [data-test-form-element-optional], .artdeco-form__label--optional',
+              ) || fs.closest('.fb-dash-form-element--optional, [data-test-form-element-optional]'),
+            );
+
+          if (!anyChecked && !isExplicitlyOptional) {
+            const options = checkboxes
+              .map(c => {
+                const cId = c.getAttribute('id');
+                let cLbl: HTMLElement | null = null;
+                if (cId) {
                   try {
-                    targetEl = document.getElementById(forId) || modal.querySelector(`[id="${CSS.escape(forId)}"]`);
+                    cLbl = fs.querySelector(`label[for="${CSS.escape(cId)}"]`);
                   } catch {
-                    targetEl = document.getElementById(forId);
+                    const allLabels = Array.from(fs.querySelectorAll('label'));
+                    cLbl = allLabels.find(l => l.getAttribute('for') === cId) || null;
                   }
                 }
-                if (!targetEl) targetEl = l.querySelector('input:not([type="file"]), select, textarea');
-                if (!targetEl) {
-                  const parent = l.closest(
-                    '.fb-dash-form-element, div[data-test-form-element], .jobs-easy-apply-form-element, .artdeco-dropdown',
-                  );
-                  if (parent) {
-                    targetEl = parent.querySelector(
-                      'select, input:not([type="file"]), textarea, button[aria-haspopup="listbox"], button.artdeco-dropdown__trigger, [role="combobox"]',
-                    );
-                  }
+                if (!cLbl) {
+                  cLbl = c.closest('label') || (c.parentElement?.querySelector('label') as HTMLElement | null);
                 }
-                if (targetEl) break;
+                return cleanElementText(cLbl) || (c.value || '').trim();
+              })
+              .filter(Boolean);
+
+            emptyRequiredFields.push({
+              label: legendText,
+              fieldType: 'checkbox',
+              options,
+            });
+          }
+        }
+      }
+
+      // 3b. Standalone required checkboxes
+      const standaloneCheckboxes = Array.from(modal.querySelectorAll('input[type="checkbox"]')) as HTMLInputElement[];
+      for (const cb of standaloneCheckboxes) {
+        if (cb.closest('fieldset, div[role="radiogroup"], div[role="group"]')) continue;
+        if (cb.checked) continue;
+
+        let label = '';
+        const id = cb.getAttribute('id');
+        if (id) {
+          const lbl = modal.querySelector(`label[for="${id}"]`);
+          if (lbl) label = cleanElementText(lbl);
+        }
+        if (!label) {
+          const parent = cb.closest('.fb-dash-form-element, div[data-test-form-element], label');
+          if (parent) label = cleanElementText(parent);
+        }
+        if (!label) label = cleanDuplicateString(cb.getAttribute('aria-label') || '');
+
+        const isRequired =
+          cb.hasAttribute('required') ||
+          cb.getAttribute('aria-required') === 'true' ||
+          /agree|terms|certify|acknowledge|consent|confirm/i.test(label);
+
+        if (isRequired && label) {
+          emptyRequiredFields.push({
+            id: cb.id || undefined,
+            label,
+            fieldType: 'checkbox',
+            options: ['Yes', 'No'],
+          });
+        }
+      }
+
+      // 4. Text and numeric inputs
+      const textInputs = Array.from(
+        modal.querySelectorAll(
+          'input:not([type="hidden"]):not([type="radio"]):not([type="checkbox"]):not([type="submit"]):not([type="button"]):not([type="file"]), textarea, select',
+        ),
+      ) as (HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement)[];
+
+      for (const input of textInputs) {
+        if (input instanceof HTMLInputElement && input.type === 'file') continue;
+        const val = (input.value || '').trim();
+        const isSelect = input.tagName.toLowerCase() === 'select';
+        const isRequired =
+          input.required || input.hasAttribute('required') || input.getAttribute('aria-required') === 'true';
+
+        let label = '';
+        const id = input.getAttribute('id');
+        if (id) {
+          const lbl = modal.querySelector(`label[for="${id}"]`);
+          if (lbl) label = cleanElementText(lbl);
+        }
+        const parentEl =
+          input.closest(
+            'div.fb-dash-form-element, div.jobs-easy-apply-form-element, div[data-test-form-element], .jobs-easy-apply-form-section__grouping, fieldset, div[class*="form-element" i]',
+          ) ||
+          input.parentElement?.parentElement ||
+          input.parentElement;
+
+        if (!label && parentEl) {
+          const lbl = parentEl.querySelector('label');
+          if (lbl) label = cleanElementText(lbl);
+        }
+        if (!label) {
+          label = cleanDuplicateString(input.getAttribute('aria-label') || '');
+        }
+
+        const placeholder = cleanDuplicateString(input.getAttribute('placeholder') || '');
+        let hintText = '';
+        const describedBy = input.getAttribute('aria-describedby');
+        if (describedBy) {
+          const ids = describedBy.split(/\s+/);
+          const parts: string[] = [];
+          for (const did of ids) {
+            if (!did) continue;
+            try {
+              const el = modal.querySelector(`[id="${CSS.escape(did)}"]`) || document.getElementById(did);
+              if (el) {
+                const t = cleanElementText(el);
+                if (t) parts.push(t);
               }
-            }
+            } catch {}
+          }
+          if (parts.length > 0) hintText = parts.join(' ');
+        }
+        if (!hintText && parentEl) {
+          const hintEl = parentEl.querySelector(
+            '.fb-dash-form-element__hint, .artdeco-text-input--hint, .artdeco-form-element__sub-text, span.t-12, [id*="hint"], [id*="helper"], [data-test-form-element-hint]',
+          );
+          if (hintEl) hintText = cleanElementText(hintEl);
+        }
+        // Also check for inline error text right next to the input
+        const errEl = parentEl?.querySelector(
+          '.artdeco-inline-feedback, .artdeco-inline-feedback--error, .artdeco-inline-feedback__message, .inline-feedback, [class*="error" i], [role="alert"], [data-test-form-element-error-message]',
+        );
+        const activeErrorText = errEl ? cleanElementText(errEl) : '';
+        if (activeErrorText) {
+          hintText = hintText ? `${hintText} ${activeErrorText}` : activeErrorText;
+        }
+
+        const rawMin = input.getAttribute('min');
+        const rawMax = input.getAttribute('max');
+        let parsedMin = rawMin !== null && !isNaN(Number(rawMin)) ? Number(rawMin) : undefined;
+        const parsedMax = rawMax !== null && !isNaN(Number(rawMax)) ? Number(rawMax) : undefined;
+
+        const combinedHint = (placeholder + ' ' + hintText).toLowerCase();
+        const isSkillOrNumeric =
+          /how many years|experience|years|\bdays\b|\bmonths\b|whole\s*number|only\s*(?:whole\s*)?numbers|in\s*inr|in\s*lpa|ctc|decimal\s*number|larger\s*than|greater\s*than/i.test(
+            label + ' ' + combinedHint,
+          ) ||
+          input.type === 'number' ||
+          input.inputMode === 'numeric' ||
+          input.inputMode === 'decimal' ||
+          input.getAttribute('data-test-fb-numeric-input') === 'true' ||
+          input.getAttribute('data-test-fb-decimal-input') === 'true' ||
+          input.hasAttribute('step') ||
+          /example:\s*\d+/i.test(combinedHint) ||
+          /whole\s*number|decimal\s*number|between \d+ and \d+|larger than \d+|greater than \d+|0 and 99/i.test(
+            combinedHint,
+          );
+
+        if (/larger\s*than\s*0(?:\.0)?|greater\s*than\s*0(?:\.0)?/i.test(combinedHint)) {
+          parsedMin = Math.max(1, parsedMin || 1);
+        }
+
+        const hasActiveError =
+          Boolean(activeErrorText) && (errorRegex.test(activeErrorText) || activeErrorText.length > 5);
+        const isInvalidValue =
+          hasActiveError || (!val && (isRequired || isSkillOrNumeric)) || (isSelect && /select an option/i.test(val));
+
+        if (isInvalidValue) {
+          let fieldType: 'text' | 'number' | 'dropdown' = 'text';
+          if (isSelect) {
+            fieldType = 'dropdown';
+          } else if (
+            input.type === 'number' ||
+            isSkillOrNumeric ||
+            /decimal\s*number|whole\s*number|larger than|greater than/i.test(combinedHint)
+          ) {
+            fieldType = 'number';
           }
 
-          if (!targetEl) {
-            // 3. Fallback: check standalone checkboxes by label, aria-label, or text in parent/wrapper
-            const allCheckboxes = Array.from(modal.querySelectorAll('input[type="checkbox"]')) as HTMLInputElement[];
-            for (const cb of allCheckboxes) {
-              const cbAria = cleanDuplicateString(cb.getAttribute('aria-label') || '')
-                .toLowerCase()
-                .trim();
-              if (cbAria && labelsMatch(cbAria, cleanLabel)) {
-                targetEl = cb;
-                break;
-              }
-              const parent = cb.closest('label, div, p, span, li');
-              if (parent) {
-                const pText = cleanElementText(parent).toLowerCase().trim();
-                if (pText && labelsMatch(pText, cleanLabel)) {
-                  targetEl = cb;
-                  break;
-                }
-              }
+          let options: string[] | undefined = undefined;
+          if (isSelect) {
+            options = Array.from((input as HTMLSelectElement).options)
+              .map(o => cleanDuplicateString(o.text.trim()))
+              .filter(t => !/select an option/i.test(t));
+          }
+
+          const fieldDesc = {
+            id: input.id || undefined,
+            label: label || 'Form Field',
+            fieldType,
+            options,
+            min: parsedMin !== undefined ? parsedMin : fieldType === 'number' ? 0 : undefined,
+            max: parsedMax !== undefined ? parsedMax : /0 and 99/i.test(combinedHint) ? 99 : undefined,
+            placeholder: placeholder || undefined,
+            hintText: hintText || undefined,
+            currentValue: val,
+            errorText: activeErrorText || undefined,
+          };
+
+          if (!emptyRequiredFields.some(e => e.label === fieldDesc.label)) {
+            emptyRequiredFields.push(fieldDesc);
+          }
+
+          if (hasActiveError && !invalidFieldsWithErrors.some(e => e.label === fieldDesc.label)) {
+            invalidFieldsWithErrors.push({
+              ...fieldDesc,
+              currentValue: val,
+              errorText: activeErrorText,
+            });
+          }
+        }
+      }
+
+      let unfulfilledMandatoryFileUpload: { label: string; documentType: string } | undefined = undefined;
+
+      // Check for mandatory file upload elements (Cover Letter, Portfolio, Custom Attachment)
+      const fileInputs = Array.from(modal.querySelectorAll('input[type="file"]')) as HTMLInputElement[];
+      for (const fi of fileInputs) {
+        const isRequired =
+          fi.required ||
+          fi.hasAttribute('required') ||
+          fi.getAttribute('aria-required') === 'true' ||
+          Boolean(fi.closest('.jobs-document-upload--required, [data-test-document-upload-required]'));
+        const hasFiles = fi.files && fi.files.length > 0;
+        const container = fi.closest('.jobs-document-upload, .fb-dash-form-element, section, div');
+        const hasError = container?.querySelector(
+          '.artdeco-inline-feedback--error, [aria-live="assertive"], .inline-feedback, [class*="error" i]',
+        );
+        const errText = (hasError?.textContent || '').trim();
+        const isUploadError =
+          /upload (?:a |your )?(?:cover letter|resume|portfolio|file|document)|document is required|file is required/i.test(
+            errText,
+          );
+
+        if ((isRequired || isUploadError) && !hasFiles) {
+          const rawLabel =
+            cleanElementText(container?.querySelector('h3, h4, label, legend') || null) || 'Document Upload';
+          const docType =
+            /cover\s*letter/i.test(rawLabel) || /cover\s*letter/i.test(errText)
+              ? 'Cover Letter'
+              : /portfolio/i.test(rawLabel) || /portfolio/i.test(errText)
+                ? 'Portfolio'
+                : 'Custom Attachment';
+          unfulfilledMandatoryFileUpload = { label: rawLabel, documentType: docType };
+          break;
+        }
+      }
+
+      return {
+        hasErrors:
+          errors.length > 0 ||
+          emptyRequiredFields.length > 0 ||
+          invalidFieldsWithErrors.length > 0 ||
+          Boolean(unfulfilledMandatoryFileUpload),
+        errors,
+        emptyRequiredFields,
+        invalidFieldsWithErrors,
+        unfulfilledMandatoryFileUpload,
+      };
+    };
+
+    if (!this._puppeteerPage) {
+      await this.attachPuppeteer().catch(() => false);
+    }
+
+    if (this._puppeteerPage) {
+      try {
+        return await this._puppeteerPage.evaluate(validateInPage);
+      } catch {}
+    }
+
+    if (this._tabId && typeof chrome !== 'undefined' && chrome.scripting?.executeScript) {
+      try {
+        const results = await chrome.scripting.executeScript({
+          target: { tabId: this._tabId },
+          func: validateInPage,
+        });
+        const res = results?.[0]?.result;
+        if (res) return res;
+      } catch {}
+    }
+
+    return {
+      hasErrors: false,
+      errors: [],
+      emptyRequiredFields: [],
+      invalidFieldsWithErrors: [],
+      unfulfilledMandatoryFileUpload: undefined,
+    };
+  }
+
+  /**
+   * Sets value for a form element directly inside the active modal
+   */
+  async fillModalFieldDirect(identifier: { id?: string; label?: string }, value: string): Promise<boolean> {
+    const fillInPage = async (ident: { id?: string; label?: string }, val: string) => {
+      function cleanDuplicateText(rawText: string): string {
+        if (!rawText) return '';
+        let text = rawText
+          .replace(/[\n\r\t]+/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim();
+        if (text.length <= 4) return text;
+
+        // 1. Direct concatenation without separator: "Question?Question?"
+        if (text.length % 2 === 0) {
+          const half = text.slice(0, text.length / 2);
+          if (half + half === text) return half;
+        }
+
+        // 2. Space-separated exact duplication: "Question? Question?"
+        const mid = Math.floor(text.length / 2);
+        if (text[mid] === ' ') {
+          const left = text.slice(0, mid).trim();
+          const right = text.slice(mid + 1).trim();
+          if (left === right) return left;
+        }
+
+        // 3. Word-based even split:
+        const words = text.split(/\s+/);
+        if (words.length >= 4 && words.length % 2 === 0) {
+          const halfLen = words.length / 2;
+          const w1 = words.slice(0, halfLen).join(' ');
+          const w2 = words.slice(halfLen).join(' ');
+          if (w1 === w2) return w1;
+        }
+
+        // 4. Repeated sentence split on punctuation:
+        const punctMatch = text.match(/^(.+?[?.!*])\s+(.+)$/);
+        if (punctMatch) {
+          const p1 = punctMatch[1].trim();
+          const p2 = punctMatch[2].trim();
+          const normP1 = p1.replace(/[*?.\s]/g, '').toLowerCase();
+          const normP2 = p2.replace(/[*?.\s]/g, '').toLowerCase();
+          if (normP1 && (normP1 === normP2 || normP2.startsWith(normP1))) return p1;
+        }
+
+        // 5. General substring repetition search:
+        for (let len = Math.floor(text.length / 2); len >= 8; len--) {
+          const candidate = text.slice(0, len).trim();
+          const remainder = text.slice(len).trim();
+          if (candidate.length > 6) {
+            const normC = candidate.replace(/[*?.\s]/g, '').toLowerCase();
+            const normR = remainder.replace(/[*?.\s]/g, '').toLowerCase();
+            if (normC.length > 6 && (normC === normR || normR.startsWith(normC))) {
+              return candidate;
             }
           }
         }
 
-        if (!targetEl) return false;
+        return text;
+      }
 
-        // Fill element
-        if (targetEl instanceof HTMLInputElement && (targetEl.type === 'radio' || targetEl.type === 'checkbox')) {
-          const clickable = targetRadioLabel || targetEl.closest('label') || targetEl.parentElement || targetEl;
+      function cleanElementText(el: Element | null): string {
+        if (!el) return '';
+        const clone = el.cloneNode(true) as HTMLElement;
+        const hidden = clone.querySelectorAll(
+          '.visually-hidden, [aria-hidden="true"], .sr-only, .u-screen-reader-only',
+        );
+        hidden.forEach(h => h.remove());
+        let txt = (clone.textContent || '')
+          .replace(/[\n\r\t]+/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim();
+        if (!txt) {
+          txt = (el.textContent || '')
+            .replace(/[\n\r\t]+/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+        }
+        return cleanDuplicateText(txt);
+      }
 
-          try {
-            targetEl.focus();
-          } catch {}
+      function cleanDuplicateString(text: string): string {
+        return cleanDuplicateText(text);
+      }
 
-          const normVal = val.toLowerCase().trim();
-          const shouldBeChecked =
-            targetEl.type === 'checkbox' ? /^(yes|true|1|y|checked|agree|authorized)$/i.test(normVal) : true;
+      function findActiveModal(root: any): HTMLElement | null {
+        const candidates = root.querySelectorAll
+          ? (Array.from(
+              root.querySelectorAll(
+                '.jobs-easy-apply-modal, [data-test-modal-id="easy-apply-modal"], [data-easy-apply-modal], div.artdeco-modal[role="dialog"], div.artdeco-modal, div[role="dialog"][aria-modal="true"], div[role="dialog"], [data-test-modal]',
+              ),
+            ) as HTMLElement[])
+          : [];
 
-          if (targetEl.type === 'checkbox') {
-            if (targetEl.checked !== shouldBeChecked) {
-              // Trigger click via clickable wrapper or element to fire framework change events
-              clickable.click();
+        for (const c of candidates) {
+          if (
+            c.closest(
+              'nav, header, #global-nav, .global-nav, .msg-overlay-container, #msg-overlay, .artdeco-dropdown, .search-reusables__filter-list, .search-reusables__filter-dropdown, .jobs-search-box, .scaffold-layout__header, .jobs-search-results-list, .scaffold-layout__list, .artdeco-pill',
+            )
+          ) {
+            continue;
+          }
+          const aria = (c.getAttribute('aria-label') || '').toLowerCase();
+          if (aria.includes('messaging') || aria.includes('chat') || aria.includes('notification')) {
+            continue;
+          }
+          const text = (c.innerText || c.textContent || '').trim().toLowerCase();
+          if (/^\d+\s*notifications?$/i.test(text) || c.closest('.notifications-badge')) {
+            continue;
+          }
+          const style = window.getComputedStyle(c);
+          if (style.display === 'none' || style.visibility === 'hidden') continue;
+          const rect = c.getBoundingClientRect();
+          if (rect.width < 200 || rect.height < 100) continue;
 
-              // If framework or default action didn't match the desired state, invoke native setter and dispatch input/change
-              if (targetEl.checked !== shouldBeChecked) {
-                const proto = HTMLInputElement.prototype;
-                const setter = Object.getOwnPropertyDescriptor(proto, 'checked')?.set;
-                if (setter) {
-                  setter.call(targetEl, shouldBeChecked);
-                } else {
-                  targetEl.checked = shouldBeChecked;
+          if (
+            c.classList.contains('jobs-easy-apply-modal') ||
+            c.hasAttribute('data-easy-apply-modal') ||
+            c.getAttribute('data-test-modal-id') === 'easy-apply-modal' ||
+            c.querySelector(
+              '.jobs-easy-apply-modal, .jobs-easy-apply-modal__content, .jobs-easy-apply-modal__header, .jobs-easy-apply-modal__footer, .jobs-easy-apply-content, .jobs-easy-apply-form-section, .jobs-easy-apply-form-element, form.jobs-easy-apply-form, [data-easy-apply-modal], [data-test-modal-id="easy-apply-modal"], h2.jobs-easy-apply-modal__title',
+            ) !== null
+          ) {
+            return c;
+          }
+
+          const titleEl = c.querySelector('h1, h2, h3, [id*="header"], [class*="header"]');
+          const titleText = (titleEl?.textContent || text.slice(0, 100)).toLowerCase();
+          const hasApplyTitle = /apply|application|job/i.test(titleText);
+          const hasPrimaryBtn =
+            c.querySelector(
+              'button.artdeco-button--primary, button[data-easy-apply-next-button], button[aria-label*="next" i], button[aria-label*="submit" i], button[aria-label*="review" i], button[aria-label*="continue" i]',
+            ) !== null;
+
+          if (hasApplyTitle || hasPrimaryBtn) {
+            return c;
+          }
+        }
+
+        const all = root.querySelectorAll ? root.querySelectorAll('*') : [];
+        for (let i = 0; i < all.length; i++) {
+          if (all[i].shadowRoot) {
+            const found = findActiveModal(all[i].shadowRoot);
+            if (found) return found;
+          }
+        }
+        return null;
+      }
+
+      const modal = findActiveModal(document);
+      if (!modal) return false;
+      let targetEl: HTMLElement | null = null;
+      let targetRadioLabel: HTMLElement | null = null;
+
+      if (ident.id) {
+        try {
+          targetEl =
+            document.getElementById(ident.id) ||
+            (modal.querySelector ? modal.querySelector(`[id="${CSS.escape(ident.id)}"]`) : null);
+        } catch {
+          targetEl = document.getElementById(ident.id);
+        }
+      }
+
+      function labelsMatch(a: string, b: string): boolean {
+        if (!a || !b) return false;
+        if (a === b || a.includes(b) || b.includes(a)) return true;
+        const normA = a
+          .replace(/[^\w\s]/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim();
+        const normB = b
+          .replace(/[^\w\s]/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim();
+        if (normA && normB && (normA === normB || normA.includes(normB) || normB.includes(normA))) return true;
+        return false;
+      }
+
+      if (!targetEl && ident.label) {
+        const cleanLabel = cleanDuplicateString(ident.label).toLowerCase().trim();
+
+        // 1. Check radio and checkbox groups (fieldsets / role="radiogroup") first
+        const fieldsets = Array.from(
+          modal.querySelectorAll('fieldset, div[role="radiogroup"], div[role="group"]'),
+        ) as HTMLElement[];
+        for (const fs of fieldsets) {
+          const legend = fs.querySelector('legend, [role="heading"], label');
+          const legendText = cleanElementText(legend).toLowerCase().trim();
+          if (legendText && labelsMatch(legendText, cleanLabel)) {
+            const radios = Array.from(fs.querySelectorAll('input[type="radio"]')) as HTMLInputElement[];
+            const checkboxes = Array.from(fs.querySelectorAll('input[type="checkbox"]')) as HTMLInputElement[];
+            const items = radios.length > 0 ? radios : checkboxes;
+            const normVal = val.toLowerCase().trim();
+            const isTargetYes = /^(yes|true|1|y|immediate|available|agree|authorized)$/i.test(normVal);
+            const isTargetNo = /^(no|false|0|n|not)$/i.test(normVal);
+
+            for (const r of items) {
+              const rId = r.getAttribute('id');
+              let rLbl: HTMLElement | null = null;
+              if (rId) {
+                try {
+                  rLbl =
+                    fs.querySelector(`label[for="${CSS.escape(rId)}"]`) ||
+                    modal.querySelector(`label[for="${CSS.escape(rId)}"]`);
+                } catch {
+                  const allLabels = Array.from(fs.querySelectorAll('label'));
+                  rLbl = allLabels.find(l => l.getAttribute('for') === rId) || null;
                 }
-                targetEl.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
-                targetEl.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+              }
+              if (!rLbl) {
+                rLbl = r.closest('label') || (r.parentElement?.querySelector('label') as HTMLElement | null);
+              }
+
+              const rawLblText = cleanElementText(rLbl).toLowerCase().trim();
+              const rawVal = (r.value || '').toLowerCase().trim();
+
+              let matched = false;
+              if (isTargetYes && (/\byes\b/i.test(rawLblText) || /^(true|1|yes|y)$/i.test(rawVal))) {
+                matched = true;
+              } else if (isTargetNo && (/\bno\b/i.test(rawLblText) || /^(false|0|no|n)$/i.test(rawVal))) {
+                matched = true;
+              } else if (
+                rawLblText &&
+                (rawLblText === normVal || rawLblText.includes(normVal) || normVal.includes(rawLblText))
+              ) {
+                matched = true;
+              } else if (rawVal && (rawVal === normVal || rawVal.includes(normVal) || normVal.includes(rawVal))) {
+                matched = true;
+              }
+
+              if (matched) {
+                targetEl = r;
+                targetRadioLabel = rLbl;
+                break;
               }
             }
-            return targetEl.checked === shouldBeChecked;
-          } else {
-            // Radio button
+          }
+          if (targetEl) break;
+        }
+
+        // 2. If not found in fieldset, check standard labels
+        if (!targetEl) {
+          const labels = Array.from(modal.querySelectorAll('label')) as HTMLElement[];
+          for (const l of labels) {
+            const lText = cleanElementText(l).toLowerCase().trim();
+            if (lText && labelsMatch(lText, cleanLabel)) {
+              const forId = l.getAttribute('for');
+              if (forId) {
+                try {
+                  targetEl = document.getElementById(forId) || modal.querySelector(`[id="${CSS.escape(forId)}"]`);
+                } catch {
+                  targetEl = document.getElementById(forId);
+                }
+              }
+              if (!targetEl) targetEl = l.querySelector('input:not([type="file"]), select, textarea');
+              if (!targetEl) {
+                const parent = l.closest(
+                  '.fb-dash-form-element, div[data-test-form-element], .jobs-easy-apply-form-element, .artdeco-dropdown',
+                );
+                if (parent) {
+                  targetEl = parent.querySelector(
+                    'select, input:not([type="file"]), textarea, button[aria-haspopup="listbox"], button.artdeco-dropdown__trigger, [role="combobox"]',
+                  );
+                }
+              }
+              if (targetEl) break;
+            }
+          }
+        }
+
+        if (!targetEl) {
+          // 3. Fallback: check standalone checkboxes by label, aria-label, or text in parent/wrapper
+          const allCheckboxes = Array.from(modal.querySelectorAll('input[type="checkbox"]')) as HTMLInputElement[];
+          for (const cb of allCheckboxes) {
+            const cbAria = cleanDuplicateString(cb.getAttribute('aria-label') || '')
+              .toLowerCase()
+              .trim();
+            if (cbAria && labelsMatch(cbAria, cleanLabel)) {
+              targetEl = cb;
+              break;
+            }
+            const parent = cb.closest('label, div, p, span, li');
+            if (parent) {
+              const pText = cleanElementText(parent).toLowerCase().trim();
+              if (pText && labelsMatch(pText, cleanLabel)) {
+                targetEl = cb;
+                break;
+              }
+            }
+          }
+        }
+      }
+
+      if (!targetEl) return false;
+
+      // Fill element
+      if (targetEl instanceof HTMLInputElement && (targetEl.type === 'radio' || targetEl.type === 'checkbox')) {
+        const clickable = targetRadioLabel || targetEl.closest('label') || targetEl.parentElement || targetEl;
+
+        try {
+          targetEl.focus();
+        } catch {}
+
+        const normVal = val.toLowerCase().trim();
+        const shouldBeChecked =
+          targetEl.type === 'checkbox' ? /^(yes|true|1|y|checked|agree|authorized)$/i.test(normVal) : true;
+
+        if (targetEl.type === 'checkbox') {
+          if (targetEl.checked !== shouldBeChecked) {
+            // Trigger click via clickable wrapper or element to fire framework change events
             clickable.click();
-            if (!targetEl.checked) {
+
+            // If framework or default action didn't match the desired state, invoke native setter and dispatch input/change
+            if (targetEl.checked !== shouldBeChecked) {
               const proto = HTMLInputElement.prototype;
               const setter = Object.getOwnPropertyDescriptor(proto, 'checked')?.set;
               if (setter) {
-                setter.call(targetEl, true);
+                setter.call(targetEl, shouldBeChecked);
               } else {
-                targetEl.checked = true;
+                targetEl.checked = shouldBeChecked;
               }
               targetEl.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
               targetEl.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
             }
-            return targetEl.checked;
           }
-        } else if (targetEl instanceof HTMLInputElement && targetEl.type === 'file') {
-          // File input elements can only accept an empty string programmatically in web browsers
-          // for security reasons. Never attempt to set non-empty string on input[type="file"].
-          return false;
-        } else if (targetEl instanceof HTMLInputElement || targetEl instanceof HTMLTextAreaElement) {
-          const proto =
-            targetEl instanceof HTMLInputElement ? HTMLInputElement.prototype : HTMLTextAreaElement.prototype;
-          const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
-
-          let finalVal = val;
-          if (
-            targetEl instanceof HTMLInputElement &&
-            (targetEl.type === 'number' || targetEl.inputMode === 'numeric' || targetEl.inputMode === 'decimal')
-          ) {
-            let numStr = String(val).replace(/,/g, '').trim();
-            const minAttr = targetEl.getAttribute('min');
-            const minNum = minAttr !== null ? parseFloat(minAttr) : NaN;
-            const minRequiresPositive = !isNaN(minNum) && minNum > 0;
-
-            if (/^(immediate|immediately|now|none|0\s*days?)$/i.test(numStr)) {
-              numStr = minRequiresPositive ? String(Math.max(1, minNum)) : '0';
-            } else {
-              const numMatch = numStr.match(/-?\d+(?:\.\d+)?/);
-              if (numMatch) {
-                let parsed = parseFloat(numMatch[0]);
-                if (minRequiresPositive && parsed < minNum) {
-                  parsed = minNum;
-                }
-                numStr = String(parsed);
-              } else {
-                numStr = minRequiresPositive ? String(Math.max(1, minNum)) : '0';
-              }
-            }
-            finalVal = numStr;
-          }
-
-          try {
-            targetEl.focus();
+          return targetEl.checked === shouldBeChecked;
+        } else {
+          // Radio button
+          clickable.click();
+          if (!targetEl.checked) {
+            const proto = HTMLInputElement.prototype;
+            const setter = Object.getOwnPropertyDescriptor(proto, 'checked')?.set;
             if (setter) {
-              setter.call(targetEl, finalVal);
+              setter.call(targetEl, true);
             } else {
-              targetEl.value = finalVal;
+              targetEl.checked = true;
             }
             targetEl.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
             targetEl.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
-          } catch (fillErr) {
-            console.warn('[Page] fillModalFieldDirect value setter caught error:', fillErr);
-            return false;
           }
+          return targetEl.checked;
+        }
+      } else if (targetEl instanceof HTMLInputElement && targetEl.type === 'file') {
+        // File input elements can only accept an empty string programmatically in web browsers
+        // for security reasons. Never attempt to set non-empty string on input[type="file"].
+        return false;
+      } else if (targetEl instanceof HTMLInputElement || targetEl instanceof HTMLTextAreaElement) {
+        const proto = targetEl instanceof HTMLInputElement ? HTMLInputElement.prototype : HTMLTextAreaElement.prototype;
+        const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
 
-          // Autocomplete / typeahead suggestion selection (e.g. Location (city), School/University, Company, Title)
-          const isLocationField =
-            /location|city/i.test(ident.label || '') ||
-            /location|city/i.test(ident.id || '') ||
-            /location|city/i.test(targetEl.id || '') ||
-            /location|city/i.test(targetEl.name || '');
+        let finalVal = val;
+        if (
+          targetEl instanceof HTMLInputElement &&
+          (targetEl.type === 'number' || targetEl.inputMode === 'numeric' || targetEl.inputMode === 'decimal')
+        ) {
+          let numStr = String(val).replace(/,/g, '').trim();
+          const minAttr = targetEl.getAttribute('min');
+          const minNum = minAttr !== null ? parseFloat(minAttr) : NaN;
+          const minRequiresPositive = !isNaN(minNum) && minNum > 0;
 
-          const isTypeahead =
-            targetEl.getAttribute('role') === 'combobox' ||
-            targetEl.getAttribute('aria-autocomplete') === 'list' ||
-            targetEl.hasAttribute('aria-controls') ||
-            Boolean(targetEl.closest('.basic-typeahead, .artdeco-typeahead, [data-test-typeahead]')) ||
-            isLocationField ||
-            /school|college|university|company|title/i.test(ident.label || '');
-
-          // If location field, sanitize remote/hybrid clauses e.g. "Bengaluru, India or Remote" -> "Bengaluru, India"
-          let cleanVal = val.trim();
-          if (isLocationField) {
-            cleanVal = cleanVal
-              .replace(/\b(?:or|and|\/)\s*remote\b/gi, '')
-              .replace(/\bremote\s*(?:or|and|\/)\b/gi, '')
-              .replace(/\(remote\)/gi, '')
-              .replace(/\[remote\]/gi, '')
-              .replace(/\b(?:or|and|\/)\s*hybrid\b/gi, '')
-              .replace(/\(hybrid\)/gi, '')
-              .replace(/\[hybrid\]/gi, '')
-              .replace(/\s*,\s*remote\b/gi, '')
-              .replace(/\bremote\s*,\s*/gi, '')
-              .replace(/^[,\-\s/]+|[,\-\s/]+$/g, '')
-              .trim();
-            if (/^remote$/i.test(cleanVal)) cleanVal = '';
-            if (!cleanVal) cleanVal = val.trim();
-
-            // Re-apply cleaned value to input if modified
-            if (cleanVal !== val) {
-              if (setter) {
-                setter.call(targetEl, cleanVal);
-              } else {
-                targetEl.value = cleanVal;
+          if (/^(immediate|immediately|now|none|0\s*days?)$/i.test(numStr)) {
+            numStr = minRequiresPositive ? String(Math.max(1, minNum)) : '0';
+          } else {
+            const numMatch = numStr.match(/-?\d+(?:\.\d+)?/);
+            if (numMatch) {
+              let parsed = parseFloat(numMatch[0]);
+              if (minRequiresPositive && parsed < minNum) {
+                parsed = minNum;
               }
-              targetEl.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
-              targetEl.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+              numStr = String(parsed);
+            } else {
+              numStr = minRequiresPositive ? String(Math.max(1, minNum)) : '0';
             }
           }
+          finalVal = numStr;
+        }
 
-          if (isTypeahead) {
-            // For location typeaheads with state/country, type primary city first so LinkedIn's remote typeahead API responds
-            const typeQuery = isLocationField && cleanVal.includes(',') ? cleanVal.split(',')[0].trim() : cleanVal;
-            if (typeQuery && typeQuery !== targetEl.value) {
-              if (setter) {
-                setter.call(targetEl, typeQuery);
-              } else {
-                targetEl.value = typeQuery;
-              }
-              targetEl.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
-              targetEl.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+        try {
+          targetEl.focus();
+          if (setter) {
+            setter.call(targetEl, finalVal);
+          } else {
+            targetEl.value = finalVal;
+          }
+          targetEl.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+          targetEl.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+        } catch (fillErr) {
+          console.warn('[Page] fillModalFieldDirect value setter caught error:', fillErr);
+          return false;
+        }
+
+        // Autocomplete / typeahead suggestion selection (e.g. Location (city), School/University, Company, Title)
+        const isLocationField =
+          /location|city/i.test(ident.label || '') ||
+          /location|city/i.test(ident.id || '') ||
+          /location|city/i.test(targetEl.id || '') ||
+          /location|city/i.test(targetEl.name || '');
+
+        const isTypeahead =
+          targetEl.getAttribute('role') === 'combobox' ||
+          targetEl.getAttribute('aria-autocomplete') === 'list' ||
+          targetEl.hasAttribute('aria-controls') ||
+          Boolean(targetEl.closest('.basic-typeahead, .artdeco-typeahead, [data-test-typeahead]')) ||
+          isLocationField ||
+          /school|college|university|company|title/i.test(ident.label || '');
+
+        // If location field, sanitize remote/hybrid clauses e.g. "Bengaluru, India or Remote" -> "Bengaluru, India"
+        let cleanVal = val.trim();
+        if (isLocationField) {
+          cleanVal = cleanVal
+            .replace(/\b(?:or|and|\/)\s*remote\b/gi, '')
+            .replace(/\bremote\s*(?:or|and|\/)\b/gi, '')
+            .replace(/\(remote\)/gi, '')
+            .replace(/\[remote\]/gi, '')
+            .replace(/\b(?:or|and|\/)\s*hybrid\b/gi, '')
+            .replace(/\(hybrid\)/gi, '')
+            .replace(/\[hybrid\]/gi, '')
+            .replace(/\s*,\s*remote\b/gi, '')
+            .replace(/\bremote\s*,\s*/gi, '')
+            .replace(/^[,\-\s/]+|[,\-\s/]+$/g, '')
+            .trim();
+          if (/^remote$/i.test(cleanVal)) cleanVal = '';
+          if (!cleanVal) cleanVal = val.trim();
+
+          // Re-apply cleaned value to input if modified
+          if (cleanVal !== val) {
+            if (setter) {
+              setter.call(targetEl, cleanVal);
+            } else {
+              targetEl.value = cleanVal;
             }
+            targetEl.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+            targetEl.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+          }
+        }
 
-            // Dispatch key events to activate LinkedIn's typeahead listener
-            targetEl.dispatchEvent(new KeyboardEvent('keydown', { key: typeQuery.slice(-1) || 'a', bubbles: true }));
-            targetEl.dispatchEvent(new KeyboardEvent('keyup', { key: typeQuery.slice(-1) || 'a', bubbles: true }));
-
-            const listboxSelectors = [
-              'div[role="listbox"]',
-              'ul[role="listbox"]',
-              '.basic-typeahead__triggered-content',
-              '.artdeco-typeahead__results-list',
-              '.basic-typeahead__selectable-list',
-              '.typeahead-results',
-              'div[data-artdeco-typeahead-results]',
-            ];
-
-            let optionEls: HTMLElement[] = [];
-            let listbox: HTMLElement | null = null;
-
-            // Poll for up to 2 seconds (10 attempts * 200ms) for suggestions to render
-            for (let attempt = 0; attempt < 10; attempt++) {
-              await new Promise(r => setTimeout(r, 200));
-
-              const container = targetEl.closest(
-                '.basic-typeahead, .artdeco-typeahead, .fb-dash-form-element, div[data-test-form-element]',
-              );
-              if (container) {
-                listbox = container.querySelector(listboxSelectors.join(', '));
-              }
-              if (!listbox) {
-                listbox =
-                  modal.querySelector(listboxSelectors.join(', ')) ||
-                  document.querySelector(listboxSelectors.join(', '));
-              }
-
-              if (listbox) {
-                optionEls = Array.from(
-                  listbox.querySelectorAll(
-                    'div[role="option"], li[role="option"], .basic-typeahead__selectable-item, .artdeco-typeahead__result, [role="option"]',
-                  ),
-                ) as HTMLElement[];
-                if (optionEls.length > 0) {
-                  break;
-                }
-              }
-
-              // After 4 attempts (800ms) with no options, if this is a location field with a comma, try typing just the city name!
-              if (attempt === 3 && optionEls.length === 0 && isLocationField && cleanVal.includes(',')) {
-                const primaryCity = cleanVal.split(',')[0].trim();
-                if (primaryCity && primaryCity !== cleanVal) {
-                  if (setter) {
-                    setter.call(targetEl, primaryCity);
-                  } else {
-                    targetEl.value = primaryCity;
-                  }
-                  targetEl.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
-                  targetEl.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
-                  targetEl.dispatchEvent(
-                    new KeyboardEvent('keydown', { key: primaryCity.slice(-1) || 'a', bubbles: true }),
-                  );
-                  targetEl.dispatchEvent(
-                    new KeyboardEvent('keyup', { key: primaryCity.slice(-1) || 'a', bubbles: true }),
-                  );
-                }
-              }
+        if (isTypeahead) {
+          // For location typeaheads with state/country, type primary city first so LinkedIn's remote typeahead API responds
+          const typeQuery = isLocationField && cleanVal.includes(',') ? cleanVal.split(',')[0].trim() : cleanVal;
+          if (typeQuery && typeQuery !== targetEl.value) {
+            if (setter) {
+              setter.call(targetEl, typeQuery);
+            } else {
+              targetEl.value = typeQuery;
             }
-
-            if (optionEls.length > 0) {
-              const normVal = cleanVal.toLowerCase().trim();
-              const tokens = normVal
-                .replace(/[^\w\s]/g, ' ')
-                .split(/\s+/)
-                .filter(t => t.length > 2);
-              const primaryToken = tokens[0] || normVal;
-
-              let bestOpt: HTMLElement | null = null;
-              let highestScore = -1;
-
-              for (const opt of optionEls) {
-                const txt = (opt.textContent || '').toLowerCase().trim();
-                let score = 0;
-
-                if (txt === normVal) {
-                  score = 100;
-                } else if (txt.startsWith(normVal)) {
-                  score = 90;
-                } else if (txt.includes(normVal) || normVal.includes(txt)) {
-                  score = 80;
-                } else if (primaryToken && txt.includes(primaryToken)) {
-                  // e.g. "bengaluru" in "Bengaluru, Karnataka, India" or "Greater Bengaluru Area"
-                  score = 70;
-                  for (const tok of tokens.slice(1)) {
-                    if (txt.includes(tok)) score += 10;
-                  }
-                } else {
-                  for (const tok of tokens) {
-                    if (txt.includes(tok)) score += 10;
-                  }
-                }
-
-                if (score > highestScore) {
-                  highestScore = score;
-                  bestOpt = opt;
-                }
-              }
-
-              if (!bestOpt) {
-                bestOpt = optionEls[0];
-              }
-
-              if (bestOpt) {
-                const clickable = (bestOpt.querySelector('span, div, p, a') as HTMLElement) || bestOpt;
-                ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(evt => {
-                  clickable.dispatchEvent(new MouseEvent(evt, { bubbles: true, cancelable: true, view: window }));
-                  bestOpt!.dispatchEvent(new MouseEvent(evt, { bubbles: true, cancelable: true, view: window }));
-                });
-                try {
-                  clickable.click();
-                } catch {}
-                try {
-                  bestOpt.click();
-                } catch {}
-
-                // Accessible combobox keyboard selection fallback: ArrowDown + Enter
-                targetEl.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', keyCode: 40, bubbles: true }));
-                targetEl.dispatchEvent(new KeyboardEvent('keyup', { key: 'ArrowDown', keyCode: 40, bubbles: true }));
-                await new Promise(r => setTimeout(r, 80));
-                targetEl.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));
-                targetEl.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', keyCode: 13, bubbles: true }));
-
-                await new Promise(r => setTimeout(r, 300));
-              }
-            }
+            targetEl.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+            targetEl.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
           }
 
-          return true;
-        } else if (targetEl instanceof HTMLSelectElement) {
-          // If select is currently disabled or options haven't hydrated yet (cascading parent -> child AJAX delay),
-          // poll up to 1200ms for options to load
-          for (let poll = 0; poll < 6; poll++) {
-            if (!targetEl.disabled && targetEl.options.length > 1) {
-              break;
-            }
+          // Dispatch key events to activate LinkedIn's typeahead listener
+          targetEl.dispatchEvent(new KeyboardEvent('keydown', { key: typeQuery.slice(-1) || 'a', bubbles: true }));
+          targetEl.dispatchEvent(new KeyboardEvent('keyup', { key: typeQuery.slice(-1) || 'a', bubbles: true }));
+
+          const listboxSelectors = [
+            'div[role="listbox"]',
+            'ul[role="listbox"]',
+            '.basic-typeahead__triggered-content',
+            '.artdeco-typeahead__results-list',
+            '.basic-typeahead__selectable-list',
+            '.typeahead-results',
+            'div[data-artdeco-typeahead-results]',
+          ];
+
+          let optionEls: HTMLElement[] = [];
+          let listbox: HTMLElement | null = null;
+
+          // Poll for up to 2 seconds (10 attempts * 200ms) for suggestions to render
+          for (let attempt = 0; attempt < 10; attempt++) {
             await new Promise(r => setTimeout(r, 200));
+
+            const container = targetEl.closest(
+              '.basic-typeahead, .artdeco-typeahead, .fb-dash-form-element, div[data-test-form-element]',
+            );
+            if (container) {
+              listbox = container.querySelector(listboxSelectors.join(', '));
+            }
+            if (!listbox) {
+              listbox =
+                modal.querySelector(listboxSelectors.join(', ')) || document.querySelector(listboxSelectors.join(', '));
+            }
+
+            if (listbox) {
+              optionEls = Array.from(
+                listbox.querySelectorAll(
+                  'div[role="option"], li[role="option"], .basic-typeahead__selectable-item, .artdeco-typeahead__result, [role="option"]',
+                ),
+              ) as HTMLElement[];
+              if (optionEls.length > 0) {
+                break;
+              }
+            }
+
+            // After 4 attempts (800ms) with no options, if this is a location field with a comma, try typing just the city name!
+            if (attempt === 3 && optionEls.length === 0 && isLocationField && cleanVal.includes(',')) {
+              const primaryCity = cleanVal.split(',')[0].trim();
+              if (primaryCity && primaryCity !== cleanVal) {
+                if (setter) {
+                  setter.call(targetEl, primaryCity);
+                } else {
+                  targetEl.value = primaryCity;
+                }
+                targetEl.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+                targetEl.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+                targetEl.dispatchEvent(
+                  new KeyboardEvent('keydown', { key: primaryCity.slice(-1) || 'a', bubbles: true }),
+                );
+                targetEl.dispatchEvent(
+                  new KeyboardEvent('keyup', { key: primaryCity.slice(-1) || 'a', bubbles: true }),
+                );
+              }
+            }
           }
 
-          const options = Array.from(targetEl.options);
+          if (optionEls.length > 0) {
+            const normVal = cleanVal.toLowerCase().trim();
+            const tokens = normVal
+              .replace(/[^\w\s]/g, ' ')
+              .split(/\s+/)
+              .filter(t => t.length > 2);
+            const primaryToken = tokens[0] || normVal;
+
+            let bestOpt: HTMLElement | null = null;
+            let highestScore = -1;
+
+            for (const opt of optionEls) {
+              const txt = (opt.textContent || '').toLowerCase().trim();
+              let score = 0;
+
+              if (txt === normVal) {
+                score = 100;
+              } else if (txt.startsWith(normVal)) {
+                score = 90;
+              } else if (txt.includes(normVal) || normVal.includes(txt)) {
+                score = 80;
+              } else if (primaryToken && txt.includes(primaryToken)) {
+                // e.g. "bengaluru" in "Bengaluru, Karnataka, India" or "Greater Bengaluru Area"
+                score = 70;
+                for (const tok of tokens.slice(1)) {
+                  if (txt.includes(tok)) score += 10;
+                }
+              } else {
+                for (const tok of tokens) {
+                  if (txt.includes(tok)) score += 10;
+                }
+              }
+
+              if (score > highestScore) {
+                highestScore = score;
+                bestOpt = opt;
+              }
+            }
+
+            if (!bestOpt) {
+              bestOpt = optionEls[0];
+            }
+
+            if (bestOpt) {
+              const clickable = (bestOpt.querySelector('span, div, p, a') as HTMLElement) || bestOpt;
+              ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(evt => {
+                clickable.dispatchEvent(new MouseEvent(evt, { bubbles: true, cancelable: true, view: window }));
+                bestOpt!.dispatchEvent(new MouseEvent(evt, { bubbles: true, cancelable: true, view: window }));
+              });
+              try {
+                clickable.click();
+              } catch {}
+              try {
+                bestOpt.click();
+              } catch {}
+
+              // Accessible combobox keyboard selection fallback: ArrowDown + Enter
+              targetEl.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', keyCode: 40, bubbles: true }));
+              targetEl.dispatchEvent(new KeyboardEvent('keyup', { key: 'ArrowDown', keyCode: 40, bubbles: true }));
+              await new Promise(r => setTimeout(r, 80));
+              targetEl.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));
+              targetEl.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', keyCode: 13, bubbles: true }));
+
+              await new Promise(r => setTimeout(r, 300));
+            }
+          }
+        }
+
+        return true;
+      } else if (targetEl instanceof HTMLSelectElement) {
+        // If select is currently disabled or options haven't hydrated yet (cascading parent -> child AJAX delay),
+        // poll up to 1200ms for options to load
+        for (let poll = 0; poll < 6; poll++) {
+          if (!targetEl.disabled && targetEl.options.length > 1) {
+            break;
+          }
+          await new Promise(r => setTimeout(r, 200));
+        }
+
+        const options = Array.from(targetEl.options);
+        const normVal = val.toLowerCase().trim();
+        const isAffirmative = /^(yes|true|1|y|immediate|available|agree|authorized)$/i.test(normVal);
+        const isNegative = /^(no|false|0|n|requires|not)$/i.test(normVal);
+
+        // 1. Exact or loose match on option text or value
+        let opt = options.find(
+          o =>
+            cleanDuplicateString(o.text).toLowerCase().trim() === normVal ||
+            o.value.toLowerCase().trim() === normVal ||
+            (normVal.length > 2 && cleanDuplicateString(o.text).toLowerCase().includes(normVal)) ||
+            (cleanDuplicateString(o.text).length > 2 && normVal.includes(cleanDuplicateString(o.text).toLowerCase())),
+        );
+
+        // 2. Boolean/affirmative fallback (e.g. "Immediate" -> "Yes", "Bengaluru" -> "Yes")
+        if (!opt) {
+          if (isAffirmative) {
+            opt = options.find(
+              o => /^(yes|agree)$/i.test(cleanDuplicateString(o.text).trim()) || /^(yes|true|1)$/i.test(o.value),
+            );
+          } else if (isNegative) {
+            opt = options.find(
+              o => /^no$/i.test(cleanDuplicateString(o.text).trim()) || /^(no|false|0)$/i.test(o.value),
+            );
+          }
+        }
+
+        // 3. City token match & common geographic synonyms (e.g. Bengaluru <-> Bangalore, Mumbai <-> Bombay)
+        if (!opt && normVal.length > 3) {
+          const citySynonyms: Record<string, string[]> = {
+            bengaluru: ['bangalore', 'bengaluru'],
+            bangalore: ['bengaluru', 'bangalore'],
+            mumbai: ['bombay', 'mumbai'],
+            bombay: ['mumbai', 'bombay'],
+            kolkata: ['calcutta', 'kolkata'],
+            calcutta: ['kolkata', 'calcutta'],
+            chennai: ['madras', 'chennai'],
+            madras: ['chennai', 'madras'],
+            gurugram: ['gurgaon', 'gurugram'],
+            gurgaon: ['gurugram', 'gurgaon'],
+          };
+
+          for (const [key, aliases] of Object.entries(citySynonyms)) {
+            if (normVal.includes(key)) {
+              opt = options.find(o => {
+                const optText = cleanDuplicateString(o.text).toLowerCase();
+                return aliases.some(a => optText.includes(a));
+              });
+              if (opt) break;
+            }
+          }
+
+          if (!opt) {
+            const tokens = normVal.split(/[\s,/-]+/).filter(t => t.length > 2);
+            opt = options.find(o => {
+              const optText = cleanDuplicateString(o.text).toLowerCase();
+              return tokens.some(t => optText.includes(t));
+            });
+          }
+        }
+
+        if (opt) {
+          targetEl.focus();
+          const proto = HTMLSelectElement.prototype;
+          const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+          if (setter) {
+            setter.call(targetEl, opt.value);
+          } else {
+            targetEl.value = opt.value;
+          }
+          opt.selected = true;
+          targetEl.selectedIndex = opt.index;
+          targetEl.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+          targetEl.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+          return true;
+        }
+      } else {
+        // Check for custom Artdeco dropdown button or combobox
+        const customTrigger =
+          targetEl.getAttribute('aria-haspopup') === 'listbox' ||
+          targetEl.getAttribute('role') === 'combobox' ||
+          targetEl.classList.contains('artdeco-dropdown__trigger')
+            ? targetEl
+            : (targetEl
+                .closest('.artdeco-dropdown, .fb-dash-form-element')
+                ?.querySelector(
+                  'button[aria-haspopup="listbox"], button.artdeco-dropdown__trigger, div[role="combobox"]',
+                ) as HTMLElement | null);
+
+        if (customTrigger) {
+          // Click trigger to open dropdown
+          ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(evt => {
+            customTrigger.dispatchEvent(new MouseEvent(evt, { bubbles: true, cancelable: true, view: window }));
+          });
+          await new Promise(r => setTimeout(r, 250));
+
           const normVal = val.toLowerCase().trim();
           const isAffirmative = /^(yes|true|1|y|immediate|available|agree|authorized)$/i.test(normVal);
           const isNegative = /^(no|false|0|n|requires|not)$/i.test(normVal);
 
-          // 1. Exact or loose match on option text or value
-          let opt = options.find(
-            o =>
-              cleanDuplicateString(o.text).toLowerCase().trim() === normVal ||
-              o.value.toLowerCase().trim() === normVal ||
-              (normVal.length > 2 && cleanDuplicateString(o.text).toLowerCase().includes(normVal)) ||
-              (cleanDuplicateString(o.text).length > 2 && normVal.includes(cleanDuplicateString(o.text).toLowerCase())),
-          );
+          const listbox = modal.querySelector('div[role="listbox"], ul[role="listbox"], .artdeco-dropdown__content');
+          if (listbox) {
+            const optionEls = Array.from(
+              listbox.querySelectorAll('[role="option"], li, .artdeco-dropdown__item'),
+            ) as HTMLElement[];
 
-          // 2. Boolean/affirmative fallback (e.g. "Immediate" -> "Yes", "Bengaluru" -> "Yes")
-          if (!opt) {
-            if (isAffirmative) {
-              opt = options.find(
-                o => /^(yes|agree)$/i.test(cleanDuplicateString(o.text).trim()) || /^(yes|true|1)$/i.test(o.value),
-              );
-            } else if (isNegative) {
-              opt = options.find(
-                o => /^no$/i.test(cleanDuplicateString(o.text).trim()) || /^(no|false|0)$/i.test(o.value),
-              );
-            }
-          }
-
-          // 3. City token match & common geographic synonyms (e.g. Bengaluru <-> Bangalore, Mumbai <-> Bombay)
-          if (!opt && normVal.length > 3) {
-            const citySynonyms: Record<string, string[]> = {
-              bengaluru: ['bangalore', 'bengaluru'],
-              bangalore: ['bengaluru', 'bangalore'],
-              mumbai: ['bombay', 'mumbai'],
-              bombay: ['mumbai', 'bombay'],
-              kolkata: ['calcutta', 'kolkata'],
-              calcutta: ['kolkata', 'calcutta'],
-              chennai: ['madras', 'chennai'],
-              madras: ['chennai', 'madras'],
-              gurugram: ['gurgaon', 'gurugram'],
-              gurgaon: ['gurugram', 'gurgaon'],
-            };
-
-            for (const [key, aliases] of Object.entries(citySynonyms)) {
-              if (normVal.includes(key)) {
-                opt = options.find(o => {
-                  const optText = cleanDuplicateString(o.text).toLowerCase();
-                  return aliases.some(a => optText.includes(a));
-                });
-                if (opt) break;
-              }
-            }
-
-            if (!opt) {
-              const tokens = normVal.split(/[\s,/-]+/).filter(t => t.length > 2);
-              opt = options.find(o => {
-                const optText = cleanDuplicateString(o.text).toLowerCase();
-                return tokens.some(t => optText.includes(t));
-              });
-            }
-          }
-
-          if (opt) {
-            targetEl.focus();
-            const proto = HTMLSelectElement.prototype;
-            const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
-            if (setter) {
-              setter.call(targetEl, opt.value);
-            } else {
-              targetEl.value = opt.value;
-            }
-            opt.selected = true;
-            targetEl.selectedIndex = opt.index;
-            targetEl.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
-            targetEl.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
-            return true;
-          }
-        } else {
-          // Check for custom Artdeco dropdown button or combobox
-          const customTrigger =
-            targetEl.getAttribute('aria-haspopup') === 'listbox' ||
-            targetEl.getAttribute('role') === 'combobox' ||
-            targetEl.classList.contains('artdeco-dropdown__trigger')
-              ? targetEl
-              : (targetEl
-                  .closest('.artdeco-dropdown, .fb-dash-form-element')
-                  ?.querySelector(
-                    'button[aria-haspopup="listbox"], button.artdeco-dropdown__trigger, div[role="combobox"]',
-                  ) as HTMLElement | null);
-
-          if (customTrigger) {
-            // Click trigger to open dropdown
-            ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(evt => {
-              customTrigger.dispatchEvent(new MouseEvent(evt, { bubbles: true, cancelable: true, view: window }));
+            let matchedOpt = optionEls.find(o => {
+              const txt = cleanDuplicateString(o.textContent || '')
+                .toLowerCase()
+                .trim();
+              return txt === normVal || (normVal.length > 2 && txt.includes(normVal));
             });
-            await new Promise(r => setTimeout(r, 250));
 
-            const normVal = val.toLowerCase().trim();
-            const isAffirmative = /^(yes|true|1|y|immediate|available|agree|authorized)$/i.test(normVal);
-            const isNegative = /^(no|false|0|n|requires|not)$/i.test(normVal);
+            if (!matchedOpt && isAffirmative) {
+              matchedOpt = optionEls.find(o => /^(yes|agree)$/i.test(cleanDuplicateString(o.textContent || '').trim()));
+            } else if (!matchedOpt && isNegative) {
+              matchedOpt = optionEls.find(o => /^no$/i.test(cleanDuplicateString(o.textContent || '').trim()));
+            }
 
-            const listbox = modal.querySelector('div[role="listbox"], ul[role="listbox"], .artdeco-dropdown__content');
-            if (listbox) {
-              const optionEls = Array.from(
-                listbox.querySelectorAll('[role="option"], li, .artdeco-dropdown__item'),
-              ) as HTMLElement[];
-
-              let matchedOpt = optionEls.find(o => {
-                const txt = cleanDuplicateString(o.textContent || '')
-                  .toLowerCase()
-                  .trim();
-                return txt === normVal || (normVal.length > 2 && txt.includes(normVal));
+            if (matchedOpt) {
+              ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(evt => {
+                matchedOpt.dispatchEvent(new MouseEvent(evt, { bubbles: true, cancelable: true, view: window }));
               });
-
-              if (!matchedOpt && isAffirmative) {
-                matchedOpt = optionEls.find(o =>
-                  /^(yes|agree)$/i.test(cleanDuplicateString(o.textContent || '').trim()),
-                );
-              } else if (!matchedOpt && isNegative) {
-                matchedOpt = optionEls.find(o => /^no$/i.test(cleanDuplicateString(o.textContent || '').trim()));
-              }
-
-              if (matchedOpt) {
-                ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(evt => {
-                  matchedOpt.dispatchEvent(new MouseEvent(evt, { bubbles: true, cancelable: true, view: window }));
-                });
-                await new Promise(r => setTimeout(r, 150));
-                return true;
-              }
+              await new Promise(r => setTimeout(r, 150));
+              return true;
             }
           }
         }
+      }
 
-        return false;
-      },
-      identifier,
-      value,
-    );
+      return false;
+    };
+
+    if (!this._puppeteerPage) {
+      await this.attachPuppeteer().catch(() => false);
+    }
+
+    if (this._puppeteerPage) {
+      try {
+        return await this._puppeteerPage.evaluate(fillInPage, identifier, value);
+      } catch {}
+    }
+
+    if (this._tabId && typeof chrome !== 'undefined' && chrome.scripting?.executeScript) {
+      try {
+        const results = await chrome.scripting.executeScript({
+          target: { tabId: this._tabId },
+          func: fillInPage,
+          args: [identifier, value],
+        });
+        return Boolean(results?.[0]?.result);
+      } catch {}
+    }
+
+    return false;
   }
 
   /**
@@ -4470,7 +4497,7 @@ export default class Page {
 
       const applyButtons = Array.from(detailsRoot.querySelectorAll('button, a'));
       for (const btn of applyButtons) {
-        if (btn.closest('.jobs-search-results-list, .scaffold-layout__list, [data-view-name="job-card"]')) {
+        if (btn.closest('.jobs-search-results-list, .scaffold-layout__list')) {
           continue;
         }
         const btnText = (btn.textContent || '').trim();
@@ -5052,7 +5079,7 @@ export default class Page {
         for (const c of candidates) {
           if (
             c.closest(
-              'nav, header, #global-nav, .global-nav, .msg-overlay-container, #msg-overlay, .artdeco-dropdown, .search-reusables__filter-list, .search-reusables__filter-dropdown, .jobs-search-box, .scaffold-layout__header, .jobs-search-results-list, .scaffold-layout__list, [data-view-name="job-card"], .artdeco-pill',
+              'nav, header, #global-nav, .global-nav, .msg-overlay-container, #msg-overlay, .artdeco-dropdown, .search-reusables__filter-list, .search-reusables__filter-dropdown, .jobs-search-box, .scaffold-layout__header, .jobs-search-results-list, .scaffold-layout__list, .artdeco-pill',
             )
           ) {
             continue;
@@ -5648,8 +5675,29 @@ export default class Page {
       }
 
       const modal = findActiveModal(document);
-      if (!modal) return { hasNext: false, hasReview: false, hasSubmit: false };
-      const buttons = Array.from(modal.querySelectorAll('button, [role="button"]')) as HTMLButtonElement[];
+      const searchRoots: HTMLElement[] = [];
+      if (modal) searchRoots.push(modal);
+      const artdecoModal = document.querySelector(
+        'div.artdeco-modal, .jobs-easy-apply-modal, div[role="dialog"][aria-modal="true"]',
+      ) as HTMLElement | null;
+      if (artdecoModal && !searchRoots.includes(artdecoModal)) searchRoots.push(artdecoModal);
+
+      let buttons: HTMLButtonElement[] = [];
+      for (const rootEl of searchRoots) {
+        const found = Array.from(rootEl.querySelectorAll('button, [role="button"]')) as HTMLButtonElement[];
+        if (found.length > 0) {
+          buttons = found;
+          break;
+        }
+      }
+      if (buttons.length === 0) {
+        buttons = Array.from(
+          document.querySelectorAll(
+            '.jobs-easy-apply-modal__footer button, .artdeco-modal__actionbar button, button[data-easy-apply-next-button], button[aria-label*="next" i], button[aria-label*="continue to next" i], button[aria-label*="review" i], button[aria-label*="submit" i]',
+          ),
+        ) as HTMLButtonElement[];
+      }
+      if (buttons.length === 0 && !modal) return { hasNext: false, hasReview: false, hasSubmit: false };
 
       let hasNext = false;
       let hasReview = false;
@@ -5695,8 +5743,8 @@ export default class Page {
 
       // Robust fallback: Check primary button in modal
       if (!hasNext && !hasReview && !hasSubmit) {
-        const primaryBtn = modal.querySelector(
-          '.jobs-easy-apply-modal__footer button.artdeco-button--primary, footer button.artdeco-button--primary, button.artdeco-button--primary',
+        const primaryBtn = (modal || document).querySelector(
+          '.jobs-easy-apply-modal__footer button.artdeco-button--primary, .artdeco-modal__actionbar button.artdeco-button--primary, footer button.artdeco-button--primary, button.artdeco-button--primary',
         ) as HTMLButtonElement | null;
         if (primaryBtn) {
           const pText = (primaryBtn.innerText || primaryBtn.textContent || '').trim().toLowerCase();
@@ -5806,8 +5854,29 @@ export default class Page {
       }
 
       const modal = findActiveModal(document);
-      if (!modal) return { clicked: false };
-      const buttons = Array.from(modal.querySelectorAll('button, [role="button"]')) as HTMLButtonElement[];
+      const searchRoots: HTMLElement[] = [];
+      if (modal) searchRoots.push(modal);
+      const artdecoModal = document.querySelector(
+        'div.artdeco-modal, .jobs-easy-apply-modal, div[role="dialog"][aria-modal="true"]',
+      ) as HTMLElement | null;
+      if (artdecoModal && !searchRoots.includes(artdecoModal)) searchRoots.push(artdecoModal);
+
+      let buttons: HTMLButtonElement[] = [];
+      for (const rootEl of searchRoots) {
+        const found = Array.from(rootEl.querySelectorAll('button, [role="button"]')) as HTMLButtonElement[];
+        if (found.length > 0) {
+          buttons = found;
+          break;
+        }
+      }
+      if (buttons.length === 0) {
+        buttons = Array.from(
+          document.querySelectorAll(
+            '.jobs-easy-apply-modal__footer button, .artdeco-modal__actionbar button, button[data-easy-apply-next-button], button[aria-label*="next" i], button[aria-label*="continue to next" i], button[aria-label*="review" i]',
+          ),
+        ) as HTMLButtonElement[];
+      }
+      if (buttons.length === 0 && !modal) return { clicked: false };
 
       function dispatchFullClick(el: HTMLElement) {
         el.scrollIntoView({ behavior: 'instant', block: 'center' });
@@ -5853,8 +5922,8 @@ export default class Page {
       }
 
       // 3. Fallback to primary button in modal
-      const primaryBtn = modal.querySelector(
-        '.jobs-easy-apply-modal__footer button.artdeco-button--primary, footer button.artdeco-button--primary, button.artdeco-button--primary',
+      const primaryBtn = (modal || document).querySelector(
+        '.jobs-easy-apply-modal__footer button.artdeco-button--primary, .artdeco-modal__actionbar button.artdeco-button--primary, footer button.artdeco-button--primary, button.artdeco-button--primary',
       ) as HTMLElement | null;
       if (primaryBtn) {
         const pText = (primaryBtn.innerText || primaryBtn.textContent || '').trim().toLowerCase();
@@ -5916,7 +5985,7 @@ export default class Page {
         for (const c of candidates) {
           if (
             c.closest(
-              'nav, header, #global-nav, .global-nav, .msg-overlay-container, #msg-overlay, .artdeco-dropdown, .search-reusables__filter-list, .search-reusables__filter-dropdown, .jobs-search-box, .scaffold-layout__header, .jobs-search-results-list, .scaffold-layout__list, [data-view-name="job-card"], .artdeco-pill',
+              'nav, header, #global-nav, .global-nav, .msg-overlay-container, #msg-overlay, .artdeco-dropdown, .search-reusables__filter-list, .search-reusables__filter-dropdown, .jobs-search-box, .scaffold-layout__header, .jobs-search-results-list, .scaffold-layout__list, .artdeco-pill',
             )
           ) {
             continue;
@@ -5967,10 +6036,15 @@ export default class Page {
       }
 
       const modal = findActiveModal(document);
-      if (!modal) return { clicked: false, error: 'Easy Apply modal is not open' };
+      const searchRoots: HTMLElement[] = [];
+      if (modal) searchRoots.push(modal);
+      const artdecoModal = document.querySelector(
+        'div.artdeco-modal, .jobs-easy-apply-modal, div[role="dialog"][aria-modal="true"]',
+      ) as HTMLElement | null;
+      if (artdecoModal && !searchRoots.includes(artdecoModal)) searchRoots.push(artdecoModal);
 
       // 1. Scroll content to bottom to ensure review screen is fully loaded
-      const scrollable = modal.querySelector(
+      const scrollable = (modal || artdecoModal)?.querySelector(
         '.jobs-easy-apply-modal__content, .artdeco-modal__content, div[role="dialog"] > div',
       );
       if (scrollable) {
@@ -5978,7 +6052,9 @@ export default class Page {
       }
 
       // 2. Ensure any review agreement checkboxes are checked
-      const checkboxes = Array.from(modal.querySelectorAll('input[type="checkbox"]')) as HTMLInputElement[];
+      const checkboxes = Array.from(
+        (modal || artdecoModal || document).querySelectorAll('input[type="checkbox"]'),
+      ) as HTMLInputElement[];
       for (const cb of checkboxes) {
         if (!cb.checked) {
           const txt = (cb.closest('label, div')?.textContent || cb.getAttribute('aria-label') || '').toLowerCase();
@@ -5990,7 +6066,22 @@ export default class Page {
         }
       }
 
-      const buttons = Array.from(modal.querySelectorAll('button, [role="button"]')) as HTMLButtonElement[];
+      let buttons: HTMLButtonElement[] = [];
+      for (const rootEl of searchRoots) {
+        const found = Array.from(rootEl.querySelectorAll('button, [role="button"]')) as HTMLButtonElement[];
+        if (found.length > 0) {
+          buttons = found;
+          break;
+        }
+      }
+      if (buttons.length === 0) {
+        buttons = Array.from(
+          document.querySelectorAll(
+            '.jobs-easy-apply-modal__footer button, .artdeco-modal__actionbar button, button[aria-label*="submit application" i], button[aria-label*="submit" i]',
+          ),
+        ) as HTMLButtonElement[];
+      }
+      if (buttons.length === 0 && !modal) return { clicked: false, error: 'Easy Apply modal is not open' };
 
       function dispatchFullClick(el: HTMLElement) {
         el.scrollIntoView({ behavior: 'instant', block: 'center' });
@@ -6023,8 +6114,8 @@ export default class Page {
       }
 
       // Primary button fallback on review step
-      const primaryBtn = modal.querySelector(
-        '.jobs-easy-apply-modal__footer button.artdeco-button--primary, footer button.artdeco-button--primary, button.artdeco-button--primary',
+      const primaryBtn = (modal || document).querySelector(
+        '.jobs-easy-apply-modal__footer button.artdeco-button--primary, .artdeco-modal__actionbar button.artdeco-button--primary, footer button.artdeco-button--primary, button.artdeco-button--primary',
       ) as HTMLElement | null;
       if (primaryBtn) {
         const pText = (primaryBtn.innerText || primaryBtn.textContent || '').trim().toLowerCase();
@@ -6356,7 +6447,7 @@ export default class Page {
         for (const c of candidates) {
           if (
             c.closest(
-              'nav, header, #global-nav, .global-nav, .msg-overlay-container, #msg-overlay, .artdeco-dropdown, .search-reusables__filter-list, .search-reusables__filter-dropdown, .jobs-search-box, .scaffold-layout__header, .jobs-search-results-list, .scaffold-layout__list, [data-view-name="job-card"], .artdeco-pill',
+              'nav, header, #global-nav, .global-nav, .msg-overlay-container, #msg-overlay, .artdeco-dropdown, .search-reusables__filter-list, .search-reusables__filter-dropdown, .jobs-search-box, .scaffold-layout__header, .jobs-search-results-list, .scaffold-layout__list, .artdeco-pill',
             )
           ) {
             continue;

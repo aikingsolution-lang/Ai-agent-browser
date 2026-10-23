@@ -721,7 +721,12 @@ export function formatFriendlySkipReason(rawReason: string): string {
   if (r.includes('external application') || r.includes('no easy apply') || r.includes('external site')) {
     return 'Requires applying directly on the company website (not Easy Apply).';
   }
-  if (r.includes('no longer accepting') || r.includes('closed listing') || r.includes('closed')) {
+  if (
+    r.includes('no longer accepting') ||
+    r.includes('closed listing') ||
+    /\bjob (?:is )?closed\b/i.test(r) ||
+    /\bposting (?:is )?closed\b/i.test(r)
+  ) {
     return 'This job posting is closed and no longer accepting applications.';
   }
   if (
@@ -4890,7 +4895,26 @@ export class DedicatedJobRunner {
           step = Math.max(0, step - 1);
         }
       } else {
-        // Neither submit nor forward button found
+        // Neither submit nor forward button found - retry after brief settlement pause
+        await new Promise(r => setTimeout(r, 800));
+        const retryActions = await page.getModalActionButtons();
+        if (retryActions.hasSubmit) {
+          this.notifyStatus(portToSend, `🎉 All steps completed! Submitting your application now...`, 'info');
+          const submitRes = await page.submitApplication();
+          if (submitRes.clicked) {
+            const confirmRes = await page.verifySubmissionConfirmation(8000);
+            if (confirmRes.confirmed) {
+              submitted = true;
+              break;
+            }
+          }
+        } else if (retryActions.hasNext || retryActions.hasReview) {
+          const fwdRes = await page.clickModalForwardButton();
+          if (fwdRes.clicked) {
+            continue;
+          }
+        }
+
         const modalOpen = await page.isEasyApplyModalOpen();
         if (!modalOpen) {
           const postCheck = await page.verifyApplicationConfirmation();
