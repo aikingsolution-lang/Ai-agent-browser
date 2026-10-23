@@ -30,7 +30,6 @@ import {
   FiSliders,
   FiChevronDown,
   FiChevronUp,
-  FiMail,
 } from 'react-icons/fi';
 import { AiOutlineLoading3Quarters } from 'react-icons/ai';
 
@@ -167,9 +166,6 @@ export function LinkedInApplyDashboard({
     roles: [],
   });
   const [planDetails, setPlanDetails] = useState<PlanLimitDetails | null>(null);
-
-  const [showAutoEmail, setShowAutoEmail] = useState(true);
-  const [autoEmailJobTitle, setAutoEmailJobTitle] = useState('');
 
   // Sync automationConfig, Career Brain info, and Plan Details
   useEffect(() => {
@@ -710,178 +706,6 @@ export function LinkedInApplyDashboard({
                 <FiExternalLink className="size-2.5" />
               </button>
             </div>
-          </div>
-        )}
-      </div>
-
-      {/* Auto Email — full Google Jobs scraping + HR email extraction workflow */}
-      <div
-        className={`rounded-xl border transition-all ${isDarkMode ? 'border-slate-700 bg-slate-800/60' : 'border-slate-200 bg-white/80 shadow-sm'}`}>
-        <button
-          type="button"
-          onClick={() => setShowAutoEmail(v => !v)}
-          className={`w-full flex items-center justify-between px-3 py-2.5 text-xs font-semibold cursor-pointer transition-colors ${isDarkMode ? 'text-slate-300 hover:text-white' : 'text-slate-600 hover:text-slate-900'}`}>
-          <div className="flex items-center gap-2">
-            <FiMail className="size-3.5 text-emerald-400" />
-            <span>Auto Email</span>
-            {isAutoEmailRunning && (
-              <span className="text-[9px] font-bold uppercase tracking-wider text-emerald-400 animate-pulse">
-                Running
-              </span>
-            )}
-          </div>
-          {showAutoEmail ? (
-            <FiChevronUp className="size-3.5 opacity-60" />
-          ) : (
-            <FiChevronDown className="size-3.5 opacity-60" />
-          )}
-        </button>
-        {showAutoEmail && (
-          <div className={`px-3 pb-3 space-y-2.5 border-t ${isDarkMode ? 'border-slate-700' : 'border-slate-100'}`}>
-            <p className={`pt-2 text-[10px] ${isDarkMode ? 'text-slate-400' : 'text-slate-500'}`}>
-              Search Google Jobs for your role, then auto-extract HR contact emails for each company found.
-            </p>
-            <div className="flex gap-2">
-              <input
-                type="text"
-                value={autoEmailJobTitle}
-                onChange={e => setAutoEmailJobTitle(e.target.value)}
-                onKeyDown={e => {
-                  if (e.key === 'Enter' && !isAutoEmailRunning && autoEmailJobTitle.trim()) {
-                    onStartAutoEmail?.(autoEmailJobTitle.trim());
-                  }
-                }}
-                disabled={isAutoEmailRunning}
-                placeholder="e.g. React Developer Dehradun"
-                className={`flex-1 min-w-0 rounded-lg px-2.5 py-1.5 text-xs border outline-none transition-colors ${
-                  isDarkMode
-                    ? 'bg-slate-700 border-slate-600 text-white placeholder-slate-400 focus:border-emerald-500 disabled:opacity-50'
-                    : 'bg-slate-50 border-slate-200 text-slate-900 placeholder-slate-400 focus:border-emerald-400 disabled:opacity-50'
-                }`}
-              />
-              {isAutoEmailRunning ? (
-                <button
-                  type="button"
-                  onClick={() => onStopAutoEmail?.()}
-                  className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold bg-red-600 hover:bg-red-500 text-white transition-all cursor-pointer">
-                  <FiSquare className="size-3" />
-                  <span>Stop</span>
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (autoEmailJobTitle.trim()) onStartAutoEmail?.(autoEmailJobTitle.trim());
-                  }}
-                  disabled={!autoEmailJobTitle.trim()}
-                  className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
-                    !autoEmailJobTitle.trim()
-                      ? 'opacity-50 cursor-not-allowed bg-emerald-800 text-emerald-300'
-                      : 'bg-emerald-600 hover:bg-emerald-500 text-white'
-                  }`}>
-                  <FiPlay className="size-3" />
-                  <span>Start</span>
-                </button>
-              )}
-            </div>
-            {autoEmailProgress && (
-              <div
-                className={`rounded-lg px-2.5 py-2 text-[10px] flex items-start gap-2 ${
-                  autoEmailProgress.type === 'ERROR'
-                    ? isDarkMode
-                      ? 'bg-red-900/30 text-red-300 border border-red-700/40'
-                      : 'bg-red-50 text-red-700 border border-red-200'
-                    : autoEmailProgress.type === 'COMPLETE'
-                      ? isDarkMode
-                        ? 'bg-emerald-900/30 text-emerald-300 border border-emerald-700/40'
-                        : 'bg-emerald-50 text-emerald-700 border border-emerald-200'
-                      : isDarkMode
-                        ? 'bg-sky-900/30 text-sky-300 border border-sky-700/40'
-                        : 'bg-sky-50 text-sky-700 border border-sky-200'
-                }`}>
-                {(autoEmailProgress.type === 'SCRAPING' ||
-                  autoEmailProgress.type === 'EXTRACTING' ||
-                  autoEmailProgress.type === 'PROGRESS') && (
-                  <AiOutlineLoading3Quarters className="size-3 animate-spin shrink-0 mt-0.5" />
-                )}
-                <span>{autoEmailProgress.message}</span>
-              </div>
-            )}
-            {autoEmailResults.length > 0 && (
-              <div className="space-y-2">
-                <div className="flex items-center justify-between">
-                  <span className={`text-[10px] font-semibold ${isDarkMode ? 'text-slate-300' : 'text-slate-600'}`}>
-                    {autoEmailResults.length} result{autoEmailResults.length !== 1 ? 's' : ''}
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const header = 'Title,Company,Location,Email\n';
-                      const rows = autoEmailResults
-                        .map(j =>
-                          [j.title, j.company, j.location, j.email || '']
-                            .map(v => `"${String(v).replace(/"/g, '""')}"`)
-                            .join(','),
-                        )
-                        .join('\n');
-                      const blob = new Blob([header + rows], { type: 'text/csv' });
-                      const url = URL.createObjectURL(blob);
-                      const a = document.createElement('a');
-                      a.href = url;
-                      a.download = `hr-emails-${Date.now()}.csv`;
-                      a.click();
-                      URL.revokeObjectURL(url);
-                    }}
-                    className={`flex items-center gap-1 px-2 py-1 rounded text-[10px] font-semibold transition-all cursor-pointer ${isDarkMode ? 'bg-slate-700 hover:bg-slate-600 text-slate-300' : 'bg-slate-100 hover:bg-slate-200 text-slate-600'}`}>
-                    <FiDownload className="size-3" />
-                    <span>CSV</span>
-                  </button>
-                </div>
-                <div
-                  className={`rounded-lg overflow-hidden border ${isDarkMode ? 'border-slate-700' : 'border-slate-200'}`}>
-                  <div className="overflow-y-auto max-h-48">
-                    <table className="w-full text-[10px]">
-                      <thead
-                        className={`sticky top-0 ${isDarkMode ? 'bg-slate-700 text-slate-300' : 'bg-slate-100 text-slate-500'}`}>
-                        <tr>
-                          <th className="px-2 py-1.5 text-left font-semibold">Company</th>
-                          <th className="px-2 py-1.5 text-left font-semibold">Email</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {autoEmailResults.map((job, idx) => (
-                          <tr
-                            key={job.id}
-                            className={`border-t ${
-                              isDarkMode
-                                ? idx % 2 === 0
-                                  ? 'bg-slate-800/50 border-slate-700 text-slate-300'
-                                  : 'bg-slate-800 border-slate-700 text-slate-300'
-                                : idx % 2 === 0
-                                  ? 'bg-white border-slate-100 text-slate-700'
-                                  : 'bg-slate-50/50 border-slate-100 text-slate-700'
-                            }`}>
-                            <td className="px-2 py-1.5 font-medium truncate max-w-[120px]">{job.company || '—'}</td>
-                            <td
-                              className={`px-2 py-1.5 break-all ${
-                                !job.email || job.email === 'Not found' || job.email === 'Error'
-                                  ? isDarkMode
-                                    ? 'text-slate-500'
-                                    : 'text-slate-400'
-                                  : isDarkMode
-                                    ? 'text-emerald-400'
-                                    : 'text-emerald-600'
-                              }`}>
-                              {job.email || '—'}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              </div>
-            )}
           </div>
         )}
       </div>
