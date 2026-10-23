@@ -1654,7 +1654,8 @@ export class DedicatedJobRunner {
 
       // 3. Search URL Navigation with f_AL=true & sortBy=R
       // Sanitize role for LinkedIn search keywords
-      const searchUrl = linkedinAdapter.buildSearchUrl(role, location, candidateNameSources);
+      const primaryLocation = prioritizedLocations[0] || location || 'Remote';
+      const searchUrl = linkedinAdapter.buildSearchUrl(role, primaryLocation, candidateNameSources);
 
       const runnerMode: RunnerMode = options.runnerMode || 'tab';
       if (runnerMode === 'tab') {
@@ -1844,9 +1845,9 @@ export class DedicatedJobRunner {
             `🔍 Scanning LinkedIn job search results for "${currentLoc}" (attempt ${readAttempts}/3)...`,
             'info',
           );
-          jobCards = await currentPage.readJobListFromSearchPane(readAttempts);
+          jobCards = await currentPage.readJobListFromSearchPane(Math.max(readAttempts + 2, 4));
           if (jobCards.length === 0 && readAttempts < 3) {
-            const sleepAborted = await this.interruptibleSleep(1200);
+            const sleepAborted = await this.interruptibleSleep(2500);
             if (sleepAborted || !this.isRunning) break;
           }
         }

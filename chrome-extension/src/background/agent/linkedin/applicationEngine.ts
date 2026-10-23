@@ -190,12 +190,36 @@ export class ApplicationEngine {
 
     const params = new URLSearchParams({
       keywords,
-      location,
       f_AL: 'true', // Easy Apply filter
       f_E: '1,2', // 1=Internship, 2=Entry level
       f_JT: 'F,I', // Full-time, Internship
       sortBy: 'R', // Most relevant
     });
+
+    if (location) {
+      const isRemote = /\bremote\b/i.test(location);
+      const isHybrid = /\bhybrid\b/i.test(location);
+      const isOnsite = /\b(?:on-site|onsite)\b/i.test(location);
+
+      if (isRemote) {
+        params.set('f_WT', '2');
+      } else if (isHybrid) {
+        params.set('f_WT', '3');
+      } else if (isOnsite) {
+        params.set('f_WT', '1');
+      }
+
+      const cleanLocation = location
+        .replace(/\b(?:remote|hybrid|on-site|onsite)\b/gi, '')
+        .replace(/^[,\s\-–—/()|]+|[,\s\-–—/()|]+$/g, '')
+        .replace(/\s*,\s*,+/g, ',')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+      if (cleanLocation) {
+        params.set('location', cleanLocation);
+      }
+    }
 
     return `https://www.linkedin.com/jobs/search/?${params.toString()}`;
   }

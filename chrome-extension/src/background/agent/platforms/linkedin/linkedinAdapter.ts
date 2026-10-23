@@ -41,7 +41,29 @@ export class LinkedInAdapter implements IPlatformAdapter {
     });
 
     if (location) {
-      searchParams.set('location', location);
+      const isRemote = /\bremote\b/i.test(location);
+      const isHybrid = /\bhybrid\b/i.test(location);
+      const isOnsite = /\b(?:on-site|onsite)\b/i.test(location);
+
+      if (isRemote) {
+        searchParams.set('f_WT', '2');
+      } else if (isHybrid) {
+        searchParams.set('f_WT', '3');
+      } else if (isOnsite) {
+        searchParams.set('f_WT', '1');
+      }
+
+      // Strip remote/hybrid/onsite tokens from geographic location string
+      const cleanLocation = location
+        .replace(/\b(?:remote|hybrid|on-site|onsite)\b/gi, '')
+        .replace(/^[,\s\-–—/()|]+|[,\s\-–—/()|]+$/g, '')
+        .replace(/\s*,\s*,+/g, ',')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+      if (cleanLocation) {
+        searchParams.set('location', cleanLocation);
+      }
     }
 
     return `https://www.linkedin.com/jobs/search/?${searchParams.toString()}`;

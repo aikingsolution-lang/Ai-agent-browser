@@ -4429,6 +4429,13 @@ export default class Page {
   async readJobListFromSearchPane(scrollAttempts = 4): Promise<SearchJobCard[]> {
     if (!this._puppeteerPage) return [];
 
+    try {
+      await this._puppeteerPage.waitForSelector(
+        '.jobs-search-results-list, .scaffold-layout__list, [data-view-name*="job-card"], li.jobs-search-results__list-item',
+        { timeout: 2500 },
+      );
+    } catch {}
+
     // Scroll left-hand container gently to trigger rendering
     for (let s = 0; s < scrollAttempts; s++) {
       await this._puppeteerPage
@@ -4439,6 +4446,7 @@ export default class Page {
             document.querySelector('.scaffold-layout__list-container'),
             document.querySelector('.jobs-search-results-list__list'),
             document.querySelector('div[data-view-name="job-card"]')?.parentElement,
+            document.querySelector('div[data-view-name*="job-card"]')?.parentElement,
             document.querySelector('ul.scaffold-layout__list-container'),
           ].filter(Boolean) as HTMLElement[];
 
@@ -4548,6 +4556,8 @@ export default class Page {
           'div[data-job-id]',
           'div[data-occludable-job-id]',
           '[data-view-name="job-card"]',
+          '[data-view-name*="job-card"]',
+          '[data-view-name="search-entity-result-universal-template"]',
           '.job-card-list__entity-lockup',
           'div.base-card',
         ].join(', ');
@@ -4591,6 +4601,13 @@ export default class Page {
             (card as any).dataset?.jobId ||
             (card as any).dataset?.occludableJobId ||
             '';
+
+          if (jobId && jobId.includes('urn:li:jobPosting:')) {
+            const urnMatch = jobId.match(/(\d+)/);
+            if (urnMatch && urnMatch[1]) {
+              jobId = urnMatch[1];
+            }
+          }
 
           // 2. Try finding job link
           const link =
@@ -4684,6 +4701,8 @@ export default class Page {
           'div[data-job-id]',
           'div[data-occludable-job-id]',
           '[data-view-name="job-card"]',
+          '[data-view-name*="job-card"]',
+          '[data-view-name="search-entity-result-universal-template"]',
           '.job-card-list__entity-lockup',
           'div.base-card',
         ].join(', ');
