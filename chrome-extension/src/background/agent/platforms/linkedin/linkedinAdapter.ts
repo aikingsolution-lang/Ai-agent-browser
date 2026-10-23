@@ -26,6 +26,7 @@ export class LinkedInAdapter implements IPlatformAdapter {
     role: string,
     location: string,
     candidateName?: string | (string | undefined | null)[],
+    start: number = 0,
   ): string {
     const cleanRole = sanitizeRoleSearchQuery(role, candidateName, 'Software Engineer');
     const sanitizedRole = cleanRole
@@ -37,8 +38,13 @@ export class LinkedInAdapter implements IPlatformAdapter {
     const searchParams = new URLSearchParams({
       keywords: sanitizedRole,
       f_AL: 'true', // Easy Apply filter
+      f_LF: 'f_AL', // Easy Apply filter compatibility
       sortBy: 'R', // Most relevant
     });
+
+    if (start > 0) {
+      searchParams.set('start', String(start));
+    }
 
     if (location) {
       const isRemote = /\bremote\b/i.test(location);

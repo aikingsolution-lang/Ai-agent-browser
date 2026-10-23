@@ -4594,10 +4594,12 @@ export default class Page {
         const seenJobIds = new Set<string>();
 
         for (const card of cards) {
-          // 1. Try finding job ID from data attributes
+          // 1. Try finding job ID from data attributes on card or child elements
           let jobId =
             card.getAttribute('data-job-id') ||
             card.getAttribute('data-occludable-job-id') ||
+            card.querySelector('[data-job-id]')?.getAttribute('data-job-id') ||
+            card.querySelector('[data-occludable-job-id]')?.getAttribute('data-occludable-job-id') ||
             (card as any).dataset?.jobId ||
             (card as any).dataset?.occludableJobId ||
             '';
@@ -4612,12 +4614,12 @@ export default class Page {
           // 2. Try finding job link
           const link =
             card.querySelector<HTMLAnchorElement>(
-              'a.job-card-container__link, a.job-card-list__title, a.job-card-container__link--cursor-pointer, a[href*="/jobs/view/"], a[href*="currentJobId="], a[data-control-name="job_card_title"]',
+              'a.job-card-container__link, a.job-card-list__title, a.job-card-container__link--cursor-pointer, a[href*="/jobs/view/"], a[href*="currentJobId="], a[data-control-name="job_card_title"], a[href*="/jobs/"]',
             ) || (card.tagName.toLowerCase() === 'a' ? (card as HTMLAnchorElement) : null);
 
           if (!jobId && link) {
             const href = link.href || '';
-            const match = href.match(/(?:\/jobs\/view\/|currentJobId=)(\d+)/);
+            const match = href.match(/(?:\/jobs\/view\/|currentJobId=|\/jobs\/)(\d+)/);
             if (match && match[1]) {
               jobId = match[1];
             }
@@ -4625,20 +4627,26 @@ export default class Page {
 
           // 3. Check any anchor tag inside card
           if (!jobId) {
-            const anyLink = card.querySelector<HTMLAnchorElement>('a[href*="/jobs/view/"], a[href*="currentJobId="]');
+            const anyLink = card.querySelector<HTMLAnchorElement>('a[href*="/jobs/"], a[href*="currentJobId="]');
             if (anyLink) {
               const href = anyLink.href || '';
-              const match = href.match(/(?:\/jobs\/view\/|currentJobId=)(\d+)/);
+              const match = href.match(/(?:\/jobs\/view\/|currentJobId=)(\d+)/) || href.match(/(\d{7,12})/);
               if (match && match[1]) {
                 jobId = match[1];
               }
             }
           }
 
-          // 4. Try finding urn
+          // 4. Try finding urn anywhere in card or its children
           if (!jobId) {
-            const urn = card.getAttribute('data-entity-urn') || card.getAttribute('data-job-urn') || '';
-            const urnMatch = urn.match(/urn:li:jobPosting:(\d+)/);
+            const urnEl = card.querySelector('[data-entity-urn], [data-job-urn]');
+            const urn =
+              card.getAttribute('data-entity-urn') ||
+              card.getAttribute('data-job-urn') ||
+              urnEl?.getAttribute('data-entity-urn') ||
+              urnEl?.getAttribute('data-job-urn') ||
+              '';
+            const urnMatch = urn.match(/urn:li:jobPosting:(\d+)/) || urn.match(/(\d{7,12})/);
             if (urnMatch && urnMatch[1]) {
               jobId = urnMatch[1];
             }

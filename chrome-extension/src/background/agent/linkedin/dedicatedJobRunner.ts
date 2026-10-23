@@ -1805,75 +1805,102 @@ export class DedicatedJobRunner {
       const seenJobIds = new Set<string>();
       let totalLinkedInScanned = 0;
 
+      const navigateLinkedInTab = async (url: string) => {
+        try {
+          if (currentPage.tabId) {
+            await chrome.tabs.update(currentPage.tabId, { url });
+          } else if (currentPage.puppeteerPage) {
+            await currentPage.puppeteerPage.goto(url, { waitUntil: 'domcontentloaded', timeout: 35000 });
+          }
+        } catch {
+          try {
+            if (currentPage.puppeteerPage) {
+              await currentPage.puppeteerPage.goto(url, { waitUntil: 'domcontentloaded', timeout: 35000 });
+            }
+          } catch {}
+        }
+      };
+
       for (let locIdx = 0; locIdx < prioritizedLocations.length; locIdx++) {
         if (queue.length >= BATCH_CAP || !this.isRunning) break;
 
         const currentLoc = prioritizedLocations[locIdx];
         const locRank = locIdx + 1;
 
-        if (locIdx > 0) {
-          const nextSearchUrl = linkedinAdapter.buildSearchUrl(role, currentLoc, candidateNameSources);
-          this.notifyStatus(
-            portToSend,
-            `📍 [LinkedIn] Location #${locRank - 1} yielded ${queue.length}/${BATCH_CAP} jobs. Checking Location #${locRank}: "${currentLoc}"...`,
-            'info',
-          );
-          try {
-            if (currentPage.puppeteerPage) {
-              await currentPage.puppeteerPage.goto(nextSearchUrl, { waitUntil: 'domcontentloaded', timeout: 35000 });
-            } else if ((currentPage as any).navigateTo) {
-              await (currentPage as any).navigateTo(nextSearchUrl);
-            }
-          } catch {}
-          const sleepAborted = await this.interruptibleSleep(2500);
-          if (sleepAborted || !this.isRunning) break;
-          if (typeof currentPage.waitForDomSettlement === 'function') {
-            await currentPage.waitForDomSettlement(
-              '.jobs-search-results-list, .scaffold-layout__list, [data-view-name="job-card"]',
-              { maxWaitMs: 4000, quietPeriodMs: 200 },
-            );
-          }
-        }
-
-        let jobCards: Array<{ jobId: string; title: string; company: string; url: string }> = [];
-        let readAttempts = 0;
-        while (readAttempts < 3 && jobCards.length === 0) {
-          readAttempts++;
+        // Scan up to 3 pages per location (start=0, start=25, start=50) to satisfy BATCH_CAP
+        for (let pageIdx = 0; pageIdx < 3 && queue.length < BATCH_CAP; pageIdx++) {
           if (!this.isRunning) break;
-          this.notifyStatus(
-            portToSend,
-            `🔍 Scanning LinkedIn job search results for "${currentLoc}" (attempt ${readAttempts}/3)...`,
-            'info',
-          );
-          jobCards = await currentPage.readJobListFromSearchPane(Math.max(readAttempts + 2, 4));
-          if (jobCards.length === 0 && readAttempts < 3) {
-            const sleepAborted = await this.interruptibleSleep(2500);
+
+          if (locIdx > 0 || pageIdx > 0) {
+            const pageOffset = pageIdx * 25;
+            const searchPageUrl = linkedinAdapter.buildSearchUrl(role, currentLoc, candidateNameSources, pageOffset);
+            if (pageIdx > 0) {
+              this.notifyStatus(
+                portToSend,
+                `📄 [LinkedIn] [${currentLoc}] Checking page ${pageIdx + 1} (${queue.length}/${BATCH_CAP} jobs gathered so far)...`,
+                'info',
+              );
+            } else {
+              this.notifyStatus(
+                portToSend,
+                `📍 [LinkedIn] Location #${locRank - 1} yielded ${queue.length}/${BATCH_CAP} jobs. Checking Location #${locRank}: "${currentLoc}"...`,
+                'info',
+              );
+            }
+            await navigateLinkedInTab(searchPageUrl);
+            const sleepAborted = await this.interruptibleSleep(3000);
             if (sleepAborted || !this.isRunning) break;
+            if (typeof currentPage.waitForDomSettlement === 'function') {
+              await currentPage.waitForDomSettlement(
+                '.jobs-search-results-list, .scaffold-layout__list, [data-view-name="job-card"]',
+                { maxWaitMs: 4000, quietPeriodMs: 200 },
+              );
+            }
           }
-        }
 
-        totalLinkedInScanned += jobCards.length;
-
-        for (const card of jobCards) {
-          if (seenJobIds.has(card.jobId)) continue;
-          seenJobIds.add(card.jobId);
-
-          const proc = await processedJobsStore.isJobProcessed(card.jobId);
-          if (proc.isProcessed && proc.status === 'applied') {
-            stats.skipped++;
-            this.notifyActivity(portToSend, onLiveActivity, {
-              jobId: card.jobId,
-              url: card.url,
-              title: card.title,
-              company: card.company,
-              status: 'skipped',
-              reason: 'Already applied previously',
-              creditsUsed: 0,
-            });
-            continue;
+          let jobCards: Array<{ jobId: string; title: string; company: string; url: string }> = [];
+          let readAttempts = 0;
+          while (readAttempts < 3 && jobCards.length === 0) {
+            readAttempts++;
+            if (!this.isRunning) break;
+            this.notifyStatus(
+              portToSend,
+              `🔍 Scanning LinkedIn job search results for "${currentLoc}"${pageIdx > 0 ? ` (page ${pageIdx + 1})` : ''} (attempt ${readAttempts}/3)...`,
+              'info',
+            );
+            jobCards = await currentPage.readJobListFromSearchPane(Math.max(readAttempts + 2, 4));
+            if (jobCards.length === 0 && readAttempts < 3) {
+              const sleepAborted = await this.interruptibleSleep(2500);
+              if (sleepAborted || !this.isRunning) break;
+            }
           }
-          queue.push(card);
-          if (queue.length >= BATCH_CAP) break;
+
+          totalLinkedInScanned += jobCards.length;
+
+          for (const card of jobCards) {
+            if (seenJobIds.has(card.jobId)) continue;
+            seenJobIds.add(card.jobId);
+
+            const proc = await processedJobsStore.isJobProcessed(card.jobId);
+            if (proc.isProcessed && proc.status === 'applied') {
+              stats.skipped++;
+              this.notifyActivity(portToSend, onLiveActivity, {
+                jobId: card.jobId,
+                url: card.url,
+                title: card.title,
+                company: card.company,
+                status: 'skipped',
+                reason: 'Already applied previously',
+                creditsUsed: 0,
+              });
+              continue;
+            }
+            queue.push(card);
+            if (queue.length >= BATCH_CAP) break;
+          }
+
+          // If no cards were found on this page at all, stop paginating this location
+          if (jobCards.length === 0) break;
         }
 
         if (queue.length >= BATCH_CAP) {
@@ -1883,6 +1910,54 @@ export class DedicatedJobRunner {
             'ok',
           );
           break;
+        }
+      }
+
+      // Fallback search trigger: If fewer than 3 genuine Easy Apply jobs were found,
+      // fallback to candidate's other predefined target roles from profile
+      const candidateAlternateRoles = (careerBrain.predefinedRoles || [])
+        .map(r => (r || '').trim())
+        .filter(r => r && r.toLowerCase() !== role.toLowerCase());
+
+      for (const altRole of candidateAlternateRoles) {
+        if (queue.length >= BATCH_CAP || !this.isRunning) break;
+        const cleanAltRole = sanitizeRoleSearchQuery(altRole, candidateNameSources, 'Software Engineer');
+        if (!cleanAltRole || cleanAltRole.toLowerCase() === role.toLowerCase()) continue;
+
+        this.notifyStatus(
+          portToSend,
+          `🔍 Checking alternate role from profile: "${cleanAltRole}" (${queue.length}/${BATCH_CAP} jobs gathered so far)...`,
+          'info',
+        );
+
+        for (let locIdx = 0; locIdx < prioritizedLocations.length && queue.length < BATCH_CAP; locIdx++) {
+          if (!this.isRunning) break;
+          const currentLoc = prioritizedLocations[locIdx];
+          const altSearchUrl = linkedinAdapter.buildSearchUrl(cleanAltRole, currentLoc, candidateNameSources);
+          await navigateLinkedInTab(altSearchUrl);
+          const sleepAborted = await this.interruptibleSleep(3000);
+          if (sleepAborted || !this.isRunning) break;
+          if (typeof currentPage.waitForDomSettlement === 'function') {
+            await currentPage.waitForDomSettlement(
+              '.jobs-search-results-list, .scaffold-layout__list, [data-view-name="job-card"]',
+              { maxWaitMs: 4000, quietPeriodMs: 200 },
+            );
+          }
+
+          const altJobCards = await currentPage.readJobListFromSearchPane(4);
+          for (const card of altJobCards) {
+            if (seenJobIds.has(card.jobId)) continue;
+            seenJobIds.add(card.jobId);
+
+            const proc = await processedJobsStore.isJobProcessed(card.jobId);
+            if (proc.isProcessed && proc.status === 'applied') {
+              stats.skipped++;
+              continue;
+            }
+            queue.push(card);
+            if (queue.length >= BATCH_CAP) break;
+          }
+          if (queue.length >= BATCH_CAP) break;
         }
       }
 
