@@ -1809,6 +1809,29 @@ export class DedicatedJobRunner {
         try {
           if (currentPage.tabId) {
             await chrome.tabs.update(currentPage.tabId, { url });
+            // Wait for tab navigation to commit or complete
+            await new Promise<void>(resolve => {
+              let done = false;
+              const finish = () => {
+                if (!done) {
+                  done = true;
+                  try {
+                    chrome.tabs.onUpdated.removeListener(listener);
+                  } catch {}
+                  resolve();
+                }
+              };
+              const listener = (tid: number, info: chrome.tabs.TabChangeInfo) => {
+                if (
+                  tid === currentPage.tabId &&
+                  (info.status === 'complete' || (info.url && info.url.startsWith('http')))
+                ) {
+                  finish();
+                }
+              };
+              chrome.tabs.onUpdated.addListener(listener);
+              setTimeout(finish, 3500);
+            });
           } else if (currentPage.puppeteerPage) {
             await currentPage.puppeteerPage.goto(url, { waitUntil: 'domcontentloaded', timeout: 35000 });
           }
@@ -1876,6 +1899,14 @@ export class DedicatedJobRunner {
           }
 
           totalLinkedInScanned += jobCards.length;
+
+          if (jobCards.length > 0) {
+            this.notifyStatus(
+              portToSend,
+              `📋 Found ${jobCards.length} job cards on LinkedIn for "${currentLoc}"${pageIdx > 0 ? ` (page ${pageIdx + 1})` : ''}. Checking previous applications...`,
+              'info',
+            );
+          }
 
           for (const card of jobCards) {
             if (seenJobIds.has(card.jobId)) continue;

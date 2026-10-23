@@ -10,7 +10,6 @@ describe('LinkedInAdapter Search URL Generation', () => {
     expect(parsed.searchParams.get('keywords')).toBe('Full Stack Developer');
     expect(parsed.searchParams.get('location')).toBe('Bengaluru, India');
     expect(parsed.searchParams.get('f_AL')).toBe('true');
-    expect(parsed.searchParams.get('f_LF')).toBe('f_AL');
     expect(parsed.searchParams.get('sortBy')).toBe('R');
     expect(parsed.searchParams.get('f_WT')).toBeNull();
   });

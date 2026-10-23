@@ -231,9 +231,54 @@ export class DedicatedWindowManager {
         throw new Error('Chrome tabs API did not return a valid tab ID');
       }
 
-      this.dedicatedTabId = newTab.id;
+      const tabId = newTab.id;
+      this.dedicatedTabId = tabId;
       this.dedicatedWindowId = newTab.windowId || targetWindowId || null;
       this.ownsWindow = false; // We do NOT own the window, only this tab
+
+      // Wait briefly for tab URL commit so tab.url is not empty
+      if (
+        url &&
+        url.startsWith('http') &&
+        typeof chrome !== 'undefined' &&
+        chrome.tabs &&
+        typeof chrome.tabs.get === 'function' &&
+        typeof chrome.tabs.onUpdated?.addListener === 'function'
+      ) {
+        await new Promise<void>(resolve => {
+          let finished = false;
+          const finish = () => {
+            if (!finished) {
+              finished = true;
+              try {
+                chrome.tabs.onUpdated.removeListener(onTabUpdated);
+              } catch {}
+              resolve();
+            }
+          };
+
+          const onTabUpdated = (tid: number, changeInfo: chrome.tabs.TabChangeInfo) => {
+            if (
+              tid === tabId &&
+              (changeInfo.status === 'complete' || (changeInfo.url && changeInfo.url.startsWith('http')))
+            ) {
+              finish();
+            }
+          };
+
+          chrome.tabs.onUpdated.addListener(onTabUpdated);
+          chrome.tabs
+            .get(tabId)
+            .then(t => {
+              if (t?.url && t.url.startsWith('http')) {
+                finish();
+              }
+            })
+            .catch(() => {});
+
+          setTimeout(finish, 2500);
+        });
+      }
 
       logger.info(
         `Created dedicated runner tab in current window (tabId=${this.dedicatedTabId}, winId=${this.dedicatedWindowId})`,

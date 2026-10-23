@@ -128,6 +128,11 @@ export default class BrowserContext {
       return page;
     }
 
+    // If existing page was not attached or puppeteer disconnected, retry attaching
+    if (!existingPage.attached) {
+      await this.attachPage(existingPage);
+    }
+
     // 3. Return existing page from attachedPages
     return existingPage;
   }

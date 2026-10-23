@@ -38,7 +38,6 @@ export class LinkedInAdapter implements IPlatformAdapter {
     const searchParams = new URLSearchParams({
       keywords: sanitizedRole,
       f_AL: 'true', // Easy Apply filter
-      f_LF: 'f_AL', // Easy Apply filter compatibility
       sortBy: 'R', // Most relevant
     });
 
