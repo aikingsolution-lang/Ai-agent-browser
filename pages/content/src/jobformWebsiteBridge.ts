@@ -182,6 +182,25 @@ export function initJobformWebsiteBridge(): void {
         }
         return true;
       }
+
+      // Auto Email: background sends job+email results after extraction completes.
+      // Mirrors noah-master content.js: dispatch CustomEvent("emailsData") so the
+      // Automation Hub React page can ingest the results (same event name/shape).
+      // We also write to localStorage immediately so the mount-time fallback in
+      // useAutoEmail works even if the event fires before React registers its listener.
+      if (request?.action === 'sendEmailsToWebsite' && Array.isArray(request.data)) {
+        try {
+          window.localStorage.setItem('companies', JSON.stringify(request.data));
+        } catch {
+          // Ignore storage errors (private mode, quota exceeded, etc.)
+        }
+        setTimeout(() => {
+          document.dispatchEvent(new CustomEvent('emailsData', { detail: request.data }));
+        }, 2000);
+        sendResponse({ success: true });
+        return true;
+      }
+
       return false;
     });
   }

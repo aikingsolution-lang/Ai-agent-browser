@@ -12,6 +12,7 @@ import {
   validateProfileCompleteness,
   queueSafetyStore,
   processedJobsStore,
+  isWebsiteAutoLoginPaused,
 } from '@extension/storage';
 import { t } from '@extension/i18n';
 import {
@@ -46,7 +47,9 @@ import { dedicatedJobRunner } from './agent/linkedin/dedicatedJobRunner';
 import { normalizeLinkedInJobUrl } from './agent/linkedin/urlUtils';
 import type { IJobData } from './agent/linkedin/types';
 import { careerCopilotEngine, auditCareerBrain } from './agent/copilot/careerCopilotEngine';
-import { registerWebsiteSessionSync } from './services/websiteSessionSync';
+import { registerWebsiteSessionSync, syncSessionFromOpenJobformTabs } from './services/websiteSessionSync';
+import { fetchHrEmailForCompany } from './services/emailExtractor';
+import { runAutoEmailWorkflow, stopAutoEmail, isAutoEmailRunning } from './services/autoEmail';
 
 const logger = createLogger('background');
 
@@ -546,6 +549,19 @@ chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(error 
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   if (tabId && changeInfo.status === 'complete' && tab.url?.startsWith('http')) {
     await injectBuildDomTreeScripts(tabId);
+  }
+  // When a JobForm Automator tab finishes loading, sync the session via executeScript so HR
+  // accounts (which don't set IsLogin in localStorage) are picked up automatically.
+  if (
+    changeInfo.status === 'complete' &&
+    tab.url &&
+    (tab.url.includes('jobformautomator.com') || tab.url.includes('localhost:3000'))
+  ) {
+    isWebsiteAutoLoginPaused()
+      .then(paused => {
+        if (!paused) syncSessionFromOpenJobformTabs().catch(() => undefined);
+      })
+      .catch(() => undefined);
   }
 });
 
@@ -1069,6 +1085,19 @@ ${resumeSnippet}
     return true;
   }
 
+  // FIND_HR_EMAIL: Ported from noah-master — Google search + regex injection to extract HR email
+  if (request.type === 'FIND_HR_EMAIL') {
+    const company: string = request.company || '';
+    if (!company.trim()) {
+      sendResponse({ success: false, error: 'Company name is required' });
+      return false;
+    }
+    fetchHrEmailForCompany(company.trim())
+      .then(email => sendResponse({ success: true, email }))
+      .catch(err => sendResponse({ success: false, error: String(err) }));
+    return true;
+  }
+
   // 1. NAYA ROUTE: Agar command "Start Auto-Apply" ya Queue start karne ka hai
   if (request.type === 'START_LINKEDIN_QUEUE') {
     console.log('🚀 Bypassing generic AI! Starting Deterministic Queue Manager...');
@@ -1538,6 +1567,43 @@ chrome.runtime.onConnect.addListener(port => {
                 error: error instanceof Error ? error.message : t('bg_cmd_replay_failed'),
               });
             }
+            break;
+          }
+
+          case 'START_AUTO_EMAIL': {
+            const jobTitle: string = message.jobTitle || '';
+            if (!jobTitle.trim()) {
+              port.postMessage({
+                type: 'AUTO_EMAIL_PROGRESS',
+                data: { type: 'ERROR', message: 'Job title is required.' },
+              });
+              break;
+            }
+            if (isAutoEmailRunning()) {
+              port.postMessage({
+                type: 'AUTO_EMAIL_PROGRESS',
+                data: { type: 'ERROR', message: 'Auto Email is already running. Stop the current run first.' },
+              });
+              break;
+            }
+            runAutoEmailWorkflow(jobTitle.trim(), progress => {
+              try {
+                port.postMessage({ type: 'AUTO_EMAIL_PROGRESS', data: progress });
+              } catch {
+                // Port may have closed; ignore
+              }
+            }).catch(err => {
+              try {
+                port.postMessage({ type: 'AUTO_EMAIL_PROGRESS', data: { type: 'ERROR', message: String(err) } });
+              } catch {
+                // Ignore
+              }
+            });
+            break;
+          }
+
+          case 'STOP_AUTO_EMAIL': {
+            stopAutoEmail();
             break;
           }
 

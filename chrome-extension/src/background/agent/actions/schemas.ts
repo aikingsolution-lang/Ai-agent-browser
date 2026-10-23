@@ -327,3 +327,13 @@ export const askUserActionSchema: ActionSchema = {
     skillName: z.string().optional().describe('The specific skill name if this is a skill experience question'),
   }),
 };
+
+export const fetchHrEmailActionSchema: ActionSchema = {
+  name: 'fetch_hr_email',
+  description:
+    'Search Google for the HR contact email of a given company. Opens a silent background tab, searches for "HR email of {company}", extracts the first email address found on the results page via regex, then closes the tab. Returns the email string or null if none is found within 10 seconds.',
+  schema: z.object({
+    intent: z.string().default('').describe('purpose of this action'),
+    company_name: z.string().describe('the company name to search HR email for'),
+  }),
+};

@@ -41,7 +41,12 @@ import { PremiumPlansModal } from './components/PremiumPlansModal';
 import { EventType, type AgentEvent, ExecutionState } from './types/event';
 import { FiBriefcase, FiFileText, FiMessageSquare, FiLock } from 'react-icons/fi';
 import { ResumeProfileView } from './components/ResumeProfileView';
-import { LinkedInApplyDashboard, type StructuredActivityItem } from './components/LinkedInApplyDashboard';
+import {
+  LinkedInApplyDashboard,
+  type StructuredActivityItem,
+  type AutoEmailJob,
+  type AutoEmailProgress,
+} from './components/LinkedInApplyDashboard';
 import { FailedRefundBanner } from './components/FailedRefundBanner';
 import './SidePanel.css';
 
@@ -91,6 +96,9 @@ const SidePanel = () => {
   const [isDismissedDiagnostics, setIsDismissedDiagnostics] = useState(false);
   const [showAuthRequiredBanner, setShowAuthRequiredBanner] = useState(false);
   const [failedRefundNotice, setFailedRefundNotice] = useState<Array<{ runId: string; reason: string }> | null>(null);
+  const [isAutoEmailRunning, setIsAutoEmailRunning] = useState(false);
+  const [autoEmailProgress, setAutoEmailProgress] = useState<AutoEmailProgress | null>(null);
+  const [autoEmailResults, setAutoEmailResults] = useState<AutoEmailJob[]>([]);
 
   const checkFailedRefunds = useCallback(async () => {
     try {
@@ -661,6 +669,15 @@ const SidePanel = () => {
                 ...prev.slice(0, 99),
               ];
             });
+          }
+        } else if (message && message.type === 'AUTO_EMAIL_PROGRESS' && message.data) {
+          const progress: AutoEmailProgress = message.data;
+          setAutoEmailProgress(progress);
+          if (progress.type === 'COMPLETE' || progress.type === 'ERROR') {
+            setIsAutoEmailRunning(false);
+            if (progress.results) {
+              setAutoEmailResults(progress.results);
+            }
           }
         } else if (message && message.type === 'heartbeat_ack') {
           console.log('Heartbeat acknowledged');
@@ -1261,6 +1278,17 @@ const SidePanel = () => {
     chrome.runtime.sendMessage({ type: 'STOP_JOB_APPLY' });
   }, []);
 
+  const handleStartAutoEmail = useCallback((jobTitle: string) => {
+    setIsAutoEmailRunning(true);
+    setAutoEmailProgress(null);
+    setAutoEmailResults([]);
+    portRef.current?.postMessage({ type: 'START_AUTO_EMAIL', jobTitle });
+  }, []);
+
+  const handleStopAutoEmail = useCallback(() => {
+    portRef.current?.postMessage({ type: 'STOP_AUTO_EMAIL' });
+  }, []);
+
   const handleAnswerQuestion = useCallback(
     (questionId: string, answer: string) => {
       if (!portRef.current) {
@@ -1850,6 +1878,11 @@ const SidePanel = () => {
             onAnswerQuestion={handleAnswerQuestion}
             pendingBatch={pendingBatch}
             onAnswerQuestionBatch={handleAnswerQuestionBatch}
+            onStartAutoEmail={handleStartAutoEmail}
+            onStopAutoEmail={handleStopAutoEmail}
+            isAutoEmailRunning={isAutoEmailRunning}
+            autoEmailProgress={autoEmailProgress}
+            autoEmailResults={autoEmailResults}
           />
         ) : mainTab === 'resume' ? (
           <ResumeProfileView isDarkMode={isDarkMode} />

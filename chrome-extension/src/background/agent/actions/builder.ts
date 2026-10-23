@@ -30,6 +30,7 @@ import {
   linkedinEasyApplyActionSchema,
   fillVisibleFormFieldsActionSchema,
   askUserActionSchema,
+  fetchHrEmailActionSchema,
 } from './schemas';
 import { z } from 'zod';
 import { createLogger } from '@src/background/log';
@@ -40,6 +41,7 @@ import { ApplicationEngine } from '../linkedin/applicationEngine';
 import { linkedInConfigStore, careerBrainStore } from '@extension/storage';
 import { userQuestionManager } from '../linkedin/userQuestionManager';
 import { resolveModalFieldWithAudit, type FormFieldDescriptor } from '../linkedin/formQuestionResolver';
+import { fetchHrEmailForCompany } from '../../services/emailExtractor';
 
 const logger = createLogger('Action');
 
@@ -1176,6 +1178,26 @@ export class ActionBuilder {
       }
     }, linkedinEasyApplyActionSchema);
     actions.push(linkedinEasyApply);
+
+    // Fetch HR email for a company via silent Google Search tab (ported from noah-master)
+    const fetchHrEmail = new Action(async (input: z.infer<typeof fetchHrEmailActionSchema.schema>) => {
+      const intent = input.intent || `Fetching HR email for ${input.company_name}`;
+      this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_START, intent);
+
+      try {
+        const email = await fetchHrEmailForCompany(input.company_name);
+        const msg = email
+          ? `HR email for "${input.company_name}": ${email}`
+          : `No HR email found for "${input.company_name}"`;
+        this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_OK, msg);
+        return new ActionResult({ extractedContent: msg, includeInMemory: true });
+      } catch (error) {
+        const errorMsg = `Failed to fetch HR email for "${input.company_name}": ${error instanceof Error ? error.message : String(error)}`;
+        this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.ACT_FAIL, errorMsg);
+        return new ActionResult({ error: errorMsg, includeInMemory: true });
+      }
+    }, fetchHrEmailActionSchema);
+    actions.push(fetchHrEmail);
 
     return actions;
   }
