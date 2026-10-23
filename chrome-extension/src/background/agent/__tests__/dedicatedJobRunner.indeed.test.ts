@@ -3,6 +3,7 @@ import { dedicatedJobRunner } from '../linkedin/dedicatedJobRunner';
 import { dedicatedWindowManager, DedicatedWindowManager } from '../linkedin/dedicatedWindow';
 import { indeedAdapter } from '../platforms/indeed/indeedAdapter';
 import { queueSafetyStore, processedJobsStore } from '@extension/storage';
+import { DailyQuotaManager } from '../linkedin/rateLimiter';
 
 describe('DedicatedJobRunner - Indeed Auto Apply Flow & Scoping', () => {
   beforeEach(() => {
@@ -332,6 +333,14 @@ describe('DedicatedJobRunner - Indeed Auto Apply Flow & Scoping', () => {
   describe('Prioritized Locations Waterfall Search', () => {
     beforeEach(() => {
       vi.clearAllMocks();
+      // The daily quota is the backend's; these tests cover the search/apply loop, so every slot is granted
+      vi.spyOn(DailyQuotaManager, 'reserveApplication').mockResolvedValue({
+        allowed: true,
+        remaining: 100,
+        currentCount: 0,
+        maxQuota: 100,
+      });
+      vi.spyOn(DailyQuotaManager, 'commitApplication').mockResolvedValue();
       vi.spyOn(dedicatedWindowManager, 'getOrCreateRunnerWindow').mockResolvedValue({
         windowId: 10,
         tabId: 101,

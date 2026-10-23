@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { openJobformSignIn } from '@extension/shared';
+import { JOBFORM_PRIVACY_URL, openJobformSignIn } from '@extension/shared';
 import { FiExternalLink, FiLogIn, FiLoader } from 'react-icons/fi';
 
 interface AuthGateViewProps {
@@ -7,16 +7,17 @@ interface AuthGateViewProps {
 }
 
 /**
- * Shown while signed out. NanoBrowser has no login of its own: the user signs in on JobForm
+ * Shown while signed out. The extension has no login of its own: the user signs in on JobForm
  * Automator, and the website session reaches the extension automatically (verified by the backend
  * in the background), which replaces this view.
  */
 export const AuthGateView: React.FC<AuthGateViewProps> = ({ isDarkMode = false }) => {
-  const [opened, setOpened] = useState(false);
+  const [status, setStatus] = useState<'idle' | 'opened' | 'different-account'>('idle');
   const [checking, setChecking] = useState(false);
 
   useEffect(() => {
-    // Proactively check if any open JobForm Automator tab already has a candidate session
+    // Adopt an open JobForm Automator tab's session of the same account (never lifts an
+    // extension-only sign-out and never switches accounts).
     if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
       chrome.runtime.sendMessage({ type: 'SYNC_JOBFORM_SESSION' }).catch(() => undefined);
     }
@@ -24,21 +25,25 @@ export const AuthGateView: React.FC<AuthGateViewProps> = ({ isDarkMode = false }
 
   const handleLogin = async () => {
     setChecking(true);
+    let differentAccount = false;
     try {
       if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
-        const res = await chrome.runtime.sendMessage({ type: 'SYNC_JOBFORM_SESSION' });
+        const res = await chrome.runtime.sendMessage({ type: 'SYNC_JOBFORM_SESSION', interactive: true });
         if (res?.ok) {
           setChecking(false);
           return;
         }
+        differentAccount = res?.reason === 'different-account';
       }
     } catch {
       // Proceed to opening the sign-in page if query fails
     }
     setChecking(false);
     openJobformSignIn();
-    setOpened(true);
+    setStatus(differentAccount ? 'different-account' : 'opened');
   };
+
+  const muted = isDarkMode ? 'text-gray-400' : 'text-gray-500';
 
   return (
     <div
@@ -49,11 +54,9 @@ export const AuthGateView: React.FC<AuthGateViewProps> = ({ isDarkMode = false }
         className={`w-full max-w-sm rounded-2xl border p-6 text-center shadow-xl ${
           isDarkMode ? 'border-slate-700/80 bg-slate-800/80' : 'border-gray-200 bg-white'
         }`}>
-        <img src="/icon-128.png" alt="NanoBrowser" className="mx-auto mb-3 size-12" />
-        <h2 className="text-lg font-bold tracking-tight">Sign in to NanoBrowser</h2>
-        <p className={`mb-5 mt-1 text-xs ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>
-          Use your JobForm Automator account.
-        </p>
+        <img src="/icon-128.png" alt="JobForm Automator" className="mx-auto mb-3 size-12" />
+        <h2 className="text-lg font-bold tracking-tight">Sign in to JobForm Automator</h2>
+        <p className={`mb-5 mt-1 text-xs ${muted}`}>Use your JobForm Automator account.</p>
 
         <button
           type="button"
@@ -74,11 +77,28 @@ export const AuthGateView: React.FC<AuthGateViewProps> = ({ isDarkMode = false }
           )}
         </button>
 
-        {opened && (
-          <p role="status" className={`mt-3 text-[11px] ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>
-            Finish signing in on the JobForm Automator tab. NanoBrowser signs you in automatically.
+        {status === 'opened' && (
+          <p role="status" className={`mt-3 text-[11px] ${muted}`}>
+            Finish signing in on the JobForm Automator tab. The extension signs you in automatically.
           </p>
         )}
+        {status === 'different-account' && (
+          <p role="status" className="mt-3 text-[11px] text-amber-600">
+            The JobForm Automator website is signed in with a different account than the one last used in this
+            extension. To switch, sign out on the website and sign in again with the account you want.
+          </p>
+        )}
+
+        <p className={`mt-5 text-left text-[11px] leading-relaxed ${muted}`}>
+          To automate job applications, the extension reads the pages you ask it to work on and sends their content,
+          your instructions and the résumé details needed to fill forms to the JobForm Automator AI service. Your résumé
+          profile, job applications, AI responses and credit usage are stored with your account. By signing in, you
+          agree to this use as described in our{' '}
+          <a href={JOBFORM_PRIVACY_URL} target="_blank" rel="noopener noreferrer" className="underline">
+            Privacy Policy
+          </a>
+          .
+        </p>
       </div>
     </div>
   );

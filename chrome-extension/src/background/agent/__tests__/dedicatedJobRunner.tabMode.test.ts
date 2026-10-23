@@ -178,7 +178,7 @@ describe('LinkedIn and Naukri Tab Runner Mode & Navigation Boundary', () => {
   describe('LinkedIn Tab Runner Mode & Easy Apply Modal Interaction', () => {
     it('opens LinkedIn single job run in current window tab with linkedin.com boundary', async () => {
       vi.spyOn(authStorage, 'getSession').mockResolvedValue({ token: 'mock-token' } as any);
-      vi.spyOn(DailyQuotaManager, 'canApplyToday').mockResolvedValue({
+      vi.spyOn(DailyQuotaManager, 'reserveApplication').mockResolvedValue({
         allowed: true,
         currentCount: 0,
         maxQuota: 20,
@@ -244,7 +244,7 @@ describe('LinkedIn and Naukri Tab Runner Mode & Navigation Boundary', () => {
 
     it('navigating away from LinkedIn mid-run triggers stop and clean exit', async () => {
       vi.spyOn(authStorage, 'getSession').mockResolvedValue({ token: 'mock-token' } as any);
-      vi.spyOn(DailyQuotaManager, 'canApplyToday').mockResolvedValue({
+      vi.spyOn(DailyQuotaManager, 'reserveApplication').mockResolvedValue({
         allowed: true,
         currentCount: 0,
         maxQuota: 20,

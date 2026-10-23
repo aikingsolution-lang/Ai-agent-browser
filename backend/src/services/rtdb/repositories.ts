@@ -37,6 +37,7 @@ import type {
   LlmUsageRecord,
   PlanRecord,
   ProviderSubscriptionLinkRecord,
+  CheckoutSessionRecord,
   SubscriptionRecord,
   SubscriptionStatus,
   TrialFlagRecord,
@@ -244,6 +245,22 @@ export class SubscriptionRepository {
     // Aborted without a value: re-read to be certain.
     const fresh = await this.getProviderLink(providerKey);
     return { ownerUid: fresh?.uid ?? link.uid, claimedNow: false };
+  }
+
+  static async updateProviderLink(providerKey: string, fields: Partial<ProviderSubscriptionLinkRecord>): Promise<void> {
+    await dbRef(paths.providerSubscription(providerKey)).update(stripUndefined(fields));
+  }
+
+  static getCheckoutSession(uid: string, planCode: string): Promise<CheckoutSessionRecord | null> {
+    return readVal<CheckoutSessionRecord>(paths.checkoutSession(uid, planCode));
+  }
+
+  static async setCheckoutSession(uid: string, planCode: string, session: CheckoutSessionRecord): Promise<void> {
+    await dbRef(paths.checkoutSession(uid, planCode)).set(session);
+  }
+
+  static async clearCheckoutSession(uid: string, planCode: string): Promise<void> {
+    await dbRef(paths.checkoutSession(uid, planCode)).remove();
   }
 }
 

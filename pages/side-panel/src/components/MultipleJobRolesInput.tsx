@@ -375,8 +375,8 @@ export function MultipleJobRolesInput({
 
       {/* Footer Helper Note */}
       <p className="text-[10px] opacity-60 leading-tight">
-        💡 Multi-role targeting enables NanoBrowser to discover and apply for jobs matching any of these roles across
-        Naukri, Indeed, and LinkedIn. The primary role is starred ⭐.
+        💡 Multi-role targeting enables JobForm Automator to discover and apply for jobs matching any of these roles
+        across Naukri, Indeed, and LinkedIn. The primary role is starred ⭐.
       </p>
     </div>
   );

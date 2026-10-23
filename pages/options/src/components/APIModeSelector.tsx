@@ -154,7 +154,8 @@ export const APIModeSelector: React.FC<APIModeSelectorProps> = ({ isDarkMode, on
               API Mode & Cloud Key Management
             </h2>
             <p className={`mt-1 text-sm ${isDarkMode ? 'text-gray-400' : 'text-gray-600'}`}>
-              Choose how Nanobrowser connects to LLM providers: bring your own API key or use built-in Cloud API access.
+              Choose how JobForm Automator connects to LLM providers: bring your own API key or use built-in Cloud API
+              access.
             </p>
           </div>
           <span

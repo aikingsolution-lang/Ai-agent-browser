@@ -110,7 +110,7 @@ describe('Career Brain profile & daily quota (Firebase RTDB)', () => {
     expect(resB.body.data).toBeNull();
   });
 
-  it('5. Quota: concurrent check-and-increment never exceeds the daily limit', async () => {
+  it('5. Quota: concurrent check-and-increment never exceeds the free limit of 10 and creates no placeholder profile', async () => {
     const { uid, auth } = await registerViaApi(app, { email: 'quota@profiletest.com' });
 
     const responses = await Promise.all(
@@ -120,20 +120,18 @@ describe('Career Brain profile & daily quota (Firebase RTDB)', () => {
     );
     const allowed = responses.filter(res => res.status === 200);
     const rejected = responses.filter(res => res.status === 429);
-    expect(allowed).toHaveLength(15);
-    expect(rejected).toHaveLength(5);
+    expect(allowed).toHaveLength(10);
+    expect(rejected).toHaveLength(10);
     expect(rejected[0].body.error.code).toBe('QUOTA_EXCEEDED');
 
-    const stored = await rtdb.careerBrain(uid);
-    expect(stored.dailyQuota.appliedToday).toBe(15);
-    // The first increment auto-created the placeholder profile, as the Mongo version did
-    expect(stored.fullName).toBe('Candidate');
+    expect((await testDb.ref(paths.applicationQuota(uid)).get()).val().applied).toBe(10);
+    expect(await rtdb.careerBrain(uid)).toBeNull();
 
     const quota = await request(app).get('/api/v1/profile/quota').set('Authorization', auth);
     expect(quota.body.data).toMatchObject({
       allowed: false,
-      appliedToday: 15,
-      dailyLimit: 15,
+      appliedToday: 10,
+      dailyLimit: 10,
       remaining: 0,
       tier: 'free',
     });
@@ -143,9 +141,7 @@ describe('Career Brain profile & daily quota (Firebase RTDB)', () => {
     const { uid, auth } = await registerViaApi(app, { email: 'quotaplan@profiletest.com' });
     await request(app).put('/api/v1/profile').set('Authorization', auth).send(extensionProfile());
     await rtdb.patchSubscription(uid, { status: 'ACTIVE', planCodeSnapshot: 'pro', isTrial: false });
-    await testDb
-      .ref(paths.careerBrainField(uid, 'dailyQuota'))
-      .set({ appliedToday: 15, dailyLimit: 15, lastResetDate: '2000-01-01' });
+    await testDb.ref(paths.applicationQuota(uid)).set({ day: '2000-01-01', applied: 15 });
 
     const res = await request(app).post('/api/v1/profile/quota/check-and-increment').set('Authorization', auth);
     expect(res.status).toBe(200);
@@ -159,10 +155,8 @@ describe('Career Brain profile & daily quota (Firebase RTDB)', () => {
         .send(extensionProfile({ currentTitle: 'Lead' })),
       request(app).post('/api/v1/profile/quota/check-and-increment').set('Authorization', auth),
     ]);
-    const stored = await rtdb.careerBrain(uid);
-    expect(stored.dailyQuota.appliedToday).toBe(2);
-    expect(stored.currentTitle).toBe('Lead');
-    expect(stored.tier).toBe('premium');
+    expect((await testDb.ref(paths.applicationQuota(uid)).get()).val().applied).toBe(2);
+    expect((await rtdb.careerBrain(uid)).currentTitle).toBe('Lead');
   });
 
   it('7. upgradeToPremium sets tier and the plan limit; it is a no-op without a profile', async () => {

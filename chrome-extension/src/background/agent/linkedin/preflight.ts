@@ -18,7 +18,10 @@ export interface PreflightResult {
 export interface PreflightDeps {
   apiClient?: {
     checkHealth: () => Promise<{ status: string }>;
-    getCreditsBalance: () => Promise<{ success: boolean; data?: { remainingCredits: number } }>;
+    getCreditsBalance: () => Promise<{
+      success: boolean;
+      data?: { remainingCredits: number; premiumCovered?: boolean };
+    }>;
     getFreshToken?: () => Promise<string | null>;
     lastRefreshStatus?: 'ok' | 'invalid' | 'unavailable' | null;
   };
@@ -154,7 +157,8 @@ export async function runPreflight(deps?: PreflightDeps): Promise<PreflightResul
       };
     }
     const remaining = balanceCheck.data.remainingCredits ?? 0;
-    if (remaining < threshold) {
+    // Verified JobForm Automator Premium includes AI use, so the credit minimum does not apply.
+    if (!balanceCheck.data.premiumCovered && remaining < threshold) {
       const msg = `🛑 Insufficient credit balance (${remaining} remaining, minimum ${threshold} required). Please top up credits.`;
       return {
         ok: false,

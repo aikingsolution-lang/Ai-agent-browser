@@ -807,8 +807,8 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
             </span>
           </div>
           <p className="text-[11px] opacity-70 leading-relaxed">
-            NanoBrowser dynamically analyzes job descriptions and auto-selects the resume profile with the highest skill
-            & keyword match for each application.
+            JobForm Automator dynamically analyzes job descriptions and auto-selects the resume profile with the highest
+            skill & keyword match for each application.
           </p>
 
           <div className="space-y-2">

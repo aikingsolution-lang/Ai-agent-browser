@@ -61,7 +61,7 @@ export function isElementVisible(el: HTMLElement | null): boolean {
  * Send real-time step progress notifications back to Background & Side Panel
  */
 function notify(message: string, isError: boolean = false) {
-  console.log(`[NanoBrowser Applier] ${message}`);
+  console.log(`[JobForm Automator Applier] ${message}`);
   try {
     chrome.runtime.sendMessage({
       type: 'APPLY_STEP_UPDATE',
@@ -868,7 +868,7 @@ async function solveQuestionsWithAI(unanswered: FormQuestion[]): Promise<void> {
       notify('⚠️ AI question solver returned no results or timed out. Proceeding with best-effort.', true);
     }
   } catch (err) {
-    console.error('[NanoBrowser Applier] Failed to solve questions with AI:', err);
+    console.error('[JobForm Automator Applier] Failed to solve questions with AI:', err);
     notify('⚠️ AI question solver error. Proceeding with best-effort.', true);
   }
 }

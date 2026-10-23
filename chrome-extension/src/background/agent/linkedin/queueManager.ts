@@ -27,7 +27,7 @@ import {
   queueSafetyStore,
 } from '@extension/storage';
 import { ApplicationEngine } from './applicationEngine';
-import { DailyQuotaManager } from './rateLimiter';
+import { DailyQuotaManager, applicationKey, quotaStopMessage } from './rateLimiter';
 import type { IJobData } from './types';
 
 const logger = createLogger('LinkedInQueueManager');
@@ -170,13 +170,10 @@ export class LinkedInQueueManager {
         break;
       }
 
-      // 2. Daily Quota Enforcement (15 max per day)
+      // 2. Daily quota (server-enforced; each job also holds a slot while it is applied)
       const quota = await DailyQuotaManager.canApplyToday();
       if (!quota.allowed) {
-        this.notifyProgress(
-          `🛑 Daily application quota reached (${quota.currentCount} applications today). Halting queue.`,
-          true,
-        );
+        this.notifyProgress(`🛑 ${quotaStopMessage(quota)} Halting queue.`, true);
         await this.stopQueue();
         break;
       }
@@ -184,7 +181,11 @@ export class LinkedInQueueManager {
       // 3. Credits Guard: check user has minimum 2 credits before attempting each job
       try {
         const balanceRes = await backendApiClient.getCreditsBalance().catch(() => null);
-        if (balanceRes?.data?.remainingCredits !== undefined && balanceRes.data.remainingCredits < 2) {
+        if (
+          !balanceRes?.data?.premiumCovered &&
+          balanceRes?.data?.remainingCredits !== undefined &&
+          balanceRes.data.remainingCredits < 2
+        ) {
           this.notifyProgress(
             `🛑 Insufficient credits: You have ${balanceRes.data.remainingCredits} credits remaining, but at least 2 credits are required to apply. Halting queue.`,
             true,
@@ -244,8 +245,19 @@ export class LinkedInQueueManager {
     logger.info(`[QueueManager] Processing Job: "${job.title}" [ID: ${job.id}] -> ${job.url}`);
 
     let tabId: number | null = null;
+    // The agent runner holds its own quota slot; the direct content-script apply holds one here.
+    let quotaKey: string | null = this.agentApplyRunner ? null : applicationKey(job.id, job.url, 'linkedin');
 
     try {
+      if (quotaKey) {
+        const slot = await DailyQuotaManager.reserveApplication(quotaKey, 'queue:content-script');
+        if (!slot.allowed) {
+          quotaKey = null;
+          this.notifyProgress(`🛑 ${quotaStopMessage(slot)}`, true);
+          return false;
+        }
+      }
+
       this.notifyProgress(`🌐 Opening job page: "${job.title}"...`);
 
       // 1. Create dedicated tab for this job
@@ -315,9 +327,10 @@ export class LinkedInQueueManager {
 
       // 6. Record status in JobQueue and handle outcome
       if (result.success) {
-        // If agentApplyRunner was not used, increment daily quota here (agent runner already does so)
-        if (!this.agentApplyRunner) {
-          await DailyQuotaManager.incrementAppliedCount();
+        // The agent runner records its own submissions; the content-script apply is recorded here
+        if (quotaKey) {
+          await DailyQuotaManager.commitApplication(quotaKey);
+          quotaKey = null;
         }
         await jobQueueStore.markJobCompleted(job, 'APPLIED');
         this.notifyProgress(`🎉 Successfully applied to "${result.title || job.title}"!`);
@@ -338,6 +351,7 @@ export class LinkedInQueueManager {
       this.notifyProgress(`🛑 Queue stopped: Error processing "${job.title}": ${errStr}`, true);
       return false;
     } finally {
+      if (quotaKey) await DailyQuotaManager.releaseApplication(quotaKey);
       // Close tab cleanly to prevent clutter and memory buildup
       if (tabId !== null) {
         try {

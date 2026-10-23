@@ -106,9 +106,15 @@ describe('Phase 8: Commercial Payment & Subscription Lifecycle Engine (Firebase 
     expect(res.body.data.currency).toBe('INR');
     expect(res.body.data.subscriptionId).toBeDefined();
 
-    // The Razorpay id is linked to the user's subscription and reserved for this user
-    expect((await rtdb.subscription(uid)).providerSubscriptionId).toBe(res.body.data.subscriptionId);
-    expect((await readPath(paths.providerSubscription(res.body.data.subscriptionId))).uid).toBe(uid);
+    // The Razorpay id is reserved for this user and the plan being bought; the current plan is
+    // untouched until the payment is confirmed
+    expect(await readPath(paths.providerSubscription(res.body.data.subscriptionId))).toMatchObject({
+      uid,
+      planCode: 'pro',
+      status: 'PENDING',
+    });
+    expect((await rtdb.subscription(uid)).status).toBe('TRIALING');
+    expect((await rtdb.subscription(uid)).providerSubscriptionId).toBeUndefined();
 
     const freeRes = await request(app)
       .post('/api/v1/subscription/checkout')
@@ -165,8 +171,12 @@ describe('Phase 8: Commercial Payment & Subscription Lifecycle Engine (Firebase 
     expect(verifyRes.body.data.hasActiveEntitlement).toBe(true);
     expect(verifyRes.body.data.subscription.currentPeriodEnd).toMatch(/^\d{4}-\d{2}-\d{2}T/);
 
+    // The plan that was bought (pro), with its credits — not the trial's
+    const sub = await rtdb.subscription(uid);
+    expect(sub).toMatchObject({ planCodeSnapshot: 'pro', creditsSnapshot: 5000, providerSubscriptionId: rzpSubId });
     const creditBalance = await rtdb.balance(uid);
-    expect(creditBalance.allocatedCredits).toBe(100);
+    expect(creditBalance.allocatedCredits).toBe(5000);
+    expect(creditBalance.remainingCredits).toBe(5000);
     expect(creditBalance.subscriptionId).toBe((await rtdb.subscription(uid)).subscriptionId);
     expect((await rtdb.ledger(uid)).some(entry => entry.type === 'SUBSCRIPTION_RENEWAL')).toBe(true);
   });
@@ -305,19 +315,17 @@ describe('Phase 8: Commercial Payment & Subscription Lifecycle Engine (Firebase 
 
   it('14. subscription.activated without a payment entity activates the linked subscription (no undefined write)', async () => {
     const { uid, rzpSubId } = await userWithCheckout('webhookactivate@paytest.com');
-    await testDb
-      .ref(paths.careerBrain(uid))
-      .set({
-        uid,
-        fullName: 'W',
-        email: 'w@x.y',
-        currentTitle: 't',
-        resumeText: 'r',
-        tier: 'free',
-        dailyQuota: { appliedToday: 0, dailyLimit: 15, lastResetDate: '2026-01-01' },
-        createdAt: 1,
-        updatedAt: 1,
-      });
+    await testDb.ref(paths.careerBrain(uid)).set({
+      uid,
+      fullName: 'W',
+      email: 'w@x.y',
+      currentTitle: 't',
+      resumeText: 'r',
+      tier: 'free',
+      dailyQuota: { appliedToday: 0, dailyLimit: 15, lastResetDate: '2026-01-01' },
+      createdAt: 1,
+      updatedAt: 1,
+    });
 
     const res = await postWebhook({
       event_id: 'evt_activate_1',
@@ -376,9 +384,15 @@ describe('Phase 8: Commercial Payment & Subscription Lifecycle Engine (Firebase 
     expect((await rtdb.subscription(uid)).status).toBe('ACTIVE');
   });
 
-  it('16. subscription.halted marks PAST_DUE; subscription.cancelled schedules cancellation', async () => {
+  it('16. subscription.halted marks a paid plan PAST_DUE; subscription.cancelled schedules cancellation', async () => {
     const { uid, rzpSubId } = await userWithCheckout('webhookhalted@paytest.com');
     const now = Math.floor(Date.now() / 1000);
+    await postWebhook({
+      event_id: 'evt_h0',
+      event: 'subscription.activated',
+      created_at: now - 1,
+      payload: { subscription: { entity: { id: rzpSubId } } },
+    });
 
     await postWebhook({
       event_id: 'evt_h1',

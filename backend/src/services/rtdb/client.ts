@@ -60,6 +60,8 @@ export const paths = {
     `${RTDB_ROOT}/subscription_history/${uidSeg(uid)}/${keySeg(subscriptionId, 'subscription id')}`,
   providerSubscription: (key: string) =>
     `${RTDB_ROOT}/provider_subscriptions/${keySeg(key, 'provider subscription key')}`,
+  checkoutSession: (uid: string, planCode: string) =>
+    `${RTDB_ROOT}/checkout_sessions/${uidSeg(uid)}/${keySeg(planCode, 'plan code')}`,
 
   creditBalance: (uid: string) => `${RTDB_ROOT}/credit_balances/${uidSeg(uid)}`,
   creditBalances: () => `${RTDB_ROOT}/credit_balances`,
@@ -79,6 +81,8 @@ export const paths = {
   careerBrain: (uid: string) => `${RTDB_ROOT}/career_brains/${uidSeg(uid)}`,
   careerBrainField: (uid: string, field: 'createdAt' | 'dailyQuota' | 'tier' | 'updatedAt') =>
     `${RTDB_ROOT}/career_brains/${uidSeg(uid)}/${field}`,
+
+  applicationQuota: (uid: string) => `${RTDB_ROOT}/application_quota/${uidSeg(uid)}`,
 
   jobApplications: (uid: string) => `${RTDB_ROOT}/job_applications/${uidSeg(uid)}`,
   jobApplication: (uid: string, appId: string) =>

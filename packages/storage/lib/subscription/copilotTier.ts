@@ -11,76 +11,88 @@ export interface PlanLimitDetails {
 }
 
 /**
- * Standard Daily Application Quota Mapping based on Subscription:
- * - Free Trial: 15 applications / day (Safety protected, non-negotiable for trial accounts)
- * - Starter: 35 applications / day
- * - Pro: 50 applications / day
- * - Power / Enterprise: 75 applications / day
+ * Daily application limits per plan — a mirror of the backend's ApplicationQuotaService, which
+ * counts and enforces them (these values only drive display and settings caps):
+ * - Free / free trial: 10 per day
+ * - JobForm Automator Premium or Diamond (verified on the website): 300 per day
+ * - Starter 50, Pro 100, Power 500 per day
+ * A user with several plans gets the highest limit.
  */
 export const PLAN_DAILY_LIMITS: Record<string, PlanLimitDetails> = {
   'free-trial': {
     planCode: 'free-trial',
     planDisplayName: 'Free Trial',
-    maxDailyApplications: 15,
+    maxDailyApplications: 10,
     isFreeTrial: true,
     tier: 'free',
   },
   free: {
     planCode: 'free',
     planDisplayName: 'Free Plan',
-    maxDailyApplications: 15,
+    maxDailyApplications: 10,
     isFreeTrial: true,
     tier: 'free',
   },
   starter: {
     planCode: 'starter',
     planDisplayName: 'Starter Plan',
-    maxDailyApplications: 35,
+    maxDailyApplications: 50,
     isFreeTrial: false,
     tier: 'starter',
   },
   pro: {
     planCode: 'pro',
     planDisplayName: 'Pro Plan',
-    maxDailyApplications: 50,
+    maxDailyApplications: 100,
     isFreeTrial: false,
     tier: 'pro',
   },
   power: {
     planCode: 'power',
     planDisplayName: 'Power Enterprise Plan',
-    maxDailyApplications: 75,
+    maxDailyApplications: 500,
+    isFreeTrial: false,
+    tier: 'power',
+  },
+  premium: {
+    planCode: 'premium',
+    planDisplayName: 'Premium',
+    maxDailyApplications: 300,
+    isFreeTrial: false,
+    tier: 'pro',
+  },
+  diamond: {
+    planCode: 'diamond',
+    planDisplayName: 'Diamond',
+    maxDailyApplications: 300,
     isFreeTrial: false,
     tier: 'power',
   },
 };
 
 /**
- * Resolves the user's active plan limit details based on the current authenticated session.
- * If user has no active subscription or is on free-trial, strictly limits to 15 apps/day.
+ * The user's plan as stored in the session (both values come from the backend). The backend
+ * remains the authority on the limit actually enforced.
  */
 export async function getPlanLimitDetails(): Promise<PlanLimitDetails> {
   try {
     const session = await authStorage.getSession();
+    const candidates: PlanLimitDetails[] = [PLAN_DAILY_LIMITS.free];
+
     const rawPlan = (session?.subscription?.planCode || '').toLowerCase().trim();
     const status = (session?.subscription?.status || '').toLowerCase().trim();
-
-    // Check if user has an active paid subscription
     if (status === 'active' && rawPlan && PLAN_DAILY_LIMITS[rawPlan]) {
-      return PLAN_DAILY_LIMITS[rawPlan];
+      candidates.push(PLAN_DAILY_LIMITS[rawPlan]);
     }
 
-    // Check legacy / external premium tier if present
     const premiumTier = (session?.premium?.tier || '').toLowerCase();
     if (session?.premium?.isPremium && !session?.premium?.expired) {
-      if (premiumTier === 'diamond') return PLAN_DAILY_LIMITS.power;
-      if (premiumTier === 'premium') return PLAN_DAILY_LIMITS.pro;
+      candidates.push(premiumTier === 'diamond' ? PLAN_DAILY_LIMITS.diamond : PLAN_DAILY_LIMITS.premium);
     }
 
-    // Default: Free Trial (15/day safe default)
-    return PLAN_DAILY_LIMITS['free-trial'];
+    return candidates.reduce((best, plan) => (plan.maxDailyApplications > best.maxDailyApplications ? plan : best));
   } catch {
-    return PLAN_DAILY_LIMITS['free-trial'];
+    return PLAN_DAILY_LIMITS.free;
   }
 }
 

@@ -186,4 +186,39 @@ export class RazorpayService {
       throw error;
     }
   }
+
+  /**
+   * Cancels a Razorpay subscription (e.g. the previous plan after an upgrade, so the user is not
+   * billed for both). `atCycleEnd` keeps it running until the current billing cycle ends.
+   * Mock subscriptions (tests, unconfigured keys) are cancelled locally only.
+   */
+  public static async cancelRazorpaySubscription(subscriptionId: string, atCycleEnd = false): Promise<void> {
+    const isMock =
+      env.NODE_ENV === 'test' ||
+      !env.RAZORPAY_KEY_ID ||
+      !env.RAZORPAY_KEY_SECRET ||
+      env.RAZORPAY_KEY_ID.includes('placeholder') ||
+      env.RAZORPAY_KEY_ID.includes('mock') ||
+      env.RAZORPAY_KEY_ID.includes('test_key_id') ||
+      subscriptionId.startsWith('sub_rzp_');
+    if (isMock) {
+      logger.info(`[Mock Mode] Cancelled Razorpay Subscription ${subscriptionId}`);
+      return;
+    }
+
+    const authHeader = `Basic ${Buffer.from(`${env.RAZORPAY_KEY_ID}:${env.RAZORPAY_KEY_SECRET}`).toString('base64')}`;
+    const response = await fetch(
+      `https://api.razorpay.com/v1/subscriptions/${encodeURIComponent(subscriptionId)}/cancel`,
+      {
+        method: 'POST',
+        headers: { Authorization: authHeader, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cancel_at_cycle_end: atCycleEnd ? 1 : 0 }),
+      },
+    );
+    if (!response.ok) {
+      const data = (await response.json().catch(() => ({}))) as { error?: { description?: string } };
+      throw new Error(data?.error?.description || `Razorpay cancel returned HTTP ${response.status}`);
+    }
+    logger.info(`[Real Razorpay API] Cancelled subscription ${subscriptionId} (atCycleEnd=${atCycleEnd})`);
+  }
 }

@@ -15,7 +15,7 @@ import {
   getPlanLimitDetails,
   type PlanLimitDetails,
 } from '@extension/storage';
-import { backendApiClient } from '@extension/shared';
+import { backendApiClient, openJobformPricing } from '@extension/shared';
 import {
   FiPlay,
   FiSquare,
@@ -91,6 +91,17 @@ export interface AutoEmailProgress {
   results?: AutoEmailJob[];
 }
 
+/** Display names for the plan codes returned by the backend quota. */
+const PLAN_LABELS: Record<string, string> = {
+  free: 'Free',
+  'free-trial': 'Free',
+  premium: 'Premium',
+  diamond: 'Diamond',
+  starter: 'Starter',
+  pro: 'Pro',
+  power: 'Power',
+};
+
 interface LinkedInApplyDashboardProps {
   isDarkMode?: boolean;
   onStartAutoApply?: (platform?: 'linkedin' | 'naukri' | 'indeed') => void;
@@ -134,6 +145,17 @@ export function LinkedInApplyDashboard({
 }: LinkedInApplyDashboardProps) {
   const [selectedPlatform, setSelectedPlatform] = useState<'linkedin' | 'naukri' | 'indeed'>('linkedin');
   const [quota, setQuota] = useState<DailyQuotaData | null>(null);
+  const quotaRemaining = quota ? (quota.remaining ?? Math.max(0, quota.maxDailyQuota - quota.appliedCount)) : 10;
+  const quotaIsPaid = Boolean(quota?.isPaid);
+  const quotaPlanLabel = PLAN_LABELS[quota?.activePlanCode ?? 'free'] ?? (quotaIsPaid ? 'Paid Plan' : 'Free');
+  const quotaResetLabel = quota?.resetsAt
+    ? new Date(quota.resetsAt).toLocaleString([], {
+        hour: 'numeric',
+        minute: '2-digit',
+        month: 'short',
+        day: 'numeric',
+      })
+    : null;
   const [session, setSession] = useState<UserSessionData | null>(null);
   const [platformPauseInfo, setPlatformPauseInfo] = useState<{ isPaused: boolean; reason?: string }>({
     isPaused: false,
@@ -350,51 +372,20 @@ export function LinkedInApplyDashboard({
     }
   }, []);
 
-  // Sync quota from storage & backend (event-driven + 60s background sync)
+  // Quota from the backend (event-driven + 60s background sync); the local copy is display-only
   const loadQuota = useCallback(async (forceBackend = false) => {
     try {
-      const data = await dailyQuotaStore.getQuotaData();
-      setQuota(data);
+      setQuota(await dailyQuotaStore.getQuotaData());
 
       const now = Date.now();
-      // Only call backend if forced or if at least 60s have elapsed since last sync
       if (!forceBackend && now - lastBackendSyncRef.current < 60000) {
         return;
       }
       lastBackendSyncRef.current = now;
 
-      // 1. Try syncing directly from backend quota endpoint
       const backendQuota = await backendApiClient.getProfileQuota().catch(() => null);
       if (backendQuota) {
-        const activeLimit = backendQuota.dailyLimit;
-        if (data.maxDailyQuota !== activeLimit) {
-          await dailyQuotaStore.setMaxDailyLimit(activeLimit);
-        }
-        setQuota({
-          ...data,
-          appliedCount: Math.max(data.appliedCount, backendQuota.appliedToday),
-          maxDailyQuota: activeLimit,
-        });
-        return;
-      }
-
-      // 2. Fallback to subscription plan check
-      const subRes = await backendApiClient.getSubscriptionMe().catch(() => null);
-      if (subRes?.data?.subscription) {
-        const sub = subRes.data.subscription;
-        let activeLimit = 15;
-        if (sub.status === 'ACTIVE') {
-          if (sub.planCodeSnapshot === 'power') activeLimit = 500;
-          else if (sub.planCodeSnapshot === 'pro') activeLimit = 100;
-          else if (sub.planCodeSnapshot === 'starter') activeLimit = 50;
-        }
-        if (data.maxDailyQuota !== activeLimit) {
-          await dailyQuotaStore.setMaxDailyLimit(activeLimit);
-        }
-        setQuota({
-          ...data,
-          maxDailyQuota: activeLimit,
-        });
+        setQuota(await dailyQuotaStore.applyServerQuota(backendQuota));
       }
     } catch {
       const localData = await dailyQuotaStore.getQuotaData().catch(() => null);
@@ -417,8 +408,24 @@ export function LinkedInApplyDashboard({
       loadQuota(true);
     }, 60000);
 
+    // Re-read the quota as soon as the verified plan changes (e.g. after a payment)
+    let planSignature = '';
+    const unsubscribeAuth = authStorage.subscribe(async () => {
+      const session = await authStorage.getSession().catch(() => null);
+      const signature = JSON.stringify([
+        session?.user?.id ?? null,
+        session?.premium?.tier ?? null,
+        session?.premium?.isPremium ?? null,
+        session?.subscription?.status ?? null,
+        session?.subscription?.planCode ?? null,
+      ]);
+      if (planSignature && signature !== planSignature) loadQuota(true);
+      planSignature = signature;
+    });
+
     return () => {
       unsubscribe();
+      unsubscribeAuth();
       clearInterval(interval);
     };
   }, [loadQuota]);
@@ -498,7 +505,7 @@ export function LinkedInApplyDashboard({
         </button>
       </div>
 
-      {/* Quota Tracker */}
+      {/* Quota Tracker (counted and enforced by the backend, per account and UTC day) */}
       <div
         className={`rounded-xl border p-3 flex items-center justify-between text-xs ${isDarkMode ? 'border-sky-900 bg-slate-800/60' : 'border-sky-100 bg-white/80 shadow-sm'}`}>
         <div>
@@ -506,33 +513,21 @@ export function LinkedInApplyDashboard({
             <p className="text-[11px] opacity-70 font-medium">Daily Application Limit</p>
             <span
               className={`text-[9px] px-1.5 py-0.2 rounded font-bold uppercase tracking-wider ${
-                (planDetails?.isFreeTrial ?? true)
-                  ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
-                  : 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
+                quotaIsPaid
+                  ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
+                  : 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
               }`}>
-              {planDetails?.planDisplayName || 'Free Trial'}
+              {quotaIsPaid ? `${quotaPlanLabel} Active` : quotaPlanLabel}
             </span>
           </div>
-          <div className="flex items-center space-x-2">
-            <p className="text-sm font-bold text-sky-400">
-              {quota ? `${quota.appliedCount} / ${quota.maxDailyQuota}` : '0 / 15'} Applied Today
-            </p>
-            {quota && quota.appliedCount > 0 && (
-              <button
-                onClick={async () => {
-                  const updated = await dailyQuotaStore.resetTodayAppliedCount();
-                  setQuota(updated);
-                }}
-                title="Reset today's applied count to 0"
-                className="text-[10px] px-1.5 py-0.5 rounded bg-slate-700 hover:bg-slate-600 text-gray-300 transition-colors cursor-pointer">
-                Reset
-              </button>
-            )}
-          </div>
+          <p className="text-sm font-bold text-sky-400">
+            {quota ? `${quota.appliedCount} / ${quota.maxDailyQuota}` : '0 / 10'} Applied Today
+          </p>
+          {quotaResetLabel && <p className="text-[10px] opacity-60">Resets at {quotaResetLabel}</p>}
         </div>
         <div className="text-right flex items-center gap-1.5">
           <span className="rounded-full border border-sky-500/30 bg-sky-500/10 px-2.5 py-1 text-[11px] font-semibold text-sky-400">
-            {quota ? Math.max(0, quota.maxDailyQuota - quota.appliedCount) : 15} Remaining
+            {quotaRemaining} Remaining
           </span>
           {onOpenPlansModal && (
             <button
@@ -544,6 +539,28 @@ export function LinkedInApplyDashboard({
           )}
         </div>
       </div>
+
+      {quota && quotaRemaining <= 0 && (
+        <div
+          role="alert"
+          className={`rounded-xl border p-3 text-xs ${isDarkMode ? 'border-amber-700 bg-amber-900/20 text-amber-200' : 'border-amber-200 bg-amber-50 text-amber-800'}`}>
+          <p className="font-bold">Daily Limit Reached</p>
+          <p className="mt-0.5">
+            {quotaIsPaid
+              ? `You have used all ${quota.maxDailyQuota} applications for today.`
+              : `You have used all ${quota.maxDailyQuota} free applications for today. Upgrade to Premium for up to 300 applications a day.`}
+            {quotaResetLabel ? ` Your limit resets at ${quotaResetLabel}.` : ''}
+          </p>
+          {!quotaIsPaid && (
+            <button
+              type="button"
+              onClick={() => openJobformPricing()}
+              className="mt-2 rounded-md bg-gradient-to-r from-amber-500 to-orange-500 px-3 py-1 text-[11px] font-bold text-white hover:from-amber-600 hover:to-orange-600 cursor-pointer">
+              Upgrade to Premium
+            </button>
+          )}
+        </div>
+      )}
 
       {/* Easy Apply & Match Criteria Settings Widget */}
       <div

@@ -8,6 +8,31 @@ const isFirefox = process.env.__FIREFOX__ === 'true';
 /** JobForm Automator website (see JOBFORM_WEBSITE_ORIGINS in packages/shared/lib/config.ts). */
 const JOBFORM_WEBSITE_MATCHES = ['https://www.jobformautomator.com/*', 'https://jobformautomator.com/*'];
 const isOpera = process.env.__OPERA__ === 'true';
+const isDev = process.env.__DEV__ === 'true';
+
+/**
+ * Dev only: the HMR loader imports chunks into content scripts by extension URL. Production content
+ * scripts are self-contained, and exposing the extension's files to every site would only let
+ * pages detect that the extension is installed.
+ */
+const devWebAccessibleResources = isDev
+  ? {
+      web_accessible_resources: [
+        {
+          resources: [
+            '*.js',
+            '*.css',
+            '*.svg',
+            'icon-128.png',
+            'icon-32.png',
+            'permission/index.html',
+            'permission/permission.js',
+          ],
+          matches: ['*://*/*'],
+        },
+      ],
+    }
+  : {};
 
 /**
  * If you want to disable the sidePanel, you can delete withSidePanel function and remove the sidePanel HoC on the manifest declaration.
@@ -61,29 +86,25 @@ const manifest = withOperaSidebar(
      * https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/Internationalization
      */
     name: '__MSG_app_metadata_name__',
+    description: '__MSG_app_metadata_description__',
     version: packageJson.version,
     minimum_chrome_version: '116',
-    host_permissions: ['https://*/*', '<all_urls>'],
-    permissions: [
-      'storage',
-      'scripting',
-      'tabs',
-      'activeTab',
-      'debugger',
-      'unlimitedStorage',
-      'webNavigation',
-      'cookies',
-      'alarms',
-    ],
+    host_permissions: ['<all_urls>'],
+    permissions: ['storage', 'scripting', 'tabs', 'debugger', 'unlimitedStorage', 'webNavigation', 'cookies', 'alarms'],
     options_page: 'options/index.html',
     background: {
       service_worker: 'background.iife.js',
       type: 'module',
     },
     action: {
-      default_icon: 'icon-32.png',
+      default_icon: {
+        16: 'icon-16.png',
+        32: 'icon-32.png',
+      },
     },
     icons: {
+      16: 'icon-16.png',
+      48: 'icon-48.png',
       128: 'icon-128.png',
     },
     content_scripts: [
@@ -101,20 +122,7 @@ const manifest = withOperaSidebar(
         js: ['content/index.iife.js'],
       },
     ],
-    web_accessible_resources: [
-      {
-        resources: [
-          '*.js',
-          '*.css',
-          '*.svg',
-          'icon-128.png',
-          'icon-32.png',
-          'permission/index.html',
-          'permission/permission.js',
-        ],
-        matches: ['*://*/*'],
-      },
-    ],
+    ...devWebAccessibleResources,
   }),
 );
 

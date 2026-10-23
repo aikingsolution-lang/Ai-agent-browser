@@ -49,6 +49,7 @@ export class LlmController {
             maxTokens,
             idempotencyKey,
             runId,
+            premiumCovered: req.premiumCovered === true,
             onChunk: (chunk: string) => {
               if (!res.writableEnded) {
                 res.write(`data: ${JSON.stringify({ chunk })}\n\n`);
@@ -84,6 +85,7 @@ export class LlmController {
         maxTokens,
         idempotencyKey,
         runId,
+        premiumCovered: req.premiumCovered === true,
       });
 
       if (req.path.endsWith('/completions')) {

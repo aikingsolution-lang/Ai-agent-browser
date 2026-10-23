@@ -15,7 +15,8 @@
  */
 
 import { AppError } from '../middleware/errorHandler.js';
-import { CareerBrainRepository, SubscriptionRepository } from './rtdb/repositories.js';
+import { ApplicationQuotaService } from './applicationQuota.service.js';
+import { CareerBrainRepository } from './rtdb/repositories.js';
 import { stripUndefined, todayString } from './rtdb/rtdbUtils.js';
 import { customAnswersToList, skillExperienceToList } from './rtdb/mappers.js';
 import { toCareerBrainDto, type CareerBrainDto } from './rtdb/serializers.js';
@@ -156,10 +157,6 @@ function newProfileRecord(uid: string, today: string, now: number): CareerBrainR
   };
 }
 
-function tierForLimit(limit: number): 'free' | 'premium' {
-  return limit > 15 ? 'premium' : 'free';
-}
-
 export class ProfileService {
   private static getTodayString(): string {
     return todayString();
@@ -289,147 +286,11 @@ export class ProfileService {
   }
 
   /**
-   * Resolves the maximum daily application limit based on the user's active subscription plan.
-   * Free Trial / Default: 15/day
-   * Starter Plan: 50/day
-   * Pro Automation Plan: 100/day
-   * Power Enterprise Plan: 500/day
+   * Daily application limit for the user's verified plan (see ApplicationQuotaService, the single
+   * source of truth for the quota).
    */
   public static async getDailyLimitForUser(userId: string): Promise<number> {
-    const sub = await SubscriptionRepository.getCurrent(userId);
-
-    if (!sub || sub.status !== 'ACTIVE') {
-      return 15;
-    }
-
-    switch (sub.planCodeSnapshot) {
-      case 'power':
-        return 500;
-      case 'pro':
-        return 100;
-      case 'starter':
-        return 50;
-      default:
-        return 50;
-    }
-  }
-
-  /**
-   * Retrieves active daily quota with lazy reset (calendar day rollover or plan limit change).
-   */
-  public static async getQuota(userId: string): Promise<QuotaStatus> {
-    const today = this.getTodayString();
-    const expectedLimit = await this.getDailyLimitForUser(userId);
-
-    if (!(await CareerBrainRepository.exists(userId))) {
-      // Return default free/tier quota status
-      return {
-        allowed: true,
-        appliedToday: 0,
-        dailyLimit: expectedLimit,
-        remaining: expectedLimit,
-        tier: tierForLimit(expectedLimit),
-        lastResetDate: today,
-      };
-    }
-
-    let changed = false;
-    const quota = await CareerBrainRepository.transactQuota(userId, defaultQuota(expectedLimit, today), current => {
-      changed = false;
-      const needsDateReset = current.lastResetDate !== today;
-      const needsLimitUpdate = current.dailyLimit !== expectedLimit;
-      if (!needsDateReset && !needsLimitUpdate) return current;
-      changed = true;
-      return {
-        appliedToday: needsDateReset ? 0 : current.appliedToday,
-        lastResetDate: needsDateReset ? today : current.lastResetDate,
-        dailyLimit: expectedLimit,
-      };
-    });
-
-    let tier: 'free' | 'premium';
-    if (changed) {
-      tier = tierForLimit(expectedLimit);
-      await CareerBrainRepository.update(userId, { tier, updatedAt: Date.now() });
-    } else {
-      tier = (await CareerBrainRepository.getTier(userId)) ?? tierForLimit(expectedLimit);
-    }
-
-    const appliedToday = quota.appliedToday ?? 0;
-    const dailyLimit = quota.dailyLimit ?? expectedLimit;
-    const remaining = Math.max(0, dailyLimit - appliedToday);
-
-    return {
-      allowed: remaining > 0,
-      appliedToday,
-      dailyLimit,
-      remaining,
-      tier,
-      lastResetDate: quota.lastResetDate ?? today,
-    };
-  }
-
-  /**
-   * Atomically verifies and increments the daily application count.
-   * Prevents race conditions and double-counting across concurrent requests.
-   */
-  public static async checkAndIncrementQuota(userId: string): Promise<QuotaStatus> {
-    const today = this.getTodayString();
-    const expectedLimit = await this.getDailyLimitForUser(userId);
-
-    if (!(await CareerBrainRepository.exists(userId))) {
-      // Auto-create initial profile entry to track quota
-      const placeholder: CareerBrainRecord = {
-        ...newProfileRecord(userId, today, Date.now()),
-        fullName: 'Candidate',
-        email: 'user@example.com',
-        phoneNumber: '+91 0000000000',
-        currentTitle: 'Developer',
-        resumeText: 'Auto-initialized Career Brain record.',
-        tier: tierForLimit(expectedLimit),
-        dailyQuota: defaultQuota(expectedLimit, today),
-      };
-      await CareerBrainRepository.createIfMissing(userId, placeholder);
-    }
-
-    let allowed = false;
-    let settingsChanged = false;
-    const quota = await CareerBrainRepository.transactQuota(userId, defaultQuota(expectedLimit, today), current => {
-      allowed = false;
-      settingsChanged = false;
-      // 1. Lazy reset if the date rolled over or the subscription limit changed
-      const needsDateReset = current.lastResetDate !== today;
-      const next: DailyQuotaRecord = {
-        appliedToday: needsDateReset ? 0 : current.appliedToday || 0,
-        lastResetDate: needsDateReset ? today : current.lastResetDate,
-        dailyLimit: expectedLimit,
-      };
-      settingsChanged = needsDateReset || current.dailyLimit !== expectedLimit;
-
-      // 2. Increment only while under the limit
-      if (next.appliedToday < expectedLimit) {
-        allowed = true;
-        next.appliedToday += 1;
-      }
-      return next;
-    });
-
-    if (settingsChanged) {
-      await CareerBrainRepository.update(userId, { tier: tierForLimit(expectedLimit), updatedAt: Date.now() });
-    }
-    const tier = settingsChanged
-      ? tierForLimit(expectedLimit)
-      : ((await CareerBrainRepository.getTier(userId)) ?? tierForLimit(expectedLimit));
-
-    const appliedToday = quota.appliedToday;
-    return {
-      allowed,
-      appliedToday,
-      dailyLimit: expectedLimit,
-      remaining: allowed ? Math.max(0, expectedLimit - appliedToday) : 0,
-      tier,
-      lastResetDate: quota.lastResetDate,
-    };
+    return (await ApplicationQuotaService.resolveEntitlement(userId)).limit;
   }
 
   /**

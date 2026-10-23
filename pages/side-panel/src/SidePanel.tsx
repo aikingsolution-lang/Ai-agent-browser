@@ -25,6 +25,8 @@ import {
 import {
   backendApiClient,
   isPremiumActive,
+  JOBFORM_SUPPORT_URL,
+  JOBFORM_WEBSITE_URL,
   openJobformSignIn,
   refreshAccountStatus,
   runSystemDiagnostics,
@@ -224,8 +226,8 @@ const SidePanel = () => {
 
       // Sync user subscription daily apply quota limit
       const quotaRes = await backendApiClient.getProfileQuota().catch(() => null);
-      if (quotaRes?.dailyLimit) {
-        await dailyQuotaStore.setMaxDailyLimit(quotaRes.dailyLimit);
+      if (quotaRes) {
+        await dailyQuotaStore.applyServerQuota(quotaRes);
       }
     } catch (error) {
       console.error('Error fetching credits balance from API:', error);
@@ -1033,7 +1035,7 @@ const SidePanel = () => {
       openJobformSignIn();
       appendMessage({
         actor: Actors.SYSTEM,
-        content: 'Please log in with JobForm Automator to start executing AI browser tasks with NanoBrowser.',
+        content: 'Please log in with JobForm Automator to start executing AI browser tasks with JobForm Automator.',
         timestamp: Date.now(),
       });
       return;
@@ -1689,23 +1691,37 @@ const SidePanel = () => {
                         </span>
                       )}
                     </span>
-                    {userCredits && (
+                    {isPremiumActive(authSession.premium) ? (
+                      // Premium includes AI Auto Apply: credits are not drawn, so they are not shown
                       <button
                         type="button"
                         onClick={() => setIsPlansModalOpen(true)}
-                        className="inline-flex items-center gap-1 rounded-md border border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-slate-800 px-2 py-0.5 text-[11px] font-semibold text-slate-700 dark:text-slate-300 hover:border-blue-500/50 hover:text-blue-600 dark:hover:text-blue-400 cursor-pointer transition-colors"
-                        title="View NanoBrowser Subscription & Credits">
-                        <FiZap className="size-2.5 text-indigo-500" />
-                        <span>{userCredits.remainingCredits.toLocaleString()}</span>
+                        className="inline-flex items-center gap-1 rounded-md border border-violet-200 dark:border-violet-500/30 bg-violet-50 dark:bg-violet-500/10 px-2 py-0.5 text-[11px] font-semibold text-violet-700 dark:text-violet-300 cursor-pointer transition-colors"
+                        title="AI Auto Apply is included with JobForm Automator Premium">
+                        <FiZap className="size-2.5" />
+                        <span>AI included</span>
                       </button>
+                    ) : (
+                      <>
+                        {userCredits && (
+                          <button
+                            type="button"
+                            onClick={() => setIsPlansModalOpen(true)}
+                            className="inline-flex items-center gap-1 rounded-md border border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-slate-800 px-2 py-0.5 text-[11px] font-semibold text-slate-700 dark:text-slate-300 hover:border-blue-500/50 hover:text-blue-600 dark:hover:text-blue-400 cursor-pointer transition-colors"
+                            title="View JobForm Automator Subscription & Credits">
+                            <FiZap className="size-2.5 text-indigo-500" />
+                            <span>{userCredits.remainingCredits.toLocaleString()}</span>
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => setIsPlansModalOpen(true)}
+                          className="inline-flex cursor-pointer items-center gap-1 rounded-md bg-blue-600 hover:bg-blue-700 px-2 py-0.5 text-[11px] font-semibold text-white shadow-xs transition-colors"
+                          title="View JobForm Automator Subscription Plans">
+                          <span>Upgrade</span>
+                        </button>
+                      </>
                     )}
-                    <button
-                      type="button"
-                      onClick={() => setIsPlansModalOpen(true)}
-                      className="inline-flex cursor-pointer items-center gap-1 rounded-md bg-blue-600 hover:bg-blue-700 px-2 py-0.5 text-[11px] font-semibold text-white shadow-xs transition-colors"
-                      title="View NanoBrowser Subscription Plans">
-                      <span>Upgrade</span>
-                    </button>
                     <button
                       type="button"
                       onClick={async () => {
@@ -1728,7 +1744,7 @@ const SidePanel = () => {
                     onClick={async () => {
                       if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
                         const res = await chrome.runtime
-                          .sendMessage({ type: 'SYNC_JOBFORM_SESSION' })
+                          .sendMessage({ type: 'SYNC_JOBFORM_SESSION', interactive: true })
                           .catch(() => null);
                         if (res?.ok) return;
                       }
@@ -1904,13 +1920,13 @@ const SidePanel = () => {
               <div
                 className={`flex flex-1 items-center justify-center p-8 ${isDarkMode ? 'text-sky-300' : 'text-sky-600'}`}>
                 <div className="max-w-md text-center">
-                  <img src="/icon-128.png" alt="Nanobrowser Logo" className="mx-auto mb-4 size-12" />
+                  <img src="/icon-128.png" alt="JobForm Automator" className="mx-auto mb-4 size-12" />
                   <h3 className={`mb-2 text-lg font-semibold ${isDarkMode ? 'text-sky-200' : 'text-sky-700'}`}>
                     {t('welcome_title')}
                   </h3>
                   <p className="mb-4 text-xs opacity-90">
-                    Sign in to connect to NanoBrowser Cloud API (AWS Bedrock Nova & Credits Engine) or configure custom
-                    local keys in Settings.
+                    Sign in to use the JobForm Automator AI service (credit-based), or add your own AI provider keys in
+                    Settings.
                   </p>
 
                   {!authSession?.token ? (
@@ -1921,7 +1937,11 @@ const SidePanel = () => {
                     </button>
                   ) : (
                     <div className="my-2 rounded-lg border border-sky-500/30 bg-sky-500/10 p-3 text-xs font-semibold text-sky-400">
-                      Logged in as {authSession.user?.email} ({userCredits?.remainingCredits || 0} credits available)
+                      Logged in as {authSession.user?.email} (
+                      {isPremiumActive(authSession.premium)
+                        ? `JobForm Automator ${authSession.premium?.tier}: AI Auto Apply included`
+                        : `${userCredits?.remainingCredits || 0} credits available`}
+                      )
                     </div>
                   )}
 
@@ -1936,7 +1956,7 @@ const SidePanel = () => {
                   </button>
                   <div className="mt-4 text-sm opacity-75">
                     <a
-                      href="https://github.com/nanobrowser/nanobrowser?tab=readme-ov-file#-quick-start"
+                      href={JOBFORM_WEBSITE_URL}
                       target="_blank"
                       rel="noopener noreferrer"
                       className={`${isDarkMode ? 'text-sky-400 hover:text-sky-300' : 'text-sky-700 hover:text-sky-600'}`}>
@@ -1944,7 +1964,7 @@ const SidePanel = () => {
                     </a>
                     <span className="mx-2">•</span>
                     <a
-                      href="https://discord.gg/NN3ABHggMK"
+                      href={JOBFORM_SUPPORT_URL}
                       target="_blank"
                       rel="noopener noreferrer"
                       className={`${isDarkMode ? 'text-sky-400 hover:text-sky-300' : 'text-sky-700 hover:text-sky-600'}`}>

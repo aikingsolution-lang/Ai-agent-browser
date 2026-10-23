@@ -287,21 +287,30 @@ describe('Production Hardening & Diagnostics Test Suite', () => {
   // 3. Daily Quota Manager
   // ─────────────────────────────────────────────────────────────
   describe('DailyQuotaManager.canApplyToday()', () => {
-    it('returns reason: error when unexpected failure occurs', async () => {
-      vi.spyOn(DailyQuotaManager as any, 'getQuotaData').mockRejectedValue(new Error('Storage access failed'));
+    it('returns reason: error (fails closed) when the backend cannot confirm the quota', async () => {
+      vi.spyOn(backendApiClient, 'getProfileQuota').mockResolvedValue(null);
 
       const res = await DailyQuotaManager.canApplyToday();
       expect(res.allowed).toBe(false);
       expect(res.reason).toBe('error');
     });
 
-    it('returns reason: quota_exceeded when daily limit is reached', async () => {
-      vi.spyOn(DailyQuotaManager as any, 'getQuotaData').mockResolvedValue({
-        dateString: '2026-10-10',
-        appliedCount: 15,
-        maxDailyQuota: 15,
-        isPausedDueToQuota: false,
-        nextResumeTimestamp: null,
+    it('returns reason: quota_exceeded when the backend reports the daily limit is reached', async () => {
+      vi.spyOn(backendApiClient, 'getProfileQuota').mockResolvedValue({
+        day: '2026-10-10',
+        timezone: 'UTC',
+        resetsAt: '2026-10-11T00:00:00.000Z',
+        applied: 10,
+        reserved: 0,
+        limit: 10,
+        remaining: 0,
+        plan: 'free',
+        isPaid: false,
+        allowed: false,
+        appliedToday: 10,
+        dailyLimit: 10,
+        tier: 'free',
+        lastResetDate: '2026-10-10',
       });
 
       const res = await DailyQuotaManager.canApplyToday();
@@ -498,6 +507,42 @@ describe('Production Hardening & Diagnostics Test Suite', () => {
       expect(result.ok).toBe(true);
       expect(result.statusMessage).toContain('Preflight verification successful');
       expect(result.details?.remainingCredits).toBe(20);
+    });
+
+    it('verified JobForm Automator Premium passes with no credits left; without it the run is blocked', async () => {
+      const balance = (premiumCovered: boolean) => ({
+        checkHealth: vi.fn().mockResolvedValue({ status: 'ok' }),
+        getCreditsBalance: vi.fn().mockResolvedValue({ success: true, data: { remainingCredits: 0, premiumCovered } }),
+        getFreshToken: vi.fn().mockResolvedValue('valid-token'),
+      });
+      const mockQuota = {
+        canApplyToday: vi.fn().mockResolvedValue({ allowed: true, currentCount: 0, maxQuota: 300 }),
+      };
+
+      const premium = await runPreflight({ apiClient: balance(true) as any, quotaManager: mockQuota, minCredits: 5 });
+      expect(premium.ok).toBe(true);
+
+      const free = await runPreflight({ apiClient: balance(false) as any, quotaManager: mockQuota, minCredits: 5 });
+      expect(free.ok).toBe(false);
+      expect(free.error).toBe('INSUFFICIENT_CREDITS');
+    });
+
+    it('Premium does not bypass the daily application limit', async () => {
+      const mockApi = {
+        checkHealth: vi.fn().mockResolvedValue({ status: 'ok' }),
+        getCreditsBalance: vi
+          .fn()
+          .mockResolvedValue({ success: true, data: { remainingCredits: 0, premiumCovered: true } }),
+        getFreshToken: vi.fn().mockResolvedValue('valid-token'),
+      };
+      const mockQuota = {
+        canApplyToday: vi
+          .fn()
+          .mockResolvedValue({ allowed: false, currentCount: 300, maxQuota: 300, reason: 'quota_exceeded' as const }),
+      };
+      const result = await runPreflight({ apiClient: mockApi as any, quotaManager: mockQuota, minCredits: 5 });
+      expect(result.ok).toBe(false);
+      expect(result.error).toBe('QUOTA_EXCEEDED');
     });
   });
 

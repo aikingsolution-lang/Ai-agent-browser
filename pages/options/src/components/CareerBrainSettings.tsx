@@ -1648,8 +1648,8 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
             </div>
 
             <p className="text-sm leading-relaxed text-gray-600 dark:text-gray-300">
-              NanoBrowser Easy Apply automation runs exclusively in <strong>Safe Dry-Run Simulation</strong> mode during
-              the verification phase.
+              JobForm Automator Easy Apply automation runs exclusively in <strong>Safe Dry-Run Simulation</strong> mode
+              during the verification phase.
             </p>
 
             <div className="space-y-2 rounded-xl border border-emerald-200 bg-emerald-50/50 p-3.5 text-xs text-gray-600 dark:border-emerald-800/60 dark:bg-emerald-950/20 dark:text-gray-300">

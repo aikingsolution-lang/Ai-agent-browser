@@ -46,7 +46,7 @@ import { formFiller } from './formFiller';
 import type { LinkedInVisionFallback } from './visionFallback';
 import { visionFallback } from './visionFallback';
 import { HumanPacingSimulator } from './humanPacing';
-import { DailyQuotaManager } from './rateLimiter';
+import { DailyQuotaManager, applicationKey, quotaStopMessage } from './rateLimiter';
 import { ResumeApprovalGate } from './resumeApproval';
 import { backendApiClient } from '@extension/shared';
 import type {
@@ -1478,10 +1478,14 @@ export class ApplicationEngine {
       return this.state;
     }
 
-    // 2. Daily Quota Check
-    const quotaCheck = await DailyQuotaManager.canApplyToday();
+    // 2. Daily quota: a real submission holds a server slot for this job (dry runs submit nothing)
+    const quotaKey = applicationKey(jobData.jobId, jobData.url, 'linkedin');
+    const holdsSlot = !this.config.dryRun;
+    const quotaCheck = holdsSlot
+      ? await DailyQuotaManager.reserveApplication(quotaKey, 'agent:easy-apply')
+      : await DailyQuotaManager.canApplyToday();
     if (!quotaCheck.allowed) {
-      const msg = `Daily application quota reached (${quotaCheck.currentCount} today). Resuming tomorrow.`;
+      const msg = quotaStopMessage(quotaCheck);
       logger.warning(`[ApplicationEngine] ${msg}`);
       this.state.status = 'QUEUED';
       this.state.errors.push(msg);
@@ -1498,6 +1502,7 @@ export class ApplicationEngine {
         const skipReason = `Skipped low fit (${fitResult.score} < ${this.config.minFitScore}): ${fitResult.reasoning}`;
         logger.warning(`[ApplicationEngine] ${skipReason}`);
         this.notifyProgress(`⏩ ${skipReason}`);
+        if (holdsSlot) await DailyQuotaManager.releaseApplication(quotaKey);
         this.state.status = 'SKIPPED_LOW_FIT';
         this.state.errors.push(skipReason);
         this.state.completedAt = Date.now();
@@ -1512,7 +1517,7 @@ export class ApplicationEngine {
       this.state.status = this.config.dryRun ? 'DRY_RUN_SUCCESS' : 'APPLIED';
       this.state.completedAt = Date.now();
       if (!this.config.dryRun) {
-        await DailyQuotaManager.incrementAppliedCount();
+        await DailyQuotaManager.commitApplication(quotaKey);
         await backendApiClient.recordJobApplication({
           jobId: jobData.jobId,
           jobTitle: jobData.title,
@@ -1533,6 +1538,8 @@ export class ApplicationEngine {
       this.state.errors.push('State machine stopped or required manual review.');
       this.state.completedAt = Date.now();
     }
+
+    if (holdsSlot && result !== 'SUBMITTED') await DailyQuotaManager.releaseApplication(quotaKey);
 
     return this.state;
   }

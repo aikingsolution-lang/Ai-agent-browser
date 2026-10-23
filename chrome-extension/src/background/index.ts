@@ -12,7 +12,6 @@ import {
   validateProfileCompleteness,
   queueSafetyStore,
   processedJobsStore,
-  isWebsiteAutoLoginPaused,
 } from '@extension/storage';
 import { t } from '@extension/i18n';
 import {
@@ -38,7 +37,7 @@ import { injectBuildDomTreeScripts } from './browser/dom/service';
 import { analytics } from './services/analytics';
 import { queueManager } from './agent/linkedin/queueManager';
 import { ApplicationEngine } from './agent/linkedin/applicationEngine';
-import { DailyQuotaManager } from './agent/linkedin/rateLimiter';
+import { DailyQuotaManager, applicationKey, quotaStopMessage } from './agent/linkedin/rateLimiter';
 import { solveQuestions } from './agent/linkedin/questionSolver';
 import { buildLinkedInApplyTask, buildLinkedInApplyTaskDetails } from './agent/linkedin/taskBuilder';
 import { buildExternalApplyTaskDetails } from './agent/taskBuilderExternal';
@@ -47,7 +46,7 @@ import { dedicatedJobRunner } from './agent/linkedin/dedicatedJobRunner';
 import { normalizeLinkedInJobUrl } from './agent/linkedin/urlUtils';
 import type { IJobData } from './agent/linkedin/types';
 import { careerCopilotEngine, auditCareerBrain } from './agent/copilot/careerCopilotEngine';
-import { registerWebsiteSessionSync, syncSessionFromOpenJobformTabs } from './services/websiteSessionSync';
+import { registerWebsiteSessionSync } from './services/websiteSessionSync';
 import { fetchHrEmailForCompany } from './services/emailExtractor';
 import { runAutoEmailWorkflow, stopAutoEmail, isAutoEmailRunning } from './services/autoEmail';
 
@@ -226,17 +225,19 @@ async function applyToCurrentActiveJob(
 
   let initialCredits: number | null = null;
   let taskId = '';
+  let quotaKey: string | null = null;
   try {
     const balanceRes = await backendApiClient.getCreditsBalance().catch(() => null);
     if (balanceRes?.data?.remainingCredits !== undefined) {
       initialCredits = balanceRes.data.remainingCredits;
     }
 
-    // 1. Quota check
+    // 1. Quota check (server-enforced)
     const quota = await DailyQuotaManager.canApplyToday();
     if (!quota.allowed) {
-      notify(`🛑 Daily application quota reached (${quota.currentCount} applications today).`, true);
-      return { status: 'error', message: 'Daily application quota reached' };
+      const quotaMsg = quotaStopMessage(quota);
+      notify(`🛑 ${quotaMsg}`, true);
+      return { status: 'error', message: quotaMsg };
     }
 
     // 2. Profile completeness check
@@ -332,6 +333,18 @@ async function applyToCurrentActiveJob(
       return { status: 'skipped', message: appliedMsg };
     }
 
+    // Hold a daily-quota slot for this job before anything is submitted
+    const slot = await DailyQuotaManager.reserveApplication(
+      applicationKey(jobId, canonicalUrl),
+      'background:apply-current',
+    );
+    if (!slot.allowed) {
+      const quotaMsg = quotaStopMessage(slot);
+      notify(`🛑 ${quotaMsg}`, true);
+      return { status: 'error', message: quotaMsg };
+    }
+    quotaKey = applicationKey(jobId, canonicalUrl);
+
     notify(`🎯 Target Job: "${jobTitleDisplay}". Launching Autonomous Planner & Navigator...`);
 
     const details = buildLinkedInApplyTaskDetails(careerBrain, jobTitle, company, location);
@@ -402,8 +415,9 @@ async function applyToCurrentActiveJob(
       creditsUsed: 0,
     });
 
-    // Only increment daily quota when run was a verified success!
-    await DailyQuotaManager.incrementAppliedCount();
+    // Only a verified success is counted toward the daily quota
+    await DailyQuotaManager.commitApplication(quotaKey);
+    quotaKey = null;
     // Unlock Gate: Record verified single application success!
     await queueSafetyStore.setSingleApplyVerified(true);
     logger.info('[QueueSafety] Recorded verified single application success! Queue mode unlocked.');
@@ -420,6 +434,7 @@ async function applyToCurrentActiveJob(
     }
     return { status: 'error', message: errorMsg };
   } finally {
+    if (quotaKey) await DailyQuotaManager.releaseApplication(quotaKey);
     isJobApplyInProgress = false;
     activeJobTaskId = null;
   }
@@ -549,19 +564,6 @@ chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(error 
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   if (tabId && changeInfo.status === 'complete' && tab.url?.startsWith('http')) {
     await injectBuildDomTreeScripts(tabId);
-  }
-  // When a JobForm Automator tab finishes loading, sync the session via executeScript so HR
-  // accounts (which don't set IsLogin in localStorage) are picked up automatically.
-  if (
-    changeInfo.status === 'complete' &&
-    tab.url &&
-    (tab.url.includes('jobformautomator.com') || tab.url.includes('localhost:3000'))
-  ) {
-    isWebsiteAutoLoginPaused()
-      .then(paused => {
-        if (!paused) syncSessionFromOpenJobformTabs().catch(() => undefined);
-      })
-      .catch(() => undefined);
   }
 });
 

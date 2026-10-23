@@ -1,24 +1,50 @@
 import { createStorage } from '../base/base';
 import { StorageEnum } from '../base/enums';
 import type { BaseStorage } from '../base/types';
-import { getPlanLimitDetails } from '../subscription/copilotTier';
 
+/**
+ * Local copy of the daily application quota, for display only. The backend counts applications
+ * and enforces the limit (GET /profile/quota, reserve/commit/release); nothing stored here can
+ * allow an application, so clearing or editing it changes nothing but what is shown.
+ */
 export interface DailyQuotaData {
+  /** UTC day (YYYY-MM-DD) the counters belong to. */
   dateString: string;
   appliedCount: number;
   maxDailyQuota: number;
   isPausedDueToQuota: boolean;
   nextResumeTimestamp: number | null;
   activePlanCode?: string;
+  remaining?: number;
+  reservedCount?: number;
+  isPaid?: boolean;
+  /** ISO time of the next reset (next UTC midnight). */
+  resetsAt?: string;
+  /** When this copy was last refreshed from the backend (ms). */
+  syncedAt?: number;
 }
 
+/** Fields of the backend quota response used by the display copy. */
+export interface ServerQuotaSnapshot {
+  day: string;
+  applied: number;
+  reserved: number;
+  limit: number;
+  remaining: number;
+  plan: string;
+  isPaid: boolean;
+  resetsAt: string;
+}
+
+const utcToday = () => new Date().toISOString().split('T')[0];
+
 export const DEFAULT_DAILY_QUOTA: DailyQuotaData = {
-  dateString: new Date().toISOString().split('T')[0],
+  dateString: utcToday(),
   appliedCount: 0,
-  maxDailyQuota: 15,
+  maxDailyQuota: 10,
   isPausedDueToQuota: false,
   nextResumeTimestamp: null,
-  activePlanCode: 'free-trial',
+  activePlanCode: 'free',
 };
 
 const storage = createStorage<DailyQuotaData>('linkedin_daily_quota', DEFAULT_DAILY_QUOTA, {
@@ -28,120 +54,44 @@ const storage = createStorage<DailyQuotaData>('linkedin_daily_quota', DEFAULT_DA
 
 export type DailyQuotaStorageType = BaseStorage<DailyQuotaData> & {
   getQuotaData: () => Promise<DailyQuotaData>;
-  canApplyToday: () => Promise<{ allowed: boolean; remaining: number; currentCount: number }>;
-  incrementAppliedCount: () => Promise<DailyQuotaData>;
-  resetTodayAppliedCount: () => Promise<DailyQuotaData>;
-  setMaxDailyLimit: (limit: number) => Promise<void>;
+  applyServerQuota: (quota: ServerQuotaSnapshot) => Promise<DailyQuotaData>;
 };
 
 export const dailyQuotaStore: DailyQuotaStorageType = {
   ...storage,
 
+  /** The last backend quota; after the UTC day changes, shows the new day as unused until refreshed. */
   async getQuotaData(): Promise<DailyQuotaData> {
-    const today = new Date().toISOString().split('T')[0];
     const data = (await storage.get()) || DEFAULT_DAILY_QUOTA;
-    const planDetails = await getPlanLimitDetails().catch(() => ({
-      maxDailyApplications: 15,
-      planCode: 'free-trial',
-    }));
-
-    const planCap = planDetails.maxDailyApplications;
-    const planCode = planDetails.planCode;
-
-    if (data.dateString !== today) {
-      const freshData: DailyQuotaData = {
-        ...data,
-        dateString: today,
-        appliedCount: 0,
-        maxDailyQuota: planCap,
-        activePlanCode: planCode,
-        isPausedDueToQuota: false,
-        nextResumeTimestamp: null,
-      };
-      await storage.set(freshData);
-      return freshData;
-    }
-
-    // Keep maxDailyQuota updated if the user's subscription upgraded or downgraded
-    if (data.maxDailyQuota !== planCap || data.activePlanCode !== planCode) {
-      const syncedData: DailyQuotaData = {
-        ...data,
-        maxDailyQuota: planCap,
-        activePlanCode: planCode,
-        isPausedDueToQuota: data.appliedCount >= planCap,
-      };
-      await storage.set(syncedData);
-      return syncedData;
-    }
-
-    return data;
-  },
-
-  async canApplyToday(): Promise<{ allowed: boolean; remaining: number; currentCount: number }> {
-    let data = await this.getQuotaData();
-
-    // Auto-unpause if limit was upgraded or applied count < maxDailyQuota
-    if (data.appliedCount < data.maxDailyQuota && data.isPausedDueToQuota) {
-      data = {
-        ...data,
-        isPausedDueToQuota: false,
-        nextResumeTimestamp: null,
-      };
-      await storage.set(data);
-    }
-
-    const remaining = Math.max(0, data.maxDailyQuota - data.appliedCount);
-    const allowed = remaining > 0 && !data.isPausedDueToQuota;
-
+    if (data.dateString === utcToday()) return data;
     return {
-      allowed,
-      remaining,
-      currentCount: data.appliedCount,
-    };
-  },
-
-  async incrementAppliedCount(): Promise<DailyQuotaData> {
-    const data = await this.getQuotaData();
-    const newCount = data.appliedCount + 1;
-    const isLimitHit = newCount >= data.maxDailyQuota;
-
-    let nextResume: number | null = null;
-    if (isLimitHit) {
-      const tomorrow = new Date();
-      tomorrow.setDate(tomorrow.getDate() + 1);
-      tomorrow.setHours(9, 0, 0, 0);
-      nextResume = tomorrow.getTime();
-    }
-
-    const updatedData: DailyQuotaData = {
       ...data,
-      appliedCount: newCount,
-      isPausedDueToQuota: isLimitHit,
-      nextResumeTimestamp: nextResume,
-    };
-
-    await storage.set(updatedData);
-    return updatedData;
-  },
-
-  async resetTodayAppliedCount(): Promise<DailyQuotaData> {
-    const data = await this.getQuotaData();
-    const updatedData: DailyQuotaData = {
-      ...data,
+      dateString: utcToday(),
       appliedCount: 0,
+      reservedCount: 0,
+      remaining: data.maxDailyQuota,
       isPausedDueToQuota: false,
       nextResumeTimestamp: null,
     };
-    await storage.set(updatedData);
-    return updatedData;
   },
 
-  async setMaxDailyLimit(limit: number): Promise<void> {
-    const data = await this.getQuotaData();
-    await storage.set({
-      ...data,
-      maxDailyQuota: Math.max(1, limit),
-    });
+  async applyServerQuota(quota: ServerQuotaSnapshot): Promise<DailyQuotaData> {
+    const resetAt = Date.parse(quota.resetsAt);
+    const next: DailyQuotaData = {
+      dateString: quota.day,
+      appliedCount: quota.applied,
+      maxDailyQuota: quota.limit,
+      remaining: quota.remaining,
+      reservedCount: quota.reserved,
+      activePlanCode: quota.plan,
+      isPaid: quota.isPaid,
+      resetsAt: quota.resetsAt,
+      isPausedDueToQuota: quota.remaining <= 0,
+      nextResumeTimestamp: quota.remaining <= 0 && Number.isFinite(resetAt) ? resetAt : null,
+      syncedAt: Date.now(),
+    };
+    await storage.set(next);
+    return next;
   },
 };
 

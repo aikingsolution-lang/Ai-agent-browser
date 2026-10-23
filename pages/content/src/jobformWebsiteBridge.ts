@@ -101,6 +101,14 @@ function send(message: Record<string, unknown>): void {
   }
 }
 
+/**
+ * The website's recruiter (HR) pages fire the same `onLogout` event for the HR sign-out, which
+ * belongs to the separate HR extension and must not sign the candidate out of this one.
+ */
+export function isHrWebsitePath(pathname: string): boolean {
+  return /^\/hr(\/|$)/i.test(pathname);
+}
+
 /** Any frame of the JobForm Automator website (the bridge itself only runs in the top frame). */
 export function isJobformWebsitePage(): boolean {
   return JOBFORM_WEBSITE_ORIGINS.includes(window.location.origin);
@@ -147,6 +155,7 @@ export function initJobformWebsiteBridge(): void {
   });
 
   document.addEventListener('onLogout', () => {
+    if (isHrWebsitePath(window.location.pathname)) return;
     send({ type: JOBFORM_WEBSITE_MESSAGES.logout, trigger: 'event' });
   });
 

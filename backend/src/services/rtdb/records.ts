@@ -89,19 +89,40 @@ export interface SubscriptionRecord {
   endedAt?: number;
   pastDueStartedAt?: number;
   lastEventTimestamp?: number;
+  /** Razorpay `paid_count` of the last charge applied (duplicate / reordered charge events are ignored). */
+  providerPaidCount?: number;
+  /** Razorpay payment id of the last charge applied. */
+  lastProviderPaymentId?: string;
   createdAt: number;
   updatedAt: number;
 }
 
+/** Lifecycle of one Razorpay subscription created by a checkout. */
+export type ProviderLinkStatus = 'PENDING' | 'AUTHENTICATED' | 'ACTIVE' | 'FAILED' | 'CANCELLED' | 'SUPERSEDED';
+
 /**
  * nanobrowser/provider_subscriptions/{razorpaySubscriptionKey}
- * Replaces the Mongo unique index on Subscription.providerSubscriptionId.
+ * Replaces the Mongo unique index on Subscription.providerSubscriptionId. Written at checkout for the
+ * authenticated user, so a paid event always resolves to the buyer and the plan they bought.
  */
 export interface ProviderSubscriptionLinkRecord {
   uid: string;
+  /** Subscription record this Razorpay subscription belongs to ('' until the purchase is activated). */
   subscriptionId: string;
   providerSubscriptionId: string;
   linkedAt: number;
+  /** Plan bought in this checkout. Absent on links created before checkouts recorded it. */
+  planCode?: string;
+  status?: ProviderLinkStatus;
+  /** Razorpay hosted payment page, reused when the same checkout is started again. */
+  shortUrl?: string;
+  updatedAt?: number;
+}
+
+/** nanobrowser/checkout_sessions/{uid}/{planCode} — the user's unpaid checkout for a plan. */
+export interface CheckoutSessionRecord {
+  providerSubscriptionId: string;
+  createdAt: number;
 }
 
 /** nanobrowser/credit_balances/{uid} */

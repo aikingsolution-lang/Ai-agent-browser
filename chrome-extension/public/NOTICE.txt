@@ -1,0 +1,8 @@
+JobForm Automator Chrome extension
+Copyright 2026 JobForm Automator
+
+This product is derived from Nanobrowser (https://github.com/nanobrowser/nanobrowser),
+which is licensed under the Apache License, Version 2.0. JobForm Automator has modified
+the original software. The full license text is in the LICENSE file.
+
+Third-party open-source components bundled with this extension remain under their own licenses.

@@ -87,6 +87,8 @@ export const FIREBASE_WEB_API_KEY: string =
 export const JOBFORM_WEBSITE_URL = 'https://www.jobformautomator.com';
 export const JOBFORM_SIGN_IN_URL = `${JOBFORM_WEBSITE_URL}/sign-in`;
 export const JOBFORM_PRICING_URL = `${JOBFORM_WEBSITE_URL}/pricing`;
+export const JOBFORM_PRIVACY_URL = `${JOBFORM_WEBSITE_URL}/privacy`;
+export const JOBFORM_SUPPORT_URL = `${JOBFORM_WEBSITE_URL}/contactUs`;
 
 /** Only these origins may hand a session to the extension (exact origin match, HTTPS only). */
 export const JOBFORM_WEBSITE_ORIGINS: readonly string[] = [

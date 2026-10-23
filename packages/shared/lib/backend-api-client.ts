@@ -1,3 +1,27 @@
+/** Daily application quota as reported by the backend (UTC day). */
+export interface ApplicationQuota {
+  day: string;
+  timezone: 'UTC';
+  resetsAt: string;
+  applied: number;
+  reserved: number;
+  limit: number;
+  remaining: number;
+  plan: string;
+  isPaid: boolean;
+  allowed: boolean;
+  appliedToday: number;
+  dailyLimit: number;
+  tier: 'free' | 'premium';
+  lastResetDate: string;
+}
+
+export interface ApplicationSlotResult {
+  status: 'granted' | 'already_counted' | 'limit_reached' | 'unavailable';
+  quota: ApplicationQuota | null;
+  message?: string;
+}
+
 export interface ApiResponse<T = any> {
   success: boolean;
   message?: string;
@@ -376,6 +400,8 @@ export class BackendApiClient {
       periodStart: string;
       periodEnd: string;
       isLowBalance: boolean;
+      /** AI use is included in a verified JobForm Automator Premium/Diamond plan (no credits drawn). */
+      premiumCovered?: boolean;
     }>('/credits/balance', {
       method: 'GET',
     });
@@ -708,8 +734,8 @@ export class BackendApiClient {
       headers['x-idempotency-key'] = idempotencyKey;
     }
     return this.request<{
+      /** Razorpay subscription ID of this checkout */
       subscriptionId: string;
-      razorpaySubscriptionId: string;
       amount: number;
       currency: string;
       planCode: string;
@@ -966,59 +992,84 @@ export class BackendApiClient {
     }
   }
 
-  public async getProfileQuota(): Promise<{
-    allowed: boolean;
-    appliedToday: number;
-    dailyLimit: number;
-    remaining: number;
-    tier: string;
-  } | null> {
+  /** Today's application quota from the backend (the only source of truth); null when unavailable. */
+  public async getProfileQuota(): Promise<ApplicationQuota | null> {
     try {
       await this.ensureToken();
       if (!this.token) {
         return null;
       }
-      const res = await this.request<{
-        allowed: boolean;
-        appliedToday: number;
-        dailyLimit: number;
-        remaining: number;
-        tier: string;
-      }>('/profile/quota', {
-        method: 'GET',
-      });
+      const res = await this.request<ApplicationQuota>('/profile/quota', { method: 'GET' });
       return res.data || null;
     } catch {
       return null;
     }
   }
 
+  /**
+   * Holds a daily-quota slot before submitting the application identified by `jobKey`
+   * (e.g. "linkedin:3912345678"). `limit_reached` when the daily limit is used up; `unavailable`
+   * when the backend could not be reached — callers must not submit in either case.
+   */
+  public async reserveApplicationSlot(jobKey: string): Promise<ApplicationSlotResult> {
+    try {
+      await this.ensureToken();
+      if (!this.token) return { status: 'unavailable', quota: null };
+      const res = await this.request<{ granted: boolean; alreadyCounted: boolean; quota: ApplicationQuota }>(
+        '/profile/quota/reserve',
+        { method: 'POST', body: JSON.stringify({ jobKey }) },
+      );
+      return {
+        status: res.data?.alreadyCounted ? 'already_counted' : 'granted',
+        quota: res.data?.quota ?? null,
+      };
+    } catch (caught) {
+      const err = caught as { status?: number; code?: string; details?: ApplicationQuota; message?: string };
+      if (err?.status === 429 && err?.code === 'QUOTA_EXCEEDED') {
+        return { status: 'limit_reached', quota: err.details ?? null, message: err.message };
+      }
+      return { status: 'unavailable', quota: null, message: err?.message };
+    }
+  }
+
+  /** Records a submitted application (counted once per job and day). Throws when the backend is unreachable. */
+  public async commitApplicationSlot(jobKey: string): Promise<{ counted: boolean; quota: ApplicationQuota }> {
+    const res = await this.request<{ counted: boolean; quota: ApplicationQuota }>('/profile/quota/commit', {
+      method: 'POST',
+      body: JSON.stringify({ jobKey }),
+    });
+    if (!res.data) throw new Error('Empty commit response');
+    return res.data;
+  }
+
+  /** Frees the slot held for an application that was not submitted (best effort). */
+  public async releaseApplicationSlot(jobKey: string): Promise<ApplicationQuota | null> {
+    try {
+      const res = await this.request<{ quota: ApplicationQuota }>('/profile/quota/release', {
+        method: 'POST',
+        body: JSON.stringify({ jobKey }),
+      });
+      return res.data?.quota ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Legacy one-shot increment; fails closed (never reports "allowed" when the backend cannot confirm it). */
   public async checkAndIncrementDailyQuota(): Promise<{ allowed: boolean; appliedToday: number; dailyLimit: number }> {
     try {
       await this.ensureToken();
       if (!this.token) {
-        return { allowed: true, appliedToday: 0, dailyLimit: 15 };
+        return { allowed: false, appliedToday: 0, dailyLimit: 0 };
       }
-      const res = await this.request<{ appliedToday: number; dailyLimit: number }>(
-        '/profile/quota/check-and-increment',
-        {
-          method: 'POST',
-        },
-      );
-      return {
-        allowed: true,
-        appliedToday: res.data?.appliedToday ?? 1,
-        dailyLimit: res.data?.dailyLimit ?? 15,
-      };
+      const res = await this.request<ApplicationQuota>('/profile/quota/check-and-increment', { method: 'POST' });
+      return { allowed: true, appliedToday: res.data?.applied ?? 0, dailyLimit: res.data?.limit ?? 0 };
     } catch (err: any) {
-      if (err.status === 429) {
-        return {
-          allowed: false,
-          appliedToday: err.details?.appliedToday ?? 15,
-          dailyLimit: err.details?.dailyLimit ?? 15,
-        };
-      }
-      return { allowed: true, appliedToday: 0, dailyLimit: 15 };
+      return {
+        allowed: false,
+        appliedToday: err?.details?.applied ?? 0,
+        dailyLimit: err?.details?.limit ?? 0,
+      };
     }
   }
 

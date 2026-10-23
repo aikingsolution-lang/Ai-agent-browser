@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { backendApiClient, isPremiumActive, refreshAccountStatus } from '@extension/shared';
+import React, { useState, useEffect, useRef } from 'react';
+import { backendApiClient, isPremiumActive, refreshAccountStatus, waitForCheckoutActivation } from '@extension/shared';
 import type { PremiumStatus } from '@extension/storage';
 import {
   FiCheck,
@@ -36,6 +36,11 @@ export const PremiumPlansModal: React.FC<PremiumPlansModalProps> = ({
   const [billingInterval, setBillingInterval] = useState<'monthly' | 'yearly'>('monthly');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  // Waiting for the backend to confirm the last checkout (kept while the side panel is open, so a
+  // payment finished after closing this window still refreshes the plan and credits)
+  const activationRef = useRef<AbortController | null>(null);
+
+  useEffect(() => () => activationRef.current?.abort(), []);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -126,6 +131,31 @@ export const PremiumPlansModal: React.FC<PremiumPlansModalProps> = ({
     },
   ];
 
+  const watchActivation = async (providerSubscriptionId: string, planName: string) => {
+    activationRef.current?.abort();
+    const controller = new AbortController();
+    activationRef.current = controller;
+
+    const result = await waitForCheckoutActivation(providerSubscriptionId, { signal: controller.signal });
+    if (activationRef.current !== controller) return; // superseded by a newer checkout
+    activationRef.current = null;
+
+    if (result.outcome === 'active') {
+      setCurrentSubscription(result.subscription);
+      setErrorMessage(null);
+      setSuccessMessage(`Payment confirmed. ${result.subscription.planNameSnapshot || planName} is now active.`);
+    } else if (result.outcome === 'timeout') {
+      setSuccessMessage(
+        'Payment confirmation has not arrived yet. If you completed the payment, your plan activates within a few minutes; reopen this window to check.',
+      );
+    } else if (result.outcome === 'account-changed') {
+      // The checkout belonged to the previous account: show nothing about it
+      setCurrentSubscription(null);
+      setJobformPremium(null);
+      setSuccessMessage(null);
+    }
+  };
+
   const handleCheckout = async (planCode: string) => {
     setLoadingPlanCode(planCode);
     setErrorMessage(null);
@@ -134,19 +164,25 @@ export const PremiumPlansModal: React.FC<PremiumPlansModalProps> = ({
     try {
       const idempotencyKey = `checkout_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
       const res = await backendApiClient.createCheckoutSession(planCode, idempotencyKey);
+      const planName = res.data?.planName || planCode.toUpperCase();
 
       // The plan becomes active only when the backend has verified the payment (Razorpay signature
-      // check / webhook); nothing is unlocked here.
-      if (res.data?.shortUrl) {
+      // check / webhook); nothing is unlocked here. The backend status is re-read until it confirms.
+      if (res.data?.shortUrl && res.data.subscriptionId) {
         window.open(res.data.shortUrl, '_blank');
-        setSuccessMessage('Razorpay payment window opened. Your plan activates as soon as the payment is confirmed.');
+        setSuccessMessage(`Razorpay payment window opened. ${planName} activates as soon as the payment is confirmed.`);
+        void watchActivation(res.data.subscriptionId, planName);
       } else {
-        setSuccessMessage(
-          `Subscription order generated for ${planCode.toUpperCase()}. Complete the payment to activate it.`,
-        );
+        setSuccessMessage(`Subscription order generated for ${planName}. Complete the payment to activate it.`);
       }
     } catch (err: any) {
-      setErrorMessage(err.message || 'Payment initiation failed. Please try again or check connection.');
+      if (err?.code === 'ALREADY_SUBSCRIBED') {
+        setSuccessMessage(err.message || 'You are already subscribed to this plan.');
+        const status = await refreshAccountStatus().catch(() => null);
+        if (status?.subscription) setCurrentSubscription(status.subscription);
+      } else {
+        setErrorMessage(err.message || 'Payment initiation failed. Please try again or check connection.');
+      }
     } finally {
       setLoadingPlanCode(null);
     }
@@ -200,6 +236,9 @@ export const PremiumPlansModal: React.FC<PremiumPlansModalProps> = ({
                 <span className={`font-semibold ${isDarkMode ? 'text-violet-200' : 'text-violet-700'}`}>
                   JobForm Automator {jobformPremium?.tier}
                 </span>
+                <span className={`block text-[11px] ${isDarkMode ? 'text-slate-300' : 'text-slate-600'}`}>
+                  AI Auto Apply included (no credits used), up to 300 applications a day
+                </span>
                 {jobformPremium?.endDate && jobformPremium.tier !== 'Diamond' && (
                   <span className={`block text-[11px] ${isDarkMode ? 'text-slate-300' : 'text-slate-600'}`}>
                     Active until {new Date(jobformPremium.endDate).toLocaleDateString()}
@@ -225,11 +264,15 @@ export const PremiumPlansModal: React.FC<PremiumPlansModalProps> = ({
                       {currentSubscription.planNameSnapshot || 'Pro Automation'} Plan Active
                     </span>
                   </>
-                ) : currentSubscription?.status === 'EXPIRED' ? (
+                ) : ['PAST_DUE', 'EXPIRED', 'CANCELLED'].includes(currentSubscription?.status) ? (
                   <>
                     <span className="size-2 rounded-full bg-amber-500" />
                     <span className={`font-bold ${isDarkMode ? 'text-amber-300' : 'text-amber-800'}`}>
-                      Subscription Expired
+                      {currentSubscription.status === 'PAST_DUE'
+                        ? `${currentSubscription.planNameSnapshot || 'Plan'}: Payment Due`
+                        : currentSubscription.isTrial
+                          ? 'Free Trial Ended'
+                          : 'Subscription Ended'}
                     </span>
                   </>
                 ) : (

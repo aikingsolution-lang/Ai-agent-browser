@@ -27,6 +27,7 @@ export const ACCOUNT_DATA_STORAGE_KEYS: readonly string[] = [
   'linkedin_pending_resume_approvals',
   'linkedin_queue_safety',
   'linkedin_dry_run_records',
+  'linkedin_pending_quota_commits',
   'linkedin_automation_config',
   'nanobrowser_pending_refunds',
   'chat_sessions_meta',
@@ -50,7 +51,31 @@ export async function clearAccountData(): Promise<void> {
   );
   if (keys.length > 0) await area.remove(keys);
   await authStorage.clearSession();
-  await area.remove(ACCOUNT_OWNER_STORAGE_KEY);
+  await area.remove([ACCOUNT_OWNER_STORAGE_KEY, WEBSITE_SESSION_ORIGIN_KEY]);
+}
+
+/** The account that owns the local data (same fallback as claimAccountData), or null when none does. */
+export async function getAccountDataOwner(): Promise<string | null> {
+  const stored = await localArea().get([ACCOUNT_OWNER_STORAGE_KEY, AUTH_SESSION_STORAGE_KEY]);
+  const recordedOwner =
+    typeof stored?.[ACCOUNT_OWNER_STORAGE_KEY] === 'string' ? stored[ACCOUNT_OWNER_STORAGE_KEY] : null;
+  return recordedOwner ?? sessionUserId(stored?.[AUTH_SESSION_STORAGE_KEY]?.user) ?? null;
+}
+
+/**
+ * Origin of the JobForm Automator site that supplied the current session. www and the bare domain
+ * keep separate sign-in state, so a page-load sign-out is only trusted from this origin.
+ */
+export const WEBSITE_SESSION_ORIGIN_KEY = 'jobform_website_session_origin';
+
+export async function getWebsiteSessionOrigin(): Promise<string | null> {
+  const stored = await localArea().get(WEBSITE_SESSION_ORIGIN_KEY);
+  const origin = stored?.[WEBSITE_SESSION_ORIGIN_KEY];
+  return typeof origin === 'string' ? origin : null;
+}
+
+export async function setWebsiteSessionOrigin(origin: string): Promise<void> {
+  await localArea().set({ [WEBSITE_SESSION_ORIGIN_KEY]: origin });
 }
 
 /**
@@ -114,6 +139,7 @@ export async function resumeWebsiteAutoLogin(): Promise<void> {
  */
 export async function endAccountSession(options: { pauseWebsiteAutoLogin?: boolean } = {}): Promise<void> {
   await authStorage.clearSession();
+  await localArea().remove(WEBSITE_SESSION_ORIGIN_KEY);
   if (options.pauseWebsiteAutoLogin) {
     await localArea().set({ [WEBSITE_AUTO_LOGIN_PAUSED_KEY]: true });
   } else {

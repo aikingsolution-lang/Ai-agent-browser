@@ -1,3 +1,4 @@
+import { hasVerifiedJobformPremium } from '../middleware/entitlement.middleware.js';
 import type { Request, Response, NextFunction } from 'express';
 import { CreditService } from '../services/credit.service.js';
 import { creditHistoryQuerySchema } from '../schemas/credit.schema.js';
@@ -27,6 +28,8 @@ export class CreditController {
       }
 
       const balance = await CreditService.getCreditBalance(userId);
+      // Verified JobForm Automator Premium covers AI use; the balance is kept for accounting only.
+      const premiumCovered = await hasVerifiedJobformPremium(userId);
 
       if (!balance) {
         sendSuccess(
@@ -37,7 +40,8 @@ export class CreditController {
             remainingCredits: 0,
             periodStart: null,
             periodEnd: null,
-            isLowBalance: true,
+            isLowBalance: !premiumCovered,
+            premiumCovered,
           },
           'User credit balance retrieved',
         );
@@ -54,7 +58,8 @@ export class CreditController {
           remainingCredits: balance.remainingCredits,
           periodStart: balance.periodStart,
           periodEnd: balance.periodEnd,
-          isLowBalance,
+          isLowBalance: isLowBalance && !premiumCovered,
+          premiumCovered,
         },
         'User credit balance retrieved',
       );

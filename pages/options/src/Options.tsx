@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import '@src/Options.css';
 import { Button } from '@extension/ui';
-import { withErrorBoundary, withSuspense } from '@extension/shared';
+import { JOBFORM_SUPPORT_URL, withErrorBoundary, withSuspense } from '@extension/shared';
 import { t } from '@extension/i18n';
 import {
   FiSettings,
@@ -77,7 +77,7 @@ const Options = () => {
 
   const handleTabClick = (tabId: TabTypes) => {
     if (tabId === 'help') {
-      window.open('https://nanobrowser.ai/docs', '_blank');
+      window.open(JOBFORM_SUPPORT_URL, '_blank');
     } else {
       setActiveTab(tabId);
     }

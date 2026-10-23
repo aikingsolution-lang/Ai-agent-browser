@@ -57,20 +57,29 @@ import {
   isPremiumActive,
   openJobformSignIn,
   refreshAccountStatus,
+  waitForCheckoutActivation,
 } from '@extension/shared';
 import {
   authStorage,
   careerBrainStore,
   cloudApiSettingsStore,
   endAccountSession,
+  getWebsiteSessionOrigin,
   isWebsiteAutoLoginPaused,
 } from '@extension/storage';
-import { readWebsiteSessionState, type KeyValueStorage } from '../../../../../pages/content/src/jobformWebsiteBridge';
+import {
+  isHrWebsitePath,
+  readWebsiteSessionState,
+  type KeyValueStorage,
+} from '../../../../../pages/content/src/jobformWebsiteBridge';
 import {
   handleWebsiteMessage,
+  isExtensionPageSender,
   isTrustedWebsiteSender,
   JOBFORM_WEBSITE_MESSAGES,
   parseLoginMessage,
+  readCandidateFirebaseSession,
+  syncSessionFromOpenJobformTabs,
 } from '../websiteSessionSync';
 
 // ── Fake backend (verifies tokens like Firebase Admin) + Firebase Secure Token API ────────────────
@@ -87,6 +96,8 @@ const backend = {
   users: new Map<string, FakeUser>(),
   refreshTokens: new Map<string, string>(), // refresh token → uid
   payments: new Map<string, { tier: 'Premium' | 'Diamond'; endDate: string }>(),
+  subscriptions: new Map<string, Record<string, unknown>>(), // default: free trial
+  balances: new Map<string, number>(),
   subscriptionMeCalls: 0,
   meCalls: 0,
   online: true,
@@ -153,7 +164,11 @@ globalThis.fetch = (async (input: any, init: any = {}) => {
     return json(200, {
       success: true,
       data: {
-        subscription: { _id: `sub_${auth.uid}`, status: 'TRIALING', planCodeSnapshot: 'free-trial' },
+        subscription: backend.subscriptions.get(auth.uid) ?? {
+          _id: `sub_${auth.uid}`,
+          status: 'TRIALING',
+          planCodeSnapshot: 'free-trial',
+        },
         premium: premiumFor(auth.uid),
       },
     });
@@ -161,7 +176,11 @@ globalThis.fetch = (async (input: any, init: any = {}) => {
   if (path === '/credits/balance') {
     return json(200, {
       success: true,
-      data: { allocatedCredits: 100, usedCredits: 0, remainingCredits: auth.uid === 'userA' ? 70 : 100 },
+      data: {
+        allocatedCredits: 100,
+        usedCredits: 0,
+        remainingCredits: backend.balances.get(auth.uid) ?? (auth.uid === 'userA' ? 70 : 100),
+      },
     });
   }
   return json(404, { success: false });
@@ -195,6 +214,8 @@ beforeEach(async () => {
     ['refresh-userB', 'userB'],
   ]);
   backend.payments = new Map();
+  backend.subscriptions = new Map();
+  backend.balances = new Map();
   backend.subscriptionMeCalls = 0;
   backend.meCalls = 0;
   backend.online = true;
@@ -541,6 +562,67 @@ describe('scenarios 6–8: premium comes only from the backend', () => {
   });
 });
 
+describe('after a Starter/Pro/Power checkout, the plan shows only once the backend confirms it', () => {
+  const FAST = { intervalMs: 5, timeoutMs: 400 };
+  const activePro = (providerSubscriptionId: string) => ({
+    _id: 'sub_rzp_pro',
+    status: 'ACTIVE',
+    isTrial: false,
+    planCodeSnapshot: 'pro',
+    planNameSnapshot: 'Pro Automation Plan',
+    providerSubscriptionId,
+  });
+
+  it('the purchased plan and its credits appear when the backend reports this checkout ACTIVE', async () => {
+    await login('userA');
+    // The backend activates the plan a moment later (verified Razorpay callback / webhook)
+    setTimeout(() => {
+      backend.subscriptions.set('userA', activePro('sub_checkout_1'));
+      backend.balances.set('userA', 5000);
+    }, 20);
+
+    const result = await waitForCheckoutActivation('sub_checkout_1', FAST);
+    expect(result).toMatchObject({ outcome: 'active', subscription: { planCodeSnapshot: 'pro' } });
+    const s = await session();
+    expect(s.subscription).toMatchObject({ status: 'ACTIVE', planCode: 'pro' });
+    expect(s.credits?.remainingCredits).toBe(5000);
+    expect((await cloudApiSettingsStore.getSettings()).subscription).toMatchObject({ planId: 'pro', status: 'active' });
+  });
+
+  it('an unpaid checkout, or a different purchase, does not count as this checkout being active', async () => {
+    await login('userA');
+    expect(await waitForCheckoutActivation('sub_checkout_1', FAST)).toEqual({ outcome: 'timeout' });
+    backend.subscriptions.set('userA', activePro('sub_some_other_checkout'));
+    expect(await waitForCheckoutActivation('sub_checkout_1', FAST)).toEqual({ outcome: 'timeout' });
+  });
+
+  it('switching accounts while waiting stops the wait; the new account gets nothing from it', async () => {
+    await login('userA');
+    const waiting = waitForCheckoutActivation('sub_checkout_1', { intervalMs: 20, timeoutMs: 2000 });
+    await login('userB');
+    backend.subscriptions.set('userA', activePro('sub_checkout_1'));
+    expect(await waiting).toEqual({ outcome: 'account-changed' });
+    const s = await session();
+    expect(uidOf(s)).toBe('userB');
+    expect(s.subscription).toMatchObject({ status: 'TRIALING', planCode: 'free-trial' });
+  });
+
+  it('can be cancelled, and does nothing while signed out', async () => {
+    await login('userA');
+    const controller = new AbortController();
+    const waiting = waitForCheckoutActivation('sub_checkout_1', {
+      intervalMs: 20,
+      timeoutMs: 2000,
+      signal: controller.signal,
+    });
+    controller.abort();
+    expect(await waiting).toEqual({ outcome: 'aborted' });
+
+    await endAccountSession();
+    expect(await waitForCheckoutActivation('sub_checkout_1', FAST)).toEqual({ outcome: 'account-changed' });
+  });
+});
+
 // ── Website stored state (page load): covers sessions the website does not announce ──────────
 const FIREBASE_KEY = 'firebase:authUser:AIzaSyDDrfKs64q7t2bZibGgjnylPDbZxf5hoig:[DEFAULT]';
 function websiteStorage(entries: Record<string, string>): KeyValueStorage {
@@ -621,10 +703,52 @@ describe('website session found on page load', () => {
     expect(backend.meCalls + backend.subscriptionMeCalls).toBe(calls);
   });
 
-  it('follows an account switch on the website', async () => {
+  it('never switches to another account or wipes local data; only a website sign-in event does', async () => {
     await login('userA');
-    expect(await pageLogin('userB')).toMatchObject({ ok: true, uid: 'userB', clearedPreviousAccount: true });
-    expect(uidOf(await session())).toBe('userB');
+    await careerBrainStore.set(prev => ({ ...prev, fullName: 'Asha A' }));
+    expect(await pageLogin('userB')).toMatchObject({ ok: false, reason: 'different-account' });
+    expect(uidOf(await session())).toBe('userA');
+    expect((await careerBrainStore.get()).fullName).toBe('Asha A');
+
+    // Signed out, but the local data still belongs to userA: still no automatic switch.
+    await handleWebsiteMessage({ type: JOBFORM_WEBSITE_MESSAGES.logout });
+    expect(await pageLogin('userB')).toMatchObject({ ok: false, reason: 'different-account' });
+    expect((await careerBrainStore.get()).fullName).toBe('Asha A');
+
+    // The website announcing a sign-in (sign-in page) is an explicit switch.
+    expect(await login('userB')).toMatchObject({ ok: true, uid: 'userB', clearedPreviousAccount: true });
+  });
+
+  it('focus and storage reports are automatic too: they respect the pause and never switch accounts', async () => {
+    await login('userA');
+    await endAccountSession({ pauseWebsiteAutoLogin: true });
+    for (const trigger of ['focus', 'storage']) {
+      const res = await handleWebsiteMessage({
+        type: JOBFORM_WEBSITE_MESSAGES.login,
+        trigger,
+        uid: 'userB',
+        idToken: idToken('userB'),
+      });
+      expect(res).toMatchObject({ ok: false, reason: 'paused' });
+    }
+    expect((await session()).token).toBeNull();
+  });
+
+  it('a page-load sign-out from the other host (www vs bare domain) is ignored; the session host signs out', async () => {
+    const WWW = 'https://www.jobformautomator.com';
+    const APEX = 'https://jobformautomator.com';
+    await handleWebsiteMessage(
+      { type: JOBFORM_WEBSITE_MESSAGES.login, trigger: 'event', uid: 'userA', idToken: idToken('userA') },
+      { senderOrigin: WWW },
+    );
+    expect(await getWebsiteSessionOrigin()).toBe(WWW);
+
+    await handleWebsiteMessage({ type: JOBFORM_WEBSITE_MESSAGES.logout, trigger: 'page-load' }, { senderOrigin: APEX });
+    expect(uidOf(await session())).toBe('userA');
+
+    await handleWebsiteMessage({ type: JOBFORM_WEBSITE_MESSAGES.logout, trigger: 'page-load' }, { senderOrigin: WWW });
+    expect(await session()).toMatchObject({ token: null, user: null });
+    expect(await getWebsiteSessionOrigin()).toBeNull();
   });
 
   it('is still verified: a forged stored token is rejected', async () => {
@@ -665,5 +789,137 @@ describe('website session found on page load', () => {
     await pageLogout();
     expect(JSON.stringify(await chrome.storage.local.get('nanobrowser_auth_session'))).toBe(before);
     expect(await isWebsiteAutoLoginPaused()).toBe(false);
+  });
+});
+
+describe('"Login with JobForm Automator" reads only a candidate session from real JobForm tabs', () => {
+  const API_KEY = 'AIzaFake';
+  const firebaseRecord = (uid: string) =>
+    JSON.stringify({ uid, stsTokenManager: { accessToken: idToken(uid), refreshToken: `refresh-${uid}` } });
+
+  function pageStorage(entries: Record<string, string>): Storage {
+    const keys = Object.keys(entries);
+    return {
+      get length() {
+        return keys.length;
+      },
+      key: (i: number) => keys[i] ?? null,
+      getItem: (k: string) => (k in entries ? entries[k] : null),
+    } as unknown as Storage;
+  }
+
+  // Simulated browser tabs: url + the page's localStorage. executeScript runs the injected function
+  // against that tab's storage, like Chrome does.
+  function withTabs(tabs: Array<{ id: number; url: string; storage: Record<string, string> }>) {
+    const executed: number[] = [];
+    (chrome as any).tabs.query = async () => tabs.map(({ id, url }) => ({ id, url }));
+    (chrome as any).scripting = {
+      executeScript: async ({ target, func }: { target: { tabId: number }; func: () => unknown }) => {
+        executed.push(target.tabId);
+        const tab = tabs.find(t => t.id === target.tabId)!;
+        const previous = (globalThis as any).window;
+        (globalThis as any).window = { localStorage: pageStorage(tab.storage) };
+        try {
+          return [{ result: func() }];
+        } finally {
+          (globalThis as any).window = previous;
+        }
+      },
+    };
+    return executed;
+  }
+
+  it('reads the [DEFAULT] (candidate) Firebase session, never the HR app or sessionStorage-like fallbacks', () => {
+    const previous = (globalThis as any).window;
+    (globalThis as any).window = {
+      localStorage: pageStorage({
+        [`firebase:authUser:${API_KEY}:hr-app`]: firebaseRecord('hrUser'),
+        token: 'not-a-firebase-token',
+        user: JSON.stringify({ uid: 'someone' }),
+      }),
+    };
+    expect(readCandidateFirebaseSession()).toBeNull();
+    (globalThis as any).window = {
+      localStorage: pageStorage({
+        [`firebase:authUser:${API_KEY}:hr-app`]: firebaseRecord('hrUser'),
+        [`firebase:authUser:${API_KEY}:[DEFAULT]`]: firebaseRecord('userA'),
+      }),
+    };
+    expect(readCandidateFirebaseSession()).toMatchObject({ uid: 'userA', refreshToken: 'refresh-userA' });
+    (globalThis as any).window = previous;
+  });
+
+  it('only inspects tabs whose origin is exactly a JobForm Automator origin', async () => {
+    const executed = withTabs([
+      { id: 1, url: 'https://evil.example/?jobformautomator.com', storage: {} },
+      { id: 2, url: 'https://jobformautomator.com.evil.example/', storage: {} },
+      { id: 3, url: 'http://localhost:3000/', storage: {} },
+      {
+        id: 4,
+        url: 'https://jobformautomator.com/dashboard',
+        storage: { [`firebase:authUser:${API_KEY}:[DEFAULT]`]: firebaseRecord('userA') },
+      },
+    ]);
+    expect(await syncSessionFromOpenJobformTabs({ interactive: true })).toMatchObject({ ok: true, uid: 'userA' });
+    expect(executed).toEqual([4]);
+    expect(await getWebsiteSessionOrigin()).toBe('https://jobformautomator.com');
+  });
+
+  it('a session of another account is reported, not adopted, and local data is kept', async () => {
+    await login('userA');
+    await careerBrainStore.set(prev => ({ ...prev, fullName: 'Asha A' }));
+    await handleWebsiteMessage({ type: JOBFORM_WEBSITE_MESSAGES.logout });
+    withTabs([
+      {
+        id: 4,
+        url: 'https://www.jobformautomator.com/dashboard',
+        storage: { [`firebase:authUser:${API_KEY}:[DEFAULT]`]: firebaseRecord('userB') },
+      },
+    ]);
+    expect(await syncSessionFromOpenJobformTabs({ interactive: true })).toMatchObject({
+      ok: false,
+      reason: 'different-account',
+    });
+    expect((await session()).token).toBeNull();
+    expect((await careerBrainStore.get()).fullName).toBe('Asha A');
+  });
+
+  it('an automatic check respects an extension-only sign-out; a Login click lifts it', async () => {
+    await login('userA');
+    await endAccountSession({ pauseWebsiteAutoLogin: true });
+    withTabs([
+      {
+        id: 4,
+        url: 'https://www.jobformautomator.com/',
+        storage: { [`firebase:authUser:${API_KEY}:[DEFAULT]`]: firebaseRecord('userA') },
+      },
+    ]);
+    expect(await syncSessionFromOpenJobformTabs()).toMatchObject({ ok: false, reason: 'paused' });
+    expect(await isWebsiteAutoLoginPaused()).toBe(true);
+    expect(await syncSessionFromOpenJobformTabs({ interactive: true })).toMatchObject({ ok: true, uid: 'userA' });
+  });
+
+  it('accepts the sync request only from the extension’s own pages', () => {
+    expect(
+      isExtensionPageSender({
+        id: 'nanobrowser-extension-id',
+        url: 'chrome-extension://nanobrowser-extension-id/side-panel/index.html',
+      }),
+    ).toBe(true);
+    expect(
+      isExtensionPageSender({
+        id: 'nanobrowser-extension-id',
+        tab: WEBSITE_TAB,
+        url: 'https://www.linkedin.com/jobs/',
+      }),
+    ).toBe(false);
+  });
+
+  it('the website’s HR pages never sign the candidate out', () => {
+    expect(isHrWebsitePath('/hr/settings')).toBe(true);
+    expect(isHrWebsitePath('/hr/dashboard/setting')).toBe(true);
+    expect(isHrWebsitePath('/hr')).toBe(true);
+    expect(isHrWebsitePath('/settings')).toBe(false);
+    expect(isHrWebsitePath('/hrms-guide')).toBe(false);
   });
 });

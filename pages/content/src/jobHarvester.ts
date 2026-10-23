@@ -50,7 +50,7 @@ export async function extractJobs(targetCount: number = 15): Promise<HarvestedJo
     currentUrl.includes('linkedin.com/jobs');
 
   if (!isJobSearchPage) {
-    console.warn('[NanoBrowser] Not on a LinkedIn job search page.');
+    console.warn('[JobForm Automator] Not on a LinkedIn job search page.');
     return [];
   }
 
@@ -63,12 +63,12 @@ export async function extractJobs(targetCount: number = 15): Promise<HarvestedJo
     document.documentElement;
 
   if (!scrollContainer) {
-    console.error('[NanoBrowser] Job list container not found.');
+    console.error('[JobForm Automator] Job list container not found.');
     return [];
   }
 
   // 2. Trigger lazy-loading
-  console.log('[NanoBrowser] Starting human-paced scroll...');
+  console.log('[JobForm Automator] Starting human-paced scroll...');
   await smoothScrollContainer(scrollContainer, targetCount);
 
   // 3. Extract and filter cards
@@ -117,7 +117,7 @@ export async function extractJobs(targetCount: number = 15): Promise<HarvestedJo
     }
   }
 
-  console.log(`[NanoBrowser] Harvested ${validJobs.length} clean Easy Apply jobs.`);
+  console.log(`[JobForm Automator] Harvested ${validJobs.length} clean Easy Apply jobs.`);
   return validJobs;
 }
 

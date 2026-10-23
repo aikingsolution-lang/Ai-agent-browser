@@ -29,6 +29,8 @@ export interface BackendSubscription {
   planCode?: string;
   cancelAtPeriodEnd?: boolean;
   currentPeriodEnd?: string;
+  /** Razorpay subscription ID of the purchase behind this plan. */
+  providerSubscriptionId?: string;
   [key: string]: unknown;
 }
 
@@ -140,6 +142,45 @@ export async function refreshAccountCredits(): Promise<void> {
   const after = await authStorage.getSession();
   if (!after.token || sessionUserId(after.user) !== uid || !res.data) return;
   await authStorage.setSession({ credits: res.data });
+}
+
+export type CheckoutActivationResult =
+  | { outcome: 'active'; subscription: BackendSubscription }
+  | { outcome: 'timeout' | 'account-changed' | 'aborted' };
+
+/**
+ * After a Razorpay checkout has been opened, re-reads the account status until the backend reports
+ * that checkout's subscription ACTIVE (the backend activates it only after verifying the payment),
+ * then refreshes the credit balance. Stops if a different account signs in, on timeout or on abort;
+ * it never activates anything itself.
+ */
+export async function waitForCheckoutActivation(
+  providerSubscriptionId: string,
+  options: { timeoutMs?: number; intervalMs?: number; signal?: AbortSignal } = {},
+): Promise<CheckoutActivationResult> {
+  const { timeoutMs = 3 * 60_000, intervalMs = 5000, signal } = options;
+  const uid = sessionUserId((await authStorage.getSession()).user);
+  if (!uid) return { outcome: 'account-changed' };
+  const sameAccount = async () => {
+    const session = await authStorage.getSession();
+    return Boolean(session.token) && sessionUserId(session.user) === uid;
+  };
+
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, intervalMs));
+    if (signal?.aborted) return { outcome: 'aborted' };
+    if (!(await sameAccount())) return { outcome: 'account-changed' };
+
+    const status = await refreshAccountStatus().catch(() => null);
+    if (!(await sameAccount())) return { outcome: 'account-changed' };
+    const subscription = status?.subscription;
+    if (subscription?.status === 'ACTIVE' && subscription.providerSubscriptionId === providerSubscriptionId) {
+      await refreshAccountCredits().catch(() => undefined);
+      return { outcome: 'active', subscription };
+    }
+  }
+  return { outcome: 'timeout' };
 }
 
 /**

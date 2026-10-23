@@ -1,6 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { cloudApiSettingsStore, type CloudApiSettingsConfig } from '@extension/storage';
-import { backendApiClient } from '@extension/shared';
+import { backendApiClient, waitForCheckoutActivation } from '@extension/shared';
 import {
   FiCheck,
   FiZap,
@@ -28,6 +28,9 @@ export const PremiumPlans: React.FC<PremiumPlansProps> = ({ isDarkMode }) => {
     { code: 'pro', name: 'Pro Automation Plan', amount: 149900, creditsPerBillingPeriod: 5000 },
     { code: 'power', name: 'Power Enterprise Plan', amount: 499900, creditsPerBillingPeriod: 25000 },
   ]);
+  const activationRef = useRef<AbortController | null>(null);
+
+  useEffect(() => () => activationRef.current?.abort(), []);
 
   useEffect(() => {
     const loadSettings = async () => {
@@ -70,12 +73,15 @@ export const PremiumPlans: React.FC<PremiumPlansProps> = ({ isDarkMode }) => {
       const idempotencyKey = `checkout_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
       const res = await backendApiClient.createCheckoutSession(planCode, idempotencyKey);
 
-      if (res.data?.shortUrl) {
-        window.open(res.data.shortUrl, '_blank');
-      }
-
       // Nothing is unlocked here: the plan becomes active only after the backend has verified the
-      // payment (Razorpay signature check / webhook); the local plan mirror follows the backend.
+      // payment (Razorpay signature check / webhook); the local plan mirror follows the backend,
+      // which is re-read until it confirms this checkout.
+      if (res.data?.shortUrl && res.data.subscriptionId) {
+        window.open(res.data.shortUrl, '_blank');
+        activationRef.current?.abort();
+        activationRef.current = new AbortController();
+        void waitForCheckoutActivation(res.data.subscriptionId, { signal: activationRef.current.signal });
+      }
     } catch (error: any) {
       console.error('Failed to create Razorpay checkout session:', error);
       alert(error.message || 'Checkout failed. Please ensure you are logged in and backend is running.');

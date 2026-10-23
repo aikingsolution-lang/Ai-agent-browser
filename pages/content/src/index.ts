@@ -8,7 +8,7 @@ if (isJobformWebsitePage()) {
   // (sign-in / sign-out / payment events).
   initJobformWebsiteBridge();
 } else {
-  console.log('[Nanobrowser] Content script initialized for LinkedIn Automation');
+  console.log('[JobForm Automator] Content script initialized for LinkedIn Automation');
 
   // 1. Initialize LinkedIn Job Harvester
   initJobHarvester();

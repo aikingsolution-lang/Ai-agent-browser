@@ -17,6 +17,8 @@ export interface ProcessLlmChatParams {
   maxTokens?: number;
   idempotencyKey?: string;
   runId?: string;
+  /** Covered by verified JobForm Automator Premium: usage is recorded but no credits are drawn. */
+  premiumCovered?: boolean;
 }
 
 export interface ProcessLlmStreamParams extends ProcessLlmChatParams {
@@ -68,7 +70,7 @@ export class LlmService {
    * Process a non-streaming LLM chat completion request.
    */
   public static async processChatCompletion(params: ProcessLlmChatParams): Promise<LlmChatResult> {
-    const { userId, model, messages, temperature, maxTokens, idempotencyKey, runId } = params;
+    const { userId, model, messages, temperature, maxTokens, idempotencyKey, runId, premiumCovered = false } = params;
 
     // 1. Idempotency Check
     if (idempotencyKey) {
@@ -95,7 +97,7 @@ export class LlmService {
     // 2. Pre-check Credit Balance before calling provider
     const minRequiredCredits = this.calculateRequiredCredits(model, 100);
     const balance = await CreditService.getCreditBalance(userId);
-    if (!balance || balance.remainingCredits < minRequiredCredits) {
+    if (!premiumCovered && (!balance || balance.remainingCredits < minRequiredCredits)) {
       const available = balance ? balance.remainingCredits : 0;
       throw new AppError(
         `Insufficient credits for LLM request. Minimum required: ${minRequiredCredits}, Available: ${available}`,
@@ -122,21 +124,22 @@ export class LlmService {
 
       // 4. Atomically Deduct Credits
       const deductionIdempotencyKey = idempotencyKey ? `llm_deduct_${idempotencyKey}` : undefined;
-      await CreditService.deductCredits({
-        userId,
-        amount: creditsToDeduct,
-        description: `LLM Proxy usage (${model})`,
-        idempotencyKey: deductionIdempotencyKey,
-        metadata: {
-          requestId,
-          model,
-          provider: provider.providerName,
-          promptTokens: completion.promptTokens,
-          completionTokens: completion.completionTokens,
-          totalTokens: completion.totalTokens,
-          runId,
-        },
-      });
+      if (!premiumCovered)
+        await CreditService.deductCredits({
+          userId,
+          amount: creditsToDeduct,
+          description: `LLM Proxy usage (${model})`,
+          idempotencyKey: deductionIdempotencyKey,
+          metadata: {
+            requestId,
+            model,
+            provider: provider.providerName,
+            promptTokens: completion.promptTokens,
+            completionTokens: completion.completionTokens,
+            totalTokens: completion.totalTokens,
+            runId,
+          },
+        });
 
       // 5. Record Usage Log
       await recordUsage(userId, {
@@ -146,7 +149,7 @@ export class LlmService {
         promptTokens: completion.promptTokens,
         completionTokens: completion.completionTokens,
         totalTokens: completion.totalTokens,
-        creditsDeducted: creditsToDeduct,
+        creditsDeducted: premiumCovered ? 0 : creditsToDeduct,
         latencyMs,
         status: 'SUCCESS',
         idempotencyKey,
@@ -154,6 +157,7 @@ export class LlmService {
         metadata: {
           content: completion.content,
           runId,
+          ...(premiumCovered ? { coveredBy: 'jobform-premium', creditsEquivalent: creditsToDeduct } : {}),
         },
       });
 
@@ -167,7 +171,7 @@ export class LlmService {
           completionTokens: completion.completionTokens,
           totalTokens: completion.totalTokens,
         },
-        creditsDeducted: creditsToDeduct,
+        creditsDeducted: premiumCovered ? 0 : creditsToDeduct,
         isIdempotentRetry: false,
         latencyMs,
       };
@@ -200,12 +204,23 @@ export class LlmService {
    * Process a streaming LLM chat completion request.
    */
   public static async processStreamCompletion(params: ProcessLlmStreamParams): Promise<LlmChatResult> {
-    const { userId, model, messages, temperature, maxTokens, idempotencyKey, onChunk, signal, runId } = params;
+    const {
+      userId,
+      model,
+      messages,
+      temperature,
+      maxTokens,
+      idempotencyKey,
+      onChunk,
+      signal,
+      runId,
+      premiumCovered = false,
+    } = params;
 
     // 1. Pre-check Credit Balance
     const minRequiredCredits = this.calculateRequiredCredits(model, 100);
     const balance = await CreditService.getCreditBalance(userId);
-    if (!balance || balance.remainingCredits < minRequiredCredits) {
+    if (!premiumCovered && (!balance || balance.remainingCredits < minRequiredCredits)) {
       const available = balance ? balance.remainingCredits : 0;
       throw new AppError(
         `Insufficient credits for LLM stream request. Minimum required: ${minRequiredCredits}, Available: ${available}`,
@@ -236,7 +251,7 @@ export class LlmService {
 
       const creditsToDeduct = this.calculateRequiredCredits(model, completion.totalTokens);
 
-      if (creditsToDeduct > 0) {
+      if (creditsToDeduct > 0 && !premiumCovered) {
         const deductionIdempotencyKey = idempotencyKey ? `llm_deduct_${idempotencyKey}` : undefined;
         await CreditService.deductCredits({
           userId,
@@ -260,7 +275,7 @@ export class LlmService {
         promptTokens: completion.promptTokens,
         completionTokens: completion.completionTokens,
         totalTokens: completion.totalTokens,
-        creditsDeducted: creditsToDeduct,
+        creditsDeducted: premiumCovered ? 0 : creditsToDeduct,
         latencyMs,
         status,
         idempotencyKey,
@@ -268,6 +283,7 @@ export class LlmService {
         metadata: {
           content: completion.content,
           runId,
+          ...(premiumCovered ? { coveredBy: 'jobform-premium', creditsEquivalent: creditsToDeduct } : {}),
         },
       });
 
@@ -281,7 +297,7 @@ export class LlmService {
           completionTokens: completion.completionTokens,
           totalTokens: completion.totalTokens,
         },
-        creditsDeducted: creditsToDeduct,
+        creditsDeducted: premiumCovered ? 0 : creditsToDeduct,
         isIdempotentRetry: false,
         latencyMs,
       };

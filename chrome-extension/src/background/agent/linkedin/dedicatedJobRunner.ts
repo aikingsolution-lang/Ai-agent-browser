@@ -22,7 +22,7 @@ import {
   isCandidateNameOrInvalidTitle,
   sanitizeRoleSearchQuery,
 } from '@extension/storage';
-import { DailyQuotaManager } from './rateLimiter';
+import { DailyQuotaManager, applicationKey, quotaStopMessage } from './rateLimiter';
 import { runPreflight } from './preflight';
 import { normalizeLinkedInJobUrl } from './urlUtils';
 import { dedicatedWindowManager, type RunnerMode } from './dedicatedWindow';
@@ -1032,10 +1032,10 @@ export class DedicatedJobRunner {
       return { status: 'skipped', message: msg };
     }
 
-    // 3. Quota & Profile Completeness Checks
-    const quota = await DailyQuotaManager.canApplyToday();
+    // 3. Quota (a server-held slot for this job) & Profile Completeness Checks
+    const quota = await DailyQuotaManager.reserveApplication(applicationKey(jobId, canonicalUrl), 'runner');
     if (!quota.allowed) {
-      const quotaMsg = `Daily application quota reached (${quota.currentCount} applications today).`;
+      const quotaMsg = quotaStopMessage(quota);
       this.notify(portToSend, `🛑 ${quotaMsg}`, true);
       this.isRunning = false;
       return { status: 'error', message: quotaMsg };
@@ -1397,7 +1397,7 @@ export class DedicatedJobRunner {
 
       // Success Path: Verified Application!
       logger.info(`🎉 Successfully completed application for "${jobTitle}"!`);
-      await DailyQuotaManager.incrementAppliedCount();
+      await DailyQuotaManager.commitApplication(applicationKey(jobId, canonicalUrl));
       await queueSafetyStore.setSingleApplyVerified(true);
       await processedJobsStore.recordJob({
         jobId,
@@ -1912,17 +1912,22 @@ export class DedicatedJobRunner {
         const jobRunId = `${runId}_${job.jobId}`;
         this.activeJobId = job.jobId;
 
-        // Daily Quota check
-        const quota = await DailyQuotaManager.canApplyToday();
+        // Daily quota: hold a server slot for this job (released if it is skipped or fails)
+        const quota = await DailyQuotaManager.reserveApplication(applicationKey(job.jobId, job.url), 'runner');
         if (!quota.allowed) {
-          const quotaMsg = `🛑 Daily application quota reached (${quota.currentCount} today). Stopping run.`;
+          const quotaMsg = `🛑 ${quotaStopMessage(quota)} Stopping run.`;
           this.notifyStatus(portToSend, quotaMsg, 'fail');
           break;
         }
 
-        // Hard credit budget check (minimum 5 credits to ensure balance for form-filling LLM calls)
+        // Hard credit budget check (minimum 5 credits to ensure balance for form-filling LLM calls).
+        // Verified JobForm Automator Premium includes AI use, so it is not limited by credits.
         const balanceRes = await backendApiClient.getCreditsBalance().catch(() => null);
-        if (balanceRes?.data?.remainingCredits !== undefined && balanceRes.data.remainingCredits < 5) {
+        if (
+          !balanceRes?.data?.premiumCovered &&
+          balanceRes?.data?.remainingCredits !== undefined &&
+          balanceRes.data.remainingCredits < 5
+        ) {
           const creditMsg = `🛑 Insufficient credit budget (${balanceRes.data.remainingCredits} remaining, minimum 5 required). Halting run.`;
           this.notifyStatus(portToSend, creditMsg, 'fail');
           break;
@@ -2355,7 +2360,7 @@ export class DedicatedJobRunner {
 
           if (fillRes.success) {
             stats.applied++;
-            await DailyQuotaManager.incrementAppliedCount();
+            await DailyQuotaManager.commitApplication(applicationKey(job.jobId, job.url));
             await queueSafetyStore.setSingleApplyVerified(true);
             const successMsg = `Applied to "${displayTitle}" at ${displayCompany || 'company'} successfully! 🎉`;
             this.notifyStatus(portToSend, `✅ ${successMsg}`, 'ok');
@@ -2731,17 +2736,21 @@ export class DedicatedJobRunner {
       const jobRunId = `${runId}_${job.jobId}`;
       this.activeJobId = job.jobId;
 
-      // Quota check
-      const quota = await DailyQuotaManager.canApplyToday();
+      // Daily quota: hold a server slot for this job (released if it is skipped or fails)
+      const quota = await DailyQuotaManager.reserveApplication(applicationKey(job.jobId, job.url), 'runner');
       if (!quota.allowed) {
-        const quotaMsg = `🛑 Daily application quota reached (${quota.currentCount} today). Stopping run.`;
+        const quotaMsg = `🛑 ${quotaStopMessage(quota)} Stopping run.`;
         this.notifyStatus(portToSend, quotaMsg, 'fail');
         break;
       }
 
-      // Hard credit budget check
+      // Hard credit budget check (not applied to verified JobForm Automator Premium)
       const balanceRes = await backendApiClient.getCreditsBalance().catch(() => null);
-      if (balanceRes?.data?.remainingCredits !== undefined && balanceRes.data.remainingCredits < 1) {
+      if (
+        !balanceRes?.data?.premiumCovered &&
+        balanceRes?.data?.remainingCredits !== undefined &&
+        balanceRes.data.remainingCredits < 1
+      ) {
         const creditMsg = `🛑 Insufficient credits (${balanceRes.data.remainingCredits} remaining). Halting run.`;
         this.notifyStatus(portToSend, creditMsg, 'fail');
         break;
@@ -2835,7 +2844,7 @@ export class DedicatedJobRunner {
 
       if (applyResult.status === 'applied') {
         stats.applied++;
-        await DailyQuotaManager.incrementAppliedCount();
+        await DailyQuotaManager.commitApplication(applicationKey(job.jobId, job.url));
         await processedJobsStore.recordJob({
           jobId: job.jobId,
           url: job.url,
@@ -3489,17 +3498,21 @@ export class DedicatedJobRunner {
       const jobRunId = `${runId}_${job.jobId}`;
       this.activeJobId = job.jobId;
 
-      // Quota check
-      const quota = await DailyQuotaManager.canApplyToday();
+      // Daily quota: hold a server slot for this job (released if it is skipped or fails)
+      const quota = await DailyQuotaManager.reserveApplication(applicationKey(job.jobId, job.url), 'runner');
       if (!quota.allowed) {
-        const quotaMsg = `🛑 Daily application quota reached (${quota.currentCount} today). Stopping run.`;
+        const quotaMsg = `🛑 ${quotaStopMessage(quota)} Stopping run.`;
         this.notifyStatus(portToSend, quotaMsg, 'fail');
         break;
       }
 
-      // Hard credit budget check
+      // Hard credit budget check (not applied to verified JobForm Automator Premium)
       const balanceRes = await backendApiClient.getCreditsBalance().catch(() => null);
-      if (balanceRes?.data?.remainingCredits !== undefined && balanceRes.data.remainingCredits < 1) {
+      if (
+        !balanceRes?.data?.premiumCovered &&
+        balanceRes?.data?.remainingCredits !== undefined &&
+        balanceRes.data.remainingCredits < 1
+      ) {
         const creditMsg = `🛑 Insufficient credits (${balanceRes.data.remainingCredits} remaining). Halting run.`;
         this.notifyStatus(portToSend, creditMsg, 'fail');
         break;
@@ -3607,7 +3620,7 @@ export class DedicatedJobRunner {
 
       if (applyResult.status === 'applied') {
         stats.applied++;
-        await DailyQuotaManager.incrementAppliedCount();
+        await DailyQuotaManager.commitApplication(applicationKey(job.jobId, job.url));
         await processedJobsStore.recordJob({
           jobId: job.jobId,
           url: job.url,
@@ -4740,7 +4753,7 @@ export class DedicatedJobRunner {
           pill.id = 'nanobrowser-runner-indicator';
           pill.innerHTML = `
             <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#22c55e;box-shadow:0 0 6px #22c55e;"></span>
-            <span style="color:#e2e8f0;font-weight:600;font-size:11px;font-family:system-ui,-apple-system,sans-serif;letter-spacing:0.3px;">NanoBrowser Runner Active</span>
+            <span style="color:#e2e8f0;font-weight:600;font-size:11px;font-family:system-ui,-apple-system,sans-serif;letter-spacing:0.3px;">JobForm Automator Runner Active</span>
           `;
           Object.assign(pill.style, {
             position: 'fixed',
@@ -4767,6 +4780,7 @@ export class DedicatedJobRunner {
   }
 
   private cleanupRun(summaryMsg?: string, stats?: any): void {
+    void DailyQuotaManager.releaseOwner('runner');
     if (this.activePort) {
       try {
         this.activePort.postMessage({
@@ -4852,7 +4866,7 @@ export class DedicatedJobRunner {
 
       if (verifiedApplied) {
         logger.info(`[DedicatedRunner] Job ${activeRun.jobId} verified as applied during startup recovery.`);
-        await DailyQuotaManager.incrementAppliedCount();
+        await DailyQuotaManager.commitApplication(applicationKey(activeRun.jobId, activeRun.canonicalUrl));
         await queueSafetyStore.setSingleApplyVerified(true);
         await processedJobsStore.recordJob({
           jobId: activeRun.jobId,
