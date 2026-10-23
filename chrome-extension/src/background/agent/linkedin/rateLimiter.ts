@@ -115,7 +115,13 @@ export class DailyQuotaManager {
         await backendApiClient.releaseApplicationSlot(previous);
       }
 
-      const slot = await backendApiClient.reserveApplicationSlot(jobKey);
+      let slot = await backendApiClient.reserveApplicationSlot(jobKey);
+      if (slot.status === 'unavailable') {
+        // Transient network or token glitch retry once before failing
+        await new Promise(r => setTimeout(r, 600));
+        await backendApiClient.getFreshToken(0).catch(() => null);
+        slot = await backendApiClient.reserveApplicationSlot(jobKey);
+      }
       if (slot.quota) await this.remember(slot.quota);
 
       switch (slot.status) {

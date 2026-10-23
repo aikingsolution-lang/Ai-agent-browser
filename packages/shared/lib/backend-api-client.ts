@@ -995,6 +995,7 @@ export class BackendApiClient {
   /** Today's application quota from the backend (the only source of truth); null when unavailable. */
   public async getProfileQuota(): Promise<ApplicationQuota | null> {
     try {
+      await this.getFreshToken().catch(() => null);
       await this.ensureToken();
       if (!this.token) {
         return null;
@@ -1013,6 +1014,7 @@ export class BackendApiClient {
    */
   public async reserveApplicationSlot(jobKey: string): Promise<ApplicationSlotResult> {
     try {
+      await this.getFreshToken().catch(() => null);
       await this.ensureToken();
       if (!this.token) return { status: 'unavailable', quota: null };
       const res = await this.request<{ granted: boolean; alreadyCounted: boolean; quota: ApplicationQuota }>(

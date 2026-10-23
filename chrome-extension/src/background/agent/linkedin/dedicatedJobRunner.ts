@@ -1035,10 +1035,28 @@ export class DedicatedJobRunner {
     // 3. Quota (a server-held slot for this job) & Profile Completeness Checks
     const quota = await DailyQuotaManager.reserveApplication(applicationKey(jobId, canonicalUrl), 'runner');
     if (!quota.allowed) {
-      const quotaMsg = quotaStopMessage(quota);
-      this.notify(portToSend, `🛑 ${quotaMsg}`, true);
-      this.isRunning = false;
-      return { status: 'error', message: quotaMsg };
+      let allowFallback = false;
+      if (quota.reason === 'error') {
+        const localQuota = await DailyQuotaManager.getQuotaData().catch(() => null);
+        const remaining = (localQuota?.maxDailyQuota ?? 10) - (localQuota?.appliedCount ?? 0);
+        if (localQuota && remaining > 0 && !localQuota.isPausedDueToQuota) {
+          logger.warning(
+            `[DedicatedJobRunner] Server quota verification slow/unavailable; proceeding with local quota fallback (${localQuota.appliedCount}/${localQuota.maxDailyQuota}).`,
+          );
+          this.notify(
+            portToSend,
+            `⚠️ Server quota check was slow/unavailable. Continuing with local quota (${localQuota.appliedCount}/${localQuota.maxDailyQuota} used).`,
+            false,
+          );
+          allowFallback = true;
+        }
+      }
+      if (!allowFallback) {
+        const quotaMsg = quotaStopMessage(quota);
+        this.notify(portToSend, `🛑 ${quotaMsg}`, true);
+        this.isRunning = false;
+        return { status: 'error', message: quotaMsg };
+      }
     }
 
     const careerBrain = await careerBrainStore.getCareerBrain();
@@ -2022,9 +2040,27 @@ export class DedicatedJobRunner {
         // Daily quota: hold a server slot for this job (released if it is skipped or fails)
         const quota = await DailyQuotaManager.reserveApplication(applicationKey(job.jobId, job.url), 'runner');
         if (!quota.allowed) {
-          const quotaMsg = `🛑 ${quotaStopMessage(quota)} Stopping run.`;
-          this.notifyStatus(portToSend, quotaMsg, 'fail');
-          break;
+          let allowFallback = false;
+          if (quota.reason === 'error') {
+            const localQuota = await DailyQuotaManager.getQuotaData().catch(() => null);
+            const remaining = (localQuota?.maxDailyQuota ?? 10) - (localQuota?.appliedCount ?? 0);
+            if (localQuota && remaining > 0 && !localQuota.isPausedDueToQuota) {
+              logger.warning(
+                `[DedicatedJobRunner] Server quota verification slow/unavailable for ${job.jobId}; proceeding with local quota fallback (${localQuota.appliedCount}/${localQuota.maxDailyQuota}).`,
+              );
+              this.notifyStatus(
+                portToSend,
+                `⚠️ Server quota check was slow/unavailable. Continuing with local quota (${localQuota.appliedCount}/${localQuota.maxDailyQuota} used).`,
+                'info',
+              );
+              allowFallback = true;
+            }
+          }
+          if (!allowFallback) {
+            const quotaMsg = `🛑 ${quotaStopMessage(quota)} Stopping run.`;
+            this.notifyStatus(portToSend, quotaMsg, 'fail');
+            break;
+          }
         }
 
         // Hard credit budget check (minimum 5 credits to ensure balance for form-filling LLM calls).
@@ -2846,9 +2882,27 @@ export class DedicatedJobRunner {
       // Daily quota: hold a server slot for this job (released if it is skipped or fails)
       const quota = await DailyQuotaManager.reserveApplication(applicationKey(job.jobId, job.url), 'runner');
       if (!quota.allowed) {
-        const quotaMsg = `🛑 ${quotaStopMessage(quota)} Stopping run.`;
-        this.notifyStatus(portToSend, quotaMsg, 'fail');
-        break;
+        let allowFallback = false;
+        if (quota.reason === 'error') {
+          const localQuota = await DailyQuotaManager.getQuotaData().catch(() => null);
+          const remaining = (localQuota?.maxDailyQuota ?? 10) - (localQuota?.appliedCount ?? 0);
+          if (localQuota && remaining > 0 && !localQuota.isPausedDueToQuota) {
+            logger.warning(
+              `[DedicatedJobRunner] Server quota verification slow/unavailable for ${job.jobId}; proceeding with local quota fallback (${localQuota.appliedCount}/${localQuota.maxDailyQuota}).`,
+            );
+            this.notifyStatus(
+              portToSend,
+              `⚠️ Server quota check was slow/unavailable. Continuing with local quota (${localQuota.appliedCount}/${localQuota.maxDailyQuota} used).`,
+              'info',
+            );
+            allowFallback = true;
+          }
+        }
+        if (!allowFallback) {
+          const quotaMsg = `🛑 ${quotaStopMessage(quota)} Stopping run.`;
+          this.notifyStatus(portToSend, quotaMsg, 'fail');
+          break;
+        }
       }
 
       // Hard credit budget check (not applied to verified JobForm Automator Premium)
@@ -3608,9 +3662,27 @@ export class DedicatedJobRunner {
       // Daily quota: hold a server slot for this job (released if it is skipped or fails)
       const quota = await DailyQuotaManager.reserveApplication(applicationKey(job.jobId, job.url), 'runner');
       if (!quota.allowed) {
-        const quotaMsg = `🛑 ${quotaStopMessage(quota)} Stopping run.`;
-        this.notifyStatus(portToSend, quotaMsg, 'fail');
-        break;
+        let allowFallback = false;
+        if (quota.reason === 'error') {
+          const localQuota = await DailyQuotaManager.getQuotaData().catch(() => null);
+          const remaining = (localQuota?.maxDailyQuota ?? 10) - (localQuota?.appliedCount ?? 0);
+          if (localQuota && remaining > 0 && !localQuota.isPausedDueToQuota) {
+            logger.warning(
+              `[DedicatedJobRunner] Server quota verification slow/unavailable for ${job.jobId}; proceeding with local quota fallback (${localQuota.appliedCount}/${localQuota.maxDailyQuota}).`,
+            );
+            this.notifyStatus(
+              portToSend,
+              `⚠️ Server quota check was slow/unavailable. Continuing with local quota (${localQuota.appliedCount}/${localQuota.maxDailyQuota} used).`,
+              'info',
+            );
+            allowFallback = true;
+          }
+        }
+        if (!allowFallback) {
+          const quotaMsg = `🛑 ${quotaStopMessage(quota)} Stopping run.`;
+          this.notifyStatus(portToSend, quotaMsg, 'fail');
+          break;
+        }
       }
 
       // Hard credit budget check (not applied to verified JobForm Automator Premium)

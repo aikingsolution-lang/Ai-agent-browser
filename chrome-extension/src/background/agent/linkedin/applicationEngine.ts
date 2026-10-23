@@ -1509,12 +1509,25 @@ export class ApplicationEngine {
       ? await DailyQuotaManager.reserveApplication(quotaKey, 'agent:easy-apply')
       : await DailyQuotaManager.canApplyToday();
     if (!quotaCheck.allowed) {
-      const msg = quotaStopMessage(quotaCheck);
-      logger.warning(`[ApplicationEngine] ${msg}`);
-      this.state.status = 'QUEUED';
-      this.state.errors.push(msg);
-      this.state.completedAt = Date.now();
-      return this.state;
+      let allowFallback = false;
+      if (quotaCheck.reason === 'error') {
+        const localQuota = await DailyQuotaManager.getQuotaData().catch(() => null);
+        const remaining = (localQuota?.maxDailyQuota ?? 10) - (localQuota?.appliedCount ?? 0);
+        if (localQuota && remaining > 0 && !localQuota.isPausedDueToQuota) {
+          logger.warning(
+            `[ApplicationEngine] Server quota verification slow/unavailable; proceeding with local quota fallback (${localQuota.appliedCount}/${localQuota.maxDailyQuota}).`,
+          );
+          allowFallback = true;
+        }
+      }
+      if (!allowFallback) {
+        const msg = quotaStopMessage(quotaCheck);
+        logger.warning(`[ApplicationEngine] ${msg}`);
+        this.state.status = 'QUEUED';
+        this.state.errors.push(msg);
+        this.state.completedAt = Date.now();
+        return this.state;
+      }
     }
 
     // 3. RAG Fit Score Check (Only enforce if minFitScore is explicitly configured > 0)
