@@ -4310,15 +4310,15 @@ export class DedicatedJobRunner {
 
     // Loop-prevention guards: limit repeat attempts on individual fields and modal steps
     const fieldAttemptCounts = new Map<string, number>();
-    const MAX_FIELD_ATTEMPTS = 3;
+    const MAX_FIELD_ATTEMPTS = 6;
     const stepRetryCounts = new Map<number, number>();
-    const MAX_STEP_RETRIES = 2;
+    const MAX_STEP_RETRIES = 4;
 
     const checkFieldRepeat = (fieldDesc: FormFieldDescriptor): boolean => {
       const key = `${(fieldDesc.label || '').trim().toLowerCase()}:::${fieldDesc.fieldType || 'text'}`;
       const current = (fieldAttemptCounts.get(key) || 0) + 1;
       fieldAttemptCounts.set(key, current);
-      if (current >= MAX_FIELD_ATTEMPTS) {
+      if (current > MAX_FIELD_ATTEMPTS) {
         logger.error(
           `[DedicatedJobRunner] Field "${fieldDesc.label}" has reached ${current} resolution attempts. Aborting modal workflow to prevent infinite loop.`,
         );
@@ -4386,6 +4386,14 @@ export class DedicatedJobRunner {
         } catch (selErr) {
           logger.warning('[DedicatedJobRunner] selectResumeInModal non-blocking warning:', selErr);
         }
+      }
+
+      // Progressive scroll down and top to force dynamic rendering of all form inputs in the modal
+      if (typeof page.scrollModalContent === 'function') {
+        await page.scrollModalContent('down');
+        await new Promise(r => setTimeout(r, 200));
+        await page.scrollModalContent('top');
+        await new Promise(r => setTimeout(r, 200));
       }
 
       // 2. Discover interactive form fields on current step
@@ -4532,6 +4540,12 @@ export class DedicatedJobRunner {
             }
           }
         }
+      }
+
+      // Scroll modal content to bottom so lower fields and checkboxes are visible & reachable
+      if (typeof page.scrollModalContent === 'function') {
+        await page.scrollModalContent('bottom');
+        await new Promise(r => setTimeout(r, 250));
       }
 
       // 3. Pre-advance validation check (checks required empty fields & aria-invalid)
@@ -4883,7 +4897,42 @@ export class DedicatedJobRunner {
           };
         }
       } else if (actions.hasReview || actions.hasNext) {
-        const fwdRes = await page.clickModalForwardButton();
+        if (typeof page.scrollModalContent === 'function') {
+          await page.scrollModalContent('bottom');
+          await new Promise(r => setTimeout(r, 200));
+        }
+
+        let fwdRes = await page.clickModalForwardButton();
+        if (!fwdRes.clicked) {
+          logger.warning(
+            '[DedicatedJobRunner] Forward button click was not accepted (may be disabled). Inspecting and healing form errors...',
+          );
+          await inspectAndHealFormErrors(page, '.jobs-easy-apply-modal');
+          if (typeof page.scrollModalContent === 'function') {
+            await page.scrollModalContent('bottom');
+          }
+          await new Promise(r => setTimeout(r, 400));
+          fwdRes = await page.clickModalForwardButton();
+        }
+
+        if (!fwdRes.clicked) {
+          const preRetryValidation = await page.validateModalFormState();
+          if (preRetryValidation.hasErrors && scopedLLM) {
+            for (const reqF of preRetryValidation.emptyRequiredFields) {
+              const autoSol = await solveQuestionAutonomousWithLLM(reqF, careerBrain, scopedLLM);
+              if (autoSol.success && autoSol.answer) {
+                const adapted = adaptAnswerToFieldFormat(autoSol.answer, reqF);
+                const fillVal = adapted.valid ? adapted.value : autoSol.answer;
+                await page.fillModalFieldDirect(reqF, fillVal);
+              }
+            }
+            if (typeof page.scrollModalContent === 'function') {
+              await page.scrollModalContent('bottom');
+            }
+            fwdRes = await page.clickModalForwardButton();
+          }
+        }
+
         if (!fwdRes.clicked) {
           return {
             success: false,
@@ -4898,24 +4947,40 @@ export class DedicatedJobRunner {
 
         // Post-advance validation check: Check if forward navigation was rejected by red alert errors!
         const postFwdValidation = await page.validateModalFormState();
-        if (postFwdValidation.hasErrors && postFwdValidation.invalidFieldsWithErrors.length > 0) {
-          logger.warning(
-            `[DedicatedJobRunner] Forward navigation was rejected by ${postFwdValidation.invalidFieldsWithErrors.length} red alert validation errors. Auto-healing with LLM...`,
-          );
-          for (const invF of postFwdValidation.invalidFieldsWithErrors) {
-            const healed = await solveValidationErrorWithLLM(invF, careerBrain, scopedLLM);
-            if (healed.success && healed.answer) {
-              const adapted = adaptAnswerToFieldFormat(healed.answer, invF as any);
-              const fillVal = adapted.valid ? adapted.value : healed.answer;
-              const fillSuccess = await page.fillModalFieldDirect(invF, fillVal);
-              onAuditLog(
-                'GENERATED',
-                invF.label,
-                fillVal,
-                `Post-forward validation heal | Prev: "${invF.currentValue}" | Error: "${invF.errorText}" | Fill: ${fillSuccess ? 'SUCCESS' : 'FAILED'}`,
-              );
+        if (postFwdValidation.hasErrors) {
+          if (postFwdValidation.invalidFieldsWithErrors.length > 0) {
+            logger.warning(
+              `[DedicatedJobRunner] Forward navigation was rejected by ${postFwdValidation.invalidFieldsWithErrors.length} red alert validation errors. Auto-healing with LLM...`,
+            );
+            for (const invF of postFwdValidation.invalidFieldsWithErrors) {
+              const healed = await solveValidationErrorWithLLM(invF, careerBrain, scopedLLM);
+              if (healed.success && healed.answer) {
+                const adapted = adaptAnswerToFieldFormat(healed.answer, invF as any);
+                const fillVal = adapted.valid ? adapted.value : healed.answer;
+                const fillSuccess = await page.fillModalFieldDirect(invF, fillVal);
+                onAuditLog(
+                  'GENERATED',
+                  invF.label,
+                  fillVal,
+                  `Post-forward validation heal | Prev: "${invF.currentValue}" | Error: "${invF.errorText}" | Fill: ${fillSuccess ? 'SUCCESS' : 'FAILED'}`,
+                );
+              }
             }
           }
+          if (postFwdValidation.emptyRequiredFields.length > 0 && scopedLLM) {
+            for (const reqF of postFwdValidation.emptyRequiredFields) {
+              const autoSol = await solveQuestionAutonomousWithLLM(reqF, careerBrain, scopedLLM);
+              if (autoSol.success && autoSol.answer) {
+                const adapted = adaptAnswerToFieldFormat(autoSol.answer, reqF);
+                const fillVal = adapted.valid ? adapted.value : autoSol.answer;
+                await page.fillModalFieldDirect(reqF, fillVal);
+              }
+            }
+          }
+          if (typeof page.scrollModalContent === 'function') {
+            await page.scrollModalContent('bottom');
+          }
+          await page.clickModalForwardButton();
           // Do not waste a step iteration when blocked on current step
           step = Math.max(0, step - 1);
         }

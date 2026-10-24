@@ -3823,6 +3823,12 @@ export default class Page {
 
       if (!targetEl) return false;
 
+      // Ensure target element is scrolled into view in modal before interaction
+      const scrollTarget = targetRadioLabel || targetEl.closest('label') || targetEl.parentElement || targetEl;
+      try {
+        scrollTarget.scrollIntoView({ behavior: 'instant', block: 'center' });
+      } catch {}
+
       // Fill element
       if (targetEl instanceof HTMLInputElement && (targetEl.type === 'radio' || targetEl.type === 'checkbox')) {
         const clickable = targetRadioLabel || targetEl.closest('label') || targetEl.parentElement || targetEl;
@@ -5807,6 +5813,124 @@ export default class Page {
   }
 
   /**
+   * Scrolls the content area of the active modal (top, bottom, or down).
+   */
+  async scrollModalContent(target: 'bottom' | 'top' | 'down' = 'bottom'): Promise<boolean> {
+    const scrollInPage = (dir: 'bottom' | 'top' | 'down') => {
+      function findActiveModal(root: any): HTMLElement | null {
+        const candidates = root.querySelectorAll
+          ? (Array.from(
+              root.querySelectorAll(
+                '.jobs-easy-apply-modal, [data-test-modal-id="easy-apply-modal"], [data-easy-apply-modal], div.artdeco-modal[role="dialog"], div.artdeco-modal, div[role="dialog"][aria-modal="true"], div[role="dialog"], [data-test-modal]',
+              ),
+            ) as HTMLElement[])
+          : [];
+
+        for (const c of candidates) {
+          if (
+            c.closest(
+              'nav, header, #global-nav, .global-nav, .msg-overlay-container, #msg-overlay, .artdeco-dropdown, .search-reusables__filter-list, .search-reusables__filter-dropdown, .jobs-search-box, .scaffold-layout__header, .jobs-search-results-list, .scaffold-layout__list, .artdeco-pill',
+            )
+          ) {
+            continue;
+          }
+          const aria = (c.getAttribute('aria-label') || '').toLowerCase();
+          if (aria.includes('messaging') || aria.includes('chat') || aria.includes('notification')) continue;
+          const text = (c.innerText || c.textContent || '').trim().toLowerCase();
+          if (/^\d+\s*notifications?$/i.test(text) || c.closest('.notifications-badge')) continue;
+          const style = window.getComputedStyle(c);
+          if (style.display === 'none' || style.visibility === 'hidden') continue;
+          const rect = c.getBoundingClientRect();
+          if (rect.width < 200 || rect.height < 100) continue;
+          return c;
+        }
+
+        const all = root.querySelectorAll ? root.querySelectorAll('*') : [];
+        for (let i = 0; i < all.length; i++) {
+          if (all[i].shadowRoot) {
+            const found = findActiveModal(all[i].shadowRoot);
+            if (found) return found;
+          }
+        }
+        return null;
+      }
+
+      const modal = findActiveModal(document);
+      const searchRoots: HTMLElement[] = [];
+      if (modal) searchRoots.push(modal);
+      const artdecoModal = document.querySelector(
+        'div.artdeco-modal, .jobs-easy-apply-modal, div[role="dialog"][aria-modal="true"]',
+      ) as HTMLElement | null;
+      if (artdecoModal && !searchRoots.includes(artdecoModal)) searchRoots.push(artdecoModal);
+
+      // Find scrollable body in modal
+      let scrollableContainer: HTMLElement | null = null;
+      for (const rootEl of searchRoots) {
+        const found = rootEl.querySelector(
+          '.jobs-easy-apply-modal__content, .artdeco-modal__content, form.jobs-easy-apply-form, div[role="dialog"] .overflow-y-auto, [data-test-modal-content], .overflow-y-auto',
+        ) as HTMLElement | null;
+        if (found) {
+          scrollableContainer = found;
+          break;
+        }
+      }
+
+      if (!scrollableContainer && modal) {
+        // Try finding any element with scrollHeight > clientHeight
+        const allDivs = Array.from(modal.querySelectorAll('div, form, section')) as HTMLElement[];
+        for (const d of allDivs) {
+          if (d.scrollHeight > d.clientHeight && d.clientHeight > 100) {
+            scrollableContainer = d;
+            break;
+          }
+        }
+      }
+
+      if (!scrollableContainer) {
+        scrollableContainer = document.querySelector(
+          '.jobs-easy-apply-modal__content, .artdeco-modal__content',
+        ) as HTMLElement | null;
+      }
+
+      if (!scrollableContainer) return false;
+
+      if (dir === 'bottom') {
+        scrollableContainer.scrollTop = scrollableContainer.scrollHeight;
+      } else if (dir === 'top') {
+        scrollableContainer.scrollTop = 0;
+      } else if (dir === 'down') {
+        scrollableContainer.scrollTop += Math.max(300, Math.floor(scrollableContainer.clientHeight * 0.7));
+      }
+
+      scrollableContainer.dispatchEvent(new Event('scroll', { bubbles: true }));
+      return true;
+    };
+
+    if (!this._puppeteerPage) {
+      await this.attachPuppeteer().catch(() => false);
+    }
+
+    if (this._puppeteerPage) {
+      try {
+        return await this._puppeteerPage.evaluate(scrollInPage, target);
+      } catch {}
+    }
+
+    if (this._tabId && typeof chrome !== 'undefined' && chrome.scripting?.executeScript) {
+      try {
+        const results = await chrome.scripting.executeScript({
+          target: { tabId: this._tabId },
+          func: scrollInPage,
+          args: [target],
+        });
+        return Boolean(results?.[0]?.result);
+      } catch {}
+    }
+
+    return false;
+  }
+
+  /**
    * Clicks the Next or Review button in the active modal.
    */
   async clickModalForwardButton(): Promise<{ clicked: boolean; type?: 'next' | 'review' }> {
@@ -5881,6 +6005,37 @@ export default class Page {
       ) as HTMLElement | null;
       if (artdecoModal && !searchRoots.includes(artdecoModal)) searchRoots.push(artdecoModal);
 
+      // Auto-scroll modal content to bottom so bottom questions & consent checkboxes are in view
+      const contentEl = (modal || document).querySelector(
+        '.jobs-easy-apply-modal__content, .artdeco-modal__content, form.jobs-easy-apply-form, div[role="dialog"] .overflow-y-auto',
+      ) as HTMLElement | null;
+      if (contentEl) {
+        contentEl.scrollTop = contentEl.scrollHeight;
+        contentEl.dispatchEvent(new Event('scroll', { bubbles: true }));
+      }
+
+      // Check required or agreement checkboxes if unchecked
+      const checkBoxes = Array.from(
+        (modal || document).querySelectorAll('input[type="checkbox"]'),
+      ) as HTMLInputElement[];
+      for (const cb of checkBoxes) {
+        if (!cb.checked) {
+          const parentText = (cb.closest('label, div, p, fieldset')?.textContent || '').toLowerCase();
+          const isConsentOrReq =
+            cb.required ||
+            cb.getAttribute('aria-required') === 'true' ||
+            /agree|consent|terms|acknowledge|certify|confirm|policy/i.test(parentText);
+          if (isConsentOrReq) {
+            const clickable = cb.closest('label') || cb.parentElement || cb;
+            clickable.click();
+            if (!cb.checked) {
+              cb.checked = true;
+              cb.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+          }
+        }
+      }
+
       let buttons: HTMLButtonElement[] = [];
       for (const rootEl of searchRoots) {
         const found = Array.from(rootEl.querySelectorAll('button, [role="button"]')) as HTMLButtonElement[];
@@ -5897,6 +6052,15 @@ export default class Page {
         ) as HTMLButtonElement[];
       }
       if (buttons.length === 0 && !modal) return { clicked: false };
+
+      function isButtonDisabled(btn: HTMLElement): boolean {
+        return (
+          (btn as HTMLButtonElement).disabled === true ||
+          btn.hasAttribute('disabled') ||
+          btn.getAttribute('aria-disabled') === 'true' ||
+          btn.classList.contains('artdeco-button--disabled')
+        );
+      }
 
       function dispatchFullClick(el: HTMLElement) {
         el.scrollIntoView({ behavior: 'instant', block: 'center' });
@@ -5915,8 +6079,10 @@ export default class Page {
         const aria = (btn.getAttribute('aria-label') || '').trim().toLowerCase();
         const dataControl = (btn.getAttribute('data-control-name') || '').trim().toLowerCase();
         if (aria.includes('review') || text === 'review' || text.includes('review') || dataControl.includes('review')) {
-          dispatchFullClick(btn);
-          return { clicked: true, type: 'review' as const };
+          if (!isButtonDisabled(btn)) {
+            dispatchFullClick(btn);
+            return { clicked: true, type: 'review' as const };
+          }
         }
       }
 
@@ -5936,8 +6102,10 @@ export default class Page {
           btn.hasAttribute('data-easy-apply-next-button') ||
           dataControl.includes('continue')
         ) {
-          dispatchFullClick(btn);
-          return { clicked: true, type: 'next' as const };
+          if (!isButtonDisabled(btn)) {
+            dispatchFullClick(btn);
+            return { clicked: true, type: 'next' as const };
+          }
         }
       }
 
@@ -5945,7 +6113,7 @@ export default class Page {
       const primaryBtn = (modal || document).querySelector(
         '.jobs-easy-apply-modal__footer button.artdeco-button--primary, .artdeco-modal__actionbar button.artdeco-button--primary, footer button.artdeco-button--primary, button.artdeco-button--primary',
       ) as HTMLElement | null;
-      if (primaryBtn) {
+      if (primaryBtn && !isButtonDisabled(primaryBtn)) {
         const pText = (primaryBtn.innerText || primaryBtn.textContent || '').trim().toLowerCase();
         const pAria = (primaryBtn.getAttribute('aria-label') || '').trim().toLowerCase();
         if (
