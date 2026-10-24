@@ -6523,6 +6523,99 @@ export default class Page {
   }
 
   /**
+   * Captures a diagnostic snapshot of the active modal for stuck-step debugging:
+   * title, a short visible-text snippet, footer/action button labels, and whether
+   * a file upload input or radio options are present on the current page.
+   */
+  async captureModalSnapshot(): Promise<{
+    title: string;
+    textSnippet: string;
+    buttonTexts: string[];
+    hasFileInput: boolean;
+    hasRadios: boolean;
+  } | null> {
+    const snapInPage = () => {
+      function findActiveModal(root: any): HTMLElement | null {
+        const candidates = root.querySelectorAll
+          ? (Array.from(
+              root.querySelectorAll(
+                'div.jobs-easy-apply-modal, [data-easy-apply-modal], [data-test-modal-id="easy-apply-modal"], div[data-test-modal], div.artdeco-modal, div[role="dialog"]',
+              ),
+            ) as HTMLElement[])
+          : [];
+
+        for (const c of candidates) {
+          if (
+            c.closest('nav, header, #global-nav, .global-nav, .msg-overlay-container, #msg-overlay, .artdeco-dropdown')
+          ) {
+            continue;
+          }
+          const text = (c.innerText || c.textContent || '').trim().toLowerCase();
+          if (/^\d+\s*notifications?$/i.test(text) || c.closest('.notifications-badge')) continue;
+          const style = window.getComputedStyle(c);
+          if (style.display === 'none' || style.visibility === 'hidden') continue;
+          const rect = c.getBoundingClientRect();
+          if (rect.width >= 150 && rect.height >= 80) return c;
+          if (
+            c.classList.contains('jobs-easy-apply-modal') ||
+            c.querySelector('.jobs-easy-apply-modal, .jobs-easy-apply-content, form.jobs-easy-apply-form')
+          ) {
+            return c;
+          }
+        }
+
+        const all = root.querySelectorAll ? root.querySelectorAll('*') : [];
+        for (let i = 0; i < all.length; i++) {
+          if (all[i].shadowRoot) {
+            const found = findActiveModal(all[i].shadowRoot);
+            if (found) return found;
+          }
+        }
+        return null;
+      }
+
+      const modal = findActiveModal(document);
+      if (!modal) return null;
+
+      const titleEl = modal.querySelector('h1, h2, h3, [data-test-modal-title]');
+      const title = (titleEl?.textContent || '').trim().slice(0, 120);
+      const textSnippet = (modal.innerText || modal.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 200);
+      const buttonTexts = (Array.from(modal.querySelectorAll('button, [role="button"]')) as HTMLElement[])
+        .map(b => (b.textContent || b.getAttribute('aria-label') || '').trim().slice(0, 40))
+        .filter(t => t.length > 0)
+        .slice(0, 8);
+      const hasFileInput = Boolean(modal.querySelector('input[type="file"]'));
+      const hasRadios = Boolean(modal.querySelector('input[type="radio"]'));
+
+      return { title, textSnippet, buttonTexts, hasFileInput, hasRadios };
+    };
+
+    if (!this._puppeteerPage) {
+      await this.attachPuppeteer().catch(() => false);
+    }
+
+    if (this._puppeteerPage) {
+      try {
+        const res = await this._puppeteerPage.evaluate(snapInPage);
+        return res && typeof res.title === 'string' ? res : null;
+      } catch {}
+    }
+
+    if (this._tabId && typeof chrome !== 'undefined' && chrome.scripting?.executeScript) {
+      try {
+        const results = await chrome.scripting.executeScript({
+          target: { tabId: this._tabId },
+          func: snapInPage,
+        });
+        const res = results?.[0]?.result;
+        return res && typeof res.title === 'string' ? res : null;
+      } catch {}
+    }
+
+    return null;
+  }
+
+  /**
    * Scrolls the content area of the active modal (top, bottom, or down).
    */
   async scrollModalContent(target: 'bottom' | 'top' | 'down' = 'bottom'): Promise<boolean> {

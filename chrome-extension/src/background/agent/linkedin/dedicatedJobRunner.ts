@@ -4510,6 +4510,14 @@ export class DedicatedJobRunner {
     const bestMatch = selectBestMatchingResume(candidateResumes, job.title);
     const bestResume = bestMatch.bestResume;
 
+    // Shared eligibility flags used by the draft-resume auto-upload logic below
+    const hasNoStoredResume = candidateResumes.length === 0 && !careerBrain.resumeFileName;
+    const hasProfileData =
+      Boolean(careerBrain.fullName?.trim()) &&
+      ((careerBrain.resumeText || '').trim().length >= 50 ||
+        (Array.isArray(careerBrain.workExperience) && careerBrain.workExperience.length > 0) ||
+        (Array.isArray(careerBrain.skills) && careerBrain.skills.length > 0));
+
     if (bestResume && candidateResumes.length > 1) {
       onAuditLog(
         'MATCHED',
@@ -4527,6 +4535,14 @@ export class DedicatedJobRunner {
     let step = 0;
     const maxSteps = 15;
     let submitted = false;
+
+    // Stuck-step guards: detect when LinkedIn silently rejects Next/Review clicks
+    // (modal neither advances nor exposes fields/buttons) and fail fast with a
+    // diagnostic snapshot instead of burning all 15 steps on a treadmill.
+    let stuckStreak = 0;
+    let lastIterationSignature: string | null = null;
+    let uploadAttempted = false;
+    let fieldsZeroStreak = 0;
 
     // Loop-prevention guards: limit repeat attempts on individual fields and modal steps
     const fieldAttemptCounts = new Map<string, number>();
@@ -4619,6 +4635,7 @@ export class DedicatedJobRunner {
       // 2. Discover interactive form fields on current step
       const fields = await page.discoverModalFormFields();
       if (fields.length > 0) {
+        fieldsZeroStreak = 0;
         this.notifyStatus(
           portToSend,
           `✨ Step ${step}: Answering ${fields.length} question${fields.length > 1 ? 's' : ''} (preserving pre-filled fields)...`,
@@ -4794,13 +4811,6 @@ export class DedicatedJobRunner {
         // Draft Resume v2: employer mandates a Resume upload but the candidate has no stored
         // resume file configured. Auto-generate a truthful PDF from careerBrain data and upload
         // it in-memory so the application can proceed instead of skipping.
-        const hasNoStoredResume = candidateResumes.length === 0 && !careerBrain.resumeFileName;
-        const hasProfileData =
-          Boolean(careerBrain.fullName?.trim()) &&
-          ((careerBrain.resumeText || '').trim().length >= 50 ||
-            (Array.isArray(careerBrain.workExperience) && careerBrain.workExperience.length > 0) ||
-            (Array.isArray(careerBrain.skills) && careerBrain.skills.length > 0));
-
         if (docType === 'Resume' && hasNoStoredResume && hasProfileData) {
           try {
             const draftFileName = buildDraftResumeFileName(careerBrain);
@@ -5190,8 +5200,11 @@ export class DedicatedJobRunner {
           }
         }
       } else {
+        // No interactive inputs found on this step - modal may be on a non-question
+        // page (resume selection/upload, review, etc.) which is handled via action buttons below.
+        fieldsZeroStreak++;
         logger.info(
-          `[DedicatedJobRunner] Step ${step}: All fields are already pre-filled. Preserving existing values untouched.`,
+          `[DedicatedJobRunner] Step ${step}: No form fields discovered (fields-zero streak ${fieldsZeroStreak}).`,
         );
       }
 
@@ -5505,6 +5518,69 @@ export class DedicatedJobRunner {
           return { success: false, reason: 'Modal closed unexpectedly without confirmation' };
         }
         return { success: false, reason: 'No action button (Next/Review/Submit) found on step' };
+      }
+
+      // Stuck-step guard (end of iteration): reachable only when the forward path did
+      // not continue/break - i.e. LinkedIn may have silently swallowed the Next/Review
+      // click while the step signature stayed identical.
+      if (typeof page.getModalStepSignature === 'function') {
+        const endSig = await page.getModalStepSignature().catch(() => null);
+        if (endSig !== null && lastIterationSignature !== null && endSig === lastIterationSignature) {
+          stuckStreak++;
+        } else {
+          stuckStreak = 0;
+        }
+        lastIterationSignature = endSig;
+      }
+
+      // If stuck on a page that has a file input (resume upload step with a disabled
+      // Next button), auto-upload the draft resume PDF once to unlock the form.
+      if (stuckStreak >= 1 && !uploadAttempted) {
+        const snap = await page.captureModalSnapshot().catch(() => null);
+        if (snap?.hasFileInput && hasNoStoredResume && hasProfileData) {
+          try {
+            const draftFileName = buildDraftResumeFileName(careerBrain);
+            const draftPdf = buildDraftResumePdf(careerBrain);
+            const draftB64 = bytesToBase64(draftPdf);
+            this.notifyStatus(portToSend, `📄 Auto-uploading "${draftFileName}" to unlock this form step...`, 'info');
+            const uploaded = await page.uploadResumeDraftFile(draftFileName, draftB64);
+            if (uploaded) {
+              await new Promise(r => setTimeout(r, 1500));
+              uploadAttempted = true;
+              stuckStreak = 0;
+              lastIterationSignature = null;
+              this.notifyStatus(portToSend, `✅ Draft resume uploaded. Re-checking form buttons...`, 'info');
+            }
+          } catch (uploadErr: any) {
+            logger.warning(`[DedicatedJobRunner] Draft resume auto-upload failed: ${uploadErr?.message || uploadErr}`);
+          }
+        }
+      }
+
+      // Fail fast with diagnostics instead of burning all 15 steps on a treadmill
+      if (stuckStreak >= 3 || fieldsZeroStreak >= 8) {
+        const snap = await page.captureModalSnapshot().catch(() => null);
+        const stuckTitle = snap?.title || 'unknown page';
+        logger.warning(
+          `[DedicatedJobRunner] Form stuck (stuckStreak=${stuckStreak}, fieldsZeroStreak=${fieldsZeroStreak}). Snapshot: ${JSON.stringify(
+            {
+              title: snap?.title,
+              buttons: snap?.buttonTexts,
+              hasFileInput: snap?.hasFileInput,
+              hasRadios: snap?.hasRadios,
+              snippet: snap?.textSnippet,
+            },
+          )}`,
+        );
+        this.notifyStatus(
+          portToSend,
+          `⚠️ LinkedIn form stuck on "${stuckTitle}" - Next/Review not advancing. Skipping to preserve credits...`,
+          'info',
+        );
+        return {
+          success: false,
+          reason: `Form stuck on "${stuckTitle}" (Next/Review not advancing)`,
+        };
       }
     }
 
