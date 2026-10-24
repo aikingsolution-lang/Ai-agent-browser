@@ -5025,7 +5025,15 @@ export class DedicatedJobRunner {
             }
           }
         } else if (retryActions.hasNext || retryActions.hasReview) {
-          const fwdRes = await page.clickModalForwardButton();
+          let fwdRes = await page.clickModalForwardButton();
+          if (!fwdRes.clicked) {
+            await inspectAndHealFormErrors(page, '.jobs-easy-apply-modal');
+            if (typeof page.scrollModalContent === 'function') {
+              await page.scrollModalContent('bottom');
+            }
+            await new Promise(r => setTimeout(r, 400));
+            fwdRes = await page.clickModalForwardButton();
+          }
           if (fwdRes.clicked) {
             if (typeof page.waitForDomSettlement === 'function') {
               await page.waitForDomSettlement();
@@ -5034,24 +5042,24 @@ export class DedicatedJobRunner {
             }
             continue;
           }
-        } else {
-          // Direct fallback: Attempt clicking primary button in case getModalActionButtons missed atypical labels
-          const directFwd = await page.clickModalForwardButton();
-          if (directFwd.clicked) {
-            if (typeof page.waitForDomSettlement === 'function') {
-              await page.waitForDomSettlement();
-            } else {
-              await new Promise(r => setTimeout(r, 1200));
-            }
-            continue;
+        }
+
+        // Direct fallback: Attempt clicking primary button in case getModalActionButtons missed atypical labels
+        const directFwd = await page.clickModalForwardButton();
+        if (directFwd.clicked) {
+          if (typeof page.waitForDomSettlement === 'function') {
+            await page.waitForDomSettlement();
+          } else {
+            await new Promise(r => setTimeout(r, 1200));
           }
-          const directSubmit = await page.submitApplication();
-          if (directSubmit.clicked) {
-            const confirmRes = await page.verifySubmissionConfirmation(8000);
-            if (confirmRes.confirmed) {
-              submitted = true;
-              break;
-            }
+          continue;
+        }
+        const directSubmit = await page.submitApplication();
+        if (directSubmit.clicked) {
+          const confirmRes = await page.verifySubmissionConfirmation(8000);
+          if (confirmRes.confirmed) {
+            submitted = true;
+            break;
           }
         }
 

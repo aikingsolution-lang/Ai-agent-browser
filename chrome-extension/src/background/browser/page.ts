@@ -3315,8 +3315,6 @@ export default class Page {
         if (input instanceof HTMLInputElement && input.type === 'file') continue;
         const val = (input.value || '').trim();
         const isSelect = input.tagName.toLowerCase() === 'select';
-        const isRequired =
-          input.required || input.hasAttribute('required') || input.getAttribute('aria-required') === 'true';
 
         let label = '';
         const id = input.getAttribute('id');
@@ -3338,6 +3336,18 @@ export default class Page {
         if (!label) {
           label = cleanDuplicateString(input.getAttribute('aria-label') || '');
         }
+
+        const isRequired =
+          input.required ||
+          input.hasAttribute('required') ||
+          input.getAttribute('aria-required') === 'true' ||
+          Boolean(
+            parentEl?.querySelector(
+              '.fb-dash-form-element__label-title--required, [data-test-form-element-required], [aria-label*="required" i]',
+            ) ||
+              /\*|required/i.test(label) ||
+              input.closest('.fb-dash-form-element--required, [data-test-form-element-required]'),
+          );
 
         const placeholder = cleanDuplicateString(input.getAttribute('placeholder') || '');
         let hintText = '';
@@ -6242,6 +6252,47 @@ export default class Page {
               pText.includes('review') || pAria.includes('review') ? 'review' : 'next';
             return { clicked: true, type: actionType };
           }
+        }
+      }
+
+      // 4. Force-Click / Unblock Primary Forward Button (Self-Healing Fallback)
+      // If LinkedIn left the button marked disabled due to artificial Ember state or pending focus event,
+      // force-remove disabled flags, fire focus/input events, and dispatch full click!
+      for (const btn of candidateButtons) {
+        const text = (btn.innerText || btn.textContent || '').trim().toLowerCase();
+        const aria = (btn.getAttribute('aria-label') || '').trim().toLowerCase();
+        if (
+          aria.includes('dismiss') ||
+          aria.includes('close') ||
+          text === 'dismiss' ||
+          text === 'cancel' ||
+          text === 'back'
+        ) {
+          continue;
+        }
+
+        if (
+          aria.includes('continue to next step') ||
+          aria.includes('next') ||
+          aria.includes('continue') ||
+          aria.includes('review') ||
+          text === 'next' ||
+          text === 'continue' ||
+          text === 'review' ||
+          text.includes('next') ||
+          text.includes('continue to next step') ||
+          text.includes('review') ||
+          btn.classList.contains('artdeco-button--primary')
+        ) {
+          try {
+            (btn as HTMLButtonElement).disabled = false;
+            btn.removeAttribute('disabled');
+            btn.setAttribute('aria-disabled', 'false');
+            btn.classList.remove('artdeco-button--disabled');
+          } catch {}
+          dispatchFullClick(btn);
+          const type: 'next' | 'review' = text.includes('review') || aria.includes('review') ? 'review' : 'next';
+          return { clicked: true, type };
         }
       }
 

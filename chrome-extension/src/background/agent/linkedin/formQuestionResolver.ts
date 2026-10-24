@@ -1747,18 +1747,46 @@ export function matchRuleBased(
   // City / Residential Location (must NOT be a willingness or binary question)
   if (
     /city|location/i.test(labelLower) &&
-    !/comfortable|willing|open\s+to|commute|relocate|able\s+to|hybrid|onsite|are\s+you/i.test(labelLower) &&
-    (careerBrain.currentLocation ||
-      careerBrain.preferredLocation ||
-      (careerBrain.preferredLocations && careerBrain.preferredLocations.length > 0))
+    !/comfortable|willing|open\s+to|commute|relocate|able\s+to|hybrid|onsite|are\s+you/i.test(labelLower)
   ) {
-    const rawLoc =
+    let rawLoc =
       careerBrain.currentLocation ||
       careerBrain.preferredLocation ||
       (careerBrain.preferredLocations && careerBrain.preferredLocations.length > 0
         ? careerBrain.preferredLocations[0]
         : '') ||
       '';
+    if (!rawLoc) {
+      const resume = (careerBrain.resumeText || '').toLowerCase();
+      const majorCities = [
+        'Bengaluru',
+        'Bangalore',
+        'Hyderabad',
+        'Pune',
+        'Mumbai',
+        'Delhi',
+        'Gurgaon',
+        'Gurugram',
+        'Noida',
+        'Chennai',
+        'Kolkata',
+        'Ahmedabad',
+        'San Francisco',
+        'New York',
+        'London',
+        'Toronto',
+        'Singapore',
+        'Berlin',
+        'Dubai',
+      ];
+      for (const city of majorCities) {
+        if (new RegExp(`\\b${city}\\b`, 'i').test(resume)) {
+          rawLoc = city === 'Bangalore' ? 'Bengaluru' : city;
+          break;
+        }
+      }
+      if (!rawLoc) rawLoc = 'Bengaluru';
+    }
     const cleanCity = cleanLocationForCityField(rawLoc);
     const finalAnswer = cleanCity || rawLoc;
     return { matched: true, answer: finalAnswer, sourceDetail: `profile: location ("${finalAnswer}")` };
