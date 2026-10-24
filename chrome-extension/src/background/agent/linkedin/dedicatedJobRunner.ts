@@ -4415,6 +4415,21 @@ export class DedicatedJobRunner {
               reason: `Field "${field.label}" repeated ${MAX_FIELD_ATTEMPTS} times (validation loop detected)`,
             };
           }
+
+          // Rule: If field is already filled and has no validation error, preserve its value and do not overwrite!
+          const hasCurrentValue =
+            Boolean(field.currentValue && String(field.currentValue).trim().length > 0) &&
+            field.currentValue !== 'Select an option' &&
+            field.currentValue !== '--' &&
+            field.currentValue !== 'Select';
+
+          if (hasCurrentValue && !field.errorText) {
+            logger.info(
+              `[DedicatedJobRunner] Preserving already-filled field "${field.label}": "${field.currentValue}"`,
+            );
+            continue;
+          }
+
           try {
             const res = await resolveModalFieldWithAudit(page, field, careerBrain, scopedLLM, onAuditLog, {
               skipAskUser: true,
