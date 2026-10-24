@@ -4943,6 +4943,14 @@ export class DedicatedJobRunner {
           await new Promise(r => setTimeout(r, 200));
         }
 
+        // Capture the step signature BEFORE clicking so we can verify the modal actually advanced.
+        // LinkedIn may silently swallow clicks on React-state-disabled Next/Review buttons, so a
+        // "clicked" result alone is not proof that the step changed.
+        const sigBefore =
+          typeof page.getModalStepSignature === 'function'
+            ? await page.getModalStepSignature().catch(() => null)
+            : null;
+
         let fwdRes = await page.clickModalForwardButton();
         if (!fwdRes.clicked) {
           logger.warning(
@@ -4984,6 +4992,83 @@ export class DedicatedJobRunner {
           await page.waitForDomSettlement();
         } else {
           await new Promise(r => setTimeout(r, 1200));
+        }
+
+        // Verify the modal ACTUALLY advanced. If the step content is unchanged, LinkedIn rejected
+        // the click (Next/Review disabled via React state). Heal the real validation errors it just
+        // surfaced, retry once; if still blocked, fail fast and preserve the draft instead of
+        // burning all 15 steps on a treadmill and then discarding the filled application.
+        if (sigBefore !== null && typeof page.getModalStepSignature === 'function') {
+          const sigAfter = await page.getModalStepSignature().catch(() => null);
+          if (sigAfter !== null && sigAfter === sigBefore) {
+            logger.warning(
+              '[DedicatedJobRunner] Forward click was silently rejected by LinkedIn (step content unchanged). Healing surfaced validation errors and retrying once...',
+            );
+            const blockedValidation = await page.validateModalFormState();
+            if (blockedValidation.hasErrors && scopedLLM) {
+              for (const invF of blockedValidation.invalidFieldsWithErrors) {
+                try {
+                  const healed = await solveValidationErrorWithLLM(invF, careerBrain, scopedLLM);
+                  if (healed.success && healed.answer !== undefined) {
+                    const adapted = adaptAnswerToFieldFormat(healed.answer, invF as any);
+                    const fillVal = adapted.valid ? adapted.value : healed.answer;
+                    const fillSuccess = await page.fillModalFieldDirect(invF, fillVal);
+                    onAuditLog(
+                      'GENERATED',
+                      invF.label,
+                      fillVal,
+                      `Blocked-forward validation heal | Prev: "${invF.currentValue}" | Error: "${invF.errorText}" | Fill: ${fillSuccess ? 'SUCCESS' : 'FAILED'}`,
+                    );
+                  }
+                } catch (healErr) {
+                  logger.warning(`[DedicatedJobRunner] Failed to heal blocked field "${invF.label}":`, healErr);
+                }
+              }
+              for (const reqF of blockedValidation.emptyRequiredFields) {
+                try {
+                  const autoSol = await solveQuestionAutonomousWithLLM(reqF, careerBrain, scopedLLM);
+                  if (autoSol.success && autoSol.answer) {
+                    const adapted = adaptAnswerToFieldFormat(autoSol.answer, reqF);
+                    const fillVal = adapted.valid ? adapted.value : autoSol.answer;
+                    const fillSuccess = await page.fillModalFieldDirect(reqF, fillVal);
+                    onAuditLog(
+                      'GENERATED',
+                      reqF.label,
+                      fillVal,
+                      `Blocked-forward empty-field fill | DOM fill: ${fillSuccess ? 'SUCCESS' : 'FAILED'}`,
+                    );
+                  }
+                } catch (healErr) {
+                  logger.warning(`[DedicatedJobRunner] Failed to fill blocked field "${reqF.label}":`, healErr);
+                }
+              }
+            }
+            if (typeof page.scrollModalContent === 'function') {
+              await page.scrollModalContent('bottom');
+              await new Promise(r => setTimeout(r, 300));
+            }
+            const retrySigBefore = await page.getModalStepSignature().catch(() => null);
+            await page.clickModalForwardButton();
+            if (typeof page.waitForDomSettlement === 'function') {
+              await page.waitForDomSettlement();
+            } else {
+              await new Promise(r => setTimeout(r, 1200));
+            }
+            const retrySigAfter = await page.getModalStepSignature().catch(() => null);
+            if (retrySigAfter !== null && retrySigBefore !== null && retrySigAfter !== retrySigBefore) {
+              // Retry advanced the modal successfully
+              step = Math.max(0, step - 1);
+              continue;
+            }
+            logger.error(
+              '[DedicatedJobRunner] Forward button rejected twice by LinkedIn (Next/Review disabled). Aborting this application cleanly; the draft is preserved on LinkedIn for manual review.',
+            );
+            return {
+              success: false,
+              reason:
+                'Next/Review button rejected by LinkedIn (validation blocked). Draft preserved for manual review.',
+            };
+          }
         }
 
         // Post-advance validation check: Check if forward navigation was rejected by red alert errors!

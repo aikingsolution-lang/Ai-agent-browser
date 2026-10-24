@@ -2321,7 +2321,7 @@ export default class Page {
    * Automatically handles known intermediate dialogs:
    *   - "Continue applying?" -> Clicks Continue
    *   - "Job search safety reminder" -> Clicks Continue / Dismiss
-   *   - "Save this application?" -> Clicks Discard
+   *   - "Save this application?" -> Preserves the draft (Save / dismiss), never Discard
    *   - Unknown modal/dialog -> Halts with clear error!
    * Checks if modal is already open before waiting.
    * Provides detailed debug logging of modal and interactive elements.
@@ -2537,21 +2537,30 @@ export default class Page {
             }
           }
 
-          // Known intermediate dialog 3: "Save this application?" from an old unsubmitted draft -> Discard old draft
+          // Known intermediate dialog 3: "Save this application?" leftover from an unsubmitted draft.
+          // Preserve the candidate's draft (click "Save" or the dialog's dismiss X). Never click
+          // "Discard" — the draft may contain freshly filled application data.
           if (
             (/save this application/i.test(title) || /save application/i.test(title) || /discard draft/i.test(title)) &&
             !/easy apply/i.test(title)
           ) {
             const buttons = Array.from(dialog.querySelectorAll('button'));
-            const discardBtn = buttons.find(b => /^\s*discard\s*$/i.test((b.textContent || '').trim()));
-            if (discardBtn) {
-              discardBtn.click();
+            const saveBtn = buttons.find(b => {
+              const t = (b.textContent || '').trim();
+              return /save/i.test(t) && !/discard/i.test(t);
+            });
+            const closeBtn = dialog.querySelector<HTMLButtonElement>(
+              'button[aria-label*="Dismiss" i], button[aria-label*="Close" i], .artdeco-modal__dismiss',
+            );
+            if (saveBtn || closeBtn) {
+              const btnToClick = (saveBtn as HTMLElement | null) || (closeBtn as HTMLElement);
+              btnToClick.click();
               return {
                 modalFound: false,
                 inShadow: root instanceof ShadowRoot,
                 dialogTitle: title,
                 isIntermediate: true,
-                intermediateAction: 'discard',
+                intermediateAction: 'continue',
                 inputsCount: 0,
                 buttonsCount: 0,
                 hasClosedShadow: false,
@@ -5029,49 +5038,77 @@ export default class Page {
   }
 
   /**
-   * Dismisses the active Easy Apply modal cleanly, handling any "Save application? -> Discard" dialogs.
+   * Dismisses the active Easy Apply modal cleanly.
+   * Preserves any in-progress draft: if LinkedIn shows a "Save this application?"
+   * dialog after closing, this clicks "Save" (or the dialog X) — never "Discard",
+   * so the candidate's filled application data is never destroyed.
    */
   async dismissEasyApplyModal(maxWaitMs = 5000): Promise<boolean> {
     const dismissInPage = () => {
-      // Check if modal or intermediate dialog exists
-      const modal = document.querySelector(
-        'div.jobs-easy-apply-modal, div[data-test-modal], div.artdeco-modal, dialog[open], div[role="dialog"]',
-      );
-      if (!modal) {
-        return { isClosed: true };
+      function isVisible(el: HTMLElement): boolean {
+        if (!el || !el.isConnected) return false;
+        const style = window.getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden') return false;
+        return parseFloat(style.opacity || '1') > 0.05;
       }
 
-      // Check for Discard confirmation dialog buttons
-      const buttons = Array.from(document.querySelectorAll('button'));
-      const discardBtn = buttons.find(
-        b =>
-          /discard/i.test(b.textContent || '') ||
-          b.getAttribute('data-control-name') === 'discard_application_confirm_btn',
-      );
-      if (discardBtn) {
-        discardBtn.click();
-        return { clickedDiscard: true };
+      // 1. Easy Apply modal itself still open -> close it ONLY via its own dismiss button.
+      //    Never click "Discard" while the form is open: LinkedIn's save-dialog Discard
+      //    destroys the candidate's filled draft.
+      const eaModal = document.querySelector(
+        'div.jobs-easy-apply-modal, [data-test-modal-id="easy-apply-modal"], [data-easy-apply-modal]',
+      ) as HTMLElement | null;
+      if (eaModal && isVisible(eaModal)) {
+        const closeBtn = eaModal.querySelector<HTMLButtonElement>(
+          'button[aria-label*="Dismiss" i], button[aria-label*="Close" i], button[data-test-modal-close-btn]',
+        );
+        if (closeBtn) {
+          closeBtn.click();
+          return { clickedClose: true };
+        }
+        return { notClosed: true };
       }
 
-      // Look for modal close/dismiss button
-      const closeBtn =
-        modal.querySelector<HTMLButtonElement>(
-          'button[aria-label*="Dismiss" i], button[aria-label*="Close" i], button[data-test-modal-close-btn], button[data-control-name="overlay.close_conversation_window"]',
-        ) || (document.querySelector('button[data-test-modal-close-btn]') as HTMLButtonElement);
+      // 2. Modal already closed; check for a leftover "Save this application?" draft dialog.
+      //    Preserve the draft: click "Save" (or the dialog's dismiss X). Never Discard.
+      const dialogs = Array.from(
+        document.querySelectorAll('div[role="dialog"], div.artdeco-modal, dialog[open]'),
+      ) as HTMLElement[];
+      for (const d of dialogs) {
+        if (!isVisible(d)) continue;
+        const text = (d.textContent || '').slice(0, 400);
+        if (!/save this application|save application|discard draft/i.test(text)) continue;
 
-      if (closeBtn) {
-        closeBtn.click();
-        return { clickedClose: true };
+        const buttons = Array.from(d.querySelectorAll('button')) as HTMLElement[];
+        const saveBtn = buttons.find(b => {
+          const t = (b.textContent || '').trim();
+          return /save/i.test(t) && !/discard/i.test(t);
+        });
+        if (saveBtn) {
+          saveBtn.click();
+          return { clickedSave: true };
+        }
+        const dialogClose = d.querySelector<HTMLButtonElement>(
+          'button[aria-label*="Dismiss" i], button[aria-label*="Close" i], button[data-test-modal-close-btn], .artdeco-modal__dismiss',
+        );
+        if (dialogClose) {
+          dialogClose.click();
+          return { clickedClose: true };
+        }
+        return { notClosed: true };
       }
 
-      return { notClosed: true };
+      return { isClosed: true };
     };
 
     const startTime = Date.now();
     while (Date.now() - startTime < maxWaitMs) {
-      let status: { isClosed?: boolean; clickedDiscard?: boolean; clickedClose?: boolean; notClosed?: boolean } = {
-        isClosed: true,
-      };
+      let status: {
+        isClosed?: boolean;
+        clickedSave?: boolean;
+        clickedClose?: boolean;
+        notClosed?: boolean;
+      } = { isClosed: true };
 
       if (!this._puppeteerPage) {
         await this.attachPuppeteer().catch(() => false);
@@ -5826,6 +5863,112 @@ export default class Page {
   }
 
   /**
+   * Captures a stable content signature of the current Easy Apply modal step
+   * (modal title + field labels/tags + footer button texts). Used to verify that
+   * a Next/Review/Submit click actually advanced the modal — LinkedIn may silently
+   * swallow clicks on React-state-disabled buttons, so a "clicked" result alone is
+   * not proof that the step changed.
+   * Returns null when no modal is currently open.
+   */
+  async getModalStepSignature(): Promise<string | null> {
+    const sigInPage = () => {
+      function findActiveModal(root: any): HTMLElement | null {
+        const candidates = root.querySelectorAll
+          ? (Array.from(
+              root.querySelectorAll(
+                'div.jobs-easy-apply-modal, [data-easy-apply-modal], [data-test-modal-id="easy-apply-modal"], div[data-test-modal], div.artdeco-modal, div[role="dialog"]',
+              ),
+            ) as HTMLElement[])
+          : [];
+
+        for (const c of candidates) {
+          if (
+            c.closest('nav, header, #global-nav, .global-nav, .msg-overlay-container, #msg-overlay, .artdeco-dropdown')
+          ) {
+            continue;
+          }
+          const text = (c.innerText || c.textContent || '').trim().toLowerCase();
+          if (/^\d+\s*notifications?$/i.test(text) || c.closest('.notifications-badge')) continue;
+          const style = window.getComputedStyle(c);
+          if (style.display === 'none' || style.visibility === 'hidden') continue;
+          const rect = c.getBoundingClientRect();
+          if (rect.width >= 150 && rect.height >= 80) return c;
+          if (
+            c.classList.contains('jobs-easy-apply-modal') ||
+            c.querySelector('.jobs-easy-apply-modal, .jobs-easy-apply-content, form.jobs-easy-apply-form')
+          ) {
+            return c;
+          }
+        }
+
+        const all = root.querySelectorAll ? root.querySelectorAll('*') : [];
+        for (let i = 0; i < all.length; i++) {
+          if (all[i].shadowRoot) {
+            const found = findActiveModal(all[i].shadowRoot);
+            if (found) return found;
+          }
+        }
+        return null;
+      }
+
+      const modal = findActiveModal(document);
+      if (!modal) return null;
+
+      const titleEl = modal.querySelector('h1, h2, h3, [data-test-modal-title]');
+      const title = (titleEl?.textContent || '').trim().slice(0, 120);
+
+      const fieldKeys: string[] = [];
+      const inputs = Array.from(modal.querySelectorAll('input, select, textarea')) as Array<
+        HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement
+      >;
+      for (const el of inputs) {
+        const label = (
+          el.closest('label')?.textContent ||
+          el.getAttribute('aria-label') ||
+          el.getAttribute('placeholder') ||
+          el.name ||
+          el.id ||
+          ''
+        ).trim();
+        fieldKeys.push(`${el.tagName.toLowerCase()}:${label.slice(0, 40)}`);
+      }
+
+      const buttonKeys: string[] = [];
+      const buttons = Array.from(modal.querySelectorAll('button')) as HTMLElement[];
+      for (const b of buttons) {
+        const t = (b.textContent || b.getAttribute('aria-label') || '').trim().toLowerCase();
+        if (t) buttonKeys.push(t.slice(0, 30));
+      }
+
+      return `${title}::${fieldKeys.sort().join('|')}::${buttonKeys.sort().join('|')}`;
+    };
+
+    if (!this._puppeteerPage) {
+      await this.attachPuppeteer().catch(() => false);
+    }
+
+    if (this._puppeteerPage) {
+      try {
+        const res = await this._puppeteerPage.evaluate(sigInPage);
+        return typeof res === 'string' ? res : null;
+      } catch {}
+    }
+
+    if (this._tabId && typeof chrome !== 'undefined' && chrome.scripting?.executeScript) {
+      try {
+        const results = await chrome.scripting.executeScript({
+          target: { tabId: this._tabId },
+          func: sigInPage,
+        });
+        const res = results?.[0]?.result;
+        return typeof res === 'string' ? res : null;
+      } catch {}
+    }
+
+    return null;
+  }
+
+  /**
    * Scrolls the content area of the active modal (top, bottom, or down).
    */
   async scrollModalContent(target: 'bottom' | 'top' | 'down' = 'bottom'): Promise<boolean> {
@@ -6003,7 +6146,8 @@ export default class Page {
         contentEl.dispatchEvent(new Event('scroll', { bubbles: true }));
       }
 
-      // Check required or agreement checkboxes if unchecked
+      // Check required or agreement checkboxes if unchecked (React-compatible: native setter + input event,
+      // so LinkedIn's React state actually registers the check and enables the Next button)
       const checkBoxes = Array.from(
         (modal || document).querySelectorAll('input[type="checkbox"]'),
       ) as HTMLInputElement[];
@@ -6018,7 +6162,14 @@ export default class Page {
             const clickable = cb.closest('label') || cb.parentElement || cb;
             clickable.click();
             if (!cb.checked) {
-              cb.checked = true;
+              const proto = (cb as any).constructor?.prototype;
+              const setter = Object.getOwnPropertyDescriptor(proto, 'checked')?.set;
+              if (setter) {
+                setter.call(cb, true);
+              } else {
+                cb.checked = true;
+              }
+              cb.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
               cb.dispatchEvent(new Event('change', { bubbles: true }));
             }
           }
