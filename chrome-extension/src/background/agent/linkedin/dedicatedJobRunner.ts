@@ -50,6 +50,7 @@ import {
   checkBlacklistAndNegativeKeywords,
   extractRequiredExperienceYears,
 } from '../intelligence';
+import { buildDraftResumePdf, buildDraftResumeFileName, bytesToBase64 } from './resumeDraft';
 import type { FormFieldDescriptor } from '../../browser/page';
 
 const logger = createLogger('DedicatedJobRunner');
@@ -2030,6 +2031,29 @@ export class DedicatedJobRunner {
             });
             continue;
           }
+
+          // 1-day negative cache: jobs that FAILED recently are skipped without
+          // re-burning credits on the same deterministic failure. They become
+          // eligible again automatically after the TTL (24h).
+          const recentFail = await processedJobsStore.isJobRecentlyFailed(card.jobId);
+          if (recentFail.recentlyFailed) {
+            recordSkip(stats, 'negative cache (failed within 24h)');
+            this.notifyStatus(
+              portToSend,
+              `⏳ Skipped "${card.title}": failed recently (${recentFail.reason || 'application error'}). Retry available tomorrow.`,
+              'info',
+            );
+            this.notifyActivity(portToSend, onLiveActivity, {
+              jobId: card.jobId,
+              url: card.url,
+              title: card.title,
+              company: card.company,
+              status: 'skipped',
+              reason: 'Failed recently (retry available tomorrow)',
+              creditsUsed: 0,
+            });
+            continue;
+          }
           eligibleOnPage.push(card);
         }
 
@@ -3931,13 +3955,13 @@ export class DedicatedJobRunner {
       }
       await currentPage.waitForDomSettlement?.(
         '.jobs-unified-top-card, [data-view-name="job-details-top-card"], .jobs-details__main-content',
-        { maxWaitMs: 3500 },
+        { maxWaitMs: 6000 },
       );
     } else {
       if (typeof currentPage.waitForDomSettlement === 'function') {
         await currentPage.waitForDomSettlement(
           '.jobs-search__job-details--container, .jobs-details__main-content, .jobs-unified-top-card, [data-view-name="job-details-top-card"]',
-          { maxWaitMs: 2500, quietPeriodMs: 150 },
+          { maxWaitMs: 5000, quietPeriodMs: 150 },
         );
       } else {
         const waitAborted = await this.interruptibleSleep(1200);
@@ -3945,21 +3969,23 @@ export class DedicatedJobRunner {
       }
     }
 
-    // 4b. Pure DOM Top-Card Extraction + Max-2 Retry Guard
-    let topCard = await currentPage.extractJobTopCardContext(4000);
+    // 4b. Pure DOM Top-Card Extraction + Max-3 Retry Guard
+    // (generous budget: slow networks / heavy LinkedIn JS often need >10s to render
+    // the job details pane; premature failure here caused false "details unavailable" skips)
+    let topCard = await currentPage.extractJobTopCardContext(8000);
     let retryCount = 0;
     while (
       (!topCard.title || !topCard.company) &&
       !topCard.isClosed &&
       !topCard.isAlreadyApplied &&
       !topCard.isLoginWall &&
-      retryCount < 2
+      retryCount < 3
     ) {
       retryCount++;
-      this.notifyStatus(portToSend, `Checking job details for ${job.jobId} (attempt ${retryCount}/2)...`, 'info');
-      const retrySleepAborted = await this.interruptibleSleep(600);
+      this.notifyStatus(portToSend, `Checking job details for ${job.jobId} (attempt ${retryCount}/3)...`, 'info');
+      const retrySleepAborted = await this.interruptibleSleep(900);
       if (retrySleepAborted || !this.isRunning) return { status: 'halt' };
-      topCard = await currentPage.extractJobTopCardContext(3000);
+      topCard = await currentPage.extractJobTopCardContext(4500);
     }
 
     const displayTitle = topCard.title || job.title;
@@ -4758,34 +4784,116 @@ export class DedicatedJobRunner {
       }
 
       // 3. Pre-advance validation check (checks required empty fields & aria-invalid)
-      const validation = await page.validateModalFormState();
+      let validation = await page.validateModalFormState();
 
-      // Guard against unfulfillable mandatory file uploads (Cover Letter, Portfolio, Custom Certificate)
+      // Guard against unfulfillable mandatory file uploads (Resume, Cover Letter, Portfolio, Custom Certificate)
       if (validation.unfulfilledMandatoryFileUpload) {
         const docType = validation.unfulfilledMandatoryFileUpload.documentType;
         const docLabel = validation.unfulfilledMandatoryFileUpload.label;
-        logger.warning(
-          `[DedicatedJobRunner] Unfulfilled mandatory file upload detected: ${docType} ("${docLabel}"). Candidate has no matching file configured.`,
-        );
-        this.notifyStatus(
-          portToSend,
-          `⚠️ Mandatory ${docType} required by employer ("${docLabel}"), but no document is configured. Skipping cleanly to preserve credits...`,
-          'info',
-        );
-        this.notifyActivity(portToSend, onLiveActivity, {
-          jobId: job.jobId,
-          url: job.url,
-          title: job.title,
-          company: job.company,
-          status: 'skipped',
-          reason: `Mandatory ${docType} required by employer`,
-          creditsUsed: 0,
-        });
-        await page.dismissEasyApplyModal(4000);
-        return {
-          success: false,
-          reason: `Mandatory ${docType} required by recruiter`,
-        };
+
+        // Draft Resume v2: employer mandates a Resume upload but the candidate has no stored
+        // resume file configured. Auto-generate a truthful PDF from careerBrain data and upload
+        // it in-memory so the application can proceed instead of skipping.
+        const hasNoStoredResume = candidateResumes.length === 0 && !careerBrain.resumeFileName;
+        const hasProfileData =
+          Boolean(careerBrain.fullName?.trim()) &&
+          ((careerBrain.resumeText || '').trim().length >= 50 ||
+            (Array.isArray(careerBrain.workExperience) && careerBrain.workExperience.length > 0) ||
+            (Array.isArray(careerBrain.skills) && careerBrain.skills.length > 0));
+
+        if (docType === 'Resume' && hasNoStoredResume && hasProfileData) {
+          try {
+            const draftFileName = buildDraftResumeFileName(careerBrain);
+            const draftPdf = buildDraftResumePdf(careerBrain);
+            const draftB64 = bytesToBase64(draftPdf);
+            logger.info(
+              `[DedicatedJobRunner] Mandatory Resume upload required ("${docLabel}"). No stored resume file - auto-generating draft "${draftFileName}" (${draftPdf.length} bytes)...`,
+            );
+            this.notifyStatus(
+              portToSend,
+              `📄 No resume file on file - auto-generating "${draftFileName}" from your profile for this application...`,
+              'info',
+            );
+            const uploaded = await page.uploadResumeDraftFile(draftFileName, draftB64);
+            if (uploaded) {
+              this.notifyStatus(portToSend, `✅ Draft resume uploaded successfully. Re-checking form...`, 'info');
+              // Re-validate; a successful upload clears the mandatory-upload gap
+              validation = await page.validateModalFormState();
+              if (!validation.unfulfilledMandatoryFileUpload) {
+                logger.info(
+                  `[DedicatedJobRunner] Draft resume upload satisfied the mandatory Resume requirement. Continuing application flow.`,
+                );
+              }
+              // Fall through to the normal fill flow below
+            } else {
+              logger.warning(
+                `[DedicatedJobRunner] Draft resume upload failed for job ${job.jobId}. Skipping cleanly to preserve credits.`,
+              );
+              this.notifyStatus(
+                portToSend,
+                `⚠️ Auto-generated resume upload failed for "${docLabel}". Skipping this job to preserve credits...`,
+                'info',
+              );
+              this.notifyActivity(portToSend, onLiveActivity, {
+                jobId: job.jobId,
+                url: job.url,
+                title: job.title,
+                company: job.company,
+                status: 'skipped',
+                reason: 'Auto-generated resume upload failed',
+                creditsUsed: 0,
+              });
+              await page.dismissEasyApplyModal(4000);
+              return { success: false, reason: 'Auto-generated resume upload failed' };
+            }
+          } catch (err: any) {
+            logger.warning(
+              `[DedicatedJobRunner] Draft resume auto-upload error for job ${job.jobId}: ${err?.message || err}`,
+            );
+            this.notifyStatus(
+              portToSend,
+              `⚠️ Auto-generated resume upload failed for "${docLabel}". Skipping this job to preserve credits...`,
+              'info',
+            );
+            this.notifyActivity(portToSend, onLiveActivity, {
+              jobId: job.jobId,
+              url: job.url,
+              title: job.title,
+              company: job.company,
+              status: 'skipped',
+              reason: 'Auto-generated resume upload failed',
+              creditsUsed: 0,
+            });
+            await page.dismissEasyApplyModal(4000);
+            return { success: false, reason: 'Auto-generated resume upload failed' };
+          }
+        }
+
+        // If the upload didn't resolve it (or docType !== 'Resume'), clean-skip
+        if (validation.unfulfilledMandatoryFileUpload) {
+          logger.warning(
+            `[DedicatedJobRunner] Unfulfilled mandatory file upload detected: ${docType} ("${docLabel}"). Candidate has no matching file configured.`,
+          );
+          this.notifyStatus(
+            portToSend,
+            `⚠️ Mandatory ${docType} required by employer ("${docLabel}"), but no document is configured. Skipping cleanly to preserve credits...`,
+            'info',
+          );
+          this.notifyActivity(portToSend, onLiveActivity, {
+            jobId: job.jobId,
+            url: job.url,
+            title: job.title,
+            company: job.company,
+            status: 'skipped',
+            reason: `Mandatory ${docType} required by employer`,
+            creditsUsed: 0,
+          });
+          await page.dismissEasyApplyModal(4000);
+          return {
+            success: false,
+            reason: `Mandatory ${docType} required by recruiter`,
+          };
+        }
       }
 
       if (validation.hasErrors) {

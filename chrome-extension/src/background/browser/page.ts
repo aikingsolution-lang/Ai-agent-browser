@@ -3595,7 +3595,12 @@ export default class Page {
 
       let unfulfilledMandatoryFileUpload: { label: string; documentType: string } | undefined = undefined;
 
-      // Check for mandatory file upload elements (Cover Letter, Portfolio, Custom Attachment)
+      // Clear any stale upload-target markers left over from earlier fill attempts
+      modal.querySelectorAll('input[type="file"][data-qoder-file-target]').forEach(el => {
+        el.removeAttribute('data-qoder-file-target');
+      });
+
+      // Check for mandatory file upload elements (Resume, Cover Letter, Portfolio, Custom Attachment)
       const fileInputs = Array.from(modal.querySelectorAll('input[type="file"]')) as HTMLInputElement[];
       for (const fi of fileInputs) {
         const isRequired =
@@ -3618,11 +3623,15 @@ export default class Page {
           const rawLabel =
             cleanElementText(container?.querySelector('h3, h4, label, legend') || null) || 'Document Upload';
           const docType =
-            /cover\s*letter/i.test(rawLabel) || /cover\s*letter/i.test(errText)
-              ? 'Cover Letter'
-              : /portfolio/i.test(rawLabel) || /portfolio/i.test(errText)
-                ? 'Portfolio'
-                : 'Custom Attachment';
+            /resume|curriculum\s*vitae|\bcv\b/i.test(rawLabel) || /resume|\bcv\b/i.test(errText)
+              ? 'Resume'
+              : /cover\s*letter/i.test(rawLabel) || /cover\s*letter/i.test(errText)
+                ? 'Cover Letter'
+                : /portfolio/i.test(rawLabel) || /portfolio/i.test(errText)
+                  ? 'Portfolio'
+                  : 'Custom Attachment';
+          // Mark this exact input so the upload method can target it precisely later
+          fi.setAttribute('data-qoder-file-target', '1');
           unfulfilledMandatoryFileUpload = { label: rawLabel, documentType: docType };
           break;
         }
@@ -3669,6 +3678,84 @@ export default class Page {
       invalidFieldsWithErrors: [],
       unfulfilledMandatoryFileUpload: undefined,
     };
+  }
+
+  /**
+   * Uploads a draft resume PDF (in-memory bytes) into the mandatory Resume file input
+   * that validateModalFormState flagged with the `data-qoder-file-target` marker.
+   * Uses the in-page DataTransfer technique (no filesystem write, no CDP file path);
+   * returns true only when the input reports at least one attached file afterwards.
+   */
+  async uploadResumeDraftFile(fileName: string, contentB64: string): Promise<boolean> {
+    const uploadInPage = async (fName: string, b64: string) => {
+      const binary = atob(b64);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) {
+        bytes[i] = binary.charCodeAt(i);
+      }
+
+      const fileInputs = Array.from(document.querySelectorAll<HTMLInputElement>('input[type="file"]'));
+      const target =
+        fileInputs.find(i => i.hasAttribute('data-qoder-file-target')) ||
+        fileInputs.find(i => {
+          const rect = i.getBoundingClientRect();
+          const style = window.getComputedStyle(i);
+          const isVisible =
+            rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
+          return (
+            isVisible && Boolean(i.closest('.jobs-easy-apply-modal, [data-test-easy-apply-modal], .artdeco-modal'))
+          );
+        });
+
+      if (!target) return false;
+
+      try {
+        const file = new File([bytes], fName, { type: 'application/pdf' });
+        const dt = new DataTransfer();
+        dt.items.add(file);
+        target.files = dt.files;
+        target.dispatchEvent(new Event('input', { bubbles: true }));
+        target.dispatchEvent(new Event('change', { bubbles: true }));
+        return target.files.length > 0;
+      } catch {
+        return false;
+      }
+    };
+
+    if (!this._puppeteerPage) {
+      await this.attachPuppeteer().catch(() => false);
+    }
+
+    if (this._puppeteerPage) {
+      try {
+        const uploaded = await this._puppeteerPage.evaluate(uploadInPage, fileName, contentB64);
+        if (uploaded === true) {
+          // Marker no longer needed; clear it so re-validation starts clean
+          await this._puppeteerPage
+            .evaluate(() => {
+              document
+                .querySelectorAll<HTMLInputElement>('input[type="file"][data-qoder-file-target]')
+                .forEach(el => el.removeAttribute('data-qoder-file-target'));
+            })
+            .catch(() => {});
+          return true;
+        }
+      } catch {}
+    }
+
+    if (this._tabId && typeof chrome !== 'undefined' && chrome.scripting?.executeScript) {
+      try {
+        const results = await chrome.scripting.executeScript({
+          target: { tabId: this._tabId },
+          func: uploadInPage,
+          args: [fileName, contentB64],
+        });
+        const res = results?.[0]?.result;
+        if (res === true) return true;
+      } catch {}
+    }
+
+    return false;
   }
 
   /**

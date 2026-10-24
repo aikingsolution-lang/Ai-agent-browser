@@ -20,12 +20,28 @@ export interface ProcessedJobsData {
   appliedJobIds: string[];
   skippedJobIds: string[];
   records: ProcessedJobRecord[];
+  /**
+   * Negative cache: jobs that FAILED during processing, keyed by jobId, with the
+   * failure reason and timestamp. Failed jobs are intentionally NOT part of the
+   * applied/skipped sets so they can be retried — but only after the TTL expires.
+   * This prevents every auto-apply run from re-burning credits on the same
+   * deterministic failure (e.g. validation loop on a broken form).
+   */
+  failedJobs: Record<string, { reason?: string; timestamp: number }>;
 }
+
+/**
+ * How long a failed job stays in the negative cache before it becomes eligible
+ * for retry again. 24h is long enough to skip re-runs the same day but short
+ * enough that a recruiter-side fix or profile update is honored the next day.
+ */
+export const FAILED_JOB_TTL_MS = 24 * 60 * 60 * 1000;
 
 const DEFAULT_PROCESSED_JOBS: ProcessedJobsData = {
   appliedJobIds: [],
   skippedJobIds: [],
   records: [],
+  failedJobs: {},
 };
 
 const storage = createStorage<ProcessedJobsData>('linkedin_processed_jobs', DEFAULT_PROCESSED_JOBS, {
@@ -33,10 +49,21 @@ const storage = createStorage<ProcessedJobsData>('linkedin_processed_jobs', DEFA
   liveUpdate: true,
 });
 
+function pruneExpiredFailedJobs(data: ProcessedJobsData, now = Date.now()): ProcessedJobsData {
+  const entries = Object.entries(data.failedJobs || {});
+  const kept = entries.filter(([, v]) => now - (v?.timestamp || 0) < FAILED_JOB_TTL_MS);
+  if (kept.length === entries.length) return data;
+  return {
+    ...data,
+    failedJobs: Object.fromEntries(kept),
+  };
+}
+
 export type ProcessedJobsStorageType = BaseStorage<ProcessedJobsData> & {
   isJobProcessed: (
     jobId: string,
   ) => Promise<{ isProcessed: boolean; status?: 'applied' | 'skipped' | 'failed'; record?: ProcessedJobRecord }>;
+  isJobRecentlyFailed: (jobId: string) => Promise<{ recentlyFailed: boolean; reason?: string; timestamp?: number }>;
   recordJob: (record: Omit<ProcessedJobRecord, 'timestamp'>) => Promise<ProcessedJobsData>;
   getAllRecords: () => Promise<ProcessedJobRecord[]>;
   clearRecords: () => Promise<void>;
@@ -59,8 +86,20 @@ export const processedJobsStore: ProcessedJobsStorageType = {
     return { isProcessed: false };
   },
 
+  async isJobRecentlyFailed(jobId: string) {
+    const raw = (await storage.get()) || DEFAULT_PROCESSED_JOBS;
+    const data = pruneExpiredFailedJobs(raw);
+    if (data !== raw) {
+      await storage.set(data);
+    }
+    const entry = data.failedJobs?.[String(jobId).trim()];
+    if (!entry) return { recentlyFailed: false };
+    return { recentlyFailed: true, reason: entry.reason, timestamp: entry.timestamp };
+  },
+
   async recordJob(record: Omit<ProcessedJobRecord, 'timestamp'>) {
-    const data = (await storage.get()) || DEFAULT_PROCESSED_JOBS;
+    const raw = (await storage.get()) || DEFAULT_PROCESSED_JOBS;
+    const data = pruneExpiredFailedJobs(raw);
     const cleanId = String(record.jobId).trim();
     const fullRecord: ProcessedJobRecord = {
       ...record,
@@ -70,12 +109,20 @@ export const processedJobsStore: ProcessedJobsStorageType = {
 
     const appliedSet = new Set(data.appliedJobIds);
     const skippedSet = new Set(data.skippedJobIds);
+    const failedJobs: Record<string, { reason?: string; timestamp: number }> = { ...(data.failedJobs || {}) };
 
     if (record.status === 'applied') {
       appliedSet.add(cleanId);
       skippedSet.delete(cleanId);
+      // A later success clears any prior negative-cache entry for this job.
+      delete failedJobs[cleanId];
     } else if (record.status === 'skipped') {
       skippedSet.add(cleanId);
+      // Permanent skip: also clear any negative-cache entry.
+      delete failedJobs[cleanId];
+    } else if (record.status === 'failed') {
+      // Retryable failure: remember it for the TTL window so re-runs skip it.
+      failedJobs[cleanId] = { reason: record.reason, timestamp: Date.now() };
     }
 
     const updatedRecords = [fullRecord, ...data.records.filter(r => r.jobId !== cleanId)].slice(0, 500);
@@ -84,6 +131,7 @@ export const processedJobsStore: ProcessedJobsStorageType = {
       appliedJobIds: Array.from(appliedSet),
       skippedJobIds: Array.from(skippedSet),
       records: updatedRecords,
+      failedJobs,
     };
 
     await storage.set(updatedData);
