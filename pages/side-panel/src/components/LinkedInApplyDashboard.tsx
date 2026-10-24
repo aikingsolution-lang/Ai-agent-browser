@@ -278,7 +278,7 @@ export function LinkedInApplyDashboard({
   // Shown only when verified by the backend for this account and day, and consistent with the
   // verified Premium status (a stale copy cannot show FREE for a Premium account).
   const quotaView = getQuotaDisplay(quota, {
-    uid: sessionUserId(session?.user),
+    uid: sessionUserId(session?.user, session?.token),
     premiumActive: session?.premium ? isPremiumActive(session.premium) : undefined,
     premiumCheckedAt: session?.premium?.checkedAt ? Date.parse(session.premium.checkedAt) : undefined,
   });
@@ -505,8 +505,9 @@ export function LinkedInApplyDashboard({
     setQuota(await dailyQuotaStore.getQuotaData().catch(() => null));
   }, []);
 
-  const retryQuota = useCallback(() => {
+  const retryQuota = useCallback(async () => {
     setQuotaFetch('checking');
+    await backendApiClient.getFreshToken(0).catch(() => null);
     loadQuota(true);
   }, [loadQuota]);
 

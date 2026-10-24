@@ -70,12 +70,25 @@ const storage = createStorage<UserSessionData>(AUTH_SESSION_STORAGE_KEY, DEFAULT
   liveUpdate: true,
 });
 
-/** Firebase uid of a stored session user (`uid` / `_id` from the backend, `id` from older sessions). */
-export function sessionUserId(user: unknown): string | null {
-  if (!user || typeof user !== 'object') return null;
-  const record = user as Record<string, unknown>;
-  const id = record.uid ?? record._id ?? record.id;
-  return typeof id === 'string' && id ? id : null;
+/** Firebase uid of a stored session user (`uid` / `_id` from the backend, `id` from older sessions, or JWT sub/user_id). */
+export function sessionUserId(user: unknown, token?: string | null): string | null {
+  if (user && typeof user === 'object') {
+    const record = user as Record<string, unknown>;
+    const id = record.uid ?? record._id ?? record.id;
+    if (typeof id === 'string' && id) return id;
+  }
+  if (typeof token === 'string' && token.includes('.')) {
+    try {
+      const payload = token.split('.')[1];
+      if (payload) {
+        const base64 = payload.replace(/-/g, '+').replace(/_/g, '/');
+        const json = JSON.parse(atob(base64.padEnd(Math.ceil(base64.length / 4) * 4, '=')));
+        const id = json?.user_id ?? json?.sub ?? json?.uid;
+        if (typeof id === 'string' && id) return id;
+      }
+    } catch {}
+  }
+  return null;
 }
 
 export const authStorage: AuthStorage = {

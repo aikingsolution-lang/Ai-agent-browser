@@ -113,7 +113,7 @@ export const ApplicationAnalytics: React.FC<ApplicationAnalyticsProps> = ({ isDa
       setRecords(unified);
       setQuota(
         getQuotaDisplay(quotaData, {
-          uid: sessionUserId(session?.user),
+          uid: sessionUserId(session?.user, session?.token),
           premiumActive: session?.premium ? isPremiumActive(session.premium) : undefined,
           premiumCheckedAt: session?.premium?.checkedAt ? Date.parse(session.premium.checkedAt) : undefined,
         }),

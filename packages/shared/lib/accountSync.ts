@@ -154,11 +154,16 @@ export type QuotaRefreshResult = 'ok' | 'unavailable' | 'signed-out' | 'account-
  */
 export async function refreshAccountQuota(): Promise<QuotaRefreshResult> {
   const before = await authStorage.getSession();
-  const uid = sessionUserId(before.user);
+  const uid = sessionUserId(before.user, before.token);
   if (!before.token || !uid) return 'signed-out';
-  const quota = await backendApiClient.getProfileQuota().catch(() => null);
+  let quota = await backendApiClient.getProfileQuota().catch(() => null);
+  if (!quota) {
+    // Proactively refresh token once and retry
+    await backendApiClient.getFreshToken(0).catch(() => null);
+    quota = await backendApiClient.getProfileQuota().catch(() => null);
+  }
   const after = await authStorage.getSession();
-  if (!after.token || sessionUserId(after.user) !== uid) return 'account-changed';
+  if (!after.token || sessionUserId(after.user, after.token) !== uid) return 'account-changed';
   if (!quota) return 'unavailable';
   return (await dailyQuotaStore.applyServerQuota(quota, uid)) ? 'ok' : 'unavailable';
 }

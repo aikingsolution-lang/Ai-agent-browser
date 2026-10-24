@@ -93,10 +93,44 @@ export class DailyQuotaManager {
     try {
       await this.flushPendingCommits();
       const uid = await this.currentUid();
-      const quota = await backendApiClient.getProfileQuota();
-      if (!quota) return await this.unavailable();
-      await this.remember(quota, uid);
-      return this.toCheck(quota, quota.remaining > 0);
+      let quota = await backendApiClient.getProfileQuota();
+      if (!quota) {
+        // Proactively refresh token once and retry before falling back
+        await backendApiClient.getFreshToken(0).catch(() => null);
+        quota = await backendApiClient.getProfileQuota();
+      }
+      if (quota) {
+        await this.remember(quota, uid);
+        return this.toCheck(quota, quota.remaining > 0);
+      }
+
+      // If backend is temporarily unreachable, check cached copy for this verified account today
+      const cached = await dailyQuotaStore.getQuotaData().catch(() => null);
+      const today = new Date().toISOString().split('T')[0];
+      if (
+        cached &&
+        cached.syncedAt &&
+        (!uid || cached.uid === uid) &&
+        cached.dateString === today &&
+        cached.maxDailyQuota > 0
+      ) {
+        const remaining = Math.max(0, cached.maxDailyQuota - cached.appliedCount);
+        if (remaining > 0 && !cached.isPausedDueToQuota) {
+          logger.info(
+            `Backend quota temporarily unreachable; allowing application via cached allowance (${cached.appliedCount}/${cached.maxDailyQuota})`,
+          );
+          return {
+            allowed: true,
+            remaining,
+            currentCount: cached.appliedCount,
+            maxQuota: cached.maxDailyQuota,
+            resetsAt: cached.resetsAt,
+            isPaid: cached.isPaid,
+          };
+        }
+      }
+
+      return await this.unavailable();
     } catch (err) {
       logger.error('Quota check failed, not allowing new applications:', err);
       return this.unavailable();
@@ -211,7 +245,7 @@ export class DailyQuotaManager {
 
   private static async currentUid(): Promise<string | null> {
     const session = await authStorage.getSession().catch(() => null);
-    return sessionUserId(session?.user) ?? null;
+    return sessionUserId(session?.user, session?.token) ?? null;
   }
 
   private static async queuePendingCommit(jobKey: string): Promise<void> {
