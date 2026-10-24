@@ -210,7 +210,11 @@ export function checkJobSkillRelevance(
 ): ISkillRelevanceResult {
   const threshold = 25;
   const rawSkills = Array.from(
-    new Set([...(careerBrain.skills || []), ...Object.keys(careerBrain.skillExperience || {})]),
+    new Set([
+      ...(careerBrain.skills || []),
+      ...Object.keys(careerBrain.skillExperience || {}),
+      ...(careerBrain.autoExtractedSkills || []),
+    ]),
   )
     .map(s => s.trim())
     .filter(s => s.length > 1);
@@ -465,6 +469,88 @@ async function getJobScopedLLM(jobRunId: string): Promise<BaseChatModel | undefi
     logger.warning('[DedicatedJobRunner] Could not resolve job-scoped LLM:', err);
   }
   return undefined;
+}
+
+/**
+ * Borderline relevance arbitration. The deterministic matcher is fast and free, but near
+ * the threshold its keyword ratio produces false negatives — and a wrong skip burns a whole
+ * job opportunity. When a job scores in the 40-60 band, one scoped-LLM judgement call
+ * decides whether to proceed. Returns null on any failure so the deterministic result
+ * always stands as the fallback.
+ */
+async function arbitrateBorderlineRelevance(
+  llm: BaseChatModel,
+  jobTitle: string,
+  jdText: string,
+  careerBrain: ICareerBrain,
+): Promise<{
+  isMatch: boolean;
+  score: number;
+  recommendation: 'apply' | 'skip';
+  reason: string;
+  matchedSkills: string[];
+  missingSkills: string[];
+} | null> {
+  try {
+    const skillsList = Array.from(
+      new Set([
+        ...(careerBrain.skills || []),
+        ...(careerBrain.autoExtractedSkills || []),
+        ...Object.keys(careerBrain.skillExperience || {}),
+      ]),
+    )
+      .map(s => s.trim())
+      .filter(s => s.length > 1)
+      .slice(0, 40)
+      .join(', ');
+
+    const workHistory = (careerBrain.workExperience || [])
+      .slice(0, 3)
+      .map(w => `${w.title} at ${w.company}`)
+      .join('; ');
+
+    const prompt = `You are a senior technical recruiter deciding whether this job posting is a realistic fit for the candidate.
+
+JOB TITLE: ${jobTitle}
+JOB DESCRIPTION (truncated):
+${(jdText || '').slice(0, 3000)}
+
+CANDIDATE PROFILE:
+- Current / target role: ${careerBrain.currentTitle || 'Not specified'}
+- Skills: ${skillsList || 'Not listed'}
+- Years of experience: ${careerBrain.yearsOfExperience || 'Unknown'}
+- Work history: ${workHistory || 'Not specified'}
+
+Reply with ONLY "YES" if the candidate has a realistic chance of an interview and should apply, otherwise "NO". Then add one short sentence explaining why.`;
+
+    const res = await llm.invoke(prompt);
+    const content = typeof res?.content === 'string' ? res.content : JSON.stringify(res?.content || '');
+    const trimmed = content.trim();
+    if (/^(yes|proceed|apply)\b/i.test(trimmed)) {
+      return {
+        isMatch: true,
+        score: 55,
+        recommendation: 'apply',
+        reason: 'Borderline score upgraded by relevance arbitration: candidate judged a realistic fit.',
+        matchedSkills: [],
+        missingSkills: [],
+      };
+    }
+    if (/^(no|skip|irrelevant)\b/i.test(trimmed)) {
+      return {
+        isMatch: false,
+        score: 40,
+        recommendation: 'skip',
+        reason: 'Borderline score confirmed by relevance arbitration: judged not a fit.',
+        matchedSkills: [],
+        missingSkills: [],
+      };
+    }
+    return null;
+  } catch (err) {
+    logger.warning('[DedicatedJobRunner] Borderline arbitration failed; keeping deterministic result:', err);
+    return null;
+  }
 }
 
 /** Cached alternate target role derived in the same resume LLM call */
@@ -744,6 +830,54 @@ export function formatFriendlySkipReason(rawReason: string): string {
     return 'LinkedIn form required answers not available in profile.';
   }
   return rawReason.replace(/^skipped:\s*/i, '');
+}
+
+/**
+ * Increments the skipped counter AND records a stable reason bucket so the run
+ * summary can show exactly WHY jobs were skipped (instrumentation for skip reduction).
+ * Safe no-op when stats is undefined or lacks the skipReasons map.
+ */
+export function recordSkip(
+  stats: { skipped: number; skipReasons?: Record<string, number> } | undefined,
+  reasonBucket: string,
+): void {
+  if (!stats) return;
+  stats.skipped++;
+  if (stats.skipReasons) {
+    stats.skipReasons[reasonBucket] = (stats.skipReasons[reasonBucket] || 0) + 1;
+  }
+}
+
+/**
+ * Buckets raw form-filling failure reasons into a small, stable set of categories
+ * so the run summary table stays readable instead of fragmenting per job.
+ */
+export function bucketFillFailureReason(rawReason: string | undefined): string {
+  const r = (rawReason || '').toLowerCase();
+  if (r.includes('security')) return 'form: security checkpoint';
+  if (r.includes('validation loop')) return 'form: validation loop detected';
+  if (r.includes('mandatory')) return 'form: mandatory document missing';
+  if (r.includes('failed validation')) return 'form: step validation failed';
+  if (r.includes('confirmation')) return 'form: submission confirmation unverified';
+  if (r.includes('submit')) return 'form: submit click failed';
+  if (r.includes('validation blocked')) return 'form: Next/Review rejected (validation)';
+  if (r.includes('advance')) return 'form: could not advance step';
+  if (r.includes('modal closed')) return 'form: modal closed unexpectedly';
+  if (r.includes('no action button')) return 'form: no action button found';
+  if (r.includes('maximum steps')) return 'form: max steps exceeded';
+  const trimmed = (rawReason || 'unknown error').trim().slice(0, 60);
+  return trimmed ? `form: ${trimmed}` : 'form: unknown failure';
+}
+
+/**
+ * Formats the skip-reason counter map into a compact "reason ×count" breakdown line.
+ * Returns empty string when the map is missing or empty.
+ */
+export function formatSkipBreakdown(skipReasons: Record<string, number> | undefined): string {
+  if (!skipReasons) return '';
+  const entries = Object.entries(skipReasons).sort((a, b) => b[1] - a[1]);
+  if (entries.length === 0) return '';
+  return `📊 Skip breakdown: ${entries.map(([reason, count]) => `${reason} ×${count}`).join(' | ')}`;
 }
 
 export class DedicatedJobRunner {
@@ -1515,6 +1649,7 @@ export class DedicatedJobRunner {
       modalOpened: number;
       skipped: number;
       failed: number;
+      skipReasons?: Record<string, number>;
     };
   }> {
     const { portToSend, onLiveActivity } = options;
@@ -1524,6 +1659,7 @@ export class DedicatedJobRunner {
       modalOpened: 0,
       skipped: 0,
       failed: 0,
+      skipReasons: {} as Record<string, number>,
     };
 
     // 0. AUTHENTICATION GATE: Enforce valid user session before starting
@@ -1882,7 +2018,7 @@ export class DedicatedJobRunner {
 
           const proc = await processedJobsStore.isJobProcessed(card.jobId);
           if (proc.isProcessed && proc.status === 'applied') {
-            stats.skipped++;
+            recordSkip(stats, 'already applied previously');
             this.notifyActivity(portToSend, onLiveActivity, {
               jobId: card.jobId,
               url: card.url,
@@ -2085,6 +2221,10 @@ export class DedicatedJobRunner {
       // 6. Final Summary
       const summaryMsg = `🏁 Auto Apply finished! Submitted ${stats.applied} application${stats.applied === 1 ? '' : 's'} (${stats.skipped} skipped).`;
       this.notifyStatus(portToSend, summaryMsg, 'ok');
+      const skipBreakdown = formatSkipBreakdown(stats.skipReasons);
+      if (skipBreakdown) {
+        this.notifyStatus(portToSend, skipBreakdown, 'info');
+      }
 
       if (portToSend) {
         try {
@@ -3664,7 +3804,14 @@ export class DedicatedJobRunner {
     runId: string,
     portToSend?: chrome.runtime.Port | null,
     onLiveActivity?: (activity: any) => void,
-    stats?: { totalFound: number; applied: number; modalOpened: number; skipped: number; failed: number },
+    stats?: {
+      totalFound: number;
+      applied: number;
+      modalOpened: number;
+      skipped: number;
+      failed: number;
+      skipReasons?: Record<string, number>;
+    },
     candidateIndex?: number,
     batchCap?: number,
   ): Promise<{ status: 'applied' | 'skipped' | 'failed' | 'halt'; usedDirectFallback?: boolean }> {
@@ -3725,7 +3872,7 @@ export class DedicatedJobRunner {
     );
     if (earlyBlacklist.blacklisted) {
       this.notifyStatus(portToSend, `🚫 Skipped "${safeTitle}": ${earlyBlacklist.reason}.`, 'info');
-      if (stats) stats.skipped++;
+      recordSkip(stats, 'blacklisted (keyword/company)');
       await processedJobsStore.recordJob({
         jobId: job.jobId,
         url: job.url,
@@ -3826,7 +3973,7 @@ export class DedicatedJobRunner {
       !topCard.isLoginWall
     ) {
       this.notifyStatus(portToSend, `ℹ️ Skipped "${displayTitle}": Could not load job details from LinkedIn.`, 'info');
-      if (stats) stats.skipped++;
+      recordSkip(stats, 'job details unavailable');
       await processedJobsStore.recordJob({
         jobId: job.jobId,
         url: job.url,
@@ -3855,7 +4002,7 @@ export class DedicatedJobRunner {
         const chkRes = await this.waitForManualCheckpointResolution(currentPage, portToSend, onLiveActivity);
         if (chkRes.aborted || !this.isRunning) return { status: 'halt' };
         if (!chkRes.solved) {
-          if (stats) stats.skipped++;
+          recordSkip(stats, 'security checkpoint unresolved');
           return { status: 'skipped', usedDirectFallback };
         }
       }
@@ -3868,7 +4015,7 @@ export class DedicatedJobRunner {
         `ℹ️ Skipped "${displayTitle}": This job is closed and no longer accepting applications.`,
         'info',
       );
-      if (stats) stats.skipped++;
+      recordSkip(stats, 'job closed');
       await processedJobsStore.recordJob({
         jobId: job.jobId,
         url: job.url,
@@ -3896,7 +4043,7 @@ export class DedicatedJobRunner {
         `ℹ️ Skipped "${displayTitle}": You already applied to this job earlier on LinkedIn.`,
         'info',
       );
-      if (stats) stats.skipped++;
+      recordSkip(stats, 'already applied on LinkedIn');
       await processedJobsStore.recordJob({
         jobId: job.jobId,
         url: job.url,
@@ -3924,7 +4071,7 @@ export class DedicatedJobRunner {
         `ℹ️ Skipped "${displayTitle}": Requires applying directly on company website (not Easy Apply).`,
         'info',
       );
-      if (stats) stats.skipped++;
+      recordSkip(stats, 'no Easy Apply (external site)');
       await processedJobsStore.recordJob({
         jobId: job.jobId,
         url: job.url,
@@ -3957,7 +4104,7 @@ export class DedicatedJobRunner {
     );
     if (postBlacklist.blacklisted) {
       this.notifyStatus(portToSend, `🚫 Skipped "${displayTitle}": ${postBlacklist.reason}.`, 'info');
-      if (stats) stats.skipped++;
+      recordSkip(stats, 'blacklisted (post-load)');
       await processedJobsStore.recordJob({
         jobId: job.jobId,
         url: job.url,
@@ -3987,7 +4134,7 @@ export class DedicatedJobRunner {
         `ℹ️ Skipped "${displayTitle}": Required skills do not closely match your profile.`,
         'info',
       );
-      if (stats) stats.skipped++;
+      recordSkip(stats, 'low skill match');
       await processedJobsStore.recordJob({
         jobId: job.jobId,
         url: job.url,
@@ -4013,7 +4160,7 @@ export class DedicatedJobRunner {
     const minScoreThreshold =
       typeof config.minFitScore === 'number' && config.minFitScore > 0 ? config.minFitScore : 50;
     const maxExpGap = config.maxExperienceGapYears ?? 3;
-    const deepMatch = evaluateDeepRelevance(
+    let deepMatch = evaluateDeepRelevance(
       topCard.descriptionSnippet || '',
       careerBrain,
       role,
@@ -4022,10 +4169,47 @@ export class DedicatedJobRunner {
       displayTitle,
     );
 
+    // Borderline arbitration: scores in the 40-60 band are often false negatives of the
+    // deterministic keyword ratio. A single scoped-LLM judgement call re-decides before
+    // we burn the job opportunity on a wrong skip.
+    let arbitrationUsed = false;
+    if (deepMatch.recommendation === 'skip' && deepMatch.score >= 40 && deepMatch.score <= 60) {
+      const arbitrationLLM = await getJobScopedLLM(jobRunId).catch(() => undefined);
+      if (arbitrationLLM) {
+        const arbitrated = await arbitrateBorderlineRelevance(
+          arbitrationLLM,
+          displayTitle,
+          topCard.descriptionSnippet || '',
+          careerBrain,
+        ).catch(() => null);
+        if (arbitrated) {
+          arbitrationUsed = true;
+          logger.info(
+            `[DedicatedJobRunner] Borderline arbitration for "${displayTitle}" (deterministic score ${deepMatch.score}): ${
+              arbitrated.recommendation === 'apply' ? 'OVERRIDDEN -> apply' : 'CONFIRMED skip'
+            }`,
+          );
+          deepMatch = { ...deepMatch, ...arbitrated };
+        }
+      }
+    }
+
     if (deepMatch.recommendation === 'skip') {
+      if (arbitrationUsed) {
+        // The arbitration call was billed against this jobRunId; refund it like any
+        // other skipped job so a borderline judgement never costs the user credits.
+        await backendApiClient.refundCredits(jobRunId).catch(err => {
+          const errMsg = String(err?.message || err);
+          if (/no billable usage|run_not_found|already_refunded/i.test(errMsg)) {
+            logger.debug(`[DedicatedJobRunner] No billable usage to refund for ${jobRunId}.`);
+          } else {
+            logger.info(`[DedicatedJobRunner] Refund note for ${jobRunId}: ${errMsg}`);
+          }
+        });
+      }
       logger.info(`[DedicatedJobRunner] Deep JD evaluation skipped "${displayTitle}": ${deepMatch.reason}`);
       this.notifyStatus(portToSend, `ℹ️ Skipped "${displayTitle}": ${deepMatch.reason}`, 'info');
-      if (stats) stats.skipped++;
+      recordSkip(stats, 'fit score below threshold');
       await processedJobsStore.recordJob({
         jobId: job.jobId,
         url: job.url,
@@ -4174,8 +4358,8 @@ export class DedicatedJobRunner {
         });
         return { status: 'applied', usedDirectFallback };
       } else {
-        if (stats) stats.skipped++;
         const skipReason = fillRes.reason || 'Form filling could not be completed';
+        recordSkip(stats, bucketFillFailureReason(skipReason));
         const friendlySkip = formatFriendlySkipReason(skipReason);
         this.notifyStatus(portToSend, `ℹ️ Skipped "${displayTitle}": ${friendlySkip}`, 'info');
 

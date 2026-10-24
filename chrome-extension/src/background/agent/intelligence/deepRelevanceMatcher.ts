@@ -190,14 +190,17 @@ export function evaluateDeepRelevance(
   maxExperienceGap = 3,
   jobTitle = '',
 ): IDeepRelevanceResult {
-  // 1. Experience Gap Check
+  // 1. Experience Gap Check — ONLY enforced when the candidate's years of experience is
+  // actually known. The profile schema defaults yearsOfExperience to 0 when unset, so
+  // treating 0 as "0 years of experience" fail-closed every posting asking for 4+ years —
+  // the single biggest source of false-negative skips. Unknown experience data means
+  // "no hard filter"; the skill-overlap score below still gates the application.
   const requiredYears = extractRequiredExperienceYears(jobTitle, jobDescriptionText);
-  const candidateYears =
-    candidateBrain.yearsOfExperience !== undefined && candidateBrain.yearsOfExperience !== null
-      ? Number(candidateBrain.yearsOfExperience) || 0
-      : 0;
+  const rawYears = candidateBrain.yearsOfExperience;
+  const yearsKnown = rawYears !== undefined && rawYears !== null && Number(rawYears) >= 1;
+  const candidateYears = yearsKnown ? Number(rawYears) || 0 : 0;
 
-  if (requiredYears !== null && requiredYears > candidateYears + maxExperienceGap) {
+  if (yearsKnown && requiredYears !== null && requiredYears > candidateYears + maxExperienceGap) {
     return {
       isMatch: false,
       score: Math.max(10, Math.min(60, Math.round((candidateYears / requiredYears) * 60))),
@@ -232,9 +235,14 @@ export function evaluateDeepRelevance(
     }
   }
 
-  // 3. Identify candidate skills
+  // 3. Identify candidate skills (profile + resume auto-extracted + calibrated experience + target role)
   const candidateSkills = new Set(
-    [...(candidateBrain.skills || []), ...Object.keys(candidateBrain.skillExperience || {}), targetRole || '']
+    [
+      ...(candidateBrain.skills || []),
+      ...Object.keys(candidateBrain.skillExperience || {}),
+      ...(candidateBrain.autoExtractedSkills || []),
+      targetRole || '',
+    ]
       .map(s => s.toLowerCase().trim())
       .filter(s => s.length > 1),
   );

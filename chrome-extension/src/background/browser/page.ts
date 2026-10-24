@@ -3102,89 +3102,108 @@ export default class Page {
       for (const errEl of errorEls) {
         const txt = cleanElementText(errEl);
         if (!txt || txt.length < 3) continue;
-        if (
-          errorRegex.test(txt) ||
+
+        // Only GENUINE, VISIBLE error feedback should be treated as validation errors.
+        // LinkedIn renders neutral hints (e.g. "Between 1 and 10") with the same base
+        // class, so we require an EXPLICIT error signal (error modifier class, role=alert
+        // or an error-named id). Text content alone is NOT a reliable signal and
+        // previously caused healthy fields to be "healed" endlessly.
+        const fbStyle = window.getComputedStyle(errEl);
+        if (fbStyle.display === 'none' || fbStyle.visibility === 'hidden') continue;
+        const fbRect = errEl.getBoundingClientRect();
+        if (fbRect.width === 0 && fbRect.height === 0) continue;
+
+        const isErrorClass =
           errEl.classList.contains('artdeco-inline-feedback--error') ||
-          errEl.closest('.artdeco-inline-feedback--error')
-        ) {
-          let label = '';
-          const container =
+          errEl.classList.contains('inline-feedback--error') ||
+          Boolean(
             errEl.closest(
-              'div.fb-dash-form-element, div.jobs-easy-apply-form-element, fieldset, div[data-test-form-element], .jobs-easy-apply-form-section__grouping',
-            ) ||
-            errEl.parentElement?.parentElement ||
-            errEl.parentElement;
+              '.artdeco-inline-feedback--error, .inline-feedback--error, [data-test-form-element-error-message]',
+            ),
+          );
+        const isAlertRole = errEl.getAttribute('role') === 'alert';
+        const hasErrorId = /\berror\b/i.test(errEl.id);
 
-          const inputEl = container
-            ? (container.querySelector('input, select, textarea') as
-                | HTMLInputElement
-                | HTMLSelectElement
-                | HTMLTextAreaElement
-                | null)
-            : null;
+        const isGenuineError = isErrorClass || isAlertRole || hasErrorId;
+        if (!isGenuineError) continue;
 
-          if (container) {
-            const lbl = container.querySelector('label, legend');
+        let label = '';
+        const container =
+          errEl.closest(
+            'div.fb-dash-form-element, div.jobs-easy-apply-form-element, fieldset, div[data-test-form-element], .jobs-easy-apply-form-section__grouping',
+          ) ||
+          errEl.parentElement?.parentElement ||
+          errEl.parentElement;
+
+        const inputEl = container
+          ? (container.querySelector('input, select, textarea') as
+              | HTMLInputElement
+              | HTMLSelectElement
+              | HTMLTextAreaElement
+              | null)
+          : null;
+
+        if (container) {
+          const lbl = container.querySelector('label, legend');
+          if (lbl) label = cleanElementText(lbl);
+        }
+        if (!label && inputEl) {
+          const id = inputEl.getAttribute('id');
+          if (id) {
+            const lbl = modal.querySelector(`label[for="${id}"]`);
             if (lbl) label = cleanElementText(lbl);
           }
-          if (!label && inputEl) {
-            const id = inputEl.getAttribute('id');
-            if (id) {
-              const lbl = modal.querySelector(`label[for="${id}"]`);
-              if (lbl) label = cleanElementText(lbl);
-            }
-            if (!label) label = cleanDuplicateString(inputEl.getAttribute('aria-label') || '');
+          if (!label) label = cleanDuplicateString(inputEl.getAttribute('aria-label') || '');
+        }
+
+        if (!errors.some(e => e.errorText === txt)) {
+          errors.push({ fieldLabel: label || 'Field', errorText: txt });
+        }
+
+        if (inputEl) {
+          const curVal = (inputEl.value || '').trim();
+          const isSelect = inputEl.tagName.toLowerCase() === 'select';
+          const isNumeric =
+            (inputEl as HTMLInputElement).type === 'number' ||
+            inputEl.inputMode === 'numeric' ||
+            inputEl.inputMode === 'decimal' ||
+            /decimal|number|larger than|greater than/i.test(txt);
+          const isCheckbox = (inputEl as HTMLInputElement).type === 'checkbox';
+          const isRadio = (inputEl as HTMLInputElement).type === 'radio';
+
+          const fieldType: 'text' | 'number' | 'radio' | 'dropdown' | 'checkbox' = isSelect
+            ? 'dropdown'
+            : isCheckbox
+              ? 'checkbox'
+              : isRadio
+                ? 'radio'
+                : isNumeric
+                  ? 'number'
+                  : 'text';
+
+          const rawMin = inputEl.getAttribute('min');
+          const minVal = /larger\s*than\s*0(?:\.0)?|greater\s*than\s*0(?:\.0)?/i.test(txt)
+            ? 1
+            : rawMin !== null && !isNaN(Number(rawMin))
+              ? Number(rawMin)
+              : undefined;
+
+          const errDesc = {
+            id: inputEl.id || undefined,
+            label: label || 'Form Field',
+            currentValue: curVal,
+            errorText: txt,
+            fieldType,
+            min: minVal,
+            placeholder: inputEl.getAttribute('placeholder') || undefined,
+            hintText: txt,
+          };
+
+          if (!invalidFieldsWithErrors.some(e => e.label === errDesc.label && e.errorText === txt)) {
+            invalidFieldsWithErrors.push(errDesc);
           }
-
-          if (!errors.some(e => e.errorText === txt)) {
-            errors.push({ fieldLabel: label || 'Field', errorText: txt });
-          }
-
-          if (inputEl) {
-            const curVal = (inputEl.value || '').trim();
-            const isSelect = inputEl.tagName.toLowerCase() === 'select';
-            const isNumeric =
-              (inputEl as HTMLInputElement).type === 'number' ||
-              inputEl.inputMode === 'numeric' ||
-              inputEl.inputMode === 'decimal' ||
-              /decimal|number|larger than|greater than/i.test(txt);
-            const isCheckbox = (inputEl as HTMLInputElement).type === 'checkbox';
-            const isRadio = (inputEl as HTMLInputElement).type === 'radio';
-
-            const fieldType: 'text' | 'number' | 'radio' | 'dropdown' | 'checkbox' = isSelect
-              ? 'dropdown'
-              : isCheckbox
-                ? 'checkbox'
-                : isRadio
-                  ? 'radio'
-                  : isNumeric
-                    ? 'number'
-                    : 'text';
-
-            const rawMin = inputEl.getAttribute('min');
-            const minVal = /larger\s*than\s*0(?:\.0)?|greater\s*than\s*0(?:\.0)?/i.test(txt)
-              ? 1
-              : rawMin !== null && !isNaN(Number(rawMin))
-                ? Number(rawMin)
-                : undefined;
-
-            const errDesc = {
-              id: inputEl.id || undefined,
-              label: label || 'Form Field',
-              currentValue: curVal,
-              errorText: txt,
-              fieldType,
-              min: minVal,
-              placeholder: inputEl.getAttribute('placeholder') || undefined,
-              hintText: txt,
-            };
-
-            if (!invalidFieldsWithErrors.some(e => e.label === errDesc.label && e.errorText === txt)) {
-              invalidFieldsWithErrors.push(errDesc);
-            }
-            if (!emptyRequiredFields.some(e => e.label === errDesc.label)) {
-              emptyRequiredFields.push(errDesc);
-            }
+          if (!emptyRequiredFields.some(e => e.label === errDesc.label)) {
+            emptyRequiredFields.push(errDesc);
           }
         }
       }
@@ -3696,7 +3715,7 @@ export default class Page {
       }
 
       const modal = findActiveModal(document);
-      if (!modal) return false;
+      if (!modal) return { ok: false, targetFound: false, isTextField: false, typeaheadUnresolved: false };
       let targetEl: HTMLElement | null = null;
       let targetRadioLabel: HTMLElement | null = null;
 
@@ -3722,6 +3741,24 @@ export default class Page {
           .replace(/\s+/g, ' ')
           .trim();
         if (normA && normB && (normA === normB || normA.includes(normB) || normB.includes(normA))) return true;
+        return false;
+      }
+
+      // Tolerant readback comparison: verifies the DOM actually holds the filled value while
+      // tolerating light site-side reformatting (whitespace, commas, case, numeric coercion).
+      function valuesMatchTolerantly(actual: string, expected: string, numericLike: boolean): boolean {
+        if (!expected) return !actual;
+        if (!actual) return false;
+        if (numericLike) {
+          const a = parseFloat(String(actual).replace(/,/g, ''));
+          const e = parseFloat(String(expected).replace(/,/g, ''));
+          return !isNaN(a) && !isNaN(e) && a === e;
+        }
+        const norm = (s: string) => s.toLowerCase().replace(/[\s,]+/g, '');
+        const nA = norm(actual);
+        const nE = norm(expected);
+        if (nA === nE) return true;
+        if (nA.length > 3 && nE.length > 3 && (nA.includes(nE) || nE.includes(nA))) return true;
         return false;
       }
 
@@ -3840,7 +3877,14 @@ export default class Page {
         }
       }
 
-      if (!targetEl) return false;
+      if (!targetEl) return { ok: false, targetFound: false, isTextField: false, typeaheadUnresolved: false };
+
+      // Mark the resolved element so the outer method can escalate to REAL CDP keyboard typing
+      // if in-page fill verification fails. Stale markers are cleared first.
+      try {
+        document.querySelectorAll('[data-qoder-fill-target]').forEach(m => m.removeAttribute('data-qoder-fill-target'));
+        targetEl.setAttribute('data-qoder-fill-target', '1');
+      } catch {}
 
       // Ensure target element is scrolled into view in modal before interaction
       const scrollTarget = targetRadioLabel || targetEl.closest('label') || targetEl.parentElement || targetEl;
@@ -3878,7 +3922,12 @@ export default class Page {
               targetEl.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
             }
           }
-          return targetEl.checked === shouldBeChecked;
+          return {
+            ok: targetEl.checked === shouldBeChecked,
+            targetFound: true,
+            isTextField: false,
+            typeaheadUnresolved: false,
+          };
         } else {
           // Radio button
           clickable.click();
@@ -3893,21 +3942,21 @@ export default class Page {
             targetEl.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
             targetEl.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
           }
-          return targetEl.checked;
+          return { ok: targetEl.checked, targetFound: true, isTextField: false, typeaheadUnresolved: false };
         }
       } else if (targetEl instanceof HTMLInputElement && targetEl.type === 'file') {
         // File input elements can only accept an empty string programmatically in web browsers
         // for security reasons. Never attempt to set non-empty string on input[type="file"].
-        return false;
+        return { ok: false, targetFound: true, isTextField: false, typeaheadUnresolved: false };
       } else if (targetEl instanceof HTMLInputElement || targetEl instanceof HTMLTextAreaElement) {
         const proto = targetEl instanceof HTMLInputElement ? HTMLInputElement.prototype : HTMLTextAreaElement.prototype;
         const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
 
         let finalVal = val;
-        if (
+        const isNumericField =
           targetEl instanceof HTMLInputElement &&
-          (targetEl.type === 'number' || targetEl.inputMode === 'numeric' || targetEl.inputMode === 'decimal')
-        ) {
+          (targetEl.type === 'number' || targetEl.inputMode === 'numeric' || targetEl.inputMode === 'decimal');
+        if (isNumericField) {
           let numStr = String(val).replace(/,/g, '').trim();
           const minAttr = targetEl.getAttribute('min');
           const minNum = minAttr !== null ? parseFloat(minAttr) : NaN;
@@ -3941,7 +3990,7 @@ export default class Page {
           targetEl.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
         } catch (fillErr) {
           console.warn('[Page] fillModalFieldDirect value setter caught error:', fillErr);
-          return false;
+          return { ok: false, targetFound: true, isTextField: true, typeaheadUnresolved: false };
         }
 
         // Autocomplete / typeahead suggestion selection (e.g. Location (city), School/University, Company, Title)
@@ -3958,6 +4007,10 @@ export default class Page {
           Boolean(targetEl.closest('.basic-typeahead, .artdeco-typeahead, [data-test-typeahead]')) ||
           isLocationField ||
           /school|college|university|company|title/i.test(ident.label || '');
+
+        // Typeahead outcome tracking, consumed by the final readback gate below
+        let optionSelected = false;
+        let selectedOptText = '';
 
         // If location field, sanitize remote/hybrid clauses e.g. "Bengaluru, India or Remote" -> "Bengaluru, India"
         let cleanVal = val.trim();
@@ -4134,12 +4187,55 @@ export default class Page {
                 targetEl.blur();
               } catch {}
 
+              optionSelected = true;
+              selectedOptText = (bestOpt.textContent || '').trim();
+
               await new Promise(r => setTimeout(r, 300));
             }
           }
         }
 
-        return true;
+        // ── FINAL READBACK VERIFICATION ──────────────────────────────────────
+        // LinkedIn's React forms silently discard programmatic fills that didn't
+        // go through a recognized interaction. Verify the DOM actually holds the
+        // intended value (or a selected typeahead option) before reporting success.
+        const finalReadback = (targetEl as HTMLInputElement | HTMLTextAreaElement).value;
+        let ok: boolean;
+        let typeaheadUnresolved = false;
+
+        if (isTypeahead) {
+          if (optionSelected) {
+            // Option click registered → input should now reflect the selected option text.
+            const rb = finalReadback.trim().toLowerCase();
+            const optTxt = selectedOptText.toLowerCase();
+            ok = rb.length > 0 && (!optTxt || rb === optTxt || optTxt.includes(rb) || rb.includes(optTxt));
+          } else {
+            // No listbox option could be selected. For structural comboboxes and location
+            // fields LinkedIn ALWAYS rejects free text on Next, so fail loudly instead of
+            // reporting a fake success. Heuristic-only matches stay lenient.
+            const hasStructuralCombobox =
+              targetEl.getAttribute('role') === 'combobox' ||
+              targetEl.getAttribute('aria-autocomplete') === 'list' ||
+              targetEl.hasAttribute('aria-controls');
+            if (isLocationField || hasStructuralCombobox) {
+              ok = false;
+              typeaheadUnresolved = true;
+            } else {
+              ok = finalReadback.trim().length > 0;
+            }
+          }
+        } else {
+          ok = valuesMatchTolerantly(finalReadback, finalVal, isNumericField);
+        }
+
+        // Blur so React finalizes the field state and triggers any inline validation
+        try {
+          targetEl.blur();
+        } catch {}
+        targetEl.dispatchEvent(new Event('blur', { bubbles: true, composed: true }));
+        targetEl.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+
+        return { ok, targetFound: true, isTextField: true, typeaheadUnresolved };
       } else if (targetEl instanceof HTMLSelectElement) {
         // If select is currently disabled or options haven't hydrated yet (cascading parent -> child AJAX delay),
         // poll up to 1200ms for options to load
@@ -4224,7 +4320,13 @@ export default class Page {
           targetEl.selectedIndex = opt.index;
           targetEl.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
           targetEl.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
-          return true;
+          // Readback verification: the DOM must actually hold the selected value.
+          return {
+            ok: targetEl.value === opt.value,
+            targetFound: true,
+            isTextField: false,
+            typeaheadUnresolved: false,
+          };
         }
       } else {
         // Check for custom Artdeco dropdown button or combobox
@@ -4274,37 +4376,115 @@ export default class Page {
                 matchedOpt.dispatchEvent(new MouseEvent(evt, { bubbles: true, cancelable: true, view: window }));
               });
               await new Promise(r => setTimeout(r, 150));
-              return true;
+              return { ok: true, targetFound: true, isTextField: false, typeaheadUnresolved: false };
             }
           }
         }
       }
 
-      return false;
+      return { ok: false, targetFound: true, isTextField: false, typeaheadUnresolved: false };
     };
 
     if (!this._puppeteerPage) {
       await this.attachPuppeteer().catch(() => false);
     }
 
+    // Structured in-page result: boolean OR { ok, targetFound, isTextField, typeaheadUnresolved }
+    type FillResultShape = {
+      ok: boolean;
+      targetFound: boolean;
+      isTextField: boolean;
+      typeaheadUnresolved: boolean;
+    };
+    const normalizeFillResult = (raw: unknown): FillResultShape | null => {
+      if (raw && typeof raw === 'object') {
+        const r = raw as Partial<FillResultShape>;
+        if (typeof r.ok === 'boolean') {
+          return {
+            ok: r.ok,
+            targetFound: Boolean(r.targetFound),
+            isTextField: Boolean(r.isTextField),
+            typeaheadUnresolved: Boolean(r.typeaheadUnresolved),
+          };
+        }
+      }
+      if (typeof raw === 'boolean') {
+        return { ok: raw, targetFound: raw, isTextField: false, typeaheadUnresolved: false };
+      }
+      return null;
+    };
+
+    const runFillInPage = async (): Promise<FillResultShape | null> => {
+      if (this._puppeteerPage) {
+        try {
+          return normalizeFillResult(await this._puppeteerPage.evaluate(fillInPage, identifier, value));
+        } catch {}
+      }
+      if (this._tabId && typeof chrome !== 'undefined' && chrome.scripting?.executeScript) {
+        try {
+          const results = await chrome.scripting.executeScript({
+            target: { tabId: this._tabId },
+            func: fillInPage,
+            args: [identifier, value],
+          });
+          return normalizeFillResult(results?.[0]?.result);
+        } catch {}
+      }
+      return null;
+    };
+
+    let result = await runFillInPage();
+
+    // ── ESCALATION LADDER (Level 2): REAL CDP keyboard typing ────────────────
+    // If in-page fill verification failed on a text/typeahead field, drive REAL
+    // keyboard input through CDP. Trusted key events are the only input that
+    // React/LinkedIn cannot silently discard, so this recovers fills that the
+    // native-setter + synthetic-event approach cannot. After typing we re-run the
+    // in-page fill once so freshly-rendered typeahead suggestions get clicked.
+    if (
+      result &&
+      !result.ok &&
+      result.targetFound &&
+      (result.isTextField || result.typeaheadUnresolved) &&
+      this._puppeteerPage
+    ) {
+      const markerSel = '[data-qoder-fill-target]';
+      try {
+        const markerPresent = await this._puppeteerPage.evaluate((sel: string) => {
+          const el = document.querySelector(sel);
+          if (!el) return false;
+          (el as HTMLInputElement | HTMLTextAreaElement).focus();
+          return true;
+        }, markerSel);
+        if (markerPresent) {
+          // Trusted select-all + delete clears BOTH the DOM value and React's internal
+          // state, so real typing starts from a clean slate (no duplicated text).
+          await this._puppeteerPage.keyboard.down('Control');
+          await this._puppeteerPage.keyboard.press('KeyA');
+          await this._puppeteerPage.keyboard.up('Control');
+          await this._puppeteerPage.keyboard.press('Backspace');
+          await this._puppeteerPage.type(markerSel, value, { delay: 25 });
+          // Give LinkedIn's remote typeahead API time to render suggestions
+          await new Promise(r => setTimeout(r, 900));
+          result = await runFillInPage();
+        }
+      } catch (escErr) {
+        console.warn('[Page] fillModalFieldDirect real-typing escalation failed:', escErr);
+      }
+    }
+
+    // Cleanup the temporary marker attribute
     if (this._puppeteerPage) {
       try {
-        return await this._puppeteerPage.evaluate(fillInPage, identifier, value);
-      } catch {}
-    }
-
-    if (this._tabId && typeof chrome !== 'undefined' && chrome.scripting?.executeScript) {
-      try {
-        const results = await chrome.scripting.executeScript({
-          target: { tabId: this._tabId },
-          func: fillInPage,
-          args: [identifier, value],
+        await this._puppeteerPage.evaluate(() => {
+          document
+            .querySelectorAll('[data-qoder-fill-target]')
+            .forEach(m => m.removeAttribute('data-qoder-fill-target'));
         });
-        return Boolean(results?.[0]?.result);
       } catch {}
     }
 
-    return false;
+    return result?.ok ?? false;
   }
 
   /**
