@@ -5708,31 +5708,76 @@ export default class Page {
       ) as HTMLElement | null;
       if (artdecoModal && !searchRoots.includes(artdecoModal)) searchRoots.push(artdecoModal);
 
-      let buttons: HTMLButtonElement[] = [];
-      for (const rootEl of searchRoots) {
-        const found = Array.from(rootEl.querySelectorAll('button, [role="button"]')) as HTMLButtonElement[];
-        if (found.length > 0) {
-          buttons = found;
-          break;
+      const seen = new Set<HTMLElement>();
+      const candidateButtons: HTMLElement[] = [];
+      const addButton = (b: HTMLElement | null) => {
+        if (!b || seen.has(b)) return;
+        seen.add(b);
+        candidateButtons.push(b);
+      };
+
+      // 1. Direct targeted queries for action buttons in modal footers & actionbars (highest priority)
+      const actionSelectors = [
+        '.jobs-easy-apply-modal__footer button',
+        '.jobs-easy-apply-modal__footer [role="button"]',
+        '.artdeco-modal__actionbar button',
+        '.artdeco-modal__actionbar [role="button"]',
+        'div[role="dialog"] footer button',
+        'div[role="dialog"] .artdeco-modal__actionbar button',
+        'button[data-easy-apply-next-button]',
+        'button[aria-label*="continue to next" i]',
+        'button[aria-label*="next" i]',
+        'button[aria-label*="review" i]',
+        'button[aria-label*="submit" i]',
+        'button.artdeco-button--primary',
+      ];
+      for (const sel of actionSelectors) {
+        for (const root of searchRoots) {
+          try {
+            root.querySelectorAll(sel).forEach(el => addButton(el as HTMLElement));
+          } catch {}
         }
+        try {
+          document.querySelectorAll(sel).forEach(el => addButton(el as HTMLElement));
+        } catch {}
       }
-      if (buttons.length === 0) {
-        buttons = Array.from(
-          document.querySelectorAll(
-            '.jobs-easy-apply-modal__footer button, .artdeco-modal__actionbar button, button[data-easy-apply-next-button], button[aria-label*="next" i], button[aria-label*="continue to next" i], button[aria-label*="review" i], button[aria-label*="submit" i]',
-          ),
-        ) as HTMLButtonElement[];
+
+      // 2. Also add any button inside searchRoots
+      for (const root of searchRoots) {
+        try {
+          root.querySelectorAll('button, [role="button"]').forEach(el => addButton(el as HTMLElement));
+        } catch {}
       }
-      if (buttons.length === 0 && !modal) return { hasNext: false, hasReview: false, hasSubmit: false };
+
+      if (candidateButtons.length === 0 && !modal) return { hasNext: false, hasReview: false, hasSubmit: false };
 
       let hasNext = false;
       let hasReview = false;
       let hasSubmit = false;
 
-      for (const btn of buttons) {
+      for (const btn of candidateButtons) {
         const text = (btn.innerText || btn.textContent || '').trim().toLowerCase();
         const aria = (btn.getAttribute('aria-label') || '').trim().toLowerCase();
         const dataControl = (btn.getAttribute('data-control-name') || '').trim().toLowerCase();
+        const testId = (
+          btn.getAttribute('data-test-modal-close-btn') ||
+          btn.getAttribute('data-test-dialog-close-btn') ||
+          ''
+        ).toLowerCase();
+
+        // Skip dismiss / cancel / close / back buttons
+        if (
+          testId.includes('close') ||
+          text === 'dismiss' ||
+          text === 'cancel' ||
+          text === 'back' ||
+          aria.includes('dismiss') ||
+          aria.includes('cancel') ||
+          aria.includes('close') ||
+          btn.classList.contains('artdeco-modal__dismiss')
+        ) {
+          continue;
+        }
 
         if (
           aria.includes('submit application') ||
@@ -5767,20 +5812,31 @@ export default class Page {
         }
       }
 
-      // Robust fallback: Check primary button in modal
+      // Robust fallback: Check primary button across searchRoots and document
       if (!hasNext && !hasReview && !hasSubmit) {
-        const primaryBtn = (modal || document).querySelector(
-          '.jobs-easy-apply-modal__footer button.artdeco-button--primary, .artdeco-modal__actionbar button.artdeco-button--primary, footer button.artdeco-button--primary, button.artdeco-button--primary',
-        ) as HTMLButtonElement | null;
-        if (primaryBtn) {
-          const pText = (primaryBtn.innerText || primaryBtn.textContent || '').trim().toLowerCase();
-          const pAria = (primaryBtn.getAttribute('aria-label') || '').trim().toLowerCase();
-          if (pText.includes('submit') || pAria.includes('submit')) {
-            hasSubmit = true;
-          } else if (pText.includes('review') || pAria.includes('review')) {
-            hasReview = true;
-          } else if (!pText.includes('dismiss') && !pText.includes('cancel')) {
-            hasNext = true;
+        for (const scope of [...searchRoots, document]) {
+          const primaryBtn = scope.querySelector(
+            '.jobs-easy-apply-modal__footer button.artdeco-button--primary, .artdeco-modal__actionbar button.artdeco-button--primary, footer button.artdeco-button--primary, button.artdeco-button--primary',
+          ) as HTMLButtonElement | null;
+          if (primaryBtn) {
+            const pText = (primaryBtn.innerText || primaryBtn.textContent || '').trim().toLowerCase();
+            const pAria = (primaryBtn.getAttribute('aria-label') || '').trim().toLowerCase();
+            if (
+              !pText.includes('dismiss') &&
+              !pText.includes('cancel') &&
+              !pAria.includes('dismiss') &&
+              !pAria.includes('cancel') &&
+              !pAria.includes('close')
+            ) {
+              if (pText.includes('submit') || pAria.includes('submit')) {
+                hasSubmit = true;
+              } else if (pText.includes('review') || pAria.includes('review')) {
+                hasReview = true;
+              } else {
+                hasNext = true;
+              }
+              break;
+            }
           }
         }
       }
@@ -6036,22 +6092,47 @@ export default class Page {
         }
       }
 
-      let buttons: HTMLButtonElement[] = [];
-      for (const rootEl of searchRoots) {
-        const found = Array.from(rootEl.querySelectorAll('button, [role="button"]')) as HTMLButtonElement[];
-        if (found.length > 0) {
-          buttons = found;
-          break;
+      const seen = new Set<HTMLElement>();
+      const candidateButtons: HTMLElement[] = [];
+      const addButton = (b: HTMLElement | null) => {
+        if (!b || seen.has(b)) return;
+        seen.add(b);
+        candidateButtons.push(b);
+      };
+
+      // 1. Direct targeted queries for forward action buttons in footers & actionbars
+      const actionSelectors = [
+        '.jobs-easy-apply-modal__footer button',
+        '.jobs-easy-apply-modal__footer [role="button"]',
+        '.artdeco-modal__actionbar button',
+        '.artdeco-modal__actionbar [role="button"]',
+        'div[role="dialog"] footer button',
+        'div[role="dialog"] .artdeco-modal__actionbar button',
+        'button[data-easy-apply-next-button]',
+        'button[aria-label*="continue to next" i]',
+        'button[aria-label*="next" i]',
+        'button[aria-label*="review" i]',
+        'button.artdeco-button--primary',
+      ];
+      for (const sel of actionSelectors) {
+        for (const root of searchRoots) {
+          try {
+            root.querySelectorAll(sel).forEach(el => addButton(el as HTMLElement));
+          } catch {}
         }
+        try {
+          document.querySelectorAll(sel).forEach(el => addButton(el as HTMLElement));
+        } catch {}
       }
-      if (buttons.length === 0) {
-        buttons = Array.from(
-          document.querySelectorAll(
-            '.jobs-easy-apply-modal__footer button, .artdeco-modal__actionbar button, button[data-easy-apply-next-button], button[aria-label*="next" i], button[aria-label*="continue to next" i], button[aria-label*="review" i]',
-          ),
-        ) as HTMLButtonElement[];
+
+      // 2. Also add any button inside searchRoots
+      for (const root of searchRoots) {
+        try {
+          root.querySelectorAll('button, [role="button"]').forEach(el => addButton(el as HTMLElement));
+        } catch {}
       }
-      if (buttons.length === 0 && !modal) return { clicked: false };
+
+      if (candidateButtons.length === 0 && !modal) return { clicked: false };
 
       function isButtonDisabled(btn: HTMLElement): boolean {
         return (
@@ -6074,10 +6155,19 @@ export default class Page {
       }
 
       // 1. Try Review
-      for (const btn of buttons) {
+      for (const btn of candidateButtons) {
         const text = (btn.innerText || btn.textContent || '').trim().toLowerCase();
         const aria = (btn.getAttribute('aria-label') || '').trim().toLowerCase();
         const dataControl = (btn.getAttribute('data-control-name') || '').trim().toLowerCase();
+        if (
+          aria.includes('dismiss') ||
+          aria.includes('close') ||
+          text === 'dismiss' ||
+          text === 'cancel' ||
+          text === 'back'
+        )
+          continue;
+
         if (aria.includes('review') || text === 'review' || text.includes('review') || dataControl.includes('review')) {
           if (!isButtonDisabled(btn)) {
             dispatchFullClick(btn);
@@ -6087,10 +6177,19 @@ export default class Page {
       }
 
       // 2. Try Next / Continue
-      for (const btn of buttons) {
+      for (const btn of candidateButtons) {
         const text = (btn.innerText || btn.textContent || '').trim().toLowerCase();
         const aria = (btn.getAttribute('aria-label') || '').trim().toLowerCase();
         const dataControl = (btn.getAttribute('data-control-name') || '').trim().toLowerCase();
+        if (
+          aria.includes('dismiss') ||
+          aria.includes('close') ||
+          text === 'dismiss' ||
+          text === 'cancel' ||
+          text === 'back'
+        )
+          continue;
+
         if (
           aria.includes('continue to next step') ||
           aria.includes('next') ||
@@ -6109,23 +6208,26 @@ export default class Page {
         }
       }
 
-      // 3. Fallback to primary button in modal
-      const primaryBtn = (modal || document).querySelector(
-        '.jobs-easy-apply-modal__footer button.artdeco-button--primary, .artdeco-modal__actionbar button.artdeco-button--primary, footer button.artdeco-button--primary, button.artdeco-button--primary',
-      ) as HTMLElement | null;
-      if (primaryBtn && !isButtonDisabled(primaryBtn)) {
-        const pText = (primaryBtn.innerText || primaryBtn.textContent || '').trim().toLowerCase();
-        const pAria = (primaryBtn.getAttribute('aria-label') || '').trim().toLowerCase();
-        if (
-          !pText.includes('dismiss') &&
-          !pText.includes('cancel') &&
-          !pAria.includes('dismiss') &&
-          !pAria.includes('cancel')
-        ) {
-          dispatchFullClick(primaryBtn);
-          const actionType: 'next' | 'review' =
-            pText.includes('review') || pAria.includes('review') ? 'review' : 'next';
-          return { clicked: true, type: actionType };
+      // 3. Fallback to primary button across searchRoots and document
+      for (const scope of [...searchRoots, document]) {
+        const primaryBtn = scope.querySelector(
+          '.jobs-easy-apply-modal__footer button.artdeco-button--primary, .artdeco-modal__actionbar button.artdeco-button--primary, footer button.artdeco-button--primary, button.artdeco-button--primary',
+        ) as HTMLElement | null;
+        if (primaryBtn && !isButtonDisabled(primaryBtn)) {
+          const pText = (primaryBtn.innerText || primaryBtn.textContent || '').trim().toLowerCase();
+          const pAria = (primaryBtn.getAttribute('aria-label') || '').trim().toLowerCase();
+          if (
+            !pText.includes('dismiss') &&
+            !pText.includes('cancel') &&
+            !pAria.includes('dismiss') &&
+            !pAria.includes('cancel') &&
+            !pAria.includes('close')
+          ) {
+            dispatchFullClick(primaryBtn);
+            const actionType: 'next' | 'review' =
+              pText.includes('review') || pAria.includes('review') ? 'review' : 'next';
+            return { clicked: true, type: actionType };
+          }
         }
       }
 
@@ -6254,22 +6356,44 @@ export default class Page {
         }
       }
 
-      let buttons: HTMLButtonElement[] = [];
-      for (const rootEl of searchRoots) {
-        const found = Array.from(rootEl.querySelectorAll('button, [role="button"]')) as HTMLButtonElement[];
-        if (found.length > 0) {
-          buttons = found;
-          break;
+      const seen = new Set<HTMLElement>();
+      const candidateButtons: HTMLElement[] = [];
+      const addButton = (b: HTMLElement | null) => {
+        if (!b || seen.has(b)) return;
+        seen.add(b);
+        candidateButtons.push(b);
+      };
+
+      // 1. Direct targeted queries for submit buttons
+      const actionSelectors = [
+        '.jobs-easy-apply-modal__footer button',
+        '.jobs-easy-apply-modal__footer [role="button"]',
+        '.artdeco-modal__actionbar button',
+        '.artdeco-modal__actionbar [role="button"]',
+        'div[role="dialog"] footer button',
+        'div[role="dialog"] .artdeco-modal__actionbar button',
+        'button[aria-label*="submit application" i]',
+        'button[aria-label*="submit" i]',
+        'button.artdeco-button--primary',
+      ];
+      for (const sel of actionSelectors) {
+        for (const root of searchRoots) {
+          try {
+            root.querySelectorAll(sel).forEach(el => addButton(el as HTMLElement));
+          } catch {}
         }
+        try {
+          document.querySelectorAll(sel).forEach(el => addButton(el as HTMLElement));
+        } catch {}
       }
-      if (buttons.length === 0) {
-        buttons = Array.from(
-          document.querySelectorAll(
-            '.jobs-easy-apply-modal__footer button, .artdeco-modal__actionbar button, button[aria-label*="submit application" i], button[aria-label*="submit" i]',
-          ),
-        ) as HTMLButtonElement[];
+
+      for (const root of searchRoots) {
+        try {
+          root.querySelectorAll('button, [role="button"]').forEach(el => addButton(el as HTMLElement));
+        } catch {}
       }
-      if (buttons.length === 0 && !modal) return { clicked: false, error: 'Easy Apply modal is not open' };
+
+      if (candidateButtons.length === 0 && !modal) return { clicked: false, error: 'Easy Apply modal is not open' };
 
       function dispatchFullClick(el: HTMLElement) {
         el.scrollIntoView({ behavior: 'instant', block: 'center' });
@@ -6282,10 +6406,19 @@ export default class Page {
         el.click();
       }
 
-      for (const btn of buttons) {
+      for (const btn of candidateButtons) {
         const text = (btn.innerText || btn.textContent || '').trim().toLowerCase();
         const aria = (btn.getAttribute('aria-label') || '').trim().toLowerCase();
         const dataControl = (btn.getAttribute('data-control-name') || '').trim().toLowerCase();
+        if (
+          aria.includes('dismiss') ||
+          aria.includes('close') ||
+          text === 'dismiss' ||
+          text === 'cancel' ||
+          text === 'back'
+        )
+          continue;
+
         const isSubmit =
           aria.includes('submit application') ||
           aria.includes('submit') ||
@@ -6301,21 +6434,24 @@ export default class Page {
         }
       }
 
-      // Primary button fallback on review step
-      const primaryBtn = (modal || document).querySelector(
-        '.jobs-easy-apply-modal__footer button.artdeco-button--primary, .artdeco-modal__actionbar button.artdeco-button--primary, footer button.artdeco-button--primary, button.artdeco-button--primary',
-      ) as HTMLElement | null;
-      if (primaryBtn) {
-        const pText = (primaryBtn.innerText || primaryBtn.textContent || '').trim().toLowerCase();
-        const pAria = (primaryBtn.getAttribute('aria-label') || '').trim().toLowerCase();
-        if (
-          !pText.includes('dismiss') &&
-          !pText.includes('cancel') &&
-          !pAria.includes('dismiss') &&
-          !pAria.includes('cancel')
-        ) {
-          dispatchFullClick(primaryBtn);
-          return { clicked: true };
+      // Primary button fallback on review step across searchRoots and document
+      for (const scope of [...searchRoots, document]) {
+        const primaryBtn = scope.querySelector(
+          '.jobs-easy-apply-modal__footer button.artdeco-button--primary, .artdeco-modal__actionbar button.artdeco-button--primary, footer button.artdeco-button--primary, button.artdeco-button--primary',
+        ) as HTMLElement | null;
+        if (primaryBtn) {
+          const pText = (primaryBtn.innerText || primaryBtn.textContent || '').trim().toLowerCase();
+          const pAria = (primaryBtn.getAttribute('aria-label') || '').trim().toLowerCase();
+          if (
+            !pText.includes('dismiss') &&
+            !pText.includes('cancel') &&
+            !pAria.includes('dismiss') &&
+            !pAria.includes('cancel') &&
+            !pAria.includes('close')
+          ) {
+            dispatchFullClick(primaryBtn);
+            return { clicked: true };
+          }
         }
       }
 

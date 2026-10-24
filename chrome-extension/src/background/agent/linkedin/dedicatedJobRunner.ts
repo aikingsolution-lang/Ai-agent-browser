@@ -4985,9 +4985,19 @@ export class DedicatedJobRunner {
           step = Math.max(0, step - 1);
         }
       } else {
-        // Neither submit nor forward button found - retry after brief settlement pause
-        await new Promise(r => setTimeout(r, 800));
-        const retryActions = await page.getModalActionButtons();
+        // Neither submit nor forward button found immediately - scroll to bottom and retry polling (up to 3 attempts)
+        let retryActions = actions;
+        for (let btnRetry = 1; btnRetry <= 3; btnRetry++) {
+          if (typeof page.scrollModalContent === 'function') {
+            await page.scrollModalContent('bottom');
+          }
+          await new Promise(r => setTimeout(r, 600 * btnRetry));
+          retryActions = await page.getModalActionButtons();
+          if (retryActions.hasSubmit || retryActions.hasNext || retryActions.hasReview) {
+            break;
+          }
+        }
+
         if (retryActions.hasSubmit) {
           this.notifyStatus(portToSend, `🎉 All steps completed! Submitting your application now...`, 'info');
           const submitRes = await page.submitApplication();
@@ -5002,6 +5012,20 @@ export class DedicatedJobRunner {
           const fwdRes = await page.clickModalForwardButton();
           if (fwdRes.clicked) {
             continue;
+          }
+        } else {
+          // Direct fallback: Attempt clicking primary button in case getModalActionButtons missed atypical labels
+          const directFwd = await page.clickModalForwardButton();
+          if (directFwd.clicked) {
+            continue;
+          }
+          const directSubmit = await page.submitApplication();
+          if (directSubmit.clicked) {
+            const confirmRes = await page.verifySubmissionConfirmation(8000);
+            if (confirmRes.confirmed) {
+              submitted = true;
+              break;
+            }
           }
         }
 
