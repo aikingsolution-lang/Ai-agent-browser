@@ -60,11 +60,6 @@ function MessageBlock({ message, isSameActor, isDarkMode = false, onSelectOption
         {!isSameActor && (
           <div className="mb-1.5 flex items-center space-x-2">
             <span className={`text-xs font-bold ${isDarkMode ? 'text-gray-200' : 'text-gray-900'}`}>{actor.name}</span>
-            {message.actor === 'copilot' && (
-              <span className="rounded-full bg-purple-500/20 px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider text-purple-300 border border-purple-500/30">
-                Career Copilot Pro
-              </span>
-            )}
           </div>
         )}
 

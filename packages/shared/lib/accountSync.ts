@@ -11,6 +11,7 @@
 import {
   authStorage,
   cloudApiSettingsStore,
+  dailyQuotaStore,
   resumeWebsiteAutoLogin,
   sessionUserId,
   startAccountSession,
@@ -144,6 +145,24 @@ export async function refreshAccountCredits(): Promise<void> {
   await authStorage.setSession({ credits: res.data });
 }
 
+export type QuotaRefreshResult = 'ok' | 'unavailable' | 'signed-out' | 'account-changed';
+
+/**
+ * Re-reads today's application quota for the signed-in account and stores it for display, stamped
+ * with that account. 'unavailable' when the backend could not be reached or its response was
+ * incomplete; the stored copy is then left as it was (and is shown only if it is still valid).
+ */
+export async function refreshAccountQuota(): Promise<QuotaRefreshResult> {
+  const before = await authStorage.getSession();
+  const uid = sessionUserId(before.user);
+  if (!before.token || !uid) return 'signed-out';
+  const quota = await backendApiClient.getProfileQuota().catch(() => null);
+  const after = await authStorage.getSession();
+  if (!after.token || sessionUserId(after.user) !== uid) return 'account-changed';
+  if (!quota) return 'unavailable';
+  return (await dailyQuotaStore.applyServerQuota(quota, uid)) ? 'ok' : 'unavailable';
+}
+
 export type CheckoutActivationResult =
   | { outcome: 'active'; subscription: BackendSubscription }
   | { outcome: 'timeout' | 'account-changed' | 'aborted' };
@@ -177,6 +196,7 @@ export async function waitForCheckoutActivation(
     const subscription = status?.subscription;
     if (subscription?.status === 'ACTIVE' && subscription.providerSubscriptionId === providerSubscriptionId) {
       await refreshAccountCredits().catch(() => undefined);
+      await refreshAccountQuota().catch(() => undefined);
       return { outcome: 'active', subscription };
     }
   }

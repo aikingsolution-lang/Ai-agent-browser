@@ -27,7 +27,7 @@ const { storageData } = vi.hoisted(() => {
 });
 
 import { backendApiClient, type ApplicationQuota } from '@extension/shared';
-import { authStorage } from '@extension/storage';
+import { authStorage, dailyQuotaStore, getQuotaDisplay, parseServerQuota } from '@extension/storage';
 import { DailyQuotaManager, applicationKey, quotaStopMessage } from '../linkedin/rateLimiter';
 
 function quota(fields: Partial<ApplicationQuota> = {}): ApplicationQuota {
@@ -172,6 +172,16 @@ describe('Daily quota client (server-authoritative)', () => {
     expect(storageData.linkedin_pending_quota_commits).toEqual([]);
   });
 
+  it('the older backend response is treated as unverified: no run starts and nothing is stored', async () => {
+    const legacy = { allowed: true, appliedToday: 0, dailyLimit: 15, remaining: 15, tier: 'free', lastResetDate: 'x' };
+    vi.spyOn(backendApiClient as any, 'request').mockResolvedValue({ success: true, data: legacy });
+    vi.spyOn(backendApiClient as any, 'ensureToken').mockResolvedValue(undefined);
+    (backendApiClient as any).token = 'token';
+    expect(await backendApiClient.getProfileQuota()).toBeNull();
+    expect(await DailyQuotaManager.canApplyToday()).toMatchObject({ allowed: false, reason: 'error' });
+    expect(storageData.linkedin_daily_quota).toBeUndefined();
+  });
+
   it('builds one stable key per job for reserve and commit', () => {
     expect(applicationKey('3912345678', 'https://www.linkedin.com/jobs/view/3912345678/?refId=x')).toBe(
       'linkedin:3912345678',
@@ -182,5 +192,136 @@ describe('Daily quota client (server-authoritative)', () => {
       'external:https://careers.example.com/apply/7',
     );
     expect(applicationKey('9', undefined, 'linkedin')).toBe('linkedin:9');
+  });
+});
+
+describe('What the side panel shows for the daily quota', () => {
+  const now = Date.now();
+  const today = new Date(now).toISOString().slice(0, 10);
+  const nextMidnight = new Date(
+    Date.UTC(new Date(now).getUTCFullYear(), new Date(now).getUTCMonth(), new Date(now).getUTCDate() + 1),
+  ).toISOString();
+  const server = (fields: Partial<ApplicationQuota> = {}) =>
+    quota({ day: today, lastResetDate: today, resetsAt: nextMidnight, ...fields });
+  const premium = (fields: Partial<ApplicationQuota> = {}) =>
+    server({ limit: 300, plan: 'premium', isPaid: true, tier: 'premium', ...fields });
+
+  beforeEach(() => {
+    for (const key of Object.keys(storageData)) delete storageData[key];
+  });
+
+  async function shown(serverQuota: unknown, options: Partial<Parameters<typeof getQuotaDisplay>[1]> = {}) {
+    const stored = await dailyQuotaStore.applyServerQuota(serverQuota, 'me');
+    return getQuotaDisplay(stored, { uid: 'me', ...options });
+  }
+
+  it('free account: 0 / 10 used, 10 remaining', async () => {
+    expect(await shown(server())).toEqual({
+      status: 'ready',
+      used: 0,
+      limit: 10,
+      remaining: 10,
+      plan: 'free',
+      isPaid: false,
+      exhausted: false,
+      resetsAt: nextMidnight,
+    });
+  });
+
+  it('Premium account: 0 / 300 used, 300 remaining (Diamond too)', async () => {
+    expect(await shown(premium(), { premiumActive: true })).toMatchObject({
+      status: 'ready',
+      used: 0,
+      limit: 300,
+      remaining: 300,
+      plan: 'premium',
+      isPaid: true,
+    });
+    expect(await shown(premium({ plan: 'diamond' }), { premiumActive: true })).toMatchObject({ plan: 'diamond' });
+  });
+
+  it('used = 10 of 10 (free) and 300 of 300 (Premium): limit reached, 0 remaining', async () => {
+    expect(await shown(server({ applied: 10 }))).toMatchObject({ used: 10, limit: 10, remaining: 0, exhausted: true });
+    expect(await shown(premium({ applied: 300 }), { premiumActive: true })).toMatchObject({
+      used: 300,
+      limit: 300,
+      remaining: 0,
+      exhausted: true,
+    });
+    expect(await shown(premium({ applied: 10 }), { premiumActive: true })).toMatchObject({
+      used: 10,
+      remaining: 290,
+      exhausted: false,
+    });
+  });
+
+  it('never more used than the limit, never negative remaining', async () => {
+    expect(await shown(server({ applied: 12, remaining: 0 }))).toMatchObject({ used: 10, remaining: 0 });
+    expect(await shown(server({ applied: 8, reserved: 3, remaining: 5 }))).toMatchObject({ used: 8, remaining: 0 });
+  });
+
+  it('rejects the older backend response and any undefined, NaN, negative or non-numeric value', async () => {
+    const legacy = {
+      allowed: true,
+      appliedToday: 0,
+      dailyLimit: 15,
+      remaining: 15,
+      tier: 'free',
+      lastResetDate: today,
+    };
+    expect(parseServerQuota(legacy)).toBeNull();
+    for (const bad of [
+      { limit: undefined },
+      { limit: Number.NaN },
+      { limit: 0 },
+      { applied: -1 },
+      { remaining: -3 },
+      { applied: '2' },
+      { plan: '' },
+      { isPaid: 'yes' },
+      { day: undefined },
+      { resetsAt: 'soon' },
+    ]) {
+      expect(parseServerQuota(server(bad as Partial<ApplicationQuota>))).toBeNull();
+    }
+    expect(await dailyQuotaStore.applyServerQuota(legacy, 'me')).toBeNull();
+    expect(storageData.linkedin_daily_quota).toBeUndefined();
+    expect(getQuotaDisplay(await dailyQuotaStore.getQuotaData(), { uid: 'me' })).toEqual({ status: 'unverified' });
+  });
+
+  it('is shown only for the account and the UTC day it was verified for', async () => {
+    const stored = await dailyQuotaStore.applyServerQuota(server(), 'me');
+    expect(getQuotaDisplay(stored, { uid: 'me' }).status).toBe('ready');
+    expect(getQuotaDisplay(stored, { uid: 'someone-else' }).status).toBe('unverified');
+    expect(getQuotaDisplay(stored, { uid: null }).status).toBe('unverified');
+    expect(getQuotaDisplay(stored, { uid: 'me', now: now + 86_400_000 }).status).toBe('unverified');
+  });
+
+  it('a newer verified Premium status overrides a stale FREE copy until the quota is re-read', async () => {
+    const free = await dailyQuotaStore.applyServerQuota(server(), 'me');
+    // Premium verified after this copy (e.g. a payment): never shown as FREE
+    expect(getQuotaDisplay(free, { uid: 'me', premiumActive: true, premiumCheckedAt: free!.syncedAt! + 1 })).toEqual({
+      status: 'unverified',
+    });
+    // Premium ended after a Premium copy: not kept
+    const paid = await dailyQuotaStore.applyServerQuota(premium(), 'me');
+    expect(getQuotaDisplay(paid, { uid: 'me', premiumActive: false, premiumCheckedAt: paid!.syncedAt! + 1 })).toEqual({
+      status: 'unverified',
+    });
+    // The quota re-read after the status check is newer, so it is shown
+    expect(
+      getQuotaDisplay(paid, { uid: 'me', premiumActive: true, premiumCheckedAt: paid!.syncedAt! - 1 }).status,
+    ).toBe('ready');
+  });
+
+  it('nothing shown is ever undefined, null or NaN', async () => {
+    for (const fields of [{}, { applied: 10 }, { applied: 999, remaining: 0 }, { reserved: 4, applied: 3 }]) {
+      const view = await shown(server(fields));
+      if (view.status !== 'ready') throw new Error('expected a verified quota');
+      for (const value of [view.used, view.limit, view.remaining]) expect(Number.isFinite(value)).toBe(true);
+      expect(view.used).toBeLessThanOrEqual(view.limit);
+      expect(view.remaining).toBeGreaterThanOrEqual(0);
+      expect(JSON.stringify(view)).not.toMatch(/undefined|NaN|null/);
+    }
   });
 });

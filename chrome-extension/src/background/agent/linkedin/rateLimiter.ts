@@ -92,9 +92,10 @@ export class DailyQuotaManager {
   static async canApplyToday(): Promise<QuotaCheck> {
     try {
       await this.flushPendingCommits();
+      const uid = await this.currentUid();
       const quota = await backendApiClient.getProfileQuota();
       if (!quota) return await this.unavailable();
-      await this.remember(quota);
+      await this.remember(quota, uid);
       return this.toCheck(quota, quota.remaining > 0);
     } catch (err) {
       logger.error('Quota check failed, not allowing new applications:', err);
@@ -115,6 +116,7 @@ export class DailyQuotaManager {
         await backendApiClient.releaseApplicationSlot(previous);
       }
 
+      const uid = await this.currentUid();
       let slot = await backendApiClient.reserveApplicationSlot(jobKey);
       if (slot.status === 'unavailable') {
         // Transient network or token glitch retry once before failing
@@ -122,7 +124,7 @@ export class DailyQuotaManager {
         await backendApiClient.getFreshToken(0).catch(() => null);
         slot = await backendApiClient.reserveApplicationSlot(jobKey);
       }
-      if (slot.quota) await this.remember(slot.quota);
+      if (slot.quota) await this.remember(slot.quota, uid);
 
       switch (slot.status) {
         case 'granted':
@@ -147,8 +149,9 @@ export class DailyQuotaManager {
   static async commitApplication(jobKey: string): Promise<void> {
     this.forget(jobKey);
     try {
+      const uid = await this.currentUid();
       const { counted, quota } = await backendApiClient.commitApplicationSlot(jobKey);
-      await this.remember(quota);
+      await this.remember(quota, uid);
       logger.info(`Application ${counted ? 'counted' : 'already counted'}: ${quota.applied}/${quota.limit} today`);
       if (quota.remaining <= 0) await this.scheduleResumeAlarm(quota.resetsAt);
     } catch (err) {
@@ -160,8 +163,9 @@ export class DailyQuotaManager {
   /** Frees the slot of an application that was not submitted (best effort; slots also expire). */
   static async releaseApplication(jobKey: string): Promise<void> {
     this.forget(jobKey);
+    const uid = await this.currentUid();
     const quota = await backendApiClient.releaseApplicationSlot(jobKey);
-    if (quota) await this.remember(quota);
+    if (quota) await this.remember(quota, uid);
   }
 
   /** Frees the slot held by a runner that stopped. */
@@ -199,8 +203,10 @@ export class DailyQuotaManager {
     };
   }
 
-  private static async remember(quota: ApplicationQuota): Promise<void> {
-    await dailyQuotaStore.applyServerQuota(quota).catch(() => undefined);
+  /** Stores the display copy, only if the account that made the request is still signed in. */
+  private static async remember(quota: ApplicationQuota, uid: string | null): Promise<void> {
+    if (!uid || uid !== (await this.currentUid())) return;
+    await dailyQuotaStore.applyServerQuota(quota, uid).catch(() => undefined);
   }
 
   private static async currentUid(): Promise<string | null> {
@@ -225,7 +231,7 @@ export class DailyQuotaManager {
       if (item.uid && item.uid !== uid) continue; // belongs to another account: never count it here
       try {
         const { quota } = await backendApiClient.commitApplicationSlot(item.jobKey);
-        await this.remember(quota);
+        await this.remember(quota, uid);
       } catch {
         remaining.push(item);
       }

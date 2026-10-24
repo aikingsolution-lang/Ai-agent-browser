@@ -12,11 +12,19 @@ import {
   type ILinkedInAutomationConfig,
   DEFAULT_LINKEDIN_CONFIG,
   careerBrainStore,
-  getPlanLimitDetails,
-  type PlanLimitDetails,
+  getQuotaDisplay,
+  sessionUserId,
+  type QuotaDisplay,
 } from '@extension/storage';
-import { backendApiClient, openJobformPricing } from '@extension/shared';
 import {
+  backendApiClient,
+  isPremiumActive,
+  openJobformPricing,
+  refreshAccountQuota,
+  type QuotaRefreshResult,
+} from '@extension/shared';
+import {
+  FiRefreshCw,
   FiPlay,
   FiSquare,
   FiCheckCircle,
@@ -101,6 +109,127 @@ const PLAN_LABELS: Record<string, string> = {
   power: 'Power',
 };
 
+/** Plans with no higher plan to move to, so no upgrade action is offered. */
+const TOP_PLANS = new Set(['premium', 'diamond', 'power']);
+
+/** "Resets 5:30 AM" / "Resets tomorrow, 5:30 AM" (local time of the next UTC midnight). */
+function formatQuotaReset(resetsAt: string | null): string | null {
+  if (!resetsAt) return null;
+  const reset = new Date(resetsAt);
+  const time = reset.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  return reset.toDateString() === new Date().toDateString() ? `Resets ${time}` : `Resets tomorrow, ${time}`;
+}
+
+type QuotaFetchState = 'checking' | 'done' | 'failed';
+
+/** Today's applications for the signed-in account, as verified by the backend. */
+function DailyQuotaCard({
+  view,
+  fetchState,
+  isDarkMode,
+  onRetry,
+  onUpgrade,
+}: {
+  view: QuotaDisplay;
+  fetchState: QuotaFetchState;
+  isDarkMode: boolean;
+  onRetry: () => void;
+  onUpgrade?: () => void;
+}) {
+  const shell = `rounded-xl border px-3 py-2.5 text-xs ${
+    isDarkMode ? 'border-sky-900 bg-slate-800/60' : 'border-sky-100 bg-white/80 shadow-sm'
+  }`;
+  const caption = `text-[11px] font-medium whitespace-nowrap ${isDarkMode ? 'text-slate-300' : 'text-slate-600'}`;
+
+  if (view.status !== 'ready') {
+    const failed = fetchState === 'failed';
+    return (
+      <div className={`${shell} flex items-center justify-between gap-2`} aria-live="polite">
+        <div className="min-w-0">
+          <p className={caption}>Daily applications</p>
+          <p
+            className={`font-semibold ${failed ? 'text-amber-500' : isDarkMode ? 'text-slate-200' : 'text-slate-700'}`}>
+            {failed ? 'Unable to load usage' : 'Checking plan…'}
+          </p>
+        </div>
+        {failed ? (
+          <button
+            type="button"
+            onClick={onRetry}
+            className={`flex shrink-0 items-center gap-1 rounded-md border px-2 py-1 text-[11px] font-semibold cursor-pointer ${
+              isDarkMode
+                ? 'border-slate-600 text-slate-200 hover:bg-slate-700'
+                : 'border-slate-300 text-slate-700 hover:bg-slate-100'
+            }`}>
+            <FiRefreshCw className="size-3" />
+            <span>Retry</span>
+          </button>
+        ) : (
+          <AiOutlineLoading3Quarters className="size-3.5 shrink-0 animate-spin opacity-60" aria-hidden="true" />
+        )}
+      </div>
+    );
+  }
+
+  const label = PLAN_LABELS[view.plan] ?? (view.isPaid ? 'Paid' : 'Free');
+  const percent = Math.round((view.used / view.limit) * 100);
+  const reset = formatQuotaReset(view.resetsAt);
+  return (
+    <div className={shell}>
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex min-w-0 items-center gap-1.5">
+          <span className={caption}>Daily applications</span>
+          <span
+            className={`whitespace-nowrap rounded px-1.5 text-[9px] font-bold uppercase tracking-wider border ${
+              view.isPaid
+                ? isDarkMode
+                  ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                  : 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                : isDarkMode
+                  ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                  : 'bg-amber-50 text-amber-700 border-amber-200'
+            }`}>
+            {view.isPaid ? `${label} Active` : label}
+          </span>
+        </div>
+        {!TOP_PLANS.has(view.plan) && onUpgrade && (
+          <button
+            type="button"
+            onClick={onUpgrade}
+            className="shrink-0 rounded-full bg-gradient-to-r from-amber-500 to-orange-500 px-2.5 py-0.5 text-[10px] font-bold text-white hover:from-amber-600 hover:to-orange-600 cursor-pointer">
+            Upgrade
+          </button>
+        )}
+      </div>
+      <div className="mt-1 flex items-baseline justify-between gap-2">
+        <p className={`text-sm font-bold ${isDarkMode ? 'text-sky-300' : 'text-sky-700'}`}>
+          {view.used} / {view.limit}{' '}
+          <span className={`text-[11px] font-medium ${isDarkMode ? 'text-slate-300' : 'text-slate-600'}`}>used</span>
+        </p>
+        <p
+          className={`text-[11px] font-semibold ${
+            view.exhausted ? 'text-amber-500' : isDarkMode ? 'text-emerald-300' : 'text-emerald-700'
+          }`}>
+          {view.remaining} remaining
+        </p>
+      </div>
+      <div
+        className={`mt-1.5 h-1 w-full overflow-hidden rounded-full ${isDarkMode ? 'bg-slate-700' : 'bg-slate-200'}`}
+        role="progressbar"
+        aria-label="Daily applications used"
+        aria-valuemin={0}
+        aria-valuemax={view.limit}
+        aria-valuenow={view.used}>
+        <div
+          className={`h-full rounded-full ${view.exhausted ? 'bg-amber-500' : 'bg-sky-500'}`}
+          style={{ width: `${percent}%` }}
+        />
+      </div>
+      {reset && <p className={`mt-1 text-[10px] ${isDarkMode ? 'text-slate-400' : 'text-slate-500'}`}>{reset}</p>}
+    </div>
+  );
+}
+
 interface LinkedInApplyDashboardProps {
   isDarkMode?: boolean;
   onStartAutoApply?: (platform?: 'linkedin' | 'naukri' | 'indeed') => void;
@@ -144,18 +273,17 @@ export function LinkedInApplyDashboard({
 }: LinkedInApplyDashboardProps) {
   const [selectedPlatform, setSelectedPlatform] = useState<'linkedin' | 'naukri' | 'indeed'>('linkedin');
   const [quota, setQuota] = useState<DailyQuotaData | null>(null);
-  const quotaRemaining = quota ? (quota.remaining ?? Math.max(0, quota.maxDailyQuota - quota.appliedCount)) : 10;
-  const quotaIsPaid = Boolean(quota?.isPaid);
-  const quotaPlanLabel = PLAN_LABELS[quota?.activePlanCode ?? 'free'] ?? (quotaIsPaid ? 'Paid Plan' : 'Free');
-  const quotaResetLabel = quota?.resetsAt
-    ? new Date(quota.resetsAt).toLocaleString([], {
-        hour: 'numeric',
-        minute: '2-digit',
-        month: 'short',
-        day: 'numeric',
-      })
-    : null;
+  const [quotaFetch, setQuotaFetch] = useState<QuotaFetchState>('checking');
   const [session, setSession] = useState<UserSessionData | null>(null);
+  // Shown only when verified by the backend for this account and day, and consistent with the
+  // verified Premium status (a stale copy cannot show FREE for a Premium account).
+  const quotaView = getQuotaDisplay(quota, {
+    uid: sessionUserId(session?.user),
+    premiumActive: session?.premium ? isPremiumActive(session.premium) : undefined,
+    premiumCheckedAt: session?.premium?.checkedAt ? Date.parse(session.premium.checkedAt) : undefined,
+  });
+  const quotaResetLabel = quotaView.status === 'ready' ? formatQuotaReset(quotaView.resetsAt) : null;
+  const aiIncluded = isPremiumActive(session?.premium);
   const [platformPauseInfo, setPlatformPauseInfo] = useState<{ isPaused: boolean; reason?: string }>({
     isPaused: false,
   });
@@ -165,21 +293,14 @@ export function LinkedInApplyDashboard({
     currentTitle: '',
     roles: [],
   });
-  const [planDetails, setPlanDetails] = useState<PlanLimitDetails | null>(null);
-
-  // Sync automationConfig, Career Brain info, and Plan Details
+  // Sync automationConfig and Career Brain info
   useEffect(() => {
     let isMounted = true;
     const syncConfig = async () => {
       try {
-        const [cfg, brain, plan] = await Promise.all([
-          linkedInConfigStore.getConfig(),
-          careerBrainStore.getCareerBrain(),
-          getPlanLimitDetails(),
-        ]);
+        const [cfg, brain] = await Promise.all([linkedInConfigStore.getConfig(), careerBrainStore.getCareerBrain()]);
         if (isMounted) {
           setAutomationConfig(cfg);
-          setPlanDetails(plan);
           setCareerBrainInfo({
             currentTitle: brain.currentTitle || '',
             roles: Array.isArray(brain.predefinedRoles) ? brain.predefinedRoles : [],
@@ -370,24 +491,24 @@ export function LinkedInApplyDashboard({
 
   // Quota from the backend (event-driven + 60s background sync); the local copy is display-only
   const loadQuota = useCallback(async (forceBackend = false) => {
-    try {
-      setQuota(await dailyQuotaStore.getQuotaData());
+    setQuota(await dailyQuotaStore.getQuotaData().catch(() => null));
 
-      const now = Date.now();
-      if (!forceBackend && now - lastBackendSyncRef.current < 60000) {
-        return;
-      }
-      lastBackendSyncRef.current = now;
-
-      const backendQuota = await backendApiClient.getProfileQuota().catch(() => null);
-      if (backendQuota) {
-        setQuota(await dailyQuotaStore.applyServerQuota(backendQuota));
-      }
-    } catch {
-      const localData = await dailyQuotaStore.getQuotaData().catch(() => null);
-      if (localData) setQuota(localData);
+    const now = Date.now();
+    if (!forceBackend && now - lastBackendSyncRef.current < 60000) {
+      return;
     }
+    lastBackendSyncRef.current = now;
+
+    const result = await refreshAccountQuota().catch((): QuotaRefreshResult => 'unavailable');
+    if (result === 'account-changed') return; // the new account's own refresh follows
+    setQuotaFetch(result === 'unavailable' ? 'failed' : 'done');
+    setQuota(await dailyQuotaStore.getQuotaData().catch(() => null));
   }, []);
+
+  const retryQuota = useCallback(() => {
+    setQuotaFetch('checking');
+    loadQuota(true);
+  }, [loadQuota]);
 
   useEffect(() => {
     // Initial fetch from backend
@@ -404,18 +525,22 @@ export function LinkedInApplyDashboard({
       loadQuota(true);
     }, 60000);
 
-    // Re-read the quota as soon as the verified plan changes (e.g. after a payment)
+    // Re-read the quota as soon as the account or its verified plan changes (sign-in, account
+    // switch, payment, Premium starting or ending)
     let planSignature = '';
     const unsubscribeAuth = authStorage.subscribe(async () => {
       const session = await authStorage.getSession().catch(() => null);
       const signature = JSON.stringify([
-        session?.user?.id ?? null,
+        sessionUserId(session?.user),
         session?.premium?.tier ?? null,
         session?.premium?.isPremium ?? null,
         session?.subscription?.status ?? null,
         session?.subscription?.planCode ?? null,
       ]);
-      if (planSignature && signature !== planSignature) loadQuota(true);
+      if (planSignature && signature !== planSignature) {
+        setQuotaFetch('checking');
+        loadQuota(true);
+      }
       planSignature = signature;
     });
 
@@ -450,7 +575,7 @@ export function LinkedInApplyDashboard({
         url: r.url,
         timestamp: r.timestamp,
       }));
-      exportApplicationsToCsv(exportable, 'JobPilot_Applied_Jobs');
+      exportApplicationsToCsv(exportable, 'JobForm_Automator_Applications');
     } catch (err) {
       console.error('Failed to export CSV from side panel:', err);
     } finally {
@@ -460,7 +585,7 @@ export function LinkedInApplyDashboard({
 
   return (
     <div
-      className={`flex flex-1 flex-col overflow-y-auto p-4 space-y-4 ${isDarkMode ? 'text-gray-100' : 'text-gray-800'}`}>
+      className={`flex flex-1 flex-col overflow-y-auto p-3 space-y-3 ${isDarkMode ? 'text-gray-100' : 'text-gray-800'}`}>
       {/* Platform Switcher */}
       <div
         className={`flex rounded-xl p-1 border text-xs font-semibold ${
@@ -473,7 +598,9 @@ export function LinkedInApplyDashboard({
           className={`flex-1 py-1.5 px-2 rounded-lg text-center transition-all cursor-pointer ${
             selectedPlatform === 'linkedin'
               ? 'bg-sky-600 text-white shadow-sm font-bold'
-              : 'text-gray-400 hover:text-gray-200'
+              : isDarkMode
+                ? 'text-gray-400 hover:text-gray-200'
+                : 'text-gray-600 hover:text-gray-900'
           }`}>
           LinkedIn
         </button>
@@ -484,9 +611,11 @@ export function LinkedInApplyDashboard({
           className={`flex-1 py-1.5 px-2 rounded-lg text-center transition-all cursor-pointer ${
             selectedPlatform === 'naukri'
               ? 'bg-blue-600 text-white shadow-sm font-bold'
-              : 'text-gray-400 hover:text-gray-200'
+              : isDarkMode
+                ? 'text-gray-400 hover:text-gray-200'
+                : 'text-gray-600 hover:text-gray-900'
           }`}>
-          Naukri.com
+          Naukri
         </button>
         <button
           type="button"
@@ -495,64 +624,42 @@ export function LinkedInApplyDashboard({
           className={`flex-1 py-1.5 px-2 rounded-lg text-center transition-all cursor-pointer ${
             selectedPlatform === 'indeed'
               ? 'bg-indigo-600 text-white shadow-sm font-bold'
-              : 'text-gray-400 hover:text-gray-200'
+              : isDarkMode
+                ? 'text-gray-400 hover:text-gray-200'
+                : 'text-gray-600 hover:text-gray-900'
           }`}>
           Indeed
         </button>
       </div>
 
-      {/* Quota Tracker (counted and enforced by the backend, per account and UTC day) */}
-      <div
-        className={`rounded-xl border p-3 flex items-center justify-between text-xs ${isDarkMode ? 'border-sky-900 bg-slate-800/60' : 'border-sky-100 bg-white/80 shadow-sm'}`}>
-        <div>
-          <div className="flex items-center gap-1.5 mb-0.5">
-            <p className="text-[11px] opacity-70 font-medium">Daily Application Limit</p>
-            <span
-              className={`text-[9px] px-1.5 py-0.2 rounded font-bold uppercase tracking-wider ${
-                quotaIsPaid
-                  ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
-                  : 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
-              }`}>
-              {quotaIsPaid ? `${quotaPlanLabel} Active` : quotaPlanLabel}
-            </span>
-          </div>
-          <p className="text-sm font-bold text-sky-400">
-            {quota ? `${quota.appliedCount} / ${quota.maxDailyQuota}` : '0 / 10'} Applied Today
-          </p>
-          {quotaResetLabel && <p className="text-[10px] opacity-60">Resets at {quotaResetLabel}</p>}
-        </div>
-        <div className="text-right flex items-center gap-1.5">
-          <span className="rounded-full border border-sky-500/30 bg-sky-500/10 px-2.5 py-1 text-[11px] font-semibold text-sky-400">
-            {quotaRemaining} Remaining
-          </span>
-          {onOpenPlansModal && (
-            <button
-              type="button"
-              onClick={onOpenPlansModal}
-              className="rounded-full bg-gradient-to-r from-amber-500 to-orange-500 px-2.5 py-1 text-[10px] font-bold text-white hover:from-amber-600 hover:to-orange-600 transition-all cursor-pointer shadow-sm">
-              {(planDetails?.isFreeTrial ?? true) ? 'Upgrade to Pro' : 'Change Plan'}
-            </button>
-          )}
-        </div>
-      </div>
+      {/* Daily applications (counted and enforced by the backend, per account and UTC day) */}
+      {session?.token && (
+        <DailyQuotaCard
+          view={quotaView}
+          fetchState={quotaFetch}
+          isDarkMode={isDarkMode}
+          onRetry={retryQuota}
+          onUpgrade={onOpenPlansModal}
+        />
+      )}
 
-      {quota && quotaRemaining <= 0 && (
+      {session?.token && quotaView.status === 'ready' && quotaView.exhausted && (
         <div
           role="alert"
-          className={`rounded-xl border p-3 text-xs ${isDarkMode ? 'border-amber-700 bg-amber-900/20 text-amber-200' : 'border-amber-200 bg-amber-50 text-amber-800'}`}>
-          <p className="font-bold">Daily Limit Reached</p>
+          className={`rounded-xl border px-3 py-2.5 text-xs ${isDarkMode ? 'border-amber-700 bg-amber-900/20 text-amber-200' : 'border-amber-200 bg-amber-50 text-amber-800'}`}>
+          <p className="font-bold">Daily limit reached</p>
           <p className="mt-0.5">
-            {quotaIsPaid
-              ? `You have used all ${quota.maxDailyQuota} applications for today.`
-              : `You have used all ${quota.maxDailyQuota} free applications for today. Upgrade to Premium for up to 300 applications a day.`}
-            {quotaResetLabel ? ` Your limit resets at ${quotaResetLabel}.` : ''}
+            {quotaView.isPaid
+              ? `All ${quotaView.limit} applications used today.`
+              : `All ${quotaView.limit} free applications used today. Premium allows 300 a day.`}
+            {quotaResetLabel ? ` ${quotaResetLabel}.` : ''}
           </p>
-          {!quotaIsPaid && (
+          {!quotaView.isPaid && (
             <button
               type="button"
               onClick={() => openJobformPricing()}
-              className="mt-2 rounded-md bg-gradient-to-r from-amber-500 to-orange-500 px-3 py-1 text-[11px] font-bold text-white hover:from-amber-600 hover:to-orange-600 cursor-pointer">
-              Upgrade to Premium
+              className="mt-1.5 rounded-md bg-gradient-to-r from-amber-500 to-orange-500 px-3 py-1 text-[11px] font-bold text-white hover:from-amber-600 hover:to-orange-600 cursor-pointer">
+              Get Premium
             </button>
           )}
         </div>
@@ -563,39 +670,47 @@ export function LinkedInApplyDashboard({
         className={`rounded-xl border transition-all ${
           isDarkMode ? 'border-sky-900 bg-slate-800/80' : 'border-sky-100 bg-white/90 shadow-sm'
         }`}>
-        <div
+        <button
+          type="button"
           onClick={() => setShowEasyApplySettings(prev => !prev)}
-          className="flex items-center justify-between p-3 cursor-pointer select-none">
-          <div className="flex items-center space-x-2">
-            <FiSliders className="size-4 text-sky-400" />
-            <div>
+          aria-expanded={showEasyApplySettings}
+          className="flex w-full items-center justify-between gap-2 px-3 py-2.5 text-left cursor-pointer select-none">
+          <div className="flex min-w-0 items-center gap-2">
+            <FiSliders className="size-4 shrink-0 text-sky-400" />
+            <div className="min-w-0">
               <div className="flex items-center gap-1.5">
-                <span className="text-xs font-bold">Easy Apply & Match Settings</span>
-                <span className="rounded bg-sky-500/20 px-1.5 py-0.2 text-[9px] font-bold text-sky-400 border border-sky-500/30">
-                  Min Fit: {automationConfig.minFitScore ?? 50}%
+                <span className="text-xs font-bold whitespace-nowrap">Match settings</span>
+                <span className="whitespace-nowrap rounded bg-sky-500/20 px-1.5 text-[9px] font-bold text-sky-500 border border-sky-500/30">
+                  Min fit {automationConfig.minFitScore ?? 50}%
                 </span>
               </div>
-              <p className="text-[10px] opacity-60">
-                {careerBrainInfo.currentTitle
-                  ? `Target: ${careerBrainInfo.currentTitle}${careerBrainInfo.roles.length > 1 ? ` (+${careerBrainInfo.roles.length - 1} more)` : ''}`
-                  : 'Configure match score threshold & safeties'}
-              </p>
+              {careerBrainInfo.currentTitle && (
+                <p className="truncate text-[10px] opacity-60">
+                  {careerBrainInfo.currentTitle}
+                  {careerBrainInfo.roles.length > 1 ? ` (+${careerBrainInfo.roles.length - 1} more)` : ''}
+                </p>
+              )}
             </div>
           </div>
-          <button type="button" className="p-1 rounded text-gray-400 hover:text-sky-400 transition-colors">
-            {showEasyApplySettings ? <FiChevronUp className="size-4" /> : <FiChevronDown className="size-4" />}
-          </button>
-        </div>
+          {showEasyApplySettings ? (
+            <FiChevronUp className="size-4 shrink-0 text-gray-400" />
+          ) : (
+            <FiChevronDown className="size-4 shrink-0 text-gray-400" />
+          )}
+        </button>
 
         {showEasyApplySettings && (
           <div className="border-t px-3 pb-3 pt-2 space-y-3 text-xs border-sky-500/10">
             {/* Minimum Match / Fit Score Threshold Slider & Presets */}
             <div>
               <div className="flex items-center justify-between mb-1">
-                <label className="text-[11px] font-semibold text-gray-300">Minimum Match / Fit Score Threshold</label>
-                <span className="text-[11px] font-bold text-sky-400">{automationConfig.minFitScore ?? 50}% / 100</span>
+                <label htmlFor="min-fit-score" className="text-[11px] font-semibold opacity-80">
+                  Minimum match score
+                </label>
+                <span className="text-[11px] font-bold text-sky-500">{automationConfig.minFitScore ?? 50}%</span>
               </div>
               <input
+                id="min-fit-score"
                 type="range"
                 min={30}
                 max={95}
@@ -606,10 +721,10 @@ export function LinkedInApplyDashboard({
               />
               <div className="flex flex-wrap gap-1 mt-1.5">
                 {[
-                  { label: '50% (Recommended / Default)', val: 50 },
-                  { label: '60% (Broad)', val: 60 },
-                  { label: '70% (Balanced)', val: 70 },
-                  { label: '80% (Strict)', val: 80 },
+                  { label: '50% (default)', val: 50 },
+                  { label: '60%', val: 60 },
+                  { label: '70%', val: 70 },
+                  { label: '80% (strict)', val: 80 },
                 ].map(preset => (
                   <button
                     key={preset.val}
@@ -627,8 +742,7 @@ export function LinkedInApplyDashboard({
                 ))}
               </div>
               <p className="text-[10px] opacity-60 mt-1">
-                Jobs with keyword & tech stack relevance below {automationConfig.minFitScore ?? 50}% are automatically
-                skipped.
+                Jobs below {automationConfig.minFitScore ?? 50}% match are skipped.
               </p>
             </div>
 
@@ -666,38 +780,9 @@ export function LinkedInApplyDashboard({
               </div>
             </div>
 
-            {/* Plan Quota & Subscription Enforced Cap */}
-            <div
-              className={`p-2.5 rounded-lg border text-[11px] flex items-center justify-between transition-colors ${
-                isDarkMode
-                  ? 'border-indigo-900/60 bg-gradient-to-r from-slate-900 to-indigo-950/40 text-slate-100 shadow-inner'
-                  : 'border-indigo-100 bg-gradient-to-r from-slate-50 to-indigo-50/60 text-slate-800 shadow-xs'
-              }`}>
-              <div>
-                <span className={`font-semibold block text-[10px] ${isDarkMode ? 'text-slate-300' : 'text-slate-600'}`}>
-                  Subscription Daily Quota
-                </span>
-                <span className={`text-[10px] font-bold ${isDarkMode ? 'text-sky-300' : 'text-sky-700'}`}>
-                  {planDetails?.planDisplayName || 'Free Trial'}: {planDetails?.maxDailyApplications ?? 15} jobs / day
-                </span>
-              </div>
-              {planDetails?.isFreeTrial && onOpenPlansModal && (
-                <button
-                  type="button"
-                  onClick={onOpenPlansModal}
-                  className={`px-2.5 py-1 rounded-md text-[10px] font-bold border transition-all cursor-pointer ${
-                    isDarkMode
-                      ? 'bg-amber-500/20 text-amber-300 border-amber-500/40 hover:bg-amber-500/30'
-                      : 'bg-amber-100 text-amber-900 border-amber-300 hover:bg-amber-200 shadow-2xs'
-                  }`}>
-                  Upgrade (up to 75/day)
-                </button>
-              )}
-            </div>
-
             {/* Link to Full Options Page */}
             <div className="pt-1 flex items-center justify-between border-t border-sky-500/10 text-[10px]">
-              <span className="opacity-60">Need to edit golden answers or blacklisted companies?</span>
+              <span className="opacity-60">Saved answers & blocked companies</span>
               <button
                 type="button"
                 onClick={() => chrome.runtime.openOptionsPage()}
@@ -720,9 +805,6 @@ export function LinkedInApplyDashboard({
               <FiLock className="size-4" />
               <span>Login with JobForm Automator</span>
             </button>
-            <p className="text-[11px] text-center text-gray-400">
-              An account is required to run automation and track applications.
-            </p>
           </div>
         ) : (
           <>
@@ -757,11 +839,9 @@ export function LinkedInApplyDashboard({
                 <span>Remove Safety Pause & Resume</span>
               </button>
             )}
-            <p className="text-[11px] text-center opacity-60">
-              {platformPauseInfo.isPaused
-                ? `${selectedPlatform === 'indeed' ? 'Indeed' : selectedPlatform} auto-apply is paused for today to protect your account. You can click 'Remove Safety Pause' above to resume.`
-                : `Autonomous end-to-end ${selectedPlatform === 'naukri' ? 'Naukri.com' : selectedPlatform === 'indeed' ? 'Indeed' : 'LinkedIn'} application flow`}
-            </p>
+            {platformPauseInfo.isPaused && (
+              <p className="text-[11px] text-center opacity-70">Paused for today to protect your account.</p>
+            )}
           </>
         )}
 
@@ -1029,7 +1109,7 @@ export function LinkedInApplyDashboard({
 
       {/* Live Activity Logs */}
       <div
-        className={`rounded-xl border p-3 flex-1 flex flex-col space-y-2 min-h-[160px] ${isDarkMode ? 'border-[#334155] bg-[#0f172a]' : 'border-[#e2e8f0] bg-white shadow-sm'}`}>
+        className={`rounded-xl border p-3 flex flex-col space-y-2 ${activityItems.length > 0 || appliedLogs.length > 0 ? 'flex-1' : ''} ${isDarkMode ? 'border-[#334155] bg-[#0f172a]' : 'border-[#e2e8f0] bg-white shadow-sm'}`}>
         <div
           className={`flex items-center justify-between border-b pb-1.5 ${isDarkMode ? 'border-[#334155]' : 'border-[#e2e8f0]'}`}>
           <span
@@ -1037,9 +1117,11 @@ export function LinkedInApplyDashboard({
             Live Activity
           </span>
           <div className="flex items-center gap-2">
-            <span className={`text-[10px] ${isDarkMode ? 'text-[#94a3b8]' : 'text-[#64748b]'}`}>
-              {activityItems.length > 0 ? `${activityItems.length} jobs` : `${appliedLogs.length} updates`}
-            </span>
+            {(activityItems.length > 0 || appliedLogs.length > 0) && (
+              <span className={`text-[10px] ${isDarkMode ? 'text-[#94a3b8]' : 'text-[#64748b]'}`}>
+                {activityItems.length > 0 ? `${activityItems.length} jobs` : `${appliedLogs.length} updates`}
+              </span>
+            )}
             <button
               type="button"
               onClick={handleExportSidePanelCsv}
@@ -1134,15 +1216,15 @@ export function LinkedInApplyDashboard({
                       {item.status === 'needs_verification'
                         ? 'Needs Verification'
                         : item.status === 'modal_opened'
-                          ? 'Modal Opened'
+                          ? 'Form Opened'
                           : item.status === 'modal_failed'
-                            ? 'Modal Failed'
+                            ? 'Form Failed'
                             : item.status === 'applied'
                               ? 'Applied'
                               : item.status === 'skipped'
-                                ? 'Skipped (0 cr)'
+                                ? 'Skipped'
                                 : item.status === 'failed'
-                                  ? 'Failed (Refunded)'
+                                  ? 'Failed'
                                   : 'Running...'}
                     </span>
                   </div>
@@ -1171,9 +1253,9 @@ export function LinkedInApplyDashboard({
                         Applied & verified
                       </span>
                     )}
-                    {item.status === 'modal_opened' && <span>0 credits (dry run)</span>}
-                    {item.status === 'skipped' && <span>0 credits deducted</span>}
-                    {item.status === 'failed' && <span>Credits refunded</span>}
+                    {item.status === 'modal_opened' && <span>Dry run</span>}
+                    {!aiIncluded && item.status === 'skipped' && <span>0 credits used</span>}
+                    {!aiIncluded && item.status === 'failed' && <span>Credits refunded</span>}
                   </div>
                 </div>
               ))}
@@ -1181,10 +1263,9 @@ export function LinkedInApplyDashboard({
           )}
 
           {activityItems.length === 0 && appliedLogs.length === 0 ? (
-            <div
-              className={`flex h-full items-center justify-center text-center p-4 text-[11px] ${isDarkMode ? 'text-[#94a3b8]' : 'text-[#64748b]'}`}>
-              Ready. Click "Start Auto Apply" to begin autonomous job search and application.
-            </div>
+            <p className={`py-2 text-center text-[11px] ${isDarkMode ? 'text-[#94a3b8]' : 'text-[#64748b]'}`}>
+              No activity yet
+            </p>
           ) : (
             appliedLogs.map(log => {
               const matchTag = log.text.match(/^\[(MATCHED|GENERATED|ASKED)\]\s*(.*)$/);

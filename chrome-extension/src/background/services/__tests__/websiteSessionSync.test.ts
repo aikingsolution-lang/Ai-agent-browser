@@ -56,6 +56,7 @@ import {
   backendApiClient,
   isPremiumActive,
   openJobformSignIn,
+  refreshAccountQuota,
   refreshAccountStatus,
   waitForCheckoutActivation,
 } from '@extension/shared';
@@ -63,7 +64,9 @@ import {
   authStorage,
   careerBrainStore,
   cloudApiSettingsStore,
+  dailyQuotaStore,
   endAccountSession,
+  getQuotaDisplay,
   getWebsiteSessionOrigin,
   isWebsiteAutoLoginPaused,
 } from '@extension/storage';
@@ -98,6 +101,9 @@ const backend = {
   payments: new Map<string, { tier: 'Premium' | 'Diamond'; endDate: string }>(),
   subscriptions: new Map<string, Record<string, unknown>>(), // default: free trial
   balances: new Map<string, number>(),
+  appliedToday: new Map<string, number>(),
+  /** Serve GET /profile/quota in the shape of the backend version currently in production. */
+  legacyQuota: false,
   subscriptionMeCalls: 0,
   meCalls: 0,
   online: true,
@@ -173,6 +179,40 @@ globalThis.fetch = (async (input: any, init: any = {}) => {
       },
     });
   }
+  if (path === '/profile/quota') {
+    const day = new Date().toISOString().slice(0, 10);
+    const applied = backend.appliedToday.get(auth.uid) ?? 0;
+    if (backend.legacyQuota) {
+      return json(200, {
+        success: true,
+        data: {
+          allowed: true,
+          appliedToday: applied,
+          dailyLimit: 15,
+          remaining: 15 - applied,
+          tier: 'free',
+          lastResetDate: day,
+        },
+      });
+    }
+    const premium = premiumFor(auth.uid);
+    const limit = premium.isPremium ? 300 : 10;
+    const now = new Date();
+    return json(200, {
+      success: true,
+      data: {
+        day,
+        timezone: 'UTC',
+        resetsAt: new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1)).toISOString(),
+        applied,
+        reserved: 0,
+        limit,
+        remaining: Math.max(0, limit - applied),
+        plan: premium.isPremium ? premium.tier.toLowerCase() : 'free',
+        isPaid: premium.isPremium,
+      },
+    });
+  }
   if (path === '/credits/balance') {
     return json(200, {
       success: true,
@@ -216,6 +256,8 @@ beforeEach(async () => {
   backend.payments = new Map();
   backend.subscriptions = new Map();
   backend.balances = new Map();
+  backend.appliedToday = new Map();
+  backend.legacyQuota = false;
   backend.subscriptionMeCalls = 0;
   backend.meCalls = 0;
   backend.online = true;
@@ -620,6 +662,144 @@ describe('after a Starter/Pro/Power checkout, the plan shows only once the backe
 
     await endAccountSession();
     expect(await waitForCheckoutActivation('sub_checkout_1', FAST)).toEqual({ outcome: 'account-changed' });
+  });
+});
+
+describe('daily applications in the side panel follow the backend for the signed-in account', () => {
+  const DAY = 86_400_000;
+  const setPremium = (uid: string, endOffsetMs = 30 * DAY, tier: 'Premium' | 'Diamond' = 'Premium') =>
+    backend.payments.set(uid, { tier, endDate: new Date(Date.now() + endOffsetMs).toISOString() });
+
+  /** What LinkedInApplyDashboard shows (same inputs). */
+  async function sidePanelQuota() {
+    const s = await session();
+    return getQuotaDisplay(await dailyQuotaStore.getQuotaData(), {
+      uid: uidOf(s),
+      premiumActive: s.premium ? isPremiumActive(s.premium) : undefined,
+      premiumCheckedAt: s.premium?.checkedAt ? Date.parse(s.premium.checkedAt) : undefined,
+    });
+  }
+
+  it('free account: 0 / 10 used, 10 remaining', async () => {
+    await login('userA');
+    expect(await refreshAccountQuota()).toBe('ok');
+    expect(await sidePanelQuota()).toMatchObject({
+      status: 'ready',
+      used: 0,
+      limit: 10,
+      remaining: 10,
+      plan: 'free',
+      isPaid: false,
+    });
+  });
+
+  it('active Premium: 0 / 300 used, 300 remaining, never FREE', async () => {
+    setPremium('userA');
+    await login('userA');
+    expect(await refreshAccountQuota()).toBe('ok');
+    expect(await sidePanelQuota()).toMatchObject({
+      status: 'ready',
+      used: 0,
+      limit: 300,
+      remaining: 300,
+      plan: 'premium',
+      isPaid: true,
+    });
+  });
+
+  it('expired Premium: the free limit applies again', async () => {
+    setPremium('userA', -1000);
+    await login('userA');
+    await refreshAccountQuota();
+    expect(await sidePanelQuota()).toMatchObject({ status: 'ready', limit: 10, plan: 'free', isPaid: false });
+  });
+
+  it('Premium with 300 of 300 used: limit reached, 0 remaining', async () => {
+    setPremium('userA', 30 * DAY, 'Diamond');
+    backend.appliedToday.set('userA', 300);
+    await login('userA');
+    await refreshAccountQuota();
+    expect(await sidePanelQuota()).toMatchObject({
+      used: 300,
+      limit: 300,
+      remaining: 0,
+      exhausted: true,
+      plan: 'diamond',
+    });
+  });
+
+  it('after a payment, the stale FREE numbers are not shown; the re-read shows Premium', async () => {
+    await login('userA');
+    await refreshAccountQuota();
+    expect(await sidePanelQuota()).toMatchObject({ plan: 'free' });
+
+    setPremium('userA'); // the website has verified the payment
+    await refreshAccountStatus();
+    expect(await sidePanelQuota()).toEqual({ status: 'unverified' }); // "Checking plan…", not FREE
+    await refreshAccountQuota();
+    expect(await sidePanelQuota()).toMatchObject({ status: 'ready', limit: 300, plan: 'premium' });
+  });
+
+  it("switching accounts never shows the previous account's numbers", async () => {
+    setPremium('userA');
+    await login('userA');
+    await refreshAccountQuota();
+    expect(await sidePanelQuota()).toMatchObject({ limit: 300 });
+
+    await login('userB');
+    expect(await sidePanelQuota()).toEqual({ status: 'unverified' });
+    await refreshAccountQuota();
+    expect(await sidePanelQuota()).toMatchObject({ status: 'ready', limit: 10, plan: 'free' });
+  });
+
+  it('a quota response that arrives after an account switch is dropped', async () => {
+    setPremium('userA');
+    await login('userA');
+    const slowFetch = globalThis.fetch;
+    let release!: () => void;
+    globalThis.fetch = (async (input: any, init: any) => {
+      if (String(input).endsWith('/profile/quota')) await new Promise<void>(resolve => (release = resolve));
+      return slowFetch(input, init);
+    }) as typeof fetch;
+    const pending = refreshAccountQuota(); // request made as userA (Premium)
+    await new Promise(resolve => setTimeout(resolve, 10));
+    globalThis.fetch = slowFetch;
+    await login('userB');
+    release();
+    expect(await pending).toBe('account-changed');
+    expect(await sidePanelQuota()).toEqual({ status: 'unverified' });
+  });
+
+  it('the backend version now in production (older quota response): unavailable, never FREE or undefined', async () => {
+    backend.legacyQuota = true;
+    setPremium('userA');
+    await login('userA');
+    expect(await refreshAccountQuota()).toBe('unavailable');
+    expect(await sidePanelQuota()).toEqual({ status: 'unverified' }); // "Unable to load usage"
+    expect((await chrome.storage.local.get('linkedin_daily_quota')).linkedin_daily_quota).toBeUndefined();
+  });
+
+  it('backend unreachable: unavailable, no numbers invented', async () => {
+    await login('userA');
+    backend.online = false;
+    expect(await refreshAccountQuota()).toBe('unavailable');
+    expect(await sidePanelQuota()).toEqual({ status: 'unverified' });
+  });
+
+  it("extension reload: today's verified numbers for this account show straight from storage", async () => {
+    setPremium('userA');
+    await login('userA');
+    await refreshAccountQuota();
+    backend.online = false; // before the first request after the reload completes
+    expect(await sidePanelQuota()).toMatchObject({ status: 'ready', limit: 300, plan: 'premium' });
+  });
+
+  it('signed out: nothing is shown or fetched', async () => {
+    await login('userA');
+    await refreshAccountQuota();
+    await endAccountSession();
+    expect(await refreshAccountQuota()).toBe('signed-out');
+    expect(await sidePanelQuota()).toEqual({ status: 'unverified' });
   });
 });
 

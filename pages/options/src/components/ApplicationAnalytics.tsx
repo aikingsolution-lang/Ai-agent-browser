@@ -14,14 +14,18 @@ import {
   FiTrash2,
 } from 'react-icons/fi';
 import {
+  authStorage,
   dryRunStore,
   dailyQuotaStore,
   processedJobsStore,
   exportApplicationsToCsv,
   detectPlatformFromUrl,
+  getQuotaDisplay,
+  sessionUserId,
   type ExportableJobRecord,
-  type DailyQuotaData,
+  type QuotaDisplay,
 } from '@extension/storage';
+import { isPremiumActive, refreshAccountQuota } from '@extension/shared';
 
 interface ApplicationAnalyticsProps {
   isDarkMode?: boolean;
@@ -29,7 +33,7 @@ interface ApplicationAnalyticsProps {
 
 export const ApplicationAnalytics: React.FC<ApplicationAnalyticsProps> = ({ isDarkMode = false }) => {
   const [records, setRecords] = useState<ExportableJobRecord[]>([]);
-  const [quota, setQuota] = useState<DailyQuotaData | null>(null);
+  const [quota, setQuota] = useState<QuotaDisplay>({ status: 'unverified' });
   const [loading, setLoading] = useState<boolean>(true);
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [statusFilter, setStatusFilter] = useState<string>('APPLIED');
@@ -40,10 +44,13 @@ export const ApplicationAnalytics: React.FC<ApplicationAnalyticsProps> = ({ isDa
   const loadData = async () => {
     setLoading(true);
     try {
-      const [processed, dryRun, quotaData] = await Promise.all([
+      // Today's quota is re-read from the backend for the signed-in account first
+      await refreshAccountQuota().catch(() => undefined);
+      const [processed, dryRun, quotaData, session] = await Promise.all([
         processedJobsStore.getAllRecords().catch(() => []),
         dryRunStore.getDryRunHistory().catch(() => []),
         dailyQuotaStore.getQuotaData().catch(() => null),
+        authStorage.getSession().catch(() => null),
       ]);
 
       const unified: ExportableJobRecord[] = [];
@@ -104,7 +111,13 @@ export const ApplicationAnalytics: React.FC<ApplicationAnalyticsProps> = ({ isDa
       // Sort descending by timestamp (freshest first)
       unified.sort((a, b) => b.timestamp - a.timestamp);
       setRecords(unified);
-      setQuota(quotaData);
+      setQuota(
+        getQuotaDisplay(quotaData, {
+          uid: sessionUserId(session?.user),
+          premiumActive: session?.premium ? isPremiumActive(session.premium) : undefined,
+          premiumCheckedAt: session?.premium?.checkedAt ? Date.parse(session.premium.checkedAt) : undefined,
+        }),
+      );
     } catch (err) {
       console.error('Failed to load application analytics data:', err);
     } finally {
@@ -267,10 +280,14 @@ export const ApplicationAnalytics: React.FC<ApplicationAnalyticsProps> = ({ isDa
             <FiPlay className="size-4" />
           </div>
           <div className="text-2xl font-bold text-amber-600 dark:text-amber-400">
-            {quota?.appliedCount || 0} / {quota?.maxDailyQuota || 15}
+            {quota.status === 'ready' ? `${quota.used} / ${quota.limit}` : '–'}
           </div>
           <p className="text-xs text-gray-500">
-            {Math.max(0, (quota?.maxDailyQuota || 15) - (quota?.appliedCount || 0))} submissions remaining today
+            {quota.status === 'ready'
+              ? `${quota.remaining} remaining today`
+              : loading
+                ? 'Checking plan…'
+                : 'Unable to load usage'}
           </p>
         </div>
       </div>

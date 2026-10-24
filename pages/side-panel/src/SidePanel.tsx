@@ -20,7 +20,6 @@ import {
   queueSafetyStore,
   normalizeLinkedInJobUrl,
   checkCopilotAccess,
-  dailyQuotaStore,
 } from '@extension/storage';
 import {
   backendApiClient,
@@ -28,6 +27,7 @@ import {
   JOBFORM_SUPPORT_URL,
   JOBFORM_WEBSITE_URL,
   openJobformSignIn,
+  refreshAccountQuota,
   refreshAccountStatus,
   runSystemDiagnostics,
   type SystemDiagnosticsReport,
@@ -41,7 +41,20 @@ import BookmarkList from './components/BookmarkList';
 import { AuthGateView } from './components/AuthGateView';
 import { PremiumPlansModal } from './components/PremiumPlansModal';
 import { EventType, type AgentEvent, ExecutionState } from './types/event';
-import { FiBriefcase, FiFileText, FiMessageSquare, FiLock } from 'react-icons/fi';
+import {
+  FiBriefcase,
+  FiFileText,
+  FiMessageSquare,
+  FiLock,
+  FiGlobe,
+  FiCompass,
+  FiSearch,
+  FiTarget,
+  FiEdit3,
+  FiMic,
+  FiChevronRight,
+} from 'react-icons/fi';
+import { AiOutlineLoading3Quarters } from 'react-icons/ai';
 import { ResumeProfileView } from './components/ResumeProfileView';
 import {
   LinkedInApplyDashboard,
@@ -58,6 +71,47 @@ declare global {
     chrome: typeof chrome;
   }
 }
+
+/** Career Copilot shortcuts; `prompt` is the message sent to the copilot. */
+const COPILOT_ACTIONS = [
+  {
+    prompt: 'Audit my profile',
+    title: 'Audit my profile',
+    description: 'Find details missing for applications',
+    Icon: FiSearch,
+  },
+  {
+    prompt: 'Check fit for open job page',
+    title: 'Check job fit',
+    description: 'Score the job open in the current tab',
+    Icon: FiTarget,
+  },
+  {
+    prompt: 'Draft tailored recruiter pitch',
+    title: 'Write a recruiter note',
+    description: 'A short pitch for this job',
+    Icon: FiEdit3,
+  },
+  {
+    prompt: 'Start mock screening interview',
+    title: 'Practice an interview',
+    description: 'Screening questions with feedback',
+    Icon: FiMic,
+  },
+] as const;
+
+const readinessTextClass = (score: number, isDarkMode: boolean) =>
+  score >= 80
+    ? isDarkMode
+      ? 'text-emerald-300'
+      : 'text-emerald-700'
+    : score >= 50
+      ? isDarkMode
+        ? 'text-amber-300'
+        : 'text-amber-700'
+      : isDarkMode
+        ? 'text-rose-300'
+        : 'text-rose-700';
 
 const SidePanel = () => {
   const progressMessage = 'Showing progress...';
@@ -224,11 +278,8 @@ const SidePanel = () => {
         await authStorage.setSession({ credits: creditsRes.data });
       }
 
-      // Sync user subscription daily apply quota limit
-      const quotaRes = await backendApiClient.getProfileQuota().catch(() => null);
-      if (quotaRes) {
-        await dailyQuotaStore.applyServerQuota(quotaRes);
-      }
+      // Today's application quota for this account (stored only if still the same account)
+      await refreshAccountQuota().catch(() => undefined);
     } catch (error) {
       console.error('Error fetching credits balance from API:', error);
     }
@@ -1696,31 +1747,22 @@ const SidePanel = () => {
                       <button
                         type="button"
                         onClick={() => setIsPlansModalOpen(true)}
-                        className="inline-flex items-center gap-1 rounded-md border border-violet-200 dark:border-violet-500/30 bg-violet-50 dark:bg-violet-500/10 px-2 py-0.5 text-[11px] font-semibold text-violet-700 dark:text-violet-300 cursor-pointer transition-colors"
+                        className="inline-flex items-center gap-1 whitespace-nowrap rounded-md border border-violet-300 bg-violet-100 px-2 py-0.5 text-[11px] font-semibold text-violet-800 hover:bg-violet-200 cursor-pointer transition-colors"
                         title="AI Auto Apply is included with JobForm Automator Premium">
                         <FiZap className="size-2.5" />
-                        <span>AI included</span>
+                        <span>AI Included</span>
                       </button>
                     ) : (
-                      <>
-                        {userCredits && (
-                          <button
-                            type="button"
-                            onClick={() => setIsPlansModalOpen(true)}
-                            className="inline-flex items-center gap-1 rounded-md border border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-slate-800 px-2 py-0.5 text-[11px] font-semibold text-slate-700 dark:text-slate-300 hover:border-blue-500/50 hover:text-blue-600 dark:hover:text-blue-400 cursor-pointer transition-colors"
-                            title="View JobForm Automator Subscription & Credits">
-                            <FiZap className="size-2.5 text-indigo-500" />
-                            <span>{userCredits.remainingCredits.toLocaleString()}</span>
-                          </button>
-                        )}
+                      userCredits && (
                         <button
                           type="button"
                           onClick={() => setIsPlansModalOpen(true)}
-                          className="inline-flex cursor-pointer items-center gap-1 rounded-md bg-blue-600 hover:bg-blue-700 px-2 py-0.5 text-[11px] font-semibold text-white shadow-xs transition-colors"
-                          title="View JobForm Automator Subscription Plans">
-                          <span>Upgrade</span>
+                          className="inline-flex items-center gap-1 whitespace-nowrap rounded-md border border-slate-200 bg-slate-100 px-2 py-0.5 text-[11px] font-semibold text-slate-700 hover:border-blue-500/50 hover:text-blue-600 cursor-pointer transition-colors"
+                          title="Credits and plans">
+                          <FiZap className="size-2.5 text-indigo-500" />
+                          <span>{userCredits.remainingCredits.toLocaleString()} credits</span>
                         </button>
-                      </>
+                      )
                     )}
                     <button
                       type="button"
@@ -1978,49 +2020,55 @@ const SidePanel = () => {
             {/* Show normal chat interface when models are configured */}
             {hasConfiguredModels === true && (
               <>
-                {/* DUAL MODE SELECTOR HEADER */}
+                {/* Chat mode: Web Agent / Career Copilot */}
                 <div
-                  className={`flex items-center justify-between border-b px-3 py-2 shrink-0 ${
-                    isDarkMode ? 'border-sky-900 bg-slate-800/80' : 'border-sky-100 bg-slate-50'
+                  className={`flex items-center justify-between gap-2 border-b px-3 py-2 shrink-0 ${
+                    isDarkMode ? 'border-sky-900 bg-slate-800/80' : 'border-slate-200 bg-white/70'
                   }`}>
-                  <div className="flex items-center space-x-1 rounded-lg border border-slate-700/50 bg-slate-900/60 p-0.5">
-                    <button
-                      type="button"
-                      onClick={() => setChatMode('agent')}
-                      className={`flex cursor-pointer items-center space-x-1.5 rounded-md px-2.5 py-1 text-xs font-semibold transition-all ${
-                        chatMode === 'agent' ? 'bg-sky-500 text-white shadow-sm' : 'text-slate-400 hover:text-slate-200'
-                      }`}>
-                      <span>🌐 Web Agent</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setChatMode('copilot')}
-                      className={`flex cursor-pointer items-center space-x-1.5 rounded-md px-2.5 py-1 text-xs font-semibold transition-all ${
-                        chatMode === 'copilot'
-                          ? 'bg-gradient-to-r from-purple-600 to-indigo-600 text-white shadow-sm'
-                          : 'text-slate-400 hover:text-slate-200'
-                      }`}>
-                      <span>✨ 🧠 Career Copilot</span>
-                      <span className="rounded bg-purple-400/25 px-1 py-0.2 text-[9px] font-bold uppercase tracking-wider text-purple-200">
-                        Pro
-                      </span>
-                    </button>
+                  <div
+                    role="tablist"
+                    aria-label="Chat mode"
+                    className={`inline-flex rounded-lg border p-0.5 ${
+                      isDarkMode ? 'border-slate-700 bg-slate-900/60' : 'border-slate-200 bg-slate-100'
+                    }`}>
+                    {(
+                      [
+                        { mode: 'agent', label: 'Web Agent', Icon: FiGlobe },
+                        { mode: 'copilot', label: 'Career Copilot', Icon: FiCompass },
+                      ] as const
+                    ).map(({ mode, label, Icon }) => {
+                      const active = chatMode === mode;
+                      return (
+                        <button
+                          key={mode}
+                          type="button"
+                          role="tab"
+                          aria-selected={active}
+                          onClick={() => setChatMode(mode)}
+                          className={`flex cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-md px-2.5 py-1 text-xs font-semibold transition-colors ${
+                            active
+                              ? isDarkMode
+                                ? 'bg-slate-700 text-white shadow-sm'
+                                : `bg-white shadow-sm ${mode === 'copilot' ? 'text-violet-700' : 'text-sky-700'}`
+                              : isDarkMode
+                                ? 'text-slate-400 hover:text-slate-200'
+                                : 'text-slate-600 hover:text-slate-900'
+                          }`}>
+                          <Icon className="size-3.5" />
+                          <span>{label}</span>
+                        </button>
+                      );
+                    })}
                   </div>
 
-                  {chatMode === 'copilot' && copilotAudit && (
-                    <div className="flex items-center space-x-1.5 text-[11px] font-semibold">
-                      <span className="opacity-70">Readiness:</span>
-                      <span
-                        className={`font-bold ${
-                          copilotAudit.score >= 80
-                            ? 'text-emerald-400'
-                            : copilotAudit.score >= 50
-                              ? 'text-amber-400'
-                              : 'text-rose-400'
-                        }`}>
-                        {copilotAudit.score}%
-                      </span>
-                    </div>
+                  {/* Readiness is in the overview card until a conversation starts */}
+                  {chatMode === 'copilot' && copilotAudit && copilotMessages.length > 0 && (
+                    <span
+                      className={`whitespace-nowrap text-[11px] font-semibold ${isDarkMode ? 'text-slate-300' : 'text-slate-600'}`}
+                      title="Profile readiness">
+                      Profile{' '}
+                      <span className={readinessTextClass(copilotAudit.score, isDarkMode)}>{copilotAudit.score}%</span>
+                    </span>
                   )}
                 </div>
 
@@ -2028,133 +2076,121 @@ const SidePanel = () => {
                   <>
                     {/* Career Copilot Mode View */}
                     {copilotMessages.length === 0 ? (
-                      <div className="flex-1 overflow-y-auto p-3.5 space-y-3">
-                        {/* Futuristic Hero Card */}
-                        <div
-                          className={`rounded-2xl border p-4 shadow-lg transition-all ${
-                            isDarkMode
-                              ? 'border-purple-500/30 bg-gradient-to-br from-purple-950/40 via-slate-900 to-slate-900 text-purple-100'
-                              : 'border-purple-200 bg-gradient-to-br from-purple-50 via-white to-indigo-50/50 text-purple-950'
+                      <div className="flex-1 overflow-y-auto p-3 space-y-3">
+                        {/* Overview and profile readiness */}
+                        <section
+                          className={`rounded-xl border p-3 ${
+                            isDarkMode ? 'border-slate-700 bg-slate-800/70' : 'border-slate-200 bg-white shadow-sm'
                           }`}>
-                          <div className="flex items-center space-x-2">
-                            <span className="text-xl">✨</span>
-                            <h3 className="font-extrabold text-sm tracking-wide bg-gradient-to-r from-purple-400 to-indigo-400 bg-clip-text text-transparent">
-                              AI Career Copilot Pro
-                            </h3>
-                          </div>
-                          <p className="mt-1 text-xs leading-relaxed opacity-85">
-                            Your personal AI career intelligence copilot. Audits missing profile details, evaluates live
-                            job fit on open tabs, and generates high-converting recruiter pitches.
-                          </p>
-
-                          {/* Live Readiness Meter */}
-                          <div className="mt-3.5 rounded-xl border border-purple-500/20 bg-purple-500/10 p-3">
-                            <div className="flex items-center justify-between text-xs font-bold">
-                              <span>Profile Readiness</span>
-                              <span className="text-purple-300">{copilotAudit?.score ?? 0}% Complete</span>
-                            </div>
-                            <div className="mt-1.5 h-2 w-full overflow-hidden rounded-full bg-slate-800/80">
-                              <div
-                                className="h-full rounded-full bg-gradient-to-r from-purple-500 to-indigo-400 transition-all duration-700"
-                                style={{ width: `${copilotAudit?.score ?? 0}%` }}
-                              />
-                            </div>
-                            {copilotAudit?.missingFields?.[0] && (
-                              <p className="mt-2 text-[11px] font-medium text-purple-200/90 flex items-center space-x-1">
-                                <span className="text-amber-400 font-bold">⚡ Priority:</span>
-                                <span>{copilotAudit.missingFields[0].promptQuestion}</span>
+                          <div className="flex items-start gap-2.5">
+                            <span
+                              className={`flex size-8 shrink-0 items-center justify-center rounded-lg ${
+                                isDarkMode ? 'bg-violet-500/20 text-violet-300' : 'bg-violet-100 text-violet-700'
+                              }`}>
+                              <FiCompass className="size-4" />
+                            </span>
+                            <div className="min-w-0">
+                              <h3 className={`text-sm font-bold ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>
+                                Career Copilot
+                              </h3>
+                              <p
+                                className={`text-[11px] leading-snug ${isDarkMode ? 'text-slate-300' : 'text-slate-600'}`}>
+                                Improve your profile, check job fit and write recruiter notes.
                               </p>
-                            )}
+                            </div>
                           </div>
-                        </div>
 
-                        {/* Quick Action Prompt Cards */}
-                        <div className="space-y-1.5 pt-1">
-                          <span className="text-[10px] uppercase font-bold tracking-wider opacity-60">
-                            Quick Actions:
-                          </span>
-                          <div className="grid grid-cols-1 gap-2">
-                            <button
-                              type="button"
-                              onClick={() => handleSendMessage('Audit my profile')}
-                              className={`flex items-center justify-between p-2.5 rounded-xl border text-left text-xs font-semibold transition-all hover:scale-[1.01] active:scale-[0.99] cursor-pointer ${
-                                isDarkMode
-                                  ? 'border-slate-800 bg-slate-800/70 hover:border-purple-500/50 hover:bg-purple-950/20 text-slate-200'
-                                  : 'border-slate-200 bg-white hover:border-purple-300 hover:bg-purple-50/50 text-slate-800 shadow-sm'
-                              }`}>
-                              <div className="flex items-center space-x-2.5">
-                                <span className="text-base">🔍</span>
-                                <div>
-                                  <div className="font-bold">Audit Profile & Missing Info</div>
-                                  <div className="text-[10px] font-normal opacity-70">
-                                    Check completeness & fill missing screening fields
-                                  </div>
-                                </div>
+                          {copilotAudit && (
+                            <div
+                              className={`mt-3 border-t pt-2.5 ${isDarkMode ? 'border-slate-700' : 'border-slate-100'}`}>
+                              <div className="flex items-center justify-between text-[11px] font-semibold">
+                                <span className={isDarkMode ? 'text-slate-300' : 'text-slate-700'}>
+                                  Profile readiness
+                                </span>
+                                <span className={readinessTextClass(copilotAudit.score, isDarkMode)}>
+                                  {copilotAudit.score}%
+                                </span>
                               </div>
-                              <span className="text-purple-400">→</span>
-                            </button>
+                              <div
+                                className={`mt-1.5 h-1.5 w-full overflow-hidden rounded-full ${
+                                  isDarkMode ? 'bg-slate-700' : 'bg-slate-200'
+                                }`}
+                                role="progressbar"
+                                aria-label="Profile readiness"
+                                aria-valuemin={0}
+                                aria-valuemax={100}
+                                aria-valuenow={copilotAudit.score}>
+                                <div
+                                  className="h-full rounded-full bg-violet-600 transition-all duration-700"
+                                  style={{ width: `${Math.min(100, Math.max(0, copilotAudit.score))}%` }}
+                                />
+                              </div>
+                              {copilotAudit.missingFields?.[0]?.promptQuestion && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleSendMessage('Audit my profile')}
+                                  className={`mt-2.5 flex w-full items-start gap-2 rounded-lg border px-2.5 py-2 text-left text-[11px] cursor-pointer transition-colors ${
+                                    isDarkMode
+                                      ? 'border-amber-500/30 bg-amber-500/10 text-slate-200 hover:bg-amber-500/20'
+                                      : 'border-amber-200 bg-amber-50 text-slate-700 hover:bg-amber-100'
+                                  }`}>
+                                  <span
+                                    className={`shrink-0 font-semibold ${isDarkMode ? 'text-amber-300' : 'text-amber-700'}`}>
+                                    Next step
+                                  </span>
+                                  <span className="line-clamp-2 min-w-0 flex-1">
+                                    {copilotAudit.missingFields[0].promptQuestion}
+                                  </span>
+                                  <FiChevronRight className="mt-0.5 size-3.5 shrink-0 opacity-60" />
+                                </button>
+                              )}
+                            </div>
+                          )}
+                        </section>
 
-                            <button
-                              type="button"
-                              onClick={() => handleSendMessage('Check fit for open job page')}
-                              className={`flex items-center justify-between p-2.5 rounded-xl border text-left text-xs font-semibold transition-all hover:scale-[1.01] active:scale-[0.99] cursor-pointer ${
-                                isDarkMode
-                                  ? 'border-slate-800 bg-slate-800/70 hover:border-purple-500/50 hover:bg-purple-950/20 text-slate-200'
-                                  : 'border-slate-200 bg-white hover:border-purple-300 hover:bg-purple-50/50 text-slate-800 shadow-sm'
-                              }`}>
-                              <div className="flex items-center space-x-2.5">
-                                <span className="text-base">🎯</span>
-                                <div>
-                                  <div className="font-bold">Check Fit for Current Tab Job</div>
-                                  <div className="text-[10px] font-normal opacity-70">
-                                    Scrape active job tab & calculate skills match score
-                                  </div>
-                                </div>
-                              </div>
-                              <span className="text-purple-400">→</span>
-                            </button>
-
-                            <button
-                              type="button"
-                              onClick={() => handleSendMessage('Draft tailored recruiter pitch')}
-                              className={`flex items-center justify-between p-2.5 rounded-xl border text-left text-xs font-semibold transition-all hover:scale-[1.01] active:scale-[0.99] cursor-pointer ${
-                                isDarkMode
-                                  ? 'border-slate-800 bg-slate-800/70 hover:border-purple-500/50 hover:bg-purple-950/20 text-slate-200'
-                                  : 'border-slate-200 bg-white hover:border-purple-300 hover:bg-purple-50/50 text-slate-800 shadow-sm'
-                              }`}>
-                              <div className="flex items-center space-x-2.5">
-                                <span className="text-base">📝</span>
-                                <div>
-                                  <div className="font-bold">Draft Tailored Recruiter Note</div>
-                                  <div className="text-[10px] font-normal opacity-70">
-                                    High-converting 3-sentence application pitch
-                                  </div>
-                                </div>
-                              </div>
-                              <span className="text-purple-400">→</span>
-                            </button>
-
-                            <button
-                              type="button"
-                              onClick={() => handleSendMessage('Start mock screening interview')}
-                              className={`flex items-center justify-between p-2.5 rounded-xl border text-left text-xs font-semibold transition-all hover:scale-[1.01] active:scale-[0.99] cursor-pointer ${
-                                isDarkMode
-                                  ? 'border-slate-800 bg-slate-800/70 hover:border-purple-500/50 hover:bg-purple-950/20 text-slate-200'
-                                  : 'border-slate-200 bg-white hover:border-purple-300 hover:bg-purple-50/50 text-slate-800 shadow-sm'
-                              }`}>
-                              <div className="flex items-center space-x-2.5">
-                                <span className="text-base">🎙️</span>
-                                <div>
-                                  <div className="font-bold">Start Mock Recruiter Interview</div>
-                                  <div className="text-[10px] font-normal opacity-70">
-                                    Simulate screening questions with feedback
-                                  </div>
-                                </div>
-                              </div>
-                              <span className="text-purple-400">→</span>
-                            </button>
+                        {/* Quick actions */}
+                        <section>
+                          <h4
+                            className={`mb-1.5 px-0.5 text-[11px] font-semibold ${isDarkMode ? 'text-slate-400' : 'text-slate-500'}`}>
+                            Quick actions
+                          </h4>
+                          <div
+                            className={`overflow-hidden rounded-xl border divide-y ${
+                              isDarkMode
+                                ? 'border-slate-700 divide-slate-700 bg-slate-800/70'
+                                : 'border-slate-200 divide-slate-100 bg-white shadow-sm'
+                            }`}>
+                            {COPILOT_ACTIONS.map(({ prompt, title, description, Icon }) => (
+                              <button
+                                key={prompt}
+                                type="button"
+                                onClick={() => handleSendMessage(prompt)}
+                                className={`flex w-full items-center gap-2.5 px-3 py-2.5 text-left cursor-pointer transition-colors ${
+                                  isDarkMode ? 'hover:bg-slate-700/60' : 'hover:bg-slate-50'
+                                }`}>
+                                <span
+                                  className={`flex size-7 shrink-0 items-center justify-center rounded-md ${
+                                    isDarkMode ? 'bg-violet-500/20 text-violet-300' : 'bg-violet-50 text-violet-700'
+                                  }`}>
+                                  <Icon className="size-3.5" />
+                                </span>
+                                <span className="min-w-0 flex-1">
+                                  <span
+                                    className={`block text-xs font-semibold ${isDarkMode ? 'text-slate-100' : 'text-slate-900'}`}>
+                                    {title}
+                                  </span>
+                                  <span
+                                    className={`block truncate text-[11px] ${isDarkMode ? 'text-slate-400' : 'text-slate-500'}`}>
+                                    {description}
+                                  </span>
+                                </span>
+                                <FiChevronRight
+                                  className={`size-4 shrink-0 ${isDarkMode ? 'text-slate-500' : 'text-slate-400'}`}
+                                />
+                              </button>
+                            ))}
                           </div>
-                        </div>
+                        </section>
                       </div>
                     ) : (
                       <div
@@ -2167,9 +2203,11 @@ const SidePanel = () => {
                           onSelectOption={handleSendMessage}
                         />
                         {isCopilotTyping && (
-                          <div className="flex items-center space-x-2 px-3 py-2 text-xs font-semibold text-purple-400 animate-pulse">
-                            <div className="size-2 rounded-full bg-purple-400" />
-                            <span>Career Copilot analyzing & formulating response...</span>
+                          <div
+                            role="status"
+                            className={`flex items-center gap-2 px-3 py-2 text-xs font-medium ${isDarkMode ? 'text-violet-300' : 'text-violet-700'}`}>
+                            <AiOutlineLoading3Quarters className="size-3.5 animate-spin" />
+                            <span>Copilot is thinking…</span>
                           </div>
                         )}
                         <div ref={messagesEndRef} />
@@ -2193,7 +2231,7 @@ const SidePanel = () => {
                           setInputTextRef.current = setter;
                         }}
                         isDarkMode={isDarkMode}
-                        placeholder="Ask about your profile, update details (e.g. 15 days notice), check job fit..."
+                        placeholder="Ask Copilot, or update your profile (e.g. notice period 15 days)"
                       />
                     </div>
                   </>

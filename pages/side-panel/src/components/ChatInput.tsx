@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { FaMicrophone } from 'react-icons/fa';
+import { FiPaperclip } from 'react-icons/fi';
 import { AiOutlineLoading3Quarters } from 'react-icons/ai';
 import { t } from '@extension/i18n';
 
@@ -187,7 +188,7 @@ export default function ChatInput({
   return (
     <form
       onSubmit={handleSubmit}
-      className={`overflow-hidden rounded-lg border transition-colors ${disabled ? 'cursor-not-allowed' : 'focus-within:border-sky-400 hover:border-sky-400'} ${isDarkMode ? 'border-slate-700' : ''}`}
+      className={`overflow-hidden rounded-xl border transition-colors ${disabled ? 'cursor-not-allowed' : 'focus-within:border-sky-500 hover:border-sky-400'} ${isDarkMode ? 'border-slate-700' : 'border-slate-200 bg-white shadow-sm'}`}
       aria-label={t('chat_input_form')}>
       <div className="flex flex-col">
         {/* File attachments display */}
@@ -225,8 +226,8 @@ export default function ChatInput({
           onKeyDown={handleKeyDown}
           disabled={disabled}
           aria-disabled={disabled}
-          rows={5}
-          className={`w-full resize-none border-none p-2 focus:outline-none ${
+          rows={3}
+          className={`w-full resize-none border-none px-3 py-2.5 text-sm focus:outline-none ${
             disabled
               ? isDarkMode
                 ? 'cursor-not-allowed bg-slate-800 text-gray-400'
@@ -260,7 +261,7 @@ export default function ChatInput({
                     ? 'text-gray-400 hover:bg-slate-700 hover:text-gray-200'
                     : 'text-gray-500 hover:bg-gray-100 hover:text-gray-700'
               }`}>
-              <span className="text-lg">📎</span>
+              <FiPaperclip className="size-4" />
             </button>
 
             {/* Hidden file input */}
@@ -325,7 +326,7 @@ export default function ChatInput({
               type="submit"
               disabled={isSendButtonDisabled}
               aria-disabled={isSendButtonDisabled}
-              className={`rounded-md bg-[#19C2FF] px-3 py-1 text-white transition-colors hover:enabled:bg-[#0073DC] ${isSendButtonDisabled ? 'cursor-not-allowed opacity-50' : ''}`}>
+              className={`rounded-lg bg-sky-600 px-3.5 py-1.5 text-xs font-semibold text-white transition-colors hover:enabled:bg-sky-700 ${isSendButtonDisabled ? 'cursor-not-allowed opacity-50' : ''}`}>
               {t('chat_buttons_send')}
             </button>
           )}

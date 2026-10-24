@@ -34,6 +34,12 @@ export interface ApiResponse<T = any> {
 }
 
 import { BACKEND_API_URL, FIREBASE_WEB_API_KEY, ENABLE_CREDITS_RECONCILE } from './config';
+import { parseServerQuota } from '@extension/storage';
+
+/** A complete quota response, or null (e.g. an older backend's response without plan, day or limit). */
+function toApplicationQuota(raw: unknown): ApplicationQuota | null {
+  return parseServerQuota(raw) ? (raw as ApplicationQuota) : null;
+}
 
 export type RefreshResult =
   | { status: 'ok'; idToken: string; refreshToken: string; userId: string | null }
@@ -1001,7 +1007,7 @@ export class BackendApiClient {
         return null;
       }
       const res = await this.request<ApplicationQuota>('/profile/quota', { method: 'GET' });
-      return res.data || null;
+      return toApplicationQuota(res.data);
     } catch {
       return null;
     }
@@ -1023,12 +1029,12 @@ export class BackendApiClient {
       );
       return {
         status: res.data?.alreadyCounted ? 'already_counted' : 'granted',
-        quota: res.data?.quota ?? null,
+        quota: toApplicationQuota(res.data?.quota),
       };
     } catch (caught) {
-      const err = caught as { status?: number; code?: string; details?: ApplicationQuota; message?: string };
+      const err = caught as { status?: number; code?: string; details?: unknown; message?: string };
       if (err?.status === 429 && err?.code === 'QUOTA_EXCEEDED') {
-        return { status: 'limit_reached', quota: err.details ?? null, message: err.message };
+        return { status: 'limit_reached', quota: toApplicationQuota(err.details), message: err.message };
       }
       return { status: 'unavailable', quota: null, message: err?.message };
     }
@@ -1051,7 +1057,7 @@ export class BackendApiClient {
         method: 'POST',
         body: JSON.stringify({ jobKey }),
       });
-      return res.data?.quota ?? null;
+      return toApplicationQuota(res.data?.quota);
     } catch {
       return null;
     }
