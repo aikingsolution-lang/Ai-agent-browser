@@ -4881,78 +4881,98 @@ export default class Page {
    */
   async clickJobInSearchList(jobId: string): Promise<boolean> {
     const clickInPage = (targetId: string): boolean => {
-      const candidateContainers = [
-        document.querySelector('.jobs-search-results-list'),
-        document.querySelector('.scaffold-layout__list'),
-        document.querySelector('.scaffold-layout__list-container'),
-        document.querySelector('.jobs-search-results-list__list'),
-        document,
-      ].filter(Boolean) as (Element | Document)[];
+      function findAndClickCard(): boolean {
+        const candidateContainers = [
+          document.querySelector('.jobs-search-results-list'),
+          document.querySelector('.scaffold-layout__list'),
+          document.querySelector('.scaffold-layout__list-container'),
+          document.querySelector('.jobs-search-results-list__list'),
+          document,
+        ].filter(Boolean) as (Element | Document)[];
 
-      const cardSelectors = [
-        'li.jobs-search-results__list-item',
-        'li.scaffold-layout__list-item',
-        'li[data-occludable-job-id]',
-        'div.job-card-container',
-        'div[data-job-id]',
-        'div[data-occludable-job-id]',
-        '[data-view-name="job-card"]',
-        '[data-view-name*="job-card"]',
-        '[data-view-name="search-entity-result-universal-template"]',
-        '.job-card-list__entity-lockup',
-        'div.base-card',
-      ].join(', ');
+        const cardSelectors = [
+          'li.jobs-search-results__list-item',
+          'li.scaffold-layout__list-item',
+          'li[data-occludable-job-id]',
+          'div.job-card-container',
+          'div[data-job-id]',
+          'div[data-occludable-job-id]',
+          '[data-view-name="job-card"]',
+          '[data-view-name*="job-card"]',
+          '[data-view-name="search-entity-result-universal-template"]',
+          '.job-card-list__entity-lockup',
+          'div.base-card',
+        ].join(', ');
 
-      let cards: HTMLElement[] = [];
-      for (const container of candidateContainers) {
-        const found = Array.from(container.querySelectorAll(cardSelectors)) as HTMLElement[];
-        if (found.length > 0) {
-          cards = found;
-          break;
-        }
-      }
-      if (cards.length === 0) {
-        cards = Array.from(document.querySelectorAll(cardSelectors)) as HTMLElement[];
-      }
-
-      for (const card of cards) {
-        const cardJobId =
-          card.getAttribute('data-job-id') ||
-          card.getAttribute('data-occludable-job-id') ||
-          (card as any).dataset?.jobId ||
-          (card as any).dataset?.occludableJobId ||
-          '';
-
-        const link = card.querySelector<HTMLAnchorElement>(
-          'a.job-card-container__link, a.job-card-list__title, a[href*="/jobs/view/"], a[href*="currentJobId="]',
-        );
-
-        let matches = cardJobId === targetId;
-        if (!matches && link) {
-          matches = link.href.includes(targetId);
-        }
-        if (!matches) {
-          const anyLink = card.querySelector<HTMLAnchorElement>(`a[href*="${targetId}"]`);
-          if (anyLink) matches = true;
-        }
-
-        if (matches) {
-          card.scrollIntoView({ behavior: 'instant', block: 'center' });
-          if (link) {
-            link.click();
-          } else {
-            card.click();
+        let cards: HTMLElement[] = [];
+        for (const container of candidateContainers) {
+          const found = Array.from(container.querySelectorAll(cardSelectors)) as HTMLElement[];
+          if (found.length > 0) {
+            cards = found;
+            break;
           }
+        }
+        if (cards.length === 0) {
+          cards = Array.from(document.querySelectorAll(cardSelectors)) as HTMLElement[];
+        }
+
+        for (const card of cards) {
+          const cardJobId =
+            card.getAttribute('data-job-id') ||
+            card.getAttribute('data-occludable-job-id') ||
+            (card as any).dataset?.jobId ||
+            (card as any).dataset?.occludableJobId ||
+            '';
+
+          const link = card.querySelector<HTMLAnchorElement>(
+            'a.job-card-container__link, a.job-card-list__title, a[href*="/jobs/view/"], a[href*="currentJobId="]',
+          );
+
+          let matches = cardJobId === targetId;
+          if (!matches && link) {
+            matches = link.href.includes(targetId);
+          }
+          if (!matches) {
+            const anyLink = card.querySelector<HTMLAnchorElement>(`a[href*="${targetId}"]`);
+            if (anyLink) matches = true;
+          }
+
+          if (matches) {
+            const targetEl = link || card.querySelector<HTMLElement>('a, .job-card-list__title') || card;
+            targetEl.scrollIntoView({ behavior: 'instant', block: 'center' });
+            targetEl.focus?.();
+            targetEl.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+            targetEl.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
+            targetEl.click();
+            return true;
+          }
+        }
+
+        // Direct anchor fallback
+        const directAnchor = document.querySelector<HTMLAnchorElement>(`a[href*="${targetId}"]`);
+        if (directAnchor) {
+          directAnchor.scrollIntoView({ behavior: 'instant', block: 'center' });
+          directAnchor.focus?.();
+          directAnchor.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+          directAnchor.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
+          directAnchor.click();
           return true;
         }
+
+        return false;
       }
 
-      // Direct anchor fallback
-      const directAnchor = document.querySelector<HTMLAnchorElement>(`a[href*="${targetId}"]`);
-      if (directAnchor) {
-        directAnchor.scrollIntoView({ behavior: 'instant', block: 'center' });
-        directAnchor.click();
-        return true;
+      // First attempt on visible DOM cards
+      if (findAndClickCard()) return true;
+
+      // Second attempt: progressive scroll on left pane container to bring virtualized cards into DOM
+      const scrollableList =
+        (document.querySelector('.jobs-search-results-list') as HTMLElement) ||
+        (document.querySelector('.scaffold-layout__list') as HTMLElement) ||
+        (document.querySelector('.jobs-search-results-list__list') as HTMLElement);
+      if (scrollableList) {
+        scrollableList.scrollTop += 500;
+        return findAndClickCard();
       }
 
       return false;

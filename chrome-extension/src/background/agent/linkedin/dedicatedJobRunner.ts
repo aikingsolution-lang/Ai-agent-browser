@@ -1597,7 +1597,7 @@ export class DedicatedJobRunner {
       const config = await linkedInConfigStore.getConfig();
       let role = (careerBrain.currentTitle || '').trim();
 
-      const candidateNameSources = [careerBrain.fullName, session?.user?.name].filter(Boolean);
+      const candidateNameSources: string[] = [careerBrain.fullName, session?.user?.name].filter(Boolean) as string[];
       const configuredFallbackRole = config?.targetJobTitle || 'Full Stack Developer';
 
       // Defensively sanitize role query upfront
@@ -1825,10 +1825,11 @@ export class DedicatedJobRunner {
         logger.debug('[DedicatedJobRunner] Could not inspect active runner tab URL:', err);
       }
 
-      // 5. Read Left-Hand Job List Pane across prioritized locations (until BATCH_CAP is satisfied)
-      const queue: Array<{ jobId: string; title: string; company: string; url: string }> = [];
+      // 5. In-Page Split-Pane Auto Apply Engine across prioritized locations (until BATCH_CAP is satisfied)
       const seenJobIds = new Set<string>();
       let totalLinkedInScanned = 0;
+      let totalCandidateAttempted = 0;
+      let quotaHalted = false;
 
       const navigateLinkedInTab = async (url: string) => {
         try {
@@ -1869,35 +1870,121 @@ export class DedicatedJobRunner {
         }
       };
 
+      const processPageCards = async (
+        cards: Array<{ jobId: string; title: string; company: string; url: string }>,
+        searchPageUrl: string,
+        targetRole: string,
+      ): Promise<boolean> => {
+        const eligibleOnPage: Array<{ jobId: string; title: string; company: string; url: string }> = [];
+        for (const card of cards) {
+          if (seenJobIds.has(card.jobId)) continue;
+          seenJobIds.add(card.jobId);
+
+          const proc = await processedJobsStore.isJobProcessed(card.jobId);
+          if (proc.isProcessed && proc.status === 'applied') {
+            stats.skipped++;
+            this.notifyActivity(portToSend, onLiveActivity, {
+              jobId: card.jobId,
+              url: card.url,
+              title: card.title,
+              company: card.company,
+              status: 'skipped',
+              reason: 'Already applied previously',
+              creditsUsed: 0,
+            });
+            continue;
+          }
+          eligibleOnPage.push(card);
+        }
+
+        if (eligibleOnPage.length > 0) {
+          this.notifyStatus(
+            portToSend,
+            `📋 Discovered ${eligibleOnPage.length} new eligible job card${eligibleOnPage.length > 1 ? 's' : ''} in search list. Processing in Split-Pane...`,
+            'info',
+          );
+        }
+
+        for (let i = 0; i < eligibleOnPage.length; i++) {
+          if (stats.applied >= BATCH_CAP || !this.isRunning) break;
+          const job = eligibleOnPage[i];
+          totalCandidateAttempted++;
+
+          const res = await this.applySingleLinkedInJobInSplitPane(
+            currentPage,
+            job,
+            searchPageUrl,
+            targetRole,
+            candidateNameSources,
+            config,
+            careerBrain,
+            runId,
+            portToSend,
+            onLiveActivity,
+            stats,
+            totalCandidateAttempted,
+            BATCH_CAP,
+          );
+
+          if (res.status === 'halt') {
+            quotaHalted = true;
+            return false;
+          }
+
+          if (res.usedDirectFallback && i + 1 < eligibleOnPage.length && this.isRunning && stats.applied < BATCH_CAP) {
+            logger.info(`[DedicatedJobRunner] Restoring split-pane search page ${searchPageUrl} for next card...`);
+            await navigateLinkedInTab(searchPageUrl);
+            await currentPage.waitForDomSettlement?.(
+              '.jobs-search-results-list, .scaffold-layout__list, [data-view-name="job-card"]',
+              { maxWaitMs: 3500, quietPeriodMs: 200 },
+            );
+          }
+
+          if (this.isRunning && stats.applied < BATCH_CAP) {
+            const jitterMs = 1500 + Math.floor(Math.random() * 1000);
+            this.notifyStatus(
+              portToSend,
+              `⏳ Pacing safety delay (${Math.round(jitterMs / 100) / 10}s) before next candidate job...`,
+              'info',
+            );
+            const paceAborted = await this.interruptibleSleep(jitterMs);
+            if (paceAborted || !this.isRunning) return false;
+          }
+        }
+        return true;
+      };
+
       for (let locIdx = 0; locIdx < prioritizedLocations.length; locIdx++) {
-        if (queue.length >= BATCH_CAP || !this.isRunning) break;
+        if (stats.applied >= BATCH_CAP || !this.isRunning || quotaHalted) break;
 
         const currentLoc = prioritizedLocations[locIdx];
         const locRank = locIdx + 1;
 
-        // Scan up to 3 pages per location (start=0, start=25, start=50) to satisfy BATCH_CAP
-        for (let pageIdx = 0; pageIdx < 3 && queue.length < BATCH_CAP; pageIdx++) {
-          if (!this.isRunning) break;
+        for (let pageIdx = 0; pageIdx < 3 && stats.applied < BATCH_CAP; pageIdx++) {
+          if (!this.isRunning || quotaHalted) break;
 
-          if (locIdx > 0 || pageIdx > 0) {
-            const pageOffset = pageIdx * 25;
-            const searchPageUrl = linkedinAdapter.buildSearchUrl(role, currentLoc, candidateNameSources, pageOffset);
+          const pageOffset = pageIdx * 25;
+          const searchPageUrl = linkedinAdapter.buildSearchUrl(role, currentLoc, candidateNameSources, pageOffset);
+
+          if (pageIdx > 0 || locIdx > 0) {
             if (pageIdx > 0) {
               this.notifyStatus(
                 portToSend,
-                `📄 [LinkedIn] [${currentLoc}] Checking page ${pageIdx + 1} (${queue.length}/${BATCH_CAP} jobs gathered so far)...`,
+                `📄 [LinkedIn] [${currentLoc}] Checking page ${pageIdx + 1} (${stats.applied}/${BATCH_CAP} applied so far)...`,
                 'info',
               );
             } else {
               this.notifyStatus(
                 portToSend,
-                `📍 [LinkedIn] Location #${locRank - 1} yielded ${queue.length}/${BATCH_CAP} jobs. Checking Location #${locRank}: "${currentLoc}"...`,
+                `📍 [LinkedIn] Checking Location #${locRank}: "${currentLoc}" (${stats.applied}/${BATCH_CAP} applied so far)...`,
                 'info',
               );
             }
+
             await navigateLinkedInTab(searchPageUrl);
-            const sleepAborted = await this.interruptibleSleep(3000);
+            const sleepAborted = await this.interruptibleSleep(2500);
             if (sleepAborted || !this.isRunning) break;
+
             if (typeof currentPage.waitForDomSettlement === 'function') {
               await currentPage.waitForDomSettlement(
                 '.jobs-search-results-list, .scaffold-layout__list, [data-view-name="job-card"]',
@@ -1924,726 +2011,65 @@ export class DedicatedJobRunner {
           }
 
           totalLinkedInScanned += jobCards.length;
-
-          if (jobCards.length > 0) {
-            this.notifyStatus(
-              portToSend,
-              `📋 Found ${jobCards.length} job cards on LinkedIn for "${currentLoc}"${pageIdx > 0 ? ` (page ${pageIdx + 1})` : ''}. Checking previous applications...`,
-              'info',
-            );
-          }
-
-          for (const card of jobCards) {
-            if (seenJobIds.has(card.jobId)) continue;
-            seenJobIds.add(card.jobId);
-
-            const proc = await processedJobsStore.isJobProcessed(card.jobId);
-            if (proc.isProcessed && proc.status === 'applied') {
-              stats.skipped++;
-              this.notifyActivity(portToSend, onLiveActivity, {
-                jobId: card.jobId,
-                url: card.url,
-                title: card.title,
-                company: card.company,
-                status: 'skipped',
-                reason: 'Already applied previously',
-                creditsUsed: 0,
-              });
-              continue;
-            }
-            queue.push(card);
-            if (queue.length >= BATCH_CAP) break;
-          }
-
-          // If no cards were found on this page at all, stop paginating this location
           if (jobCards.length === 0) break;
-        }
 
-        if (queue.length >= BATCH_CAP) {
-          this.notifyStatus(
-            portToSend,
-            `🎯 [LinkedIn] Batch cap of ${BATCH_CAP} jobs reached with Location #${locRank} (${currentLoc}). Stopping location search.`,
-            'ok',
-          );
-          break;
+          const keepGoing = await processPageCards(jobCards, searchPageUrl, role);
+          if (!keepGoing || stats.applied >= BATCH_CAP) break;
         }
       }
 
-      // Fallback search trigger: If fewer than 3 genuine Easy Apply jobs were found,
+      // Fallback search trigger: If fewer than 3 genuine Easy Apply jobs were applied,
       // fallback to candidate's other predefined target roles from profile
-      const candidateAlternateRoles = (careerBrain.predefinedRoles || [])
-        .map(r => (r || '').trim())
-        .filter(r => r && r.toLowerCase() !== role.toLowerCase());
+      if (!quotaHalted && stats.applied < 3 && stats.applied < BATCH_CAP && this.isRunning) {
+        const candidateAlternateRoles = (careerBrain.predefinedRoles || [])
+          .map(r => (r || '').trim())
+          .filter(r => r && r.toLowerCase() !== role.toLowerCase());
 
-      for (const altRole of candidateAlternateRoles) {
-        if (queue.length >= BATCH_CAP || !this.isRunning) break;
-        const cleanAltRole = sanitizeRoleSearchQuery(altRole, candidateNameSources, 'Software Engineer');
-        if (!cleanAltRole || cleanAltRole.toLowerCase() === role.toLowerCase()) continue;
+        for (const altRole of candidateAlternateRoles) {
+          if (stats.applied >= BATCH_CAP || !this.isRunning || quotaHalted) break;
+          const cleanAltRole = sanitizeRoleSearchQuery(altRole, candidateNameSources, 'Software Engineer');
+          if (!cleanAltRole || cleanAltRole.toLowerCase() === role.toLowerCase()) continue;
 
-        this.notifyStatus(
-          portToSend,
-          `🔍 Checking alternate role from profile: "${cleanAltRole}" (${queue.length}/${BATCH_CAP} jobs gathered so far)...`,
-          'info',
-        );
+          this.notifyStatus(
+            portToSend,
+            `🔍 Checking alternate role from profile: "${cleanAltRole}" (${stats.applied}/${BATCH_CAP} applied so far)...`,
+            'info',
+          );
 
-        for (let locIdx = 0; locIdx < prioritizedLocations.length && queue.length < BATCH_CAP; locIdx++) {
-          if (!this.isRunning) break;
-          const currentLoc = prioritizedLocations[locIdx];
-          const altSearchUrl = linkedinAdapter.buildSearchUrl(cleanAltRole, currentLoc, candidateNameSources);
-          await navigateLinkedInTab(altSearchUrl);
-          const sleepAborted = await this.interruptibleSleep(3000);
-          if (sleepAborted || !this.isRunning) break;
-          if (typeof currentPage.waitForDomSettlement === 'function') {
-            await currentPage.waitForDomSettlement(
-              '.jobs-search-results-list, .scaffold-layout__list, [data-view-name="job-card"]',
-              { maxWaitMs: 4000, quietPeriodMs: 200 },
-            );
-          }
+          for (let locIdx = 0; locIdx < prioritizedLocations.length && stats.applied < BATCH_CAP; locIdx++) {
+            if (!this.isRunning || quotaHalted) break;
+            const currentLoc = prioritizedLocations[locIdx];
+            const altSearchUrl = linkedinAdapter.buildSearchUrl(cleanAltRole, currentLoc, candidateNameSources);
 
-          const altJobCards = await currentPage.readJobListFromSearchPane(4);
-          for (const card of altJobCards) {
-            if (seenJobIds.has(card.jobId)) continue;
-            seenJobIds.add(card.jobId);
+            await navigateLinkedInTab(altSearchUrl);
+            const sleepAborted = await this.interruptibleSleep(2500);
+            if (sleepAborted || !this.isRunning) break;
 
-            const proc = await processedJobsStore.isJobProcessed(card.jobId);
-            if (proc.isProcessed && proc.status === 'applied') {
-              stats.skipped++;
-              continue;
+            if (typeof currentPage.waitForDomSettlement === 'function') {
+              await currentPage.waitForDomSettlement(
+                '.jobs-search-results-list, .scaffold-layout__list, [data-view-name="job-card"]',
+                { maxWaitMs: 4000, quietPeriodMs: 200 },
+              );
             }
-            queue.push(card);
-            if (queue.length >= BATCH_CAP) break;
+
+            const altJobCards = await currentPage.readJobListFromSearchPane(4);
+            totalLinkedInScanned += altJobCards.length;
+            if (altJobCards.length === 0) continue;
+
+            const keepGoing = await processPageCards(altJobCards, altSearchUrl, cleanAltRole);
+            if (!keepGoing || stats.applied >= BATCH_CAP) break;
           }
-          if (queue.length >= BATCH_CAP) break;
         }
       }
 
       stats.totalFound = totalLinkedInScanned;
 
-      if (queue.length === 0) {
+      if (totalLinkedInScanned === 0 && stats.applied === 0 && stats.skipped === 0 && stats.failed === 0) {
         const noJobsMsg =
           'No jobs found across target locations. Please check your role/location criteria or search filters.';
         this.notifyStatus(portToSend, `⚠️ ${noJobsMsg}`, 'fail');
         this.cleanupRun(noJobsMsg, stats);
         return { status: 'error', message: noJobsMsg, stats };
-      }
-
-      this.notifyStatus(
-        portToSend,
-        `🎯 Queued ${queue.length} eligible jobs for this run (capped at max ${BATCH_CAP}).`,
-        'info',
-      );
-
-      // 6. Loop Through Each Job in Queue
-      for (let i = 0; i < queue.length; i++) {
-        if (!this.isRunning) {
-          logger.info('[DedicatedJobRunner] Autonomous loop halted (user stopped).');
-          break;
-        }
-
-        const job = queue[i];
-        const jobRunId = `${runId}_${job.jobId}`;
-        this.activeJobId = job.jobId;
-
-        // Daily quota: hold a server slot for this job (released if it is skipped or fails)
-        const quota = await DailyQuotaManager.reserveApplication(applicationKey(job.jobId, job.url), 'runner');
-        if (!quota.allowed) {
-          let allowFallback = false;
-          if (quota.reason === 'error') {
-            const localQuota = await DailyQuotaManager.getQuotaData().catch(() => null);
-            const applied = localQuota?.appliedCount ?? 0;
-            const maxQ = localQuota?.maxDailyQuota || 10;
-            const remaining = maxQ - applied;
-            if (remaining > 0 && !localQuota?.isPausedDueToQuota) {
-              logger.warning(
-                `[DedicatedJobRunner] Server quota verification slow/unavailable for ${job.jobId}; proceeding with local quota fallback (${applied}/${maxQ}).`,
-              );
-              this.notifyStatus(
-                portToSend,
-                `⚠️ Server quota check was slow/unavailable. Continuing with local quota (${applied}/${maxQ} used).`,
-                'info',
-              );
-              allowFallback = true;
-            }
-          }
-          if (!allowFallback) {
-            const quotaMsg = `🛑 ${quotaStopMessage(quota)} Stopping run.`;
-            this.notifyStatus(portToSend, quotaMsg, 'fail');
-            break;
-          }
-        }
-
-        // Hard credit budget check (minimum 5 credits to ensure balance for form-filling LLM calls).
-        // Verified JobForm Automator Premium includes AI use, so it is not limited by credits.
-        const balanceRes = await backendApiClient.getCreditsBalance().catch(() => null);
-        if (
-          !balanceRes?.data?.premiumCovered &&
-          balanceRes?.data?.remainingCredits !== undefined &&
-          balanceRes.data.remainingCredits < 5
-        ) {
-          const creditMsg = `🛑 Insufficient credit budget (${balanceRes.data.remainingCredits} remaining, minimum 5 required). Halting run.`;
-          this.notifyStatus(portToSend, creditMsg, 'fail');
-          break;
-        }
-
-        const safeTitle = cleanLinkedInJobTitle(job.title) || 'Loading title...';
-        const safeCompany = job.company || 'Unknown Company';
-
-        // 4a-0. Instant 0-Credit Blacklist & Negative Keyword Check on Search Card
-        const earlyBlacklist = checkBlacklistAndNegativeKeywords(
-          safeTitle,
-          safeCompany,
-          undefined,
-          config.negativeKeywords,
-          config.blacklistedCompanies,
-          role,
-        );
-        if (earlyBlacklist.blacklisted) {
-          this.notifyStatus(portToSend, `🚫 Skipped "${safeTitle}": ${earlyBlacklist.reason}.`, 'info');
-          stats.skipped++;
-          await processedJobsStore.recordJob({
-            jobId: job.jobId,
-            url: job.url,
-            title: safeTitle,
-            company: safeCompany,
-            status: 'skipped',
-            reason: `Blacklisted: ${earlyBlacklist.reason}`,
-            creditsUsed: 0,
-          });
-          this.notifyActivity(portToSend, onLiveActivity, {
-            jobId: job.jobId,
-            url: job.url,
-            title: safeTitle,
-            company: safeCompany,
-            status: 'skipped',
-            reason: earlyBlacklist.reason || 'Blacklisted',
-            creditsUsed: 0,
-          });
-          continue;
-        }
-
-        this.notifyStatus(
-          portToSend,
-          `💼 Checking job ${i + 1} of ${queue.length}: "${safeTitle}" (${safeCompany})`,
-          'info',
-        );
-
-        this.notifyActivity(portToSend, onLiveActivity, {
-          jobId: job.jobId,
-          url: job.url,
-          title: safeTitle,
-          company: safeCompany,
-          status: 'running',
-          reason: 'Loading details in split-pane...',
-          creditsUsed: 0,
-        });
-
-        // 4a. Click Job in Left Pane to Load Details in Right Pane
-        let clicked = await currentPage.clickJobInSearchList(job.jobId);
-        if (!clicked) {
-          logger.info(
-            `[DedicatedJobRunner] Could not select job card for ${job.jobId} in current search list view. Navigating directly to ${job.url}...`,
-          );
-          try {
-            if (currentPage.puppeteerPage) {
-              await currentPage.puppeteerPage.goto(job.url, { waitUntil: 'domcontentloaded', timeout: 35000 });
-            } else if ((currentPage as any).navigateTo) {
-              await (currentPage as any).navigateTo(job.url);
-            }
-          } catch (navErr) {
-            logger.warning(`[DedicatedJobRunner] Direct navigation to job URL failed:`, navErr);
-          }
-          await currentPage.waitForDomSettlement?.(
-            '.jobs-unified-top-card, [data-view-name="job-details-top-card"], .jobs-details__main-content',
-            { maxWaitMs: 3500 },
-          );
-        } else {
-          if (typeof currentPage.waitForDomSettlement === 'function') {
-            await currentPage.waitForDomSettlement(
-              '.jobs-search__job-details--container, .jobs-details__main-content, .jobs-unified-top-card, [data-view-name="job-details-top-card"]',
-              { maxWaitMs: 2500, quietPeriodMs: 150 },
-            );
-          } else {
-            const waitAborted = await this.interruptibleSleep(1200);
-            if (waitAborted || !this.isRunning) break;
-          }
-        }
-
-        // 4b. Pure DOM Top-Card Extraction + Max-2 Retry Guard
-        let topCard = await currentPage.extractJobTopCardContext(4000);
-        let retryCount = 0;
-        while (
-          (!topCard.title || !topCard.company) &&
-          !topCard.isClosed &&
-          !topCard.isAlreadyApplied &&
-          !topCard.isLoginWall &&
-          retryCount < 2
-        ) {
-          retryCount++;
-          this.notifyStatus(portToSend, `Checking job details for ${job.jobId} (attempt ${retryCount}/2)...`, 'info');
-          const retrySleepAborted = await this.interruptibleSleep(600);
-          if (retrySleepAborted || !this.isRunning) break;
-          topCard = await currentPage.extractJobTopCardContext(3000);
-        }
-
-        const displayTitle = topCard.title || job.title;
-        const displayCompany = topCard.company || job.company;
-
-        // Check if details extraction completely failed
-        if (
-          (!topCard.title || !topCard.company) &&
-          !topCard.isClosed &&
-          !topCard.isAlreadyApplied &&
-          !topCard.isLoginWall
-        ) {
-          this.notifyStatus(
-            portToSend,
-            `ℹ️ Skipped "${displayTitle}": Could not load job details from LinkedIn.`,
-            'info',
-          );
-          stats.skipped++;
-          await processedJobsStore.recordJob({
-            jobId: job.jobId,
-            url: job.url,
-            title: displayTitle,
-            company: displayCompany,
-            status: 'skipped',
-            reason: 'Could not load job details from LinkedIn',
-            creditsUsed: 0,
-          });
-          this.notifyActivity(portToSend, onLiveActivity, {
-            jobId: job.jobId,
-            url: job.url,
-            title: displayTitle,
-            company: displayCompany,
-            status: 'skipped',
-            reason: 'Selector timeout',
-            creditsUsed: 0,
-          });
-          continue;
-        }
-
-        // 4a-1. Checkpoint Guardian: Inspect for security verification or OTP challenge
-        if (typeof currentPage.detectSecurityCheckpoint === 'function') {
-          const checkpointCheck = await currentPage.detectSecurityCheckpoint().catch(() => ({ isCheckpoint: false }));
-          if (checkpointCheck.isCheckpoint) {
-            const chkRes = await this.waitForManualCheckpointResolution(currentPage, portToSend, onLiveActivity);
-            if (chkRes.aborted || !this.isRunning) break;
-            if (!chkRes.solved) {
-              stats.skipped++;
-              continue;
-            }
-          }
-        }
-
-        // 4b. Pure DOM 0-Credit Skip Checks
-        if (topCard.isClosed) {
-          this.notifyStatus(
-            portToSend,
-            `ℹ️ Skipped "${displayTitle}": This job is closed and no longer accepting applications.`,
-            'info',
-          );
-          stats.skipped++;
-          await processedJobsStore.recordJob({
-            jobId: job.jobId,
-            url: job.url,
-            title: displayTitle,
-            company: displayCompany,
-            status: 'skipped',
-            reason: 'No longer accepting applications',
-            creditsUsed: 0,
-          });
-          this.notifyActivity(portToSend, onLiveActivity, {
-            jobId: job.jobId,
-            url: job.url,
-            title: displayTitle,
-            company: displayCompany,
-            status: 'skipped',
-            reason: 'Closed listing',
-            creditsUsed: 0,
-          });
-          continue;
-        }
-
-        if (topCard.isAlreadyApplied) {
-          this.notifyStatus(
-            portToSend,
-            `ℹ️ Skipped "${displayTitle}": You already applied to this job earlier on LinkedIn.`,
-            'info',
-          );
-          stats.skipped++;
-          await processedJobsStore.recordJob({
-            jobId: job.jobId,
-            url: job.url,
-            title: displayTitle,
-            company: displayCompany,
-            status: 'applied',
-            reason: 'Already applied on LinkedIn',
-            creditsUsed: 0,
-          });
-          this.notifyActivity(portToSend, onLiveActivity, {
-            jobId: job.jobId,
-            url: job.url,
-            title: displayTitle,
-            company: displayCompany,
-            status: 'skipped',
-            reason: 'Already applied on LinkedIn',
-            creditsUsed: 0,
-          });
-          continue;
-        }
-
-        if (!topCard.hasEasyApply) {
-          this.notifyStatus(
-            portToSend,
-            `ℹ️ Skipped "${displayTitle}": Requires applying directly on company website (not Easy Apply).`,
-            'info',
-          );
-          stats.skipped++;
-          await processedJobsStore.recordJob({
-            jobId: job.jobId,
-            url: job.url,
-            title: displayTitle,
-            company: displayCompany,
-            status: 'skipped',
-            reason: 'External application only (no Easy Apply)',
-            creditsUsed: 0,
-          });
-          this.notifyActivity(portToSend, onLiveActivity, {
-            jobId: job.jobId,
-            url: job.url,
-            title: displayTitle,
-            company: displayCompany,
-            status: 'skipped',
-            reason: 'External application only',
-            creditsUsed: 0,
-          });
-          continue;
-        }
-
-        // 4b-1. Post-Load Blacklist & Negative Keyword Check (Includes full split-pane description snippet)
-        const postBlacklist = checkBlacklistAndNegativeKeywords(
-          displayTitle,
-          displayCompany,
-          topCard.descriptionSnippet,
-          config.negativeKeywords,
-          config.blacklistedCompanies,
-          role,
-        );
-        if (postBlacklist.blacklisted) {
-          this.notifyStatus(portToSend, `🚫 Skipped "${displayTitle}": ${postBlacklist.reason}.`, 'info');
-          stats.skipped++;
-          await processedJobsStore.recordJob({
-            jobId: job.jobId,
-            url: job.url,
-            title: displayTitle,
-            company: displayCompany,
-            status: 'skipped',
-            reason: `Blacklisted: ${postBlacklist.reason}`,
-            creditsUsed: 0,
-          });
-          this.notifyActivity(portToSend, onLiveActivity, {
-            jobId: job.jobId,
-            url: job.url,
-            title: displayTitle,
-            company: displayCompany,
-            status: 'skipped',
-            reason: postBlacklist.reason || 'Blacklisted',
-            creditsUsed: 0,
-          });
-          continue;
-        }
-
-        // 4c. Pre-Apply Skill Relevance Check (0 LLM credits)
-        const relevance = checkJobSkillRelevance(displayTitle, topCard.descriptionSnippet, careerBrain, role);
-        if (!relevance.relevant) {
-          this.notifyStatus(
-            portToSend,
-            `ℹ️ Skipped "${displayTitle}": Required skills do not closely match your profile.`,
-            'info',
-          );
-          stats.skipped++;
-          await processedJobsStore.recordJob({
-            jobId: job.jobId,
-            url: job.url,
-            title: displayTitle,
-            company: displayCompany,
-            status: 'skipped',
-            reason: 'Skills do not closely match profile',
-            creditsUsed: 0,
-          });
-          this.notifyActivity(portToSend, onLiveActivity, {
-            jobId: job.jobId,
-            url: job.url,
-            title: displayTitle,
-            company: displayCompany,
-            status: 'skipped',
-            reason: 'Low skill match',
-            creditsUsed: 0,
-          });
-          continue;
-        }
-
-        if (relevance.matchedSkills.length > 0) {
-          logger.info(
-            `[DedicatedJobRunner] Job "${displayTitle}" matched skills: ${relevance.matchedSkills.slice(0, 5).join(', ')}`,
-          );
-        }
-
-        // Tier-2 Deep JD Relevance & Match Score Threshold Check (with Experience Gap Detection)
-        const minScoreThreshold =
-          typeof config.minFitScore === 'number' && config.minFitScore > 0 ? config.minFitScore : 50;
-        const maxExpGap = config.maxExperienceGapYears ?? 3;
-        const deepMatch = evaluateDeepRelevance(
-          topCard.descriptionSnippet || '',
-          careerBrain,
-          role,
-          minScoreThreshold,
-          maxExpGap,
-          displayTitle,
-        );
-
-        if (deepMatch.recommendation === 'skip') {
-          logger.info(`[DedicatedJobRunner] Deep JD evaluation skipped "${displayTitle}": ${deepMatch.reason}`);
-          this.notifyStatus(portToSend, `ℹ️ Skipped "${displayTitle}": ${deepMatch.reason}`, 'info');
-          stats.skipped++;
-          await processedJobsStore.recordJob({
-            jobId: job.jobId,
-            url: job.url,
-            title: displayTitle,
-            company: displayCompany,
-            location: topCard.location,
-            platform: 'linkedin',
-            fitScore: deepMatch.score,
-            status: 'skipped',
-            reason: deepMatch.reason,
-            creditsUsed: 0,
-          });
-          this.notifyActivity(portToSend, onLiveActivity, {
-            jobId: job.jobId,
-            url: job.url,
-            title: displayTitle,
-            company: displayCompany,
-            status: 'skipped',
-            reason:
-              deepMatch.reason.length > 40 ? `Match ${deepMatch.score}% < ${minScoreThreshold}%` : deepMatch.reason,
-            creditsUsed: 0,
-          });
-          continue;
-        }
-
-        // 4d. Click Easy Apply & Verify Modal Opens
-        this.notifyStatus(portToSend, `🚀 Opening Easy Apply for "${displayTitle}"...`, 'info');
-        let clickRes = await currentPage.clickEasyApplyButton();
-        logger.info(`[DedicatedJobRunner] clickEasyApplyButton attempt 1:`, clickRes);
-        if (!clickRes.success) {
-          logger.warning(`[DedicatedJobRunner] Easy Apply click attempt 1 failed (${clickRes.error}). Retrying...`);
-          // Retry click once
-          const clickSleepAborted = await this.interruptibleSleep(1200);
-          if (clickSleepAborted || !this.isRunning) break;
-          clickRes = await currentPage.clickEasyApplyButton();
-          logger.info(`[DedicatedJobRunner] clickEasyApplyButton attempt 2:`, clickRes);
-        }
-
-        // Check immediately for LinkedIn daily/weekly application limit banner or dialog
-        if (typeof currentPage.detectPlatformRateLimit === 'function') {
-          const rateCheck = await currentPage
-            .detectPlatformRateLimit()
-            .catch(() => ({ isLimited: false as const, reason: undefined }));
-          if (rateCheck.isLimited) {
-            const limitMsg = `🛑 LinkedIn Application Limit Reached: ${rateCheck.reason || 'Maximum Easy Apply limit reached for today/week'}. Pausing auto-apply run cleanly.`;
-            logger.error(`[DedicatedJobRunner] ${limitMsg}`);
-            this.notifyStatus(portToSend, limitMsg, 'fail');
-            this.notifyActivity(portToSend, onLiveActivity, {
-              jobId: job.jobId,
-              url: job.url,
-              title: displayTitle,
-              company: displayCompany,
-              status: 'skipped',
-              reason: limitMsg,
-              creditsUsed: 0,
-            });
-            this.isRunning = false;
-            break;
-          }
-        }
-
-        // Poll for modal with generous timeout for low-speed connections
-        let modalRes = await currentPage.waitForEasyApplyModal(8000, 300);
-        if (!modalRes.opened) {
-          // Re-check if a rate limit dialog appeared instead of the Easy Apply modal
-          if (typeof currentPage.detectPlatformRateLimit === 'function') {
-            const rateCheck = await currentPage
-              .detectPlatformRateLimit()
-              .catch(() => ({ isLimited: false as const, reason: undefined }));
-            if (rateCheck.isLimited) {
-              const limitMsg = `🛑 LinkedIn Application Limit Reached: ${rateCheck.reason || 'Maximum Easy Apply limit reached for today/week'}. Pausing auto-apply run cleanly.`;
-              logger.error(`[DedicatedJobRunner] ${limitMsg}`);
-              this.notifyStatus(portToSend, limitMsg, 'fail');
-              this.notifyActivity(portToSend, onLiveActivity, {
-                jobId: job.jobId,
-                url: job.url,
-                title: displayTitle,
-                company: displayCompany,
-                status: 'skipped',
-                reason: limitMsg,
-                creditsUsed: 0,
-              });
-              this.isRunning = false;
-              break;
-            }
-          }
-
-          // Retry clicking one more time
-          logger.warning(`[DedicatedJobRunner] Modal did not open on first attempt. Retrying click...`);
-          const modalSleepAborted = await this.interruptibleSleep(1200);
-          if (modalSleepAborted || !this.isRunning) break;
-          await currentPage.clickEasyApplyButton();
-          modalRes = await currentPage.waitForEasyApplyModal(8000, 300);
-        }
-
-        // 4d. Handle Modal Form-Filling & Verified Submission
-        if (modalRes.opened) {
-          stats.modalOpened++;
-          this.notifyStatus(portToSend, `📝 Application form opened: Filling your details...`, 'info');
-          const fillRes = await this.fillAndSubmitModal(
-            currentPage,
-            { ...job, title: displayTitle, company: displayCompany },
-            jobRunId,
-            portToSend,
-            onLiveActivity,
-          );
-
-          if (fillRes.success) {
-            stats.applied++;
-            await DailyQuotaManager.commitApplication(applicationKey(job.jobId, job.url));
-            await queueSafetyStore.setSingleApplyVerified(true);
-            const successMsg = `Applied to "${displayTitle}" at ${displayCompany || 'company'} successfully! 🎉`;
-            this.notifyStatus(portToSend, `✅ ${successMsg}`, 'ok');
-
-            await processedJobsStore.recordJob({
-              jobId: job.jobId,
-              url: job.url,
-              title: displayTitle,
-              company: displayCompany,
-              location: topCard.location,
-              platform: 'linkedin',
-              fitScore: deepMatch.score,
-              status: 'applied',
-              reason: 'Application submitted and verified',
-              creditsUsed: 0,
-            });
-
-            await this.syncJobApplicationToBackend({
-              jobId: job.jobId,
-              jobTitle: displayTitle,
-              company: displayCompany,
-              location: topCard.location,
-              platform: 'linkedin',
-              applicationUrl: job.url,
-              fitScore: deepMatch?.score,
-              status: 'applied',
-              appliedAt: new Date().toISOString(),
-            });
-
-            this.notifyActivity(portToSend, onLiveActivity, {
-              jobId: job.jobId,
-              url: job.url,
-              title: displayTitle,
-              company: displayCompany,
-              status: 'applied',
-              reason: 'Application submitted and verified',
-              creditsUsed: 0,
-            });
-            // Verified applied: legitimate LLM variable deductions are retained. 0 flat fee charged.
-          } else {
-            stats.skipped++;
-            const skipReason = fillRes.reason || 'Form filling could not be completed';
-            const friendlySkip = formatFriendlySkipReason(skipReason);
-            this.notifyStatus(portToSend, `ℹ️ Skipped "${displayTitle}": ${friendlySkip}`, 'info');
-
-            // Automatically refund any credits deducted for this job's LLM calls
-            await backendApiClient.refundCredits(jobRunId).catch(err => {
-              const errMsg = String(err?.message || err);
-              if (/no billable usage|run_not_found|already_refunded/i.test(errMsg)) {
-                logger.debug(`[DedicatedJobRunner] No billable usage to refund for ${jobRunId}.`);
-              } else {
-                logger.info(`[DedicatedJobRunner] Refund note for ${jobRunId}: ${errMsg}`);
-              }
-            });
-
-            await currentPage.dismissEasyApplyModal(5000).catch(() => {});
-
-            await processedJobsStore.recordJob({
-              jobId: job.jobId,
-              url: job.url,
-              title: displayTitle,
-              company: displayCompany,
-              location: topCard.location,
-              platform: 'linkedin',
-              fitScore: deepMatch.score,
-              status: 'skipped',
-              reason: skipReason,
-              creditsUsed: 0,
-            });
-
-            this.notifyActivity(portToSend, onLiveActivity, {
-              jobId: job.jobId,
-              url: job.url,
-              title: displayTitle,
-              company: displayCompany,
-              status: 'skipped',
-              reason: skipReason,
-              creditsUsed: 0,
-            });
-          }
-        } else {
-          stats.failed++;
-          const failReason = modalRes.error || clickRes.error || 'Easy Apply modal failed to open within timeout';
-          this.notifyStatus(portToSend, `⚠️ Could not open Easy Apply for "${displayTitle}".`, 'fail');
-
-          await backendApiClient.refundCredits(jobRunId).catch(() => {});
-          await currentPage.dismissEasyApplyModal(3000).catch(() => {});
-
-          await processedJobsStore.recordJob({
-            jobId: job.jobId,
-            url: job.url,
-            title: displayTitle,
-            company: displayCompany,
-            location: topCard.location,
-            platform: 'linkedin',
-            fitScore: deepMatch.score,
-            status: 'failed',
-            reason: failReason,
-            creditsUsed: 0,
-          });
-
-          this.notifyActivity(portToSend, onLiveActivity, {
-            jobId: job.jobId,
-            url: job.url,
-            title: displayTitle,
-            company: displayCompany,
-            status: 'modal_failed',
-            reason: failReason,
-            creditsUsed: 0,
-          });
-        }
-
-        if (!this.isRunning) {
-          logger.info('[DedicatedJobRunner] Application flow stopped by user.');
-          break;
-        }
-
-        // Inter-job pacing & anti-bot safety jitter (natural human cadence without sluggish lag)
-        if (this.isRunning && i + 1 < queue.length) {
-          const jitterMs = 1500 + Math.floor(Math.random() * 1000); // 1.5s - 2.5s natural human cadence
-          this.notifyStatus(
-            portToSend,
-            `⏳ Pacing safety delay (${Math.round(jitterMs / 100) / 10}s) before next candidate job...`,
-            'info',
-          );
-          const jitterAborted = await this.interruptibleSleep(jitterMs);
-          if (jitterAborted || !this.isRunning) break;
-        }
       }
 
       // 6. Final Summary
@@ -4211,6 +3637,605 @@ export class DedicatedJobRunner {
       logger.warning('[DedicatedJobRunner] Platform enrichment skipped:', enrichErr);
     }
     return careerBrain;
+  }
+
+  /**
+   * Applies to a single LinkedIn job card in the Split-Pane view,
+   * with automatic fallback to direct URL navigation if split-view click is occluded.
+   */
+  private async applySingleLinkedInJobInSplitPane(
+    currentPage: any,
+    job: { jobId: string; title: string; company: string; url: string },
+    searchPageUrl: string,
+    role: string,
+    candidateNameSources: string[],
+    config: any,
+    careerBrain: any,
+    runId: string,
+    portToSend?: chrome.runtime.Port | null,
+    onLiveActivity?: (activity: any) => void,
+    stats?: { totalFound: number; applied: number; modalOpened: number; skipped: number; failed: number },
+    candidateIndex?: number,
+    batchCap?: number,
+  ): Promise<{ status: 'applied' | 'skipped' | 'failed' | 'halt'; usedDirectFallback?: boolean }> {
+    const jobRunId = `${runId}_${job.jobId}`;
+    this.activeJobId = job.jobId;
+
+    // Daily quota: hold a server slot for this job (released if it is skipped or fails)
+    const quota = await DailyQuotaManager.reserveApplication(applicationKey(job.jobId, job.url), 'runner');
+    if (!quota.allowed) {
+      let allowFallback = false;
+      if (quota.reason === 'error') {
+        const localQuota = await DailyQuotaManager.getQuotaData().catch(() => null);
+        const applied = localQuota?.appliedCount ?? 0;
+        const maxQ = localQuota?.maxDailyQuota || 10;
+        const remaining = maxQ - applied;
+        if (remaining > 0 && !localQuota?.isPausedDueToQuota) {
+          logger.warning(
+            `[DedicatedJobRunner] Server quota verification slow/unavailable for ${job.jobId}; proceeding with local quota fallback (${applied}/${maxQ}).`,
+          );
+          this.notifyStatus(
+            portToSend,
+            `⚠️ Server quota check was slow/unavailable. Continuing with local quota (${applied}/${maxQ} used).`,
+            'info',
+          );
+          allowFallback = true;
+        }
+      }
+      if (!allowFallback) {
+        const quotaMsg = `🛑 ${quotaStopMessage(quota)} Stopping run.`;
+        this.notifyStatus(portToSend, quotaMsg, 'fail');
+        return { status: 'halt' };
+      }
+    }
+
+    // Hard credit budget check (minimum 5 credits to ensure balance for form-filling LLM calls).
+    const balanceRes = await backendApiClient.getCreditsBalance().catch(() => null);
+    if (
+      !balanceRes?.data?.premiumCovered &&
+      balanceRes?.data?.remainingCredits !== undefined &&
+      balanceRes.data.remainingCredits < 5
+    ) {
+      const creditMsg = `🛑 Insufficient credit budget (${balanceRes.data.remainingCredits} remaining, minimum 5 required). Halting run.`;
+      this.notifyStatus(portToSend, creditMsg, 'fail');
+      return { status: 'halt' };
+    }
+
+    const safeTitle = cleanLinkedInJobTitle(job.title) || 'Loading title...';
+    const safeCompany = job.company || 'Unknown Company';
+
+    // 4a-0. Instant 0-Credit Blacklist & Negative Keyword Check on Search Card
+    const earlyBlacklist = checkBlacklistAndNegativeKeywords(
+      safeTitle,
+      safeCompany,
+      undefined,
+      config.negativeKeywords,
+      config.blacklistedCompanies,
+      role,
+    );
+    if (earlyBlacklist.blacklisted) {
+      this.notifyStatus(portToSend, `🚫 Skipped "${safeTitle}": ${earlyBlacklist.reason}.`, 'info');
+      if (stats) stats.skipped++;
+      await processedJobsStore.recordJob({
+        jobId: job.jobId,
+        url: job.url,
+        title: safeTitle,
+        company: safeCompany,
+        status: 'skipped',
+        reason: `Blacklisted: ${earlyBlacklist.reason}`,
+        creditsUsed: 0,
+      });
+      this.notifyActivity(portToSend, onLiveActivity, {
+        jobId: job.jobId,
+        url: job.url,
+        title: safeTitle,
+        company: safeCompany,
+        status: 'skipped',
+        reason: earlyBlacklist.reason || 'Blacklisted',
+        creditsUsed: 0,
+      });
+      return { status: 'skipped' };
+    }
+
+    const candidateNumber = candidateIndex || 1;
+    const maxGoal = batchCap || 10;
+    this.notifyStatus(
+      portToSend,
+      `💼 Checking candidate job #${candidateNumber} (${stats?.applied || 0}/${maxGoal} applied): "${safeTitle}" (${safeCompany})`,
+      'info',
+    );
+
+    this.notifyActivity(portToSend, onLiveActivity, {
+      jobId: job.jobId,
+      url: job.url,
+      title: safeTitle,
+      company: safeCompany,
+      status: 'running',
+      reason: 'Loading details in split-pane...',
+      creditsUsed: 0,
+    });
+
+    // 4a. Click Job in Left Pane to Load Details in Right Pane (Split-View)
+    let usedDirectFallback = false;
+    let clicked = await currentPage.clickJobInSearchList(job.jobId);
+    if (!clicked) {
+      logger.info(
+        `[DedicatedJobRunner] Could not select job card for ${job.jobId} in current search list view. Navigating directly to ${job.url}...`,
+      );
+      usedDirectFallback = true;
+      try {
+        if (currentPage.puppeteerPage) {
+          await currentPage.puppeteerPage.goto(job.url, { waitUntil: 'domcontentloaded', timeout: 35000 });
+        } else if ((currentPage as any).navigateTo) {
+          await (currentPage as any).navigateTo(job.url);
+        }
+      } catch (navErr) {
+        logger.warning(`[DedicatedJobRunner] Direct navigation to job URL failed:`, navErr);
+      }
+      await currentPage.waitForDomSettlement?.(
+        '.jobs-unified-top-card, [data-view-name="job-details-top-card"], .jobs-details__main-content',
+        { maxWaitMs: 3500 },
+      );
+    } else {
+      if (typeof currentPage.waitForDomSettlement === 'function') {
+        await currentPage.waitForDomSettlement(
+          '.jobs-search__job-details--container, .jobs-details__main-content, .jobs-unified-top-card, [data-view-name="job-details-top-card"]',
+          { maxWaitMs: 2500, quietPeriodMs: 150 },
+        );
+      } else {
+        const waitAborted = await this.interruptibleSleep(1200);
+        if (waitAborted || !this.isRunning) return { status: 'halt' };
+      }
+    }
+
+    // 4b. Pure DOM Top-Card Extraction + Max-2 Retry Guard
+    let topCard = await currentPage.extractJobTopCardContext(4000);
+    let retryCount = 0;
+    while (
+      (!topCard.title || !topCard.company) &&
+      !topCard.isClosed &&
+      !topCard.isAlreadyApplied &&
+      !topCard.isLoginWall &&
+      retryCount < 2
+    ) {
+      retryCount++;
+      this.notifyStatus(portToSend, `Checking job details for ${job.jobId} (attempt ${retryCount}/2)...`, 'info');
+      const retrySleepAborted = await this.interruptibleSleep(600);
+      if (retrySleepAborted || !this.isRunning) return { status: 'halt' };
+      topCard = await currentPage.extractJobTopCardContext(3000);
+    }
+
+    const displayTitle = topCard.title || job.title;
+    const displayCompany = topCard.company || job.company;
+
+    // Check if details extraction completely failed
+    if (
+      (!topCard.title || !topCard.company) &&
+      !topCard.isClosed &&
+      !topCard.isAlreadyApplied &&
+      !topCard.isLoginWall
+    ) {
+      this.notifyStatus(portToSend, `ℹ️ Skipped "${displayTitle}": Could not load job details from LinkedIn.`, 'info');
+      if (stats) stats.skipped++;
+      await processedJobsStore.recordJob({
+        jobId: job.jobId,
+        url: job.url,
+        title: displayTitle,
+        company: displayCompany,
+        status: 'skipped',
+        reason: 'Could not load job details from LinkedIn',
+        creditsUsed: 0,
+      });
+      this.notifyActivity(portToSend, onLiveActivity, {
+        jobId: job.jobId,
+        url: job.url,
+        title: displayTitle,
+        company: displayCompany,
+        status: 'skipped',
+        reason: 'Selector timeout',
+        creditsUsed: 0,
+      });
+      return { status: 'skipped', usedDirectFallback };
+    }
+
+    // 4a-1. Checkpoint Guardian: Inspect for security verification or OTP challenge
+    if (typeof currentPage.detectSecurityCheckpoint === 'function') {
+      const checkpointCheck = await currentPage.detectSecurityCheckpoint().catch(() => ({ isCheckpoint: false }));
+      if (checkpointCheck.isCheckpoint) {
+        const chkRes = await this.waitForManualCheckpointResolution(currentPage, portToSend, onLiveActivity);
+        if (chkRes.aborted || !this.isRunning) return { status: 'halt' };
+        if (!chkRes.solved) {
+          if (stats) stats.skipped++;
+          return { status: 'skipped', usedDirectFallback };
+        }
+      }
+    }
+
+    // 4b. Pure DOM 0-Credit Skip Checks
+    if (topCard.isClosed) {
+      this.notifyStatus(
+        portToSend,
+        `ℹ️ Skipped "${displayTitle}": This job is closed and no longer accepting applications.`,
+        'info',
+      );
+      if (stats) stats.skipped++;
+      await processedJobsStore.recordJob({
+        jobId: job.jobId,
+        url: job.url,
+        title: displayTitle,
+        company: displayCompany,
+        status: 'skipped',
+        reason: 'No longer accepting applications',
+        creditsUsed: 0,
+      });
+      this.notifyActivity(portToSend, onLiveActivity, {
+        jobId: job.jobId,
+        url: job.url,
+        title: displayTitle,
+        company: displayCompany,
+        status: 'skipped',
+        reason: 'Closed listing',
+        creditsUsed: 0,
+      });
+      return { status: 'skipped', usedDirectFallback };
+    }
+
+    if (topCard.isAlreadyApplied) {
+      this.notifyStatus(
+        portToSend,
+        `ℹ️ Skipped "${displayTitle}": You already applied to this job earlier on LinkedIn.`,
+        'info',
+      );
+      if (stats) stats.skipped++;
+      await processedJobsStore.recordJob({
+        jobId: job.jobId,
+        url: job.url,
+        title: displayTitle,
+        company: displayCompany,
+        status: 'applied',
+        reason: 'Already applied on LinkedIn',
+        creditsUsed: 0,
+      });
+      this.notifyActivity(portToSend, onLiveActivity, {
+        jobId: job.jobId,
+        url: job.url,
+        title: displayTitle,
+        company: displayCompany,
+        status: 'skipped',
+        reason: 'Already applied on LinkedIn',
+        creditsUsed: 0,
+      });
+      return { status: 'skipped', usedDirectFallback };
+    }
+
+    if (!topCard.hasEasyApply) {
+      this.notifyStatus(
+        portToSend,
+        `ℹ️ Skipped "${displayTitle}": Requires applying directly on company website (not Easy Apply).`,
+        'info',
+      );
+      if (stats) stats.skipped++;
+      await processedJobsStore.recordJob({
+        jobId: job.jobId,
+        url: job.url,
+        title: displayTitle,
+        company: displayCompany,
+        status: 'skipped',
+        reason: 'External application only (no Easy Apply)',
+        creditsUsed: 0,
+      });
+      this.notifyActivity(portToSend, onLiveActivity, {
+        jobId: job.jobId,
+        url: job.url,
+        title: displayTitle,
+        company: displayCompany,
+        status: 'skipped',
+        reason: 'External application only',
+        creditsUsed: 0,
+      });
+      return { status: 'skipped', usedDirectFallback };
+    }
+
+    // 4b-1. Post-Load Blacklist & Negative Keyword Check
+    const postBlacklist = checkBlacklistAndNegativeKeywords(
+      displayTitle,
+      displayCompany,
+      topCard.descriptionSnippet,
+      config.negativeKeywords,
+      config.blacklistedCompanies,
+      role,
+    );
+    if (postBlacklist.blacklisted) {
+      this.notifyStatus(portToSend, `🚫 Skipped "${displayTitle}": ${postBlacklist.reason}.`, 'info');
+      if (stats) stats.skipped++;
+      await processedJobsStore.recordJob({
+        jobId: job.jobId,
+        url: job.url,
+        title: displayTitle,
+        company: displayCompany,
+        status: 'skipped',
+        reason: `Blacklisted: ${postBlacklist.reason}`,
+        creditsUsed: 0,
+      });
+      this.notifyActivity(portToSend, onLiveActivity, {
+        jobId: job.jobId,
+        url: job.url,
+        title: displayTitle,
+        company: displayCompany,
+        status: 'skipped',
+        reason: postBlacklist.reason || 'Blacklisted',
+        creditsUsed: 0,
+      });
+      return { status: 'skipped', usedDirectFallback };
+    }
+
+    // 4c. Pre-Apply Skill Relevance Check (0 LLM credits)
+    const relevance = checkJobSkillRelevance(displayTitle, topCard.descriptionSnippet, careerBrain, role);
+    if (!relevance.relevant) {
+      this.notifyStatus(
+        portToSend,
+        `ℹ️ Skipped "${displayTitle}": Required skills do not closely match your profile.`,
+        'info',
+      );
+      if (stats) stats.skipped++;
+      await processedJobsStore.recordJob({
+        jobId: job.jobId,
+        url: job.url,
+        title: displayTitle,
+        company: displayCompany,
+        status: 'skipped',
+        reason: 'Skills do not closely match profile',
+        creditsUsed: 0,
+      });
+      this.notifyActivity(portToSend, onLiveActivity, {
+        jobId: job.jobId,
+        url: job.url,
+        title: displayTitle,
+        company: displayCompany,
+        status: 'skipped',
+        reason: 'Low skill match',
+        creditsUsed: 0,
+      });
+      return { status: 'skipped', usedDirectFallback };
+    }
+
+    // Tier-2 Deep JD Relevance & Match Score Threshold Check
+    const minScoreThreshold =
+      typeof config.minFitScore === 'number' && config.minFitScore > 0 ? config.minFitScore : 50;
+    const maxExpGap = config.maxExperienceGapYears ?? 3;
+    const deepMatch = evaluateDeepRelevance(
+      topCard.descriptionSnippet || '',
+      careerBrain,
+      role,
+      minScoreThreshold,
+      maxExpGap,
+      displayTitle,
+    );
+
+    if (deepMatch.recommendation === 'skip') {
+      logger.info(`[DedicatedJobRunner] Deep JD evaluation skipped "${displayTitle}": ${deepMatch.reason}`);
+      this.notifyStatus(portToSend, `ℹ️ Skipped "${displayTitle}": ${deepMatch.reason}`, 'info');
+      if (stats) stats.skipped++;
+      await processedJobsStore.recordJob({
+        jobId: job.jobId,
+        url: job.url,
+        title: displayTitle,
+        company: displayCompany,
+        location: topCard.location,
+        platform: 'linkedin',
+        fitScore: deepMatch.score,
+        status: 'skipped',
+        reason: deepMatch.reason,
+        creditsUsed: 0,
+      });
+      this.notifyActivity(portToSend, onLiveActivity, {
+        jobId: job.jobId,
+        url: job.url,
+        title: displayTitle,
+        company: displayCompany,
+        status: 'skipped',
+        reason: deepMatch.reason.length > 40 ? `Match ${deepMatch.score}% < ${minScoreThreshold}%` : deepMatch.reason,
+        creditsUsed: 0,
+      });
+      return { status: 'skipped', usedDirectFallback };
+    }
+
+    // 4d. Click Easy Apply & Verify Modal Opens
+    this.notifyStatus(portToSend, `🚀 Opening Easy Apply for "${displayTitle}"...`, 'info');
+    let clickRes = await currentPage.clickEasyApplyButton();
+    logger.info(`[DedicatedJobRunner] clickEasyApplyButton attempt 1:`, clickRes);
+    if (!clickRes.success) {
+      logger.warning(`[DedicatedJobRunner] Easy Apply click attempt 1 failed (${clickRes.error}). Retrying...`);
+      const clickSleepAborted = await this.interruptibleSleep(1200);
+      if (clickSleepAborted || !this.isRunning) return { status: 'halt' };
+      clickRes = await currentPage.clickEasyApplyButton();
+      logger.info(`[DedicatedJobRunner] clickEasyApplyButton attempt 2:`, clickRes);
+    }
+
+    // Check immediately for LinkedIn rate limit
+    if (typeof currentPage.detectPlatformRateLimit === 'function') {
+      const rateCheck = await currentPage
+        .detectPlatformRateLimit()
+        .catch(() => ({ isLimited: false as const, reason: undefined }));
+      if (rateCheck.isLimited) {
+        const limitMsg = `🛑 LinkedIn Application Limit Reached: ${rateCheck.reason || 'Maximum Easy Apply limit reached for today/week'}. Pausing auto-apply run cleanly.`;
+        logger.error(`[DedicatedJobRunner] ${limitMsg}`);
+        this.notifyStatus(portToSend, limitMsg, 'fail');
+        this.notifyActivity(portToSend, onLiveActivity, {
+          jobId: job.jobId,
+          url: job.url,
+          title: displayTitle,
+          company: displayCompany,
+          status: 'skipped',
+          reason: limitMsg,
+          creditsUsed: 0,
+        });
+        this.isRunning = false;
+        return { status: 'halt' };
+      }
+    }
+
+    // Poll for modal with generous timeout
+    let modalRes = await currentPage.waitForEasyApplyModal(8000, 300);
+    if (!modalRes.opened) {
+      // Re-check rate limit dialog
+      if (typeof currentPage.detectPlatformRateLimit === 'function') {
+        const rateCheck = await currentPage
+          .detectPlatformRateLimit()
+          .catch(() => ({ isLimited: false as const, reason: undefined }));
+        if (rateCheck.isLimited) {
+          const limitMsg = `🛑 LinkedIn Application Limit Reached: ${rateCheck.reason || 'Maximum Easy Apply limit reached for today/week'}. Pausing auto-apply run cleanly.`;
+          logger.error(`[DedicatedJobRunner] ${limitMsg}`);
+          this.notifyStatus(portToSend, limitMsg, 'fail');
+          this.notifyActivity(portToSend, onLiveActivity, {
+            jobId: job.jobId,
+            url: job.url,
+            title: displayTitle,
+            company: displayCompany,
+            status: 'skipped',
+            reason: limitMsg,
+            creditsUsed: 0,
+          });
+          this.isRunning = false;
+          return { status: 'halt' };
+        }
+      }
+
+      // Retry click once
+      logger.warning(`[DedicatedJobRunner] Modal did not open on first attempt. Retrying click...`);
+      const modalSleepAborted = await this.interruptibleSleep(1200);
+      if (modalSleepAborted || !this.isRunning) return { status: 'halt' };
+      await currentPage.clickEasyApplyButton();
+      modalRes = await currentPage.waitForEasyApplyModal(8000, 300);
+    }
+
+    // 4d. Handle Modal Form-Filling & Verified Submission
+    if (modalRes.opened) {
+      if (stats) stats.modalOpened++;
+      this.notifyStatus(portToSend, `📝 Application form opened: Filling your details...`, 'info');
+      const fillRes = await this.fillAndSubmitModal(
+        currentPage,
+        { ...job, title: displayTitle, company: displayCompany },
+        jobRunId,
+        portToSend,
+        onLiveActivity,
+      );
+
+      if (fillRes.success) {
+        if (stats) stats.applied++;
+        await DailyQuotaManager.commitApplication(applicationKey(job.jobId, job.url));
+        await queueSafetyStore.setSingleApplyVerified(true);
+        const successMsg = `Applied to "${displayTitle}" at ${displayCompany || 'company'} successfully! 🎉`;
+        this.notifyStatus(portToSend, `✅ ${successMsg}`, 'ok');
+
+        await processedJobsStore.recordJob({
+          jobId: job.jobId,
+          url: job.url,
+          title: displayTitle,
+          company: displayCompany,
+          location: topCard.location,
+          platform: 'linkedin',
+          fitScore: deepMatch.score,
+          status: 'applied',
+          reason: 'Application submitted and verified',
+          creditsUsed: 0,
+        });
+
+        await this.syncJobApplicationToBackend({
+          jobId: job.jobId,
+          jobTitle: displayTitle,
+          company: displayCompany,
+          location: topCard.location,
+          platform: 'linkedin',
+          applicationUrl: job.url,
+          fitScore: deepMatch?.score,
+          status: 'applied',
+          appliedAt: new Date().toISOString(),
+        });
+
+        this.notifyActivity(portToSend, onLiveActivity, {
+          jobId: job.jobId,
+          url: job.url,
+          title: displayTitle,
+          company: displayCompany,
+          status: 'applied',
+          reason: 'Application submitted and verified',
+          creditsUsed: 0,
+        });
+        return { status: 'applied', usedDirectFallback };
+      } else {
+        if (stats) stats.skipped++;
+        const skipReason = fillRes.reason || 'Form filling could not be completed';
+        const friendlySkip = formatFriendlySkipReason(skipReason);
+        this.notifyStatus(portToSend, `ℹ️ Skipped "${displayTitle}": ${friendlySkip}`, 'info');
+
+        await backendApiClient.refundCredits(jobRunId).catch(err => {
+          const errMsg = String(err?.message || err);
+          if (/no billable usage|run_not_found|already_refunded/i.test(errMsg)) {
+            logger.debug(`[DedicatedJobRunner] No billable usage to refund for ${jobRunId}.`);
+          } else {
+            logger.info(`[DedicatedJobRunner] Refund note for ${jobRunId}: ${errMsg}`);
+          }
+        });
+
+        await currentPage.dismissEasyApplyModal(5000).catch(() => {});
+
+        await processedJobsStore.recordJob({
+          jobId: job.jobId,
+          url: job.url,
+          title: displayTitle,
+          company: displayCompany,
+          location: topCard.location,
+          platform: 'linkedin',
+          fitScore: deepMatch.score,
+          status: 'skipped',
+          reason: skipReason,
+          creditsUsed: 0,
+        });
+
+        this.notifyActivity(portToSend, onLiveActivity, {
+          jobId: job.jobId,
+          url: job.url,
+          title: displayTitle,
+          company: displayCompany,
+          status: 'skipped',
+          reason: skipReason,
+          creditsUsed: 0,
+        });
+        return { status: 'skipped', usedDirectFallback };
+      }
+    } else {
+      if (stats) stats.failed++;
+      const failReason = modalRes.error || clickRes.error || 'Easy Apply modal failed to open within timeout';
+      this.notifyStatus(portToSend, `⚠️ Could not open Easy Apply for "${displayTitle}".`, 'fail');
+
+      await backendApiClient.refundCredits(jobRunId).catch(() => {});
+      await currentPage.dismissEasyApplyModal(3000).catch(() => {});
+
+      await processedJobsStore.recordJob({
+        jobId: job.jobId,
+        url: job.url,
+        title: displayTitle,
+        company: displayCompany,
+        location: topCard.location,
+        platform: 'linkedin',
+        fitScore: deepMatch.score,
+        status: 'failed',
+        reason: failReason,
+        creditsUsed: 0,
+      });
+
+      this.notifyActivity(portToSend, onLiveActivity, {
+        jobId: job.jobId,
+        url: job.url,
+        title: displayTitle,
+        company: displayCompany,
+        status: 'modal_failed',
+        reason: failReason,
+        creditsUsed: 0,
+      });
+      return { status: 'failed', usedDirectFallback };
+    }
   }
 
   private async fillAndSubmitModal(
