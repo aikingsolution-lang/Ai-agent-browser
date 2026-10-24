@@ -3208,9 +3208,13 @@ export default class Page {
         }
       }
 
-      // 3. Check radio groups and checkbox groups
+      // 3. Check radio groups, checkbox groups and question-library BUTTON GROUPS.
+      // fb-dash / form-builder question wrappers can render single-choice answers as
+      // pill <button> elements (or [role="radio"]) with NO <input type="radio"> underneath.
       const fieldsets = Array.from(
-        modal.querySelectorAll('fieldset, div[role="radiogroup"], div[role="group"]'),
+        modal.querySelectorAll(
+          'fieldset, div[role="radiogroup"], div[role="group"], div.fb-dash-form-element, div[data-test-form-element]',
+        ),
       ) as HTMLElement[];
       for (const fs of fieldsets) {
         const radios = Array.from(fs.querySelectorAll('input[type="radio"]')) as HTMLInputElement[];
@@ -3294,6 +3298,109 @@ export default class Page {
               label: legendText,
               fieldType: 'checkbox',
               options,
+            });
+          }
+        } else {
+          // Phase 3: LinkedIn question-library BUTTON GROUPS. Newer Easy Apply questions
+          // render single-choice answers as pill <button> elements (or [role="radio"]) with
+          // no <input type="radio"> underneath. Without this branch such unanswered questions
+          // are invisible to validation, so Next gets rejected and the run ends in a
+          // validation-loop skip.
+          const hasPlainInputs = Boolean(
+            fs.querySelector(
+              'select, textarea, input:not([type="radio"]):not([type="checkbox"]):not([type="hidden"]):not([type="submit"]):not([type="button"])',
+            ),
+          );
+          if (hasPlainInputs) continue;
+
+          // Only the INNERMOST qualifying container reports the group so a question
+          // nested inside wrapper divs is never double-counted.
+          if (
+            fs.querySelector(
+              'fieldset, div[role="radiogroup"], div[role="group"], div.fb-dash-form-element, div[data-test-form-element]',
+            )
+          ) {
+            continue;
+          }
+
+          const optionBtns = (
+            Array.from(fs.querySelectorAll('button, [role="radio"], [role="option"], [role="button"]')) as HTMLElement[]
+          ).filter(b => {
+            if (
+              b.getAttribute('aria-haspopup') === 'listbox' ||
+              b.getAttribute('role') === 'combobox' ||
+              b.classList.contains('artdeco-dropdown__trigger')
+            ) {
+              return false;
+            }
+            if (
+              b.closest('[aria-hidden="true"]') ||
+              b.closest('footer, .jobs-easy-apply-modal__footer, .artdeco-modal__actionbar')
+            ) {
+              return false;
+            }
+            const st = window.getComputedStyle(b);
+            if (st.display === 'none' || st.visibility === 'hidden') return false;
+            const r = b.getBoundingClientRect();
+            if (r.width === 0 && r.height === 0) return false;
+            const txt = cleanElementText(b).toLowerCase().trim();
+            if (!txt) return false;
+            if (/^(next|review|submit|continue|back|previous|dismiss|close|cancel|save|skip)$/.test(txt)) {
+              return false;
+            }
+            return true;
+          });
+          if (optionBtns.length < 2) continue;
+
+          // Legend lookup climbs to ancestor question wrappers when the innermost
+          // container has no legend/label of its own.
+          let legend: Element | null = null;
+          let legendProbe: Element | null = fs;
+          for (let depth = 0; depth < 3 && legendProbe; depth++) {
+            legend = legendProbe.querySelector('legend, [role="heading"], label');
+            if (legend) break;
+            legendProbe = legendProbe.parentElement
+              ? (legendProbe.parentElement.closest(
+                  'fieldset, div[role="radiogroup"], div[role="group"], div.fb-dash-form-element, div[data-test-form-element]',
+                ) as HTMLElement | null)
+              : null;
+          }
+          const legendText = cleanElementText(legend);
+          if (!legendText) continue;
+
+          const anySelected = optionBtns.some(b => {
+            if (
+              b.getAttribute('aria-pressed') === 'true' ||
+              b.getAttribute('aria-checked') === 'true' ||
+              b.getAttribute('aria-selected') === 'true'
+            ) {
+              return true;
+            }
+            const cls = String(b.className || '');
+            if (/selected|--checked|is-checked/i.test(cls)) return true;
+            if (b.querySelector('input[type="radio"]:checked, input[type="checkbox"]:checked')) return true;
+            const wrap = b.closest('label, li, div[class*="choice"], div[class*="option"], div[class*="pill"]');
+            if (wrap) {
+              const wcls = String(wrap.className || '');
+              if (/selected|--checked|is-checked/i.test(wcls)) return true;
+              if (wrap.querySelector('input[type="radio"]:checked, input[type="checkbox"]:checked')) return true;
+            }
+            return false;
+          });
+
+          const isExplicitlyOptional =
+            /\boptional\b/i.test(legendText) ||
+            Boolean(
+              fs.querySelector(
+                '.fb-dash-form-element__label-title--optional, [data-test-form-element-optional], .artdeco-form__label--optional',
+              ) || fs.closest('.fb-dash-form-element--optional, [data-test-form-element-optional]'),
+            );
+
+          if (!anySelected && !isExplicitlyOptional) {
+            emptyRequiredFields.push({
+              label: legendText,
+              fieldType: 'radio',
+              options: optionBtns.map(b => cleanElementText(b)).filter(Boolean),
             });
           }
         }
@@ -3715,9 +3822,11 @@ export default class Page {
       }
 
       const modal = findActiveModal(document);
-      if (!modal) return { ok: false, targetFound: false, isTextField: false, typeaheadUnresolved: false };
+      if (!modal)
+        return { ok: false, targetFound: false, isTextField: false, typeaheadUnresolved: false, isButtonOption: false };
       let targetEl: HTMLElement | null = null;
       let targetRadioLabel: HTMLElement | null = null;
+      let targetIsButtonOption = false;
 
       if (ident.id) {
         try {
@@ -3765,9 +3874,12 @@ export default class Page {
       if (!targetEl && ident.label) {
         const cleanLabel = cleanDuplicateString(ident.label).toLowerCase().trim();
 
-        // 1. Check radio and checkbox groups (fieldsets / role="radiogroup") first
+        // 1. Check radio groups, checkbox groups and question-library button groups
+        // (fieldsets / role="radiogroup" / fb-dash form-builder wrappers) first
         const fieldsets = Array.from(
-          modal.querySelectorAll('fieldset, div[role="radiogroup"], div[role="group"]'),
+          modal.querySelectorAll(
+            'fieldset, div[role="radiogroup"], div[role="group"], div.fb-dash-form-element, div[data-test-form-element]',
+          ),
         ) as HTMLElement[];
         for (const fs of fieldsets) {
           const legend = fs.querySelector('legend, [role="heading"], label');
@@ -3818,6 +3930,62 @@ export default class Page {
                 targetEl = r;
                 targetRadioLabel = rLbl;
                 break;
+              }
+            }
+
+            // Phase 3: button-group options (containers with pill <button> elements and
+            // NO radio/checkbox inputs). Match the resolved answer text against the
+            // visible option buttons; the resolver has already aligned the answer to one
+            // of the option strings, so tolerant text matching is a safety net.
+            if (!targetEl && items.length === 0) {
+              const optionBtns = (
+                Array.from(
+                  fs.querySelectorAll('button, [role="radio"], [role="option"], [role="button"]'),
+                ) as HTMLElement[]
+              ).filter(b => {
+                if (
+                  b.getAttribute('aria-haspopup') === 'listbox' ||
+                  b.getAttribute('role') === 'combobox' ||
+                  b.classList.contains('artdeco-dropdown__trigger')
+                ) {
+                  return false;
+                }
+                if (
+                  b.closest('[aria-hidden="true"]') ||
+                  b.closest('footer, .jobs-easy-apply-modal__footer, .artdeco-modal__actionbar')
+                ) {
+                  return false;
+                }
+                const st = window.getComputedStyle(b);
+                if (st.display === 'none' || st.visibility === 'hidden') return false;
+                const r = b.getBoundingClientRect();
+                if (r.width === 0 && r.height === 0) return false;
+                const txt = cleanElementText(b).toLowerCase().trim();
+                if (!txt) return false;
+                if (/^(next|review|submit|continue|back|previous|dismiss|close|cancel|save|skip)$/.test(txt)) {
+                  return false;
+                }
+                return true;
+              });
+
+              for (const b of optionBtns) {
+                const bTxt = cleanElementText(b).toLowerCase().trim();
+                const bVal = (b.getAttribute('value') || '').toLowerCase().trim();
+                let matched = false;
+                if (isTargetYes && /\byes\b/i.test(bTxt)) {
+                  matched = true;
+                } else if (isTargetNo && /\bno\b/i.test(bTxt)) {
+                  matched = true;
+                } else if (bTxt && (bTxt === normVal || bTxt.includes(normVal) || normVal.includes(bTxt))) {
+                  matched = true;
+                } else if (bVal && (bVal === normVal || bVal.includes(normVal) || normVal.includes(bVal))) {
+                  matched = true;
+                }
+                if (matched) {
+                  targetEl = b;
+                  targetIsButtonOption = true;
+                  break;
+                }
               }
             }
           }
@@ -3877,7 +4045,8 @@ export default class Page {
         }
       }
 
-      if (!targetEl) return { ok: false, targetFound: false, isTextField: false, typeaheadUnresolved: false };
+      if (!targetEl)
+        return { ok: false, targetFound: false, isTextField: false, typeaheadUnresolved: false, isButtonOption: false };
 
       // Mark the resolved element so the outer method can escalate to REAL CDP keyboard typing
       // if in-page fill verification fails. Stale markers are cleared first.
@@ -3891,6 +4060,63 @@ export default class Page {
       try {
         scrollTarget.scrollIntoView({ behavior: 'instant', block: 'center' });
       } catch {}
+
+      // Phase 3: button-group option click. Options are pill <button> elements (or
+      // [role="radio"]) with no input underneath, so the radio/checkbox native-setter
+      // path cannot apply. A synthetic click plus the full pointer-event sequence is
+      // the reliable in-page trigger; the selection state is verified afterwards, and
+      // the outer method escalates to a REAL CDP mouse click if verification fails.
+      if (targetIsButtonOption) {
+        const isSelectedState = (): boolean => {
+          if (!targetEl) return false;
+          if (
+            targetEl.getAttribute('aria-pressed') === 'true' ||
+            targetEl.getAttribute('aria-checked') === 'true' ||
+            targetEl.getAttribute('aria-selected') === 'true'
+          ) {
+            return true;
+          }
+          const cls = String(targetEl.className || '');
+          if (/selected|--checked|is-checked/i.test(cls)) return true;
+          if (targetEl.querySelector('input[type="radio"]:checked, input[type="checkbox"]:checked')) return true;
+          const wrap = targetEl.closest('label, li, div[class*="choice"], div[class*="option"], div[class*="pill"]');
+          if (wrap) {
+            const wcls = String(wrap.className || '');
+            if (/selected|--checked|is-checked/i.test(wcls)) return true;
+            if (wrap.querySelector('input[type="radio"]:checked, input[type="checkbox"]:checked')) return true;
+          }
+          return false;
+        };
+
+        try {
+          targetEl.focus();
+        } catch {}
+        ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(evt => {
+          targetEl.dispatchEvent(new MouseEvent(evt, { bubbles: true, cancelable: true, view: window }));
+        });
+        try {
+          targetEl.click();
+        } catch {}
+        await new Promise(r => setTimeout(r, 120));
+        let selOk = isSelectedState();
+        if (!selOk) {
+          const wrap = (targetEl.closest('label') || targetEl.parentElement) as HTMLElement | null;
+          if (wrap && wrap !== targetEl) {
+            try {
+              wrap.click();
+            } catch {}
+            await new Promise(r => setTimeout(r, 120));
+            selOk = isSelectedState();
+          }
+        }
+        return {
+          ok: selOk,
+          targetFound: true,
+          isTextField: false,
+          typeaheadUnresolved: false,
+          isButtonOption: true,
+        };
+      }
 
       // Fill element
       if (targetEl instanceof HTMLInputElement && (targetEl.type === 'radio' || targetEl.type === 'checkbox')) {
@@ -3927,6 +4153,7 @@ export default class Page {
             targetFound: true,
             isTextField: false,
             typeaheadUnresolved: false,
+            isButtonOption: false,
           };
         } else {
           // Radio button
@@ -3942,12 +4169,18 @@ export default class Page {
             targetEl.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
             targetEl.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
           }
-          return { ok: targetEl.checked, targetFound: true, isTextField: false, typeaheadUnresolved: false };
+          return {
+            ok: targetEl.checked,
+            targetFound: true,
+            isTextField: false,
+            typeaheadUnresolved: false,
+            isButtonOption: false,
+          };
         }
       } else if (targetEl instanceof HTMLInputElement && targetEl.type === 'file') {
         // File input elements can only accept an empty string programmatically in web browsers
         // for security reasons. Never attempt to set non-empty string on input[type="file"].
-        return { ok: false, targetFound: true, isTextField: false, typeaheadUnresolved: false };
+        return { ok: false, targetFound: true, isTextField: false, typeaheadUnresolved: false, isButtonOption: false };
       } else if (targetEl instanceof HTMLInputElement || targetEl instanceof HTMLTextAreaElement) {
         const proto = targetEl instanceof HTMLInputElement ? HTMLInputElement.prototype : HTMLTextAreaElement.prototype;
         const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
@@ -3990,7 +4223,7 @@ export default class Page {
           targetEl.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
         } catch (fillErr) {
           console.warn('[Page] fillModalFieldDirect value setter caught error:', fillErr);
-          return { ok: false, targetFound: true, isTextField: true, typeaheadUnresolved: false };
+          return { ok: false, targetFound: true, isTextField: true, typeaheadUnresolved: false, isButtonOption: false };
         }
 
         // Autocomplete / typeahead suggestion selection (e.g. Location (city), School/University, Company, Title)
@@ -4235,7 +4468,7 @@ export default class Page {
         targetEl.dispatchEvent(new Event('blur', { bubbles: true, composed: true }));
         targetEl.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
 
-        return { ok, targetFound: true, isTextField: true, typeaheadUnresolved };
+        return { ok, targetFound: true, isTextField: true, typeaheadUnresolved, isButtonOption: false };
       } else if (targetEl instanceof HTMLSelectElement) {
         // If select is currently disabled or options haven't hydrated yet (cascading parent -> child AJAX delay),
         // poll up to 1200ms for options to load
@@ -4326,6 +4559,7 @@ export default class Page {
             targetFound: true,
             isTextField: false,
             typeaheadUnresolved: false,
+            isButtonOption: false,
           };
         }
       } else {
@@ -4376,25 +4610,32 @@ export default class Page {
                 matchedOpt.dispatchEvent(new MouseEvent(evt, { bubbles: true, cancelable: true, view: window }));
               });
               await new Promise(r => setTimeout(r, 150));
-              return { ok: true, targetFound: true, isTextField: false, typeaheadUnresolved: false };
+              return {
+                ok: true,
+                targetFound: true,
+                isTextField: false,
+                typeaheadUnresolved: false,
+                isButtonOption: false,
+              };
             }
           }
         }
       }
 
-      return { ok: false, targetFound: true, isTextField: false, typeaheadUnresolved: false };
+      return { ok: false, targetFound: true, isTextField: false, typeaheadUnresolved: false, isButtonOption: false };
     };
 
     if (!this._puppeteerPage) {
       await this.attachPuppeteer().catch(() => false);
     }
 
-    // Structured in-page result: boolean OR { ok, targetFound, isTextField, typeaheadUnresolved }
+    // Structured in-page result: boolean OR { ok, targetFound, isTextField, typeaheadUnresolved, isButtonOption }
     type FillResultShape = {
       ok: boolean;
       targetFound: boolean;
       isTextField: boolean;
       typeaheadUnresolved: boolean;
+      isButtonOption: boolean;
     };
     const normalizeFillResult = (raw: unknown): FillResultShape | null => {
       if (raw && typeof raw === 'object') {
@@ -4405,11 +4646,12 @@ export default class Page {
             targetFound: Boolean(r.targetFound),
             isTextField: Boolean(r.isTextField),
             typeaheadUnresolved: Boolean(r.typeaheadUnresolved),
+            isButtonOption: Boolean(r.isButtonOption),
           };
         }
       }
       if (typeof raw === 'boolean') {
-        return { ok: raw, targetFound: raw, isTextField: false, typeaheadUnresolved: false };
+        return { ok: raw, targetFound: raw, isTextField: false, typeaheadUnresolved: false, isButtonOption: false };
       }
       return null;
     };
@@ -4470,6 +4712,51 @@ export default class Page {
         }
       } catch (escErr) {
         console.warn('[Page] fillModalFieldDirect real-typing escalation failed:', escErr);
+      }
+    }
+
+    // ── ESCALATION LADDER (Level 2b): REAL CDP mouse click for button-group options ──
+    // If an in-page synthetic click on a question-library pill button did not flip the
+    // selection state, drive a REAL trusted mouse click through CDP on the marked
+    // option. Frameworks cannot discard trusted pointer input. Selection state is then
+    // verified WITHOUT re-clicking (a second click could toggle the option back off).
+    if (result && !result.ok && result.targetFound && result.isButtonOption && this._puppeteerPage) {
+      const markerSel = '[data-qoder-fill-target]';
+      try {
+        const markerPresent = await this._puppeteerPage.evaluate((sel: string) => {
+          const el = document.querySelector(sel) as HTMLElement | null;
+          if (!el) return false;
+          el.scrollIntoView({ behavior: 'instant', block: 'center' });
+          return true;
+        }, markerSel);
+        if (markerPresent) {
+          await this._puppeteerPage.click(markerSel);
+          await new Promise(r => setTimeout(r, 400));
+          const selOk = await this._puppeteerPage.evaluate((sel: string) => {
+            const el = document.querySelector(sel) as HTMLElement | null;
+            if (!el) return false;
+            if (
+              el.getAttribute('aria-pressed') === 'true' ||
+              el.getAttribute('aria-checked') === 'true' ||
+              el.getAttribute('aria-selected') === 'true'
+            ) {
+              return true;
+            }
+            const cls = String(el.className || '');
+            if (/selected|--checked|is-checked/i.test(cls)) return true;
+            if (el.querySelector('input[type="radio"]:checked, input[type="checkbox"]:checked')) return true;
+            const wrap = el.closest('label, li, div[class*="choice"], div[class*="option"], div[class*="pill"]');
+            if (wrap) {
+              const wcls = String(wrap.className || '');
+              if (/selected|--checked|is-checked/i.test(wcls)) return true;
+              if (wrap.querySelector('input[type="radio"]:checked, input[type="checkbox"]:checked')) return true;
+            }
+            return false;
+          }, markerSel);
+          result = { ...result, ok: Boolean(selOk) };
+        }
+      } catch (escErr) {
+        console.warn('[Page] fillModalFieldDirect real-click escalation failed:', escErr);
       }
     }
 
