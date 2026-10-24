@@ -4110,6 +4110,11 @@ export default class Page {
               targetEl.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));
               targetEl.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', keyCode: 13, bubbles: true }));
 
+              // Blur input to dismiss any open typeahead dropdown listbox overlay
+              try {
+                targetEl.blur();
+              } catch {}
+
               await new Promise(r => setTimeout(r, 300));
             }
           }
@@ -5716,6 +5721,15 @@ export default class Page {
         candidateButtons.push(b);
       };
 
+      // Auto-scroll modal content to bottom so bottom questions & action buttons are in view
+      const contentEl = (modal || artdecoModal || document).querySelector(
+        '.jobs-easy-apply-modal__content, .artdeco-modal__content, form.jobs-easy-apply-form, div[role="dialog"] .overflow-y-auto',
+      ) as HTMLElement | null;
+      if (contentEl) {
+        contentEl.scrollTop = contentEl.scrollHeight;
+        contentEl.dispatchEvent(new Event('scroll', { bubbles: true }));
+      }
+
       // 1. Direct targeted queries for action buttons in modal footers & actionbars (highest priority)
       const actionSelectors = [
         '.jobs-easy-apply-modal__footer button',
@@ -6363,6 +6377,15 @@ export default class Page {
         seen.add(b);
         candidateButtons.push(b);
       };
+
+      // Auto-scroll modal content to bottom so bottom questions & action buttons are in view
+      const contentEl = (modal || artdecoModal || document).querySelector(
+        '.jobs-easy-apply-modal__content, .artdeco-modal__content, form.jobs-easy-apply-form, div[role="dialog"] .overflow-y-auto',
+      ) as HTMLElement | null;
+      if (contentEl) {
+        contentEl.scrollTop = contentEl.scrollHeight;
+        contentEl.dispatchEvent(new Event('scroll', { bubbles: true }));
+      }
 
       // 1. Direct targeted queries for submit buttons
       const actionSelectors = [

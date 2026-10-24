@@ -4401,7 +4401,7 @@ export class DedicatedJobRunner {
       if (fields.length > 0) {
         this.notifyStatus(
           portToSend,
-          `✨ Found ${fields.length} question${fields.length > 1 ? 's' : ''} on Step ${step}: Answering automatically...`,
+          `✨ Step ${step}: Answering ${fields.length} question${fields.length > 1 ? 's' : ''} (preserving pre-filled fields)...`,
           'info',
         );
         const unresolvedFields: FormFieldDescriptor[] = [];
@@ -4799,6 +4799,10 @@ export class DedicatedJobRunner {
           }
 
           // Test if we can advance despite remaining validation warnings (often non-blocking in LinkedIn DOM)
+          if (typeof page.scrollModalContent === 'function') {
+            await page.scrollModalContent('bottom');
+            await new Promise(r => setTimeout(r, 200));
+          }
           const testActions = await page.getModalActionButtons();
           if (testActions.hasNext || testActions.hasReview) {
             logger.info(
@@ -4868,6 +4872,18 @@ export class DedicatedJobRunner {
             }
           }
         }
+      } else {
+        logger.info(
+          `[DedicatedJobRunner] Step ${step}: All fields are already pre-filled. Preserving existing values untouched.`,
+        );
+      }
+
+      // Step par information bharne / verify karne ke baad, container ko scroll karke
+      // bilkul bottom par le jayein taaki footer action buttons (Next/Review/Submit)
+      // fully in-view aur clickable ho sakein.
+      if (typeof page.scrollModalContent === 'function') {
+        await page.scrollModalContent('bottom');
+        await new Promise(r => setTimeout(r, 250));
       }
 
       // 4. Check action buttons (Submit vs Review/Next)
@@ -5011,12 +5027,22 @@ export class DedicatedJobRunner {
         } else if (retryActions.hasNext || retryActions.hasReview) {
           const fwdRes = await page.clickModalForwardButton();
           if (fwdRes.clicked) {
+            if (typeof page.waitForDomSettlement === 'function') {
+              await page.waitForDomSettlement();
+            } else {
+              await new Promise(r => setTimeout(r, 1200));
+            }
             continue;
           }
         } else {
           // Direct fallback: Attempt clicking primary button in case getModalActionButtons missed atypical labels
           const directFwd = await page.clickModalForwardButton();
           if (directFwd.clicked) {
+            if (typeof page.waitForDomSettlement === 'function') {
+              await page.waitForDomSettlement();
+            } else {
+              await new Promise(r => setTimeout(r, 1200));
+            }
             continue;
           }
           const directSubmit = await page.submitApplication();

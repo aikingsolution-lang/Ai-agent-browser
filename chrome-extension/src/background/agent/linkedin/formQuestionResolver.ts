@@ -1748,9 +1748,17 @@ export function matchRuleBased(
   if (
     /city|location/i.test(labelLower) &&
     !/comfortable|willing|open\s+to|commute|relocate|able\s+to|hybrid|onsite|are\s+you/i.test(labelLower) &&
-    (careerBrain.currentLocation || careerBrain.preferredLocation)
+    (careerBrain.currentLocation ||
+      careerBrain.preferredLocation ||
+      (careerBrain.preferredLocations && careerBrain.preferredLocations.length > 0))
   ) {
-    const rawLoc = careerBrain.currentLocation || careerBrain.preferredLocation || '';
+    const rawLoc =
+      careerBrain.currentLocation ||
+      careerBrain.preferredLocation ||
+      (careerBrain.preferredLocations && careerBrain.preferredLocations.length > 0
+        ? careerBrain.preferredLocations[0]
+        : '') ||
+      '';
     const cleanCity = cleanLocationForCityField(rawLoc);
     const finalAnswer = cleanCity || rawLoc;
     return { matched: true, answer: finalAnswer, sourceDetail: `profile: location ("${finalAnswer}")` };
