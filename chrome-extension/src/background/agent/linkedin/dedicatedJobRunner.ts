@@ -1941,6 +1941,16 @@ export class DedicatedJobRunner {
           }
 
           if (this.isRunning && stats.applied < BATCH_CAP) {
+            // Strict sequential completion: Ensure previous application modal is fully completed/closed before picking next job
+            const isModalStillOpen = await currentPage.isEasyApplyModalOpen();
+            if (isModalStillOpen) {
+              logger.info(
+                '[DedicatedJobRunner] Waiting for previous job application to fully conclude before next candidate...',
+              );
+              await currentPage.dismissEasyApplyModal(5000).catch(() => {});
+              await new Promise(r => setTimeout(r, 1000));
+            }
+
             const jitterMs = 1500 + Math.floor(Math.random() * 1000);
             this.notifyStatus(
               portToSend,
@@ -5016,9 +5026,9 @@ export class DedicatedJobRunner {
           step = Math.max(0, step - 1);
         }
       } else {
-        // Neither submit nor forward button found immediately - scroll to bottom and retry polling (up to 3 attempts)
+        // Neither submit nor forward button found immediately - scroll to bottom and retry polling with patience (up to 6 attempts)
         let retryActions = actions;
-        for (let btnRetry = 1; btnRetry <= 3; btnRetry++) {
+        for (let btnRetry = 1; btnRetry <= 6; btnRetry++) {
           if (typeof page.scrollModalContent === 'function') {
             await page.scrollModalContent('bottom');
           }
@@ -5027,6 +5037,36 @@ export class DedicatedJobRunner {
           if (retryActions.hasSubmit || retryActions.hasNext || retryActions.hasReview) {
             break;
           }
+        }
+
+        // If buttons are still not visible, check if blocking form validation errors exist and heal them
+        if (!retryActions.hasSubmit && !retryActions.hasNext && !retryActions.hasReview) {
+          logger.info('[DedicatedJobRunner] Action buttons delayed: Checking for blocking validation errors...');
+          await inspectAndHealFormErrors(page, '.jobs-easy-apply-modal');
+          const validationCheck = await page.validateModalFormState();
+          if (validationCheck.hasErrors && scopedLLM) {
+            for (const invF of validationCheck.invalidFieldsWithErrors || []) {
+              const healed = await solveValidationErrorWithLLM(invF, careerBrain, scopedLLM);
+              if (healed.success && healed.answer) {
+                const adapted = adaptAnswerToFieldFormat(healed.answer, invF as any);
+                const fillVal = adapted.valid ? adapted.value : healed.answer;
+                await page.fillModalFieldDirect(invF, fillVal);
+              }
+            }
+            for (const reqF of validationCheck.emptyRequiredFields || []) {
+              const autoSol = await solveQuestionAutonomousWithLLM(reqF, careerBrain, scopedLLM);
+              if (autoSol.success && autoSol.answer) {
+                const adapted = adaptAnswerToFieldFormat(autoSol.answer, reqF);
+                const fillVal = adapted.valid ? adapted.value : autoSol.answer;
+                await page.fillModalFieldDirect(reqF, fillVal);
+              }
+            }
+          }
+          if (typeof page.scrollModalContent === 'function') {
+            await page.scrollModalContent('bottom');
+            await new Promise(r => setTimeout(r, 400));
+          }
+          retryActions = await page.getModalActionButtons();
         }
 
         if (retryActions.hasSubmit) {
