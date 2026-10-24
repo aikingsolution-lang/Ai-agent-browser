@@ -14,7 +14,14 @@
  * Everything is reported only from the top frame of the website's own origins to the background,
  * which checks the sender again, verifies the session with the backend and reads premium status from
  * the backend (the payment event is only a hint to re-check; its contents are ignored).
+ *
+ * The Automation Hub's "Extract Emails" fires `startEmailExtraction`: the bridge shows the "Find HR
+ * emails" dialog and starts the extension's Auto Email run (see autoEmailDialog.ts). The website
+ * detects an installed extension through `contentScriptReady` (answer to its `checkExtension` pings)
+ * and the `data-extension-installed` attribute, as with the JobForm Automator extension.
  */
+
+import { openAutoEmailDialog, updateAutoEmailDialog, type AutoEmailStartResponse } from './autoEmailDialog';
 
 // Keep in sync with JOBFORM_WEBSITE_ORIGINS in packages/shared/lib/config.ts (the background
 // re-checks every message against that list).
@@ -24,6 +31,9 @@ export const JOBFORM_WEBSITE_MESSAGES = {
   login: 'JOBFORM_WEBSITE_LOGIN',
   logout: 'JOBFORM_WEBSITE_LOGOUT',
   paymentCompleted: 'JOBFORM_WEBSITE_PAYMENT_COMPLETED',
+  // Keep in sync with AUTO_EMAIL_WEBSITE_MESSAGES in chrome-extension/src/background/services/autoEmailWebsite.ts
+  startAutoEmail: 'JOBFORM_WEBSITE_START_AUTO_EMAIL',
+  stopAutoEmail: 'JOBFORM_WEBSITE_STOP_AUTO_EMAIL',
 } as const;
 
 /** Set by the website (localStorage) once a candidate is signed in and their profile exists. */
@@ -101,6 +111,26 @@ function send(message: Record<string, unknown>): void {
   }
 }
 
+/** Like send(), with the background's answer (null when the extension can't be reached). */
+async function ask<T>(message: Record<string, unknown>): Promise<T | null> {
+  try {
+    return ((await chrome.runtime.sendMessage(message)) as T) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** Tells the website page an extension is installed and running (its "Extension is live" check). */
+function announcePresence(): void {
+  try {
+    if (!chrome.runtime?.id) return; // context invalidated: the extension was removed or updated
+    document.documentElement.setAttribute('data-extension-installed', 'true');
+    document.dispatchEvent(new Event('contentScriptReady'));
+  } catch {
+    // Extension context invalidated
+  }
+}
+
 /**
  * The website's recruiter (HR) pages fire the same `onLogout` event for the HR sign-out, which
  * belongs to the separate HR extension and must not sign the candidate out of this one.
@@ -163,6 +193,19 @@ export function initJobformWebsiteBridge(): void {
     send({ type: JOBFORM_WEBSITE_MESSAGES.paymentCompleted });
   });
 
+  // "Extract Emails" on the Automation Hub (candidate pages only; HR pages have their own extension)
+  document.addEventListener('startEmailExtraction', () => {
+    if (isHrWebsitePath(window.location.pathname)) return;
+    openAutoEmailDialog({
+      onStart: query => ask<AutoEmailStartResponse>({ type: JOBFORM_WEBSITE_MESSAGES.startAutoEmail, query }),
+      onStop: () => send({ type: JOBFORM_WEBSITE_MESSAGES.stopAutoEmail }),
+    });
+  });
+
+  // The website pings `checkExtension` every second and expects `contentScriptReady` back
+  document.addEventListener('checkExtension', announcePresence);
+  announcePresence();
+
   // Cross-tab storage updates
   window.addEventListener('storage', () => {
     reportStoredSession('storage');
@@ -208,6 +251,12 @@ export function initJobformWebsiteBridge(): void {
         }, 2000);
         sendResponse({ success: true });
         return true;
+      }
+
+      // Auto Email progress for the run started from this tab
+      if (request?.action === 'autoEmailProgress' && request.data && typeof request.data === 'object') {
+        updateAutoEmailDialog(request.data);
+        return false;
       }
 
       return false;

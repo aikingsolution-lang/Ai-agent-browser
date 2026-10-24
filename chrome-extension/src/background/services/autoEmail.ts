@@ -1,4 +1,17 @@
+import { isJobformWebsiteOrigin, originOf } from '@extension/shared';
 import { fetchHrEmailForCompany } from './emailExtractor';
+
+const AUTOMATION_HUB_URL = 'https://www.jobformautomator.com/dashboard/automation-hub';
+
+/** A JobForm Automator Automation Hub page (www or bare domain), which ingests the results. */
+export function isAutomationHubUrl(url: string | undefined): boolean {
+  if (!url || !isJobformWebsiteOrigin(originOf(url))) return false;
+  try {
+    return new URL(url).pathname.replace(/\/+$/, '') === '/dashboard/automation-hub';
+  } catch {
+    return false;
+  }
+}
 
 export interface AutoEmailJob {
   id: string;
@@ -46,48 +59,58 @@ async function waitWithStop(ms: number): Promise<void> {
 }
 
 /**
- * Mirrors noah-master's updateEmailsForAllJobs delivery step:
- *   1. Open the JobForm Automator Automation Hub tab (production URL).
- *   2. Wait for it to reach 'complete'.
- *   3. Send the jobs via chrome.tabs.sendMessage({ action: "sendEmailsToWebsite" }).
- *   4. The content script (jobformWebsiteBridge) dispatches CustomEvent("emailsData")
- *      so the React app on the page can ingest the results.
- *
+ * Sends the jobs to an Automation Hub tab: chrome.tabs.sendMessage({ action: "sendEmailsToWebsite" }),
+ * which the content script (jobformWebsiteBridge) turns into CustomEvent("emailsData") for the page.
  * Retries up to 15 times at 1-second intervals, matching noah-master's retry logic.
  */
-function deliverResultsToAutomationHub(jobs: AutoEmailJob[]): void {
-  const hubUrl = 'https://www.jobformautomator.com/dashboard/automation-hub';
+function sendResultsToTab(tabId: number, jobs: AutoEmailJob[]): void {
+  let retries = 0;
+  const maxRetries = 15;
 
-  chrome.tabs.create({ url: hubUrl, active: true }, tab => {
+  const attemptSend = () => {
+    chrome.tabs.sendMessage(
+      tabId,
+      { action: 'sendEmailsToWebsite', data: jobs },
+      (response: { success?: boolean } | undefined) => {
+        if (chrome.runtime.lastError || !response?.success) {
+          if (retries < maxRetries) {
+            retries++;
+            setTimeout(attemptSend, 1000);
+          }
+        }
+      },
+    );
+  };
+
+  attemptSend();
+}
+
+/**
+ * Mirrors noah-master's updateEmailsForAllJobs delivery step. The results go to `preferredTabId`
+ * (the Automation Hub tab the run was started from) when it is still open on the hub; otherwise a
+ * new Automation Hub tab is opened (production URL) and they are sent once it has loaded.
+ */
+async function deliverResultsToAutomationHub(jobs: AutoEmailJob[], preferredTabId?: number): Promise<void> {
+  if (preferredTabId !== undefined) {
+    const tab = await chrome.tabs.get(preferredTabId).catch(() => null);
+    if (tab?.id !== undefined && isAutomationHubUrl(tab.url)) {
+      await chrome.tabs.update(tab.id, { active: true }).catch(() => undefined);
+      if (tab.windowId !== undefined)
+        await chrome.windows.update(tab.windowId, { focused: true }).catch(() => undefined);
+      sendResultsToTab(tab.id, jobs);
+      return;
+    }
+  }
+
+  chrome.tabs.create({ url: AUTOMATION_HUB_URL, active: true }, tab => {
     if (!tab?.id) return;
     const tabId = tab.id;
 
     const listener = (_updatedTabId: number, changeInfo: chrome.tabs.TabChangeInfo) => {
       if (_updatedTabId !== tabId || changeInfo.status !== 'complete') return;
       chrome.tabs.onUpdated.removeListener(listener);
-
-      // Brief delay then attempt with retries — matches noah-master's 1.5s initial wait
-      setTimeout(() => {
-        let retries = 0;
-        const maxRetries = 15;
-
-        const attemptSend = () => {
-          chrome.tabs.sendMessage(
-            tabId,
-            { action: 'sendEmailsToWebsite', data: jobs },
-            (response: { success?: boolean } | undefined) => {
-              if (chrome.runtime.lastError || !response?.success) {
-                if (retries < maxRetries) {
-                  retries++;
-                  setTimeout(attemptSend, 1000);
-                }
-              }
-            },
-          );
-        };
-
-        attemptSend();
-      }, 1500);
+      // Brief delay before the first attempt — matches noah-master's 1.5s initial wait
+      setTimeout(() => sendResultsToTab(tabId, jobs), 1500);
     };
 
     chrome.tabs.onUpdated.addListener(listener);
@@ -191,8 +214,13 @@ async function scrapeGoogleJobsTab(tabId: number): Promise<{ title: string; comp
  * Ported from noah-master background.js updateEmailsForAllJobs +
  * updateMissingJobEmails + fetchHREmailForCompany pipeline.
  * Adapted to NanoBrowser's port-based messaging instead of IndexedDB + localhost delivery.
+ * `resultsTabId`: the Automation Hub tab to deliver the results to (see deliverResultsToAutomationHub).
  */
-export async function runAutoEmailWorkflow(jobTitle: string, onProgress: AutoEmailProgressCallback): Promise<void> {
+export async function runAutoEmailWorkflow(
+  jobTitle: string,
+  onProgress: AutoEmailProgressCallback,
+  options: { resultsTabId?: number } = {},
+): Promise<void> {
   if (isRunning) {
     onProgress({ type: 'ERROR', message: 'Auto Email is already running. Stop the current run first.' });
     return;
@@ -212,9 +240,10 @@ export async function runAutoEmailWorkflow(jobTitle: string, onProgress: AutoEma
     try {
       jobsTabId = await openTabAndWait(searchUrl, true);
     } catch (e) {
+      console.warn('[AutoEmail] Could not open the Google Jobs tab:', e);
       onProgress({
         type: 'ERROR',
-        message: `Could not open Google Jobs tab: ${e instanceof Error ? e.message : String(e)}`,
+        message: 'Could not open Google Jobs. Check your internet connection and try again.',
       });
       return;
     }
@@ -227,7 +256,11 @@ export async function runAutoEmailWorkflow(jobTitle: string, onProgress: AutoEma
       rawJobs = await scrapeGoogleJobsTab(jobsTabId);
     } catch (e) {
       chrome.tabs.remove(jobsTabId).catch(() => {});
-      onProgress({ type: 'ERROR', message: `Scraping failed: ${e instanceof Error ? e.message : String(e)}` });
+      console.warn('[AutoEmail] Reading Google Jobs failed:', e);
+      onProgress({
+        type: 'ERROR',
+        message: 'Could not read the Google Jobs results. Check your internet connection and try again.',
+      });
       return;
     }
 
@@ -311,7 +344,7 @@ export async function runAutoEmailWorkflow(jobTitle: string, onProgress: AutoEma
     // Deliver results to JobForm Automator Automation Hub — mirrors noah-master's
     // updateEmailsForAllJobs final step (open hub tab → sendEmailsToWebsite message).
     if (jobs.length > 0) {
-      deliverResultsToAutomationHub(jobs);
+      await deliverResultsToAutomationHub(jobs, options.resultsTabId);
     }
   } finally {
     isRunning = false;

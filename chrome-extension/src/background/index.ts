@@ -47,6 +47,7 @@ import { normalizeLinkedInJobUrl } from './agent/linkedin/urlUtils';
 import type { IJobData } from './agent/linkedin/types';
 import { careerCopilotEngine, auditCareerBrain } from './agent/copilot/careerCopilotEngine';
 import { registerWebsiteSessionSync } from './services/websiteSessionSync';
+import { registerWebsiteAutoEmail } from './services/autoEmailWebsite';
 import { fetchHrEmailForCompany } from './services/emailExtractor';
 import { runAutoEmailWorkflow, stopAutoEmail, isAutoEmailRunning } from './services/autoEmail';
 
@@ -54,6 +55,7 @@ const logger = createLogger('background');
 
 // JobForm Automator website sign-in / sign-out / payment events (from the content script)
 registerWebsiteSessionSync();
+registerWebsiteAutoEmail();
 
 const browserContext = new BrowserContext({});
 queueManager.setBrowserContext(browserContext);
