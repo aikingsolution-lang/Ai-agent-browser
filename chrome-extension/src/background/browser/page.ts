@@ -2155,7 +2155,7 @@ export default class Page {
    * Clicks the Easy Apply button in the active job details pane.
    * Scoped specifically to details pane in split-view or standalone view.
    */
-  async clickEasyApplyButton(): Promise<{ success: boolean; error?: string }> {
+  async clickEasyApplyButton(): Promise<{ success: boolean; error?: string; diagnostics?: string }> {
     const clickInPage = () => {
       function isVisible(el: HTMLElement): boolean {
         if (!el) return false;
@@ -2187,17 +2187,66 @@ export default class Page {
         return false;
       }
 
-      function isEasyApplyMatch(btn: HTMLElement): boolean {
-        if (isFilterOrNav(btn) || !isVisible(btn)) return false;
+      // Verdict helper — returns match result plus rejection reason for diagnostics
+      function easyApplyVerdict(btn: HTMLElement): { ok: boolean; why: string } {
+        if (isFilterOrNav(btn)) return { ok: false, why: 'filter/nav exclusion' };
+        if (!isVisible(btn)) return { ok: false, why: 'not visible' };
         const text = (btn.innerText || btn.textContent || '').trim().toLowerCase();
         const aria = (btn.getAttribute('aria-label') || '').trim().toLowerCase();
-        return (
+        if (
           btn.classList.contains('jobs-apply-button') ||
           /\beasy\s*apply\b/i.test(text) ||
           /\beasy\s*apply\b/i.test(aria) ||
           btn.querySelector('svg[data-test-icon*="easy-apply"], .jobs-apply-button__label') !== null
-        );
+        ) {
+          return { ok: true, why: 'match' };
+        }
+        return { ok: false, why: 'no easy-apply marker' };
       }
+
+      // ---- diagnostic collection (surfaced when the click fails) ----
+      const scanLog: Array<{ phase: string; sel: string; matched: number; rejected: string[] }> = [];
+      const MAX_REJECTED_SAMPLES = 3;
+      let matchedSelector = '';
+      let matchedPhase = '';
+
+      function pushScan(phase: string, sel: string, matches: HTMLElement[]) {
+        const rejected: string[] = [];
+        for (const btn of matches) {
+          if (rejected.length >= MAX_REJECTED_SAMPLES) break;
+          const v = easyApplyVerdict(btn);
+          if (v.ok) continue;
+          const tag = btn.tagName.toLowerCase();
+          const cls = typeof btn.className === 'string' ? btn.className.trim().slice(0, 50) : '';
+          const txt = (btn.innerText || btn.textContent || '').trim().slice(0, 40);
+          rejected.push(`${tag}${cls ? '.' + cls : ''} [${v.why}]${txt ? ' "' + txt + '"' : ''}`);
+        }
+        scanLog.push({ phase, sel, matched: matches.length, rejected });
+      }
+
+      function buildDiagnostics(clickedHtml: string): string {
+        const parts: string[] = [];
+        if (matchedSelector) {
+          parts.push(`matched=${matchedPhase}.${matchedSelector}`);
+        } else {
+          parts.push('matched=NONE');
+        }
+        const interesting = scanLog.filter(e => e.rejected.length > 0 || e.matched > 0);
+        if (interesting.length > 0) {
+          parts.push(
+            'scan: ' +
+              interesting
+                .map(e => {
+                  const r = e.rejected.length ? ` rejected:[${e.rejected.join(' | ')}]` : '';
+                  return `${e.phase}.${e.sel}(m=${e.matched})${r}`;
+                })
+                .join(' ; '),
+          );
+        }
+        if (clickedHtml) parts.push(`html: ${clickedHtml}`);
+        return parts.join(' || ');
+      }
+      // ---- end diagnostics ----
 
       // Find active details container in split view or standalone
       const detailsContainer =
@@ -2230,23 +2279,38 @@ export default class Page {
       if (detailsContainer) {
         for (const sel of candidateSelectors) {
           const matches = Array.from(detailsContainer.querySelectorAll(sel)) as HTMLElement[];
+          let found: HTMLElement | null = null;
           for (const btn of matches) {
-            if (isEasyApplyMatch(btn)) {
-              easyApplyBtn = btn;
+            if (easyApplyVerdict(btn).ok) {
+              found = btn;
               break;
             }
           }
-          if (easyApplyBtn) break;
+          if (found) {
+            easyApplyBtn = found;
+            matchedSelector = sel;
+            matchedPhase = 'details';
+            break;
+          }
+          pushScan('details', sel, matches);
         }
 
         // Generic button/a search inside detailsContainer
         if (!easyApplyBtn) {
           const allBtns = Array.from(detailsContainer.querySelectorAll('button, [role="button"], a')) as HTMLElement[];
+          let found: HTMLElement | null = null;
           for (const btn of allBtns) {
-            if (isEasyApplyMatch(btn)) {
-              easyApplyBtn = btn;
+            if (easyApplyVerdict(btn).ok) {
+              found = btn;
               break;
             }
+          }
+          if (found) {
+            easyApplyBtn = found;
+            matchedSelector = 'generic (button,[role="button"],a)';
+            matchedPhase = 'details';
+          } else {
+            pushScan('details', 'generic (button,[role="button"],a)', allBtns);
           }
         }
       }
@@ -2255,24 +2319,39 @@ export default class Page {
       if (!easyApplyBtn) {
         for (const sel of candidateSelectors) {
           const matches = Array.from(document.querySelectorAll(sel)) as HTMLElement[];
+          let found: HTMLElement | null = null;
           for (const btn of matches) {
-            if (isEasyApplyMatch(btn)) {
-              easyApplyBtn = btn;
+            if (easyApplyVerdict(btn).ok) {
+              found = btn;
               break;
             }
           }
-          if (easyApplyBtn) break;
+          if (found) {
+            easyApplyBtn = found;
+            matchedSelector = sel;
+            matchedPhase = 'global';
+            break;
+          }
+          pushScan('global', sel, matches);
         }
       }
 
       // 3. Generic button/a search globally
       if (!easyApplyBtn) {
         const allBtns = Array.from(document.querySelectorAll('button, [role="button"], a')) as HTMLElement[];
+        let found: HTMLElement | null = null;
         for (const btn of allBtns) {
-          if (isEasyApplyMatch(btn)) {
-            easyApplyBtn = btn;
+          if (easyApplyVerdict(btn).ok) {
+            found = btn;
             break;
           }
+        }
+        if (found) {
+          easyApplyBtn = found;
+          matchedSelector = 'generic (button,[role="button"],a)';
+          matchedPhase = 'global';
+        } else {
+          pushScan('global', 'generic (button,[role="button"],a)', allBtns);
         }
       }
 
@@ -2286,9 +2365,14 @@ export default class Page {
         target.dispatchEvent(new PointerEvent('pointerup', opts));
         target.dispatchEvent(new MouseEvent('mouseup', opts));
         target.click();
-        return { clicked: true, reason: '' };
+        const btnHtml = target.outerHTML ? target.outerHTML.slice(0, 300) : '';
+        return { clicked: true, reason: '', diagnostics: buildDiagnostics(btnHtml) };
       }
-      return { clicked: false, reason: 'Easy Apply button not found in active job details' };
+      return {
+        clicked: false,
+        reason: 'Easy Apply button not found in active job details',
+        diagnostics: buildDiagnostics(''),
+      };
     };
 
     if (!this._puppeteerPage) {
@@ -2298,7 +2382,11 @@ export default class Page {
     if (this._puppeteerPage) {
       try {
         const clickResult = await this._puppeteerPage.evaluate(clickInPage);
-        return { success: clickResult.clicked, error: clickResult.reason };
+        return {
+          success: clickResult.clicked,
+          error: clickResult.reason,
+          diagnostics: clickResult.diagnostics,
+        };
       } catch (pErr) {
         logger.debug('[clickEasyApplyButton] Puppeteer click threw, trying chrome.scripting fallback:', pErr);
       }
@@ -2312,7 +2400,7 @@ export default class Page {
         });
         const res = results?.[0]?.result;
         if (res) {
-          return { success: Boolean(res.clicked), error: res.reason };
+          return { success: Boolean(res.clicked), error: res.reason, diagnostics: res.diagnostics };
         }
       } catch (sErr) {
         logger.debug('[clickEasyApplyButton] chrome.scripting fallback error:', sErr);
@@ -2962,6 +3050,27 @@ export default class Page {
         return cleanDuplicateText(text);
       }
 
+      // True when the container visibly shows a GENUINE validation error (not a neutral hint).
+      // Used to decide whether a radio/checkbox group is actually unanswered in LinkedIn's
+      // form state, even if a synthetic fill left the DOM input checked.
+      function hasVisibleGenuineError(container: HTMLElement): boolean {
+        const errEls = Array.from(
+          container.querySelectorAll(
+            '.artdeco-inline-feedback--error, .inline-feedback--error, [data-test-form-element-error-message], [role="alert"], p[id*="error" i], span[id*="error" i], [class*="error-message" i]',
+          ),
+        ) as HTMLElement[];
+        for (const el of errEls) {
+          const txt = (el.textContent || '').trim();
+          if (!txt || txt.length < 3) continue;
+          const st = window.getComputedStyle(el);
+          if (st.display === 'none' || st.visibility === 'hidden') continue;
+          const r = el.getBoundingClientRect();
+          if (r.width === 0 && r.height === 0) continue;
+          return true;
+        }
+        return false;
+      }
+
       const modal = findActiveModal(document);
       if (!modal) {
         return { hasErrors: false, errors: [], emptyRequiredFields: [], invalidFieldsWithErrors: [] };
@@ -3237,6 +3346,10 @@ export default class Page {
           const legend = fs.querySelector('legend, [role="heading"], label');
           const legendText = cleanElementText(legend);
           const anyChecked = radios.some(r => r.checked);
+          // A visible validation error means LinkedIn's form state is still empty even if
+          // a radio LOOKS checked in the DOM (synthetic fills desync DOM vs React state).
+          // Treat it as unanswered so the heal loop re-answers it with a trusted click.
+          const groupHasError = hasVisibleGenuineError(fs);
 
           // Check if explicitly marked optional by LinkedIn
           const isExplicitlyOptional =
@@ -3248,7 +3361,7 @@ export default class Page {
             );
 
           // In LinkedIn Easy Apply modals, radio groups are required screening questions unless explicitly marked optional
-          if (!anyChecked && !isExplicitlyOptional) {
+          if ((!anyChecked || groupHasError) && !isExplicitlyOptional) {
             const options = radios
               .map(r => {
                 const rId = r.getAttribute('id');
@@ -3268,16 +3381,19 @@ export default class Page {
               })
               .filter(Boolean);
 
-            emptyRequiredFields.push({
-              label: legendText,
-              fieldType: 'radio',
-              options,
-            });
+            if (!emptyRequiredFields.some(e => e.label === legendText && e.fieldType === 'radio')) {
+              emptyRequiredFields.push({
+                label: legendText,
+                fieldType: 'radio',
+                options,
+              });
+            }
           }
         } else if (checkboxes.length > 0) {
           const legend = fs.querySelector('legend, [role="heading"], label');
           const legendText = cleanElementText(legend);
           const anyChecked = checkboxes.some(c => c.checked);
+          const groupHasError = hasVisibleGenuineError(fs);
 
           const isExplicitlyOptional =
             /\boptional\b/i.test(legendText) ||
@@ -3287,7 +3403,7 @@ export default class Page {
               ) || fs.closest('.fb-dash-form-element--optional, [data-test-form-element-optional]'),
             );
 
-          if (!anyChecked && !isExplicitlyOptional) {
+          if ((!anyChecked || groupHasError) && !isExplicitlyOptional) {
             const options = checkboxes
               .map(c => {
                 const cId = c.getAttribute('id');
@@ -3537,7 +3653,7 @@ export default class Page {
 
         const combinedHint = (placeholder + ' ' + hintText).toLowerCase();
         const isSkillOrNumeric =
-          /how many years|experience|years|\bdays\b|\bmonths\b|whole\s*number|only\s*(?:whole\s*)?numbers|in\s*inr|in\s*lpa|ctc|decimal\s*number|larger\s*than|greater\s*than/i.test(
+          /how many years|experience|years|\bdays\b|\bmonths\b|whole\s*number|only\s*(?:whole\s*)?numbers|in\s*inr|in\s*lpa|ctc|\bsalary\b|\bcompensation\b|decimal\s*number|larger\s*than|greater\s*than/i.test(
             label + ' ' + combinedHint,
           ) ||
           input.type === 'number' ||
@@ -3992,8 +4108,12 @@ export default class Page {
             const checkboxes = Array.from(fs.querySelectorAll('input[type="checkbox"]')) as HTMLInputElement[];
             const items = radios.length > 0 ? radios : checkboxes;
             const normVal = val.toLowerCase().trim();
-            const isTargetYes = /^(yes|true|1|y|immediate|available|agree|authorized)$/i.test(normVal);
-            const isTargetNo = /^(no|false|0|n|not)$/i.test(normVal);
+            // Accept sentence-style answers ("Yes, I have worked with X", "No, not interested")
+            // by matching the leading affirmative/negative token instead of requiring an
+            // exact answer match.
+            const isTargetYes =
+              /^(?:yes|true|1|y|immediate(?:ly)?|available|agree|authorized|willing|interested)\b/i.test(normVal);
+            const isTargetNo = /^(?:no|false|0|n|not|none)\b/i.test(normVal);
 
             for (const r of items) {
               const rId = r.getAttribute('id');
@@ -4109,14 +4229,15 @@ export default class Page {
                   targetEl = document.getElementById(forId);
                 }
               }
-              if (!targetEl) targetEl = l.querySelector('input:not([type="file"]), select, textarea');
+              if (!targetEl)
+                targetEl = l.querySelector('input:not([type="file"]), select, textarea, [contenteditable="true"]');
               if (!targetEl) {
                 const parent = l.closest(
                   '.fb-dash-form-element, div[data-test-form-element], .jobs-easy-apply-form-element, .artdeco-dropdown',
                 );
                 if (parent) {
                   targetEl = parent.querySelector(
-                    'select, input:not([type="file"]), textarea, button[aria-haspopup="listbox"], button.artdeco-dropdown__trigger, [role="combobox"]',
+                    'select, input:not([type="file"]), textarea, [contenteditable="true"], button[aria-haspopup="listbox"], button.artdeco-dropdown__trigger, [role="combobox"]',
                   );
                 }
               }
@@ -4222,6 +4343,28 @@ export default class Page {
       }
 
       // Fill element
+      const isContentEditableEl =
+        targetEl.isContentEditable === true || targetEl.getAttribute('contenteditable') === 'true';
+      if (isContentEditableEl) {
+        try {
+          targetEl.focus();
+          targetEl.textContent = val;
+          targetEl.dispatchEvent(new InputEvent('input', { bubbles: true, composed: true, data: val }));
+          targetEl.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+        } catch (fillErr) {
+          console.warn('[Page] fillModalFieldDirect contenteditable fill error:', fillErr);
+          return { ok: false, targetFound: true, isTextField: true, typeaheadUnresolved: false, isButtonOption: false };
+        }
+        const readback = (targetEl.textContent || '').trim();
+        return {
+          ok: valuesMatchTolerantly(readback, val, false),
+          targetFound: true,
+          isTextField: true,
+          typeaheadUnresolved: false,
+          isButtonOption: false,
+        };
+      }
+
       if (targetEl instanceof HTMLInputElement && (targetEl.type === 'radio' || targetEl.type === 'checkbox')) {
         const clickable = targetRadioLabel || targetEl.closest('label') || targetEl.parentElement || targetEl;
 
@@ -4259,9 +4402,31 @@ export default class Page {
             isButtonOption: false,
           };
         } else {
-          // Radio button
-          clickable.click();
-          if (!targetEl.checked) {
+          // Radio button — LinkedIn's React form registers radio selection from CLICK
+          // events only. A synthetic change event (or the native checked setter) leaves
+          // the DOM looking selected while the form state stays empty — surfacing as
+          // "Yes is selected" + "This field is required". Point the fill marker at the
+          // clickable wrapper so the outer ladder can drive a REAL CDP click on it.
+          try {
+            targetEl.removeAttribute('data-qoder-fill-target');
+            clickable.setAttribute('data-qoder-fill-target', '1');
+          } catch {}
+
+          const isDesiredState = () => (targetEl as HTMLInputElement).checked;
+          if (!isDesiredState()) {
+            try {
+              clickable.click();
+            } catch {}
+            await new Promise(r => setTimeout(r, 100));
+          }
+          if (!isDesiredState()) {
+            try {
+              targetEl.click();
+            } catch {}
+            await new Promise(r => setTimeout(r, 100));
+          }
+          if (!isDesiredState()) {
+            // Last-resort DOM fallback; the trusted CDP click escalation follows outside.
             const proto = HTMLInputElement.prototype;
             const setter = Object.getOwnPropertyDescriptor(proto, 'checked')?.set;
             if (setter) {
@@ -4278,6 +4443,7 @@ export default class Page {
             isTextField: false,
             typeaheadUnresolved: false,
             isButtonOption: false,
+            isRadioOption: true,
           };
         }
       } else if (targetEl instanceof HTMLInputElement && targetEl.type === 'file') {
@@ -4289,11 +4455,30 @@ export default class Page {
         const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
 
         let finalVal = val;
+        // Salary / compensation questions are numeric even when LinkedIn renders them as
+        // plain text inputs (current Easy Apply forms do exactly this). Treat them as
+        // numeric and strip currency symbols / thousands separators: "₹12,00,000" -> "1200000".
+        const labelIsSalary =
+          /\bsalary\b|\bcompensation\b|\bctc\b|\binr\b|\blpa\b|lakhs?/i.test(ident.label || '') && /\d/.test(val);
         const isNumericField =
           targetEl instanceof HTMLInputElement &&
-          (targetEl.type === 'number' || targetEl.inputMode === 'numeric' || targetEl.inputMode === 'decimal');
+          (targetEl.type === 'number' ||
+            targetEl.inputMode === 'numeric' ||
+            targetEl.inputMode === 'decimal' ||
+            labelIsSalary);
         if (isNumericField) {
-          let numStr = String(val).replace(/,/g, '').trim();
+          let numStr = String(val)
+            .replace(/[₹$]/g, '')
+            .replace(/\b(?:rs\.?|inr)\b/gi, '')
+            .trim();
+          // Extract the first complete number, honoring Indian/Western thousands groups so
+          // "12,00,000" becomes 1200000 (not "12") and ranges keep the first amount.
+          const groupedNum = numStr.match(/\d{1,3}(?:,\d{2,3})+(?:\.\d+)?|\d+(?:\.\d+)?/);
+          if (groupedNum) {
+            numStr = groupedNum[0].replace(/,/g, '');
+          } else {
+            numStr = numStr.replace(/,/g, '');
+          }
           const minAttr = targetEl.getAttribute('min');
           const minNum = minAttr !== null ? parseFloat(minAttr) : NaN;
           const minRequiresPositive = !isNaN(minNum) && minNum > 0;
@@ -4739,6 +4924,7 @@ export default class Page {
       isTextField: boolean;
       typeaheadUnresolved: boolean;
       isButtonOption: boolean;
+      isRadioOption?: boolean;
     };
     const normalizeFillResult = (raw: unknown): FillResultShape | null => {
       if (raw && typeof raw === 'object') {
@@ -4750,11 +4936,19 @@ export default class Page {
             isTextField: Boolean(r.isTextField),
             typeaheadUnresolved: Boolean(r.typeaheadUnresolved),
             isButtonOption: Boolean(r.isButtonOption),
+            isRadioOption: Boolean(r.isRadioOption),
           };
         }
       }
       if (typeof raw === 'boolean') {
-        return { ok: raw, targetFound: raw, isTextField: false, typeaheadUnresolved: false, isButtonOption: false };
+        return {
+          ok: raw,
+          targetFound: raw,
+          isTextField: false,
+          typeaheadUnresolved: false,
+          isButtonOption: false,
+          isRadioOption: false,
+        };
       }
       return null;
     };
@@ -4860,6 +5054,50 @@ export default class Page {
         }
       } catch (escErr) {
         console.warn('[Page] fillModalFieldDirect real-click escalation failed:', escErr);
+      }
+    }
+
+    // ── ESCALATION LADDER (Level 2c): REAL CDP mouse click for radio options ──
+    // LinkedIn's React form tracks radio selection on trusted click events. A synthetic
+    // click/setter can leave the DOM checked while the form state stays empty ("Yes"
+    // selected but "This field is required"). Drive a trusted click on the option label
+    // (marked in-page) and re-verify the input afterwards.
+    if (result && result.targetFound && result.isRadioOption && this._puppeteerPage) {
+      const markerSel = '[data-qoder-fill-target]';
+      try {
+        const markerReady = await this._puppeteerPage.evaluate((sel: string) => {
+          const el = document.querySelector(sel) as HTMLElement | null;
+          if (!el) return false;
+          el.scrollIntoView({ behavior: 'instant', block: 'center' });
+          return true;
+        }, markerSel);
+        if (markerReady) {
+          await this._puppeteerPage.click(markerSel).catch(() => {});
+          await new Promise(r => setTimeout(r, 250));
+          const radioOk = await this._puppeteerPage.evaluate((sel: string) => {
+            const el = document.querySelector(sel) as HTMLElement | null;
+            if (!el) return false;
+            const direct = el.tagName === 'INPUT' ? (el as HTMLInputElement) : null;
+            if (direct && direct.type === 'radio') return direct.checked;
+            const nested = el.querySelector('input[type="radio"]') as HTMLInputElement | null;
+            if (nested) return nested.checked;
+            const labelFor = el.getAttribute('for') || (el as HTMLLabelElement).htmlFor;
+            if (labelFor) {
+              try {
+                const byId = document.getElementById(labelFor) as HTMLInputElement | null;
+                if (byId) return byId.checked;
+              } catch {}
+            }
+            const wrap = el.closest('label, li, div');
+            const near = wrap?.querySelector('input[type="radio"]') as HTMLInputElement | null;
+            return Boolean(near?.checked);
+          }, markerSel);
+          if (radioOk) {
+            result = { ...result, ok: true };
+          }
+        }
+      } catch (escErr) {
+        console.warn('[Page] fillModalFieldDirect real radio click escalation failed:', escErr);
       }
     }
 
@@ -6131,7 +6369,7 @@ export default class Page {
           const isTextArea = input.tagName.toLowerCase() === 'textarea';
           const combinedHint = (placeholder + ' ' + hintText).toLowerCase();
           const isSkillOrNumeric =
-            /how many years|experience|years|\bdays\b|\bmonths\b|whole\s*number|only\s*(?:whole\s*)?numbers|in\s*inr|in\s*lpa|ctc|decimal\s*number|larger\s*than|greater\s*than|notice\s*period|how\s*soon\s*can\s*you\s*start|availability\s*to\s*join|joining\s*time/i.test(
+            /how many years|experience|years|\bdays\b|\bmonths\b|whole\s*number|only\s*(?:whole\s*)?numbers|in\s*inr|in\s*lpa|ctc|\bsalary\b|\bcompensation\b|decimal\s*number|larger\s*than|greater\s*than|notice\s*period|how\s*soon\s*can\s*you\s*start|availability\s*to\s*join|joining\s*time/i.test(
               label + ' ' + combinedHint,
             ) ||
             input.type === 'number' ||
@@ -6175,6 +6413,49 @@ export default class Page {
             required: isRequired,
           });
         }
+      }
+
+      // 3b. Contenteditable free-text answer boxes — LinkedIn's newer form UI renders
+      // some answers as rich-text divs instead of <input>/<textarea>, which the native
+      // input query above cannot see.
+      const contentEditables = Array.from(modal.querySelectorAll('[contenteditable="true"]')) as HTMLElement[];
+      for (const ce of contentEditables) {
+        const val = (ce.textContent || '').trim();
+        if (val) continue; // already answered — preserve
+
+        const ariaLabel = cleanDuplicateString(ce.getAttribute('aria-label') || '');
+        const placeholder = cleanDuplicateString(
+          ce.getAttribute('placeholder') || ce.getAttribute('data-placeholder') || '',
+        );
+        let label = ariaLabel || placeholder;
+        let hintText = '';
+        const parent = ce.closest(
+          'div.fb-dash-form-element, div.jobs-easy-apply-form-element, div[data-test-form-element]',
+        );
+        if (!label && parent) {
+          const lbl = parent.querySelector('label, [data-test-form-element-label], [class*="label"]');
+          if (lbl) label = cleanElementText(lbl);
+        }
+        if (!label) {
+          const prev = ce.previousElementSibling as HTMLElement | null;
+          if (prev) label = cleanElementText(prev);
+        }
+        if (!label) continue; // cannot identify the question — left for the LLM fallback
+
+        const hintEl = parent?.querySelector(
+          '.fb-dash-form-element__hint, [id*="hint"], [data-test-form-element-hint]',
+        );
+        if (hintEl) hintText = cleanElementText(hintEl);
+
+        const isExplicitlyOptional = /\boptional\b/i.test(label) || /\boptional\b/i.test(hintText);
+        descriptors.push({
+          label,
+          fieldType: 'text',
+          isTextArea: true,
+          placeholder: placeholder || undefined,
+          hintText: hintText || undefined,
+          required: !isExplicitlyOptional,
+        });
       }
 
       // 4. Standalone Checkboxes
@@ -6563,6 +6844,19 @@ export default class Page {
     buttonTexts: string[];
     hasFileInput: boolean;
     hasRadios: boolean;
+    modalTag: string;
+    inputsCount: number;
+    textareasCount: number;
+    selectsCount: number;
+    fieldsetsCount: number;
+    contenteditableCount: number;
+    iframesCount: number;
+    spinnersCount: number;
+    shadowHosts: number;
+    shadowInputs: number;
+    shadowSelects: number;
+    shadowTextareas: number;
+    outerHtmlSnippet: string;
   } | null> {
     const snapInPage = () => {
       function findActiveModal(root: any): HTMLElement | null {
@@ -6610,6 +6904,36 @@ export default class Page {
       const modal = findActiveModal(document);
       if (!modal) return null;
 
+      const tag = modal.tagName.toLowerCase();
+      const cls = typeof modal.className === 'string' ? modal.className.trim().slice(0, 80) : '';
+      const modalTag = `${tag}${cls ? '.' + cls : ''}${modal.id ? '#' + modal.id : ''}`;
+
+      const countSel = (sel: string) => modal.querySelectorAll(sel).length;
+
+      // Walk nested shadow roots INSIDE the modal (depth-limited). Light-DOM
+      // queries cannot see controls living in a shadow tree; LinkedIn's newer
+      // UI may render the form inside web components.
+      let shadowHosts = 0;
+      let shadowInputs = 0;
+      let shadowSelects = 0;
+      let shadowTextareas = 0;
+      const walkShadow = (root: Document | Element | DocumentFragment, depth: number) => {
+        if (depth > 6) return;
+        const all = root.querySelectorAll ? Array.from(root.querySelectorAll('*')) : [];
+        for (let i = 0; i < all.length; i++) {
+          const el = all[i] as HTMLElement;
+          const sr = el.shadowRoot;
+          if (sr) {
+            shadowHosts++;
+            shadowInputs += sr.querySelectorAll('input:not([type="hidden"])').length;
+            shadowSelects += sr.querySelectorAll('select').length;
+            shadowTextareas += sr.querySelectorAll('textarea').length;
+            walkShadow(sr, depth + 1);
+          }
+        }
+      };
+      walkShadow(modal, 0);
+
       const titleEl = modal.querySelector('h1, h2, h3, [data-test-modal-title]');
       const title = (titleEl?.textContent || '').trim().slice(0, 120);
       const textSnippet = (modal.innerText || modal.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 200);
@@ -6620,7 +6944,28 @@ export default class Page {
       const hasFileInput = Boolean(modal.querySelector('input[type="file"]'));
       const hasRadios = Boolean(modal.querySelector('input[type="radio"]'));
 
-      return { title, textSnippet, buttonTexts, hasFileInput, hasRadios };
+      return {
+        title,
+        textSnippet,
+        buttonTexts,
+        hasFileInput,
+        hasRadios,
+        modalTag,
+        inputsCount: countSel('input:not([type="hidden"])'),
+        textareasCount: countSel('textarea'),
+        selectsCount: countSel('select'),
+        fieldsetsCount: countSel('fieldset'),
+        contenteditableCount: countSel('[contenteditable="true"]'),
+        iframesCount: countSel('iframe'),
+        spinnersCount: countSel(
+          '.artdeco-spinner, [role="progressbar"], .loader, [data-test-spinner], .fb-dash-form-element__spinner, .jobs-easy-apply-modal__loading',
+        ),
+        shadowHosts,
+        shadowInputs,
+        shadowSelects,
+        shadowTextareas,
+        outerHtmlSnippet: modal.outerHTML ? modal.outerHTML.slice(0, 300) : '',
+      };
     };
 
     if (!this._puppeteerPage) {

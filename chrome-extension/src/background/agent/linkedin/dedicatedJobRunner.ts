@@ -42,6 +42,7 @@ import {
   adaptAnswerToFieldFormat,
   solveQuestionAutonomousWithLLM,
   solveValidationErrorWithLLM,
+  analyzeModalStepWithLLM,
   matchRuleBased,
 } from './formQuestionResolver';
 import {
@@ -4326,6 +4327,8 @@ export class DedicatedJobRunner {
 
     // Poll for modal with generous timeout
     let modalRes = await currentPage.waitForEasyApplyModal(8000, 300);
+    logger.info(`[DedicatedJobRunner] waitForEasyApplyModal result:`, modalRes);
+    let retryClickRes: { success: boolean; error?: string; diagnostics?: string } | null = null;
     if (!modalRes.opened) {
       // Re-check rate limit dialog
       if (typeof currentPage.detectPlatformRateLimit === 'function') {
@@ -4354,7 +4357,8 @@ export class DedicatedJobRunner {
       logger.warning(`[DedicatedJobRunner] Modal did not open on first attempt. Retrying click...`);
       const modalSleepAborted = await this.interruptibleSleep(1200);
       if (modalSleepAborted || !this.isRunning) return { status: 'halt' };
-      await currentPage.clickEasyApplyButton();
+      retryClickRes = await currentPage.clickEasyApplyButton();
+      logger.info(`[DedicatedJobRunner] clickEasyApplyButton retry (after modal miss):`, retryClickRes);
       modalRes = await currentPage.waitForEasyApplyModal(8000, 300);
     }
 
@@ -4455,8 +4459,21 @@ export class DedicatedJobRunner {
       }
     } else {
       if (stats) stats.failed++;
-      const failReason = modalRes.error || clickRes.error || 'Easy Apply modal failed to open within timeout';
-      this.notifyStatus(portToSend, `⚠️ Could not open Easy Apply for "${displayTitle}".`, 'fail');
+      const lastClickDiag = retryClickRes?.diagnostics || clickRes?.diagnostics;
+      const failReason = [
+        modalRes.error || clickRes.error || 'Easy Apply modal failed to open within timeout',
+        lastClickDiag,
+      ]
+        .filter(Boolean)
+        .join(' | ');
+      logger.error(
+        `[DedicatedJobRunner] Easy Apply modal failed for "${displayTitle}". Click diagnostics: ${lastClickDiag || 'none collected'}`,
+      );
+      this.notifyStatus(
+        portToSend,
+        `⚠️ Could not open Easy Apply for "${displayTitle}".${lastClickDiag ? ' ' + lastClickDiag.slice(0, 240) : ''}`,
+        'fail',
+      );
 
       await backendApiClient.refundCredits(jobRunId).catch(() => {});
       await currentPage.dismissEasyApplyModal(3000).catch(() => {});
@@ -4497,6 +4514,14 @@ export class DedicatedJobRunner {
     let careerBrain = await careerBrainStore.getCareerBrain();
     careerBrain = await this.enrichMissingCareerBrainFromPlatform(page, careerBrain);
     const scopedLLM = await getJobScopedLLM(jobRunId);
+
+    // Central answer-format adapter: LLM/rule answers must be normalized to the field's
+    // expected format (digits for numeric/salary questions, exact options for radios)
+    // before they reach the DOM — LinkedIn rejects formatted strings with "Invalid input".
+    const fillAnswerWithFormat = async (field: FormFieldDescriptor, answer: string): Promise<boolean> => {
+      const adapted = adaptAnswerToFieldFormat(answer, field);
+      return page.fillModalFieldDirect(field, adapted.valid ? adapted.value : answer);
+    };
 
     const onAuditLog = (
       category: 'MATCHED' | 'GENERATED' | 'ASKED',
@@ -4740,7 +4765,7 @@ export class DedicatedJobRunner {
                 );
                 const autoSol = await solveQuestionAutonomousWithLLM(singleField, careerBrain, scopedLLM);
                 if (autoSol.success && autoSol.answer) {
-                  await page.fillModalFieldDirect(singleField, autoSol.answer);
+                  await fillAnswerWithFormat(singleField, autoSol.answer);
                 }
               }
             } catch (err: any) {
@@ -4751,7 +4776,7 @@ export class DedicatedJobRunner {
               if (scopedLLM) {
                 const autoSol = await solveQuestionAutonomousWithLLM(singleField, careerBrain, scopedLLM);
                 if (autoSol.success && autoSol.answer) {
-                  await page.fillModalFieldDirect(singleField, autoSol.answer);
+                  await fillAnswerWithFormat(singleField, autoSol.answer);
                 }
               }
             }
@@ -4804,7 +4829,7 @@ export class DedicatedJobRunner {
                   try {
                     const autoSol = await solveQuestionAutonomousWithLLM(f, careerBrain, scopedLLM);
                     if (autoSol.success && autoSol.answer) {
-                      const fillSuccess = await page.fillModalFieldDirect(f, autoSol.answer);
+                      const fillSuccess = await fillAnswerWithFormat(f, autoSol.answer);
                       onAuditLog(
                         'GENERATED',
                         f.label,
@@ -4983,7 +5008,7 @@ export class DedicatedJobRunner {
                 if (scopedLLM) {
                   const autoSol = await solveQuestionAutonomousWithLLM(singleReq, careerBrain, scopedLLM);
                   if (autoSol.success && autoSol.answer) {
-                    await page.fillModalFieldDirect(singleReq, autoSol.answer);
+                    await fillAnswerWithFormat(singleReq, autoSol.answer);
                   }
                 }
               }
@@ -5028,7 +5053,7 @@ export class DedicatedJobRunner {
                     try {
                       const autoSol = await solveQuestionAutonomousWithLLM(f, careerBrain, scopedLLM);
                       if (autoSol.success && autoSol.answer) {
-                        const fillSuccess = await page.fillModalFieldDirect(f, autoSol.answer);
+                        const fillSuccess = await fillAnswerWithFormat(f, autoSol.answer);
                         onAuditLog(
                           'GENERATED',
                           f.label,
@@ -5232,9 +5257,77 @@ export class DedicatedJobRunner {
         // No interactive inputs found on this step - modal may be on a non-question
         // page (resume selection/upload, review, etc.) which is handled via action buttons below.
         fieldsZeroStreak++;
-        logger.info(
-          `[DedicatedJobRunner] Step ${step}: No form fields discovered (fields-zero streak ${fieldsZeroStreak}).`,
+        const zeroSnap = await page.captureModalSnapshot().catch(() => null);
+        logger.warning(
+          `[DedicatedJobRunner] Step ${step}: No form fields discovered (fields-zero streak ${fieldsZeroStreak}). Modal inventory: ${JSON.stringify(zeroSnap)}`,
         );
+        if (zeroSnap) {
+          const compact = [
+            `modal=${zeroSnap.modalTag || '?'}`,
+            `inputs=${zeroSnap.inputsCount} selects=${zeroSnap.selectsCount} fieldsets=${zeroSnap.fieldsetsCount}`,
+            `iframes=${zeroSnap.iframesCount} spinners=${zeroSnap.spinnersCount} shadowHosts=${zeroSnap.shadowHosts} shadowInputs=${zeroSnap.shadowInputs}`,
+          ].join(' | ');
+          this.notifyStatus(portToSend, `🧐 Step ${step}: zero form fields found. ${compact}`, 'info');
+        }
+
+        // LLM modal-step brain: when the DOM extractor sees nothing, let the LLM
+        // read the rendered modal and decide the actual next action. Limited to the
+        // first 2 zero-field steps to keep token cost bounded.
+        if (zeroSnap && fieldsZeroStreak <= 2) {
+          try {
+            const analysis = await analyzeModalStepWithLLM(
+              {
+                title: zeroSnap.title,
+                textSnippet: zeroSnap.textSnippet,
+                buttonTexts: zeroSnap.buttonTexts,
+                inputsCount: zeroSnap.inputsCount,
+                selectsCount: zeroSnap.selectsCount,
+                fieldsetsCount: zeroSnap.fieldsetsCount,
+                contenteditableCount: zeroSnap.contenteditableCount,
+                iframesCount: zeroSnap.iframesCount,
+                spinnersCount: zeroSnap.spinnersCount,
+                shadowHosts: zeroSnap.shadowHosts,
+                shadowInputs: zeroSnap.shadowInputs,
+                outerHtmlSnippet: zeroSnap.outerHtmlSnippet,
+              },
+              careerBrain,
+              scopedLLM,
+            );
+            if (analysis) {
+              this.notifyStatus(
+                portToSend,
+                `🤖 LLM step analysis: ${analysis.action}${analysis.reason ? ' — ' + analysis.reason : ''}`,
+                'info',
+              );
+              if (analysis.action === 'FILL' && analysis.fields && analysis.fields.length > 0) {
+                for (const f of analysis.fields) {
+                  const fillOk = await page.fillModalFieldDirect({ label: f.label }, f.answer);
+                  logger.info(
+                    `[DedicatedJobRunner] LLM-guided fill "${f.label}" = "${f.answer}": ${fillOk ? 'OK' : 'FAILED'}`,
+                  );
+                }
+                await new Promise(r => setTimeout(r, 400));
+              } else if (analysis.action === 'SUBMIT') {
+                const subRes = await page.submitApplication();
+                if (subRes.clicked) {
+                  const confirmRes = await page.verifySubmissionConfirmation(8000);
+                  if (confirmRes.confirmed) {
+                    submitted = true;
+                    break;
+                  }
+                }
+              } else if (analysis.action === 'SKIP') {
+                return {
+                  success: false,
+                  reason: analysis.reason || 'LLM determined this step cannot be handled',
+                };
+              }
+              // ADVANCE: fall through to the normal action-button flow below
+            }
+          } catch (llmErr) {
+            logger.warning(`[DedicatedJobRunner] LLM modal-step analysis error:`, llmErr);
+          }
+        }
       }
 
       // Step par information bharne / verify karne ke baad, container ko scroll karke
@@ -5594,10 +5687,18 @@ export class DedicatedJobRunner {
           `[DedicatedJobRunner] Form stuck (stuckStreak=${stuckStreak}, fieldsZeroStreak=${fieldsZeroStreak}). Snapshot: ${JSON.stringify(
             {
               title: snap?.title,
+              modalTag: snap?.modalTag,
               buttons: snap?.buttonTexts,
               hasFileInput: snap?.hasFileInput,
               hasRadios: snap?.hasRadios,
+              inputsCount: snap?.inputsCount,
+              selectsCount: snap?.selectsCount,
+              iframesCount: snap?.iframesCount,
+              spinnersCount: snap?.spinnersCount,
+              shadowHosts: snap?.shadowHosts,
+              shadowInputs: snap?.shadowInputs,
               snippet: snap?.textSnippet,
+              html: snap?.outerHtmlSnippet,
             },
           )}`,
         );

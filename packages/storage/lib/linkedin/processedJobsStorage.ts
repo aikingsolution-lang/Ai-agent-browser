@@ -28,6 +28,13 @@ export interface ProcessedJobsData {
    * deterministic failure (e.g. validation loop on a broken form).
    */
   failedJobs: Record<string, { reason?: string; timestamp: number }>;
+  /**
+   * Negative-cache schema version. Bump when a shipped fix changes failure
+   * behavior (e.g. Easy Apply click / form-discovery fixes) so stale entries
+   * recorded by older builds are invalidated instead of blocking re-tests for
+   * the full 24h TTL.
+   */
+  failedJobsCacheVersion?: number;
 }
 
 /**
@@ -36,6 +43,13 @@ export interface ProcessedJobsData {
  * enough that a recruiter-side fix or profile update is honored the next day.
  */
 export const FAILED_JOB_TTL_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Bump whenever a code change invalidates previously recorded failure reasons
+ * (UI-mismatch fixes, click fixes, form-discovery fixes). Entries written by a
+ * build with a different version are discarded on next read.
+ */
+export const NEGATIVE_CACHE_SCHEMA_VERSION = 1;
 
 const DEFAULT_PROCESSED_JOBS: ProcessedJobsData = {
   appliedJobIds: [],
@@ -50,11 +64,17 @@ const storage = createStorage<ProcessedJobsData>('linkedin_processed_jobs', DEFA
 });
 
 function pruneExpiredFailedJobs(data: ProcessedJobsData, now = Date.now()): ProcessedJobsData {
-  const entries = Object.entries(data.failedJobs || {});
+  let next: ProcessedJobsData = data;
+  // Invalidate stale negative-cache entries written by older builds (pre-fix
+  // failure reasons no longer describe current behavior).
+  if ((data.failedJobsCacheVersion ?? 0) !== NEGATIVE_CACHE_SCHEMA_VERSION) {
+    next = { ...data, failedJobs: {}, failedJobsCacheVersion: NEGATIVE_CACHE_SCHEMA_VERSION };
+  }
+  const entries = Object.entries(next.failedJobs || {});
   const kept = entries.filter(([, v]) => now - (v?.timestamp || 0) < FAILED_JOB_TTL_MS);
-  if (kept.length === entries.length) return data;
+  if (kept.length === entries.length) return next;
   return {
-    ...data,
+    ...next,
     failedJobs: Object.fromEntries(kept),
   };
 }
@@ -132,6 +152,7 @@ export const processedJobsStore: ProcessedJobsStorageType = {
       skippedJobIds: Array.from(skippedSet),
       records: updatedRecords,
       failedJobs,
+      failedJobsCacheVersion: NEGATIVE_CACHE_SCHEMA_VERSION,
     };
 
     await storage.set(updatedData);

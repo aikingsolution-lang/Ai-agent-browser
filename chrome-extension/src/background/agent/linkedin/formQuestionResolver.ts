@@ -1051,6 +1051,24 @@ export function adaptAnswerToFieldFormat(
       }
     }
 
+    // Range / formatted answers (e.g. "₹6,00,000 - ₹12,00,000", "6-12 LPA", "Rs. 12,00,000 p.a."):
+    // take the FIRST amount only — never concatenate digits from a range.
+    if (inrVal === null) {
+      const groupedMatch = answer.match(/(\d{1,3}(?:,\d{2,3})+|\d+(?:\.\d+)?)/);
+      if (groupedMatch) {
+        const parsed = parseFloat(groupedMatch[1].replace(/,/g, ''));
+        if (!isNaN(parsed) && parsed > 0) {
+          if (parsed <= 100) {
+            lpaVal = parsed;
+            inrVal = Math.round(parsed * 100000);
+          } else {
+            inrVal = Math.round(parsed);
+            lpaVal = parsed / 100000;
+          }
+        }
+      }
+    }
+
     if (inrVal !== null && lpaVal !== null) {
       if (expectsLPA) {
         const valStr = String(lpaVal);
@@ -1070,6 +1088,17 @@ export function adaptAnswerToFieldFormat(
           sourceNote: valStr !== answer ? `[MATCHED] CTC '${answer}' -> ${valStr} INR` : undefined,
         };
       }
+      // Default (e.g. "What is your current compensation?" with no unit hint): LinkedIn's
+      // salary/compensation inputs are numeric — always emit digits-only INR. Sending a
+      // formatted answer ("₹12,00,000", "12 LPA" as text) triggers "Invalid input".
+      const defaultVal = String(inrVal);
+      return {
+        valid: true,
+        value: defaultVal,
+        wasConverted: defaultVal !== answer,
+        sourceNote:
+          defaultVal !== answer ? `[MATCHED] CTC '${answer}' -> ${defaultVal} INR (digits default)` : undefined,
+      };
     }
 
     // If numeric field but could not parse number (e.g. "Confidential", "Market standard")
@@ -2839,6 +2868,122 @@ OUTPUT STRICTLY VALID JSON ONLY:
   }
 
   return { success: false, reason: 'LLM failed to produce valid answer' };
+}
+
+export interface ModalStepAnalysisField {
+  label: string;
+  fieldType: 'text' | 'number' | 'radio' | 'dropdown' | 'checkbox';
+  answer: string;
+  options?: string[];
+}
+
+export interface ModalStepAnalysis {
+  action: 'ADVANCE' | 'FILL' | 'SUBMIT' | 'SKIP';
+  fields?: ModalStepAnalysisField[];
+  reason?: string;
+}
+
+/**
+ * LLM "modal-step brain": when the DOM field extractor finds ZERO fillable fields
+ * on a step, the rendered modal data is sent to the LLM to decide what the step
+ * really is (pre-filled contact step, review page, unseen field markup, or an
+ * unhandleable step) and return the next action plus any fields it can answer.
+ */
+export async function analyzeModalStepWithLLM(
+  modalData: {
+    title?: string;
+    textSnippet?: string;
+    buttonTexts?: string[];
+    inputsCount?: number;
+    selectsCount?: number;
+    fieldsetsCount?: number;
+    contenteditableCount?: number;
+    iframesCount?: number;
+    spinnersCount?: number;
+    shadowHosts?: number;
+    shadowInputs?: number;
+    outerHtmlSnippet?: string;
+  },
+  careerBrain: ICareerBrain,
+  llm?: BaseChatModel,
+): Promise<ModalStepAnalysis | null> {
+  let activeLLM = llm;
+  if (!activeLLM) {
+    try {
+      activeLLM = (await getActiveChatModel()) ?? undefined;
+    } catch (err) {
+      logger.warning('[FormQuestionResolver] Failed to get active chat model for modal analysis:', err);
+    }
+  }
+  if (!activeLLM) return null;
+
+  const prompt = `You are the vision brain of a LinkedIn Easy Apply autofill extension.
+The DOM field extractor found ZERO fillable fields on the current step of the application form.
+Your job: read the modal data below, decide what this step really is, and output the next action.
+
+MODAL DATA (JSON):
+${JSON.stringify(modalData)}
+
+CANDIDATE (for filling any fields you identify):
+- Full Name: ${careerBrain.fullName || 'Candidate'}
+- Years of experience: ${careerBrain.yearsOfExperience ?? 1}
+- Current Location: ${careerBrain.currentLocation || 'Bengaluru, India'}
+- Notice Period: ${careerBrain.noticePeriod || 'Immediate / 15-30 days'}
+- Work Authorization: ${careerBrain.workAuthorization || 'Legally authorized to work, does not require sponsorship'}
+- Gender: ${careerBrain.gender || 'Prefer not to say'}
+
+DECISION RULES:
+- ADVANCE: the step is pre-filled (contact info etc.) or needs no input — the existing Next/Review click flow should continue. Use ADVANCE when buttonTexts contain Next/Review/Continue.
+- SUBMIT: this is the final review step — buttonTexts contain Submit. Use SUBMIT.
+- FILL: you can identify unanswered questions from the text snippet or HTML and answer them truthfully from the candidate profile. List each field with label, fieldType (text/number/radio/dropdown/checkbox), and the exact answer string. For option fields also provide options when visible.
+- SKIP: the step cannot be handled (e.g. requires a file upload, a captcha, or an unknown question type). Provide the reason.
+
+OUTPUT STRICTLY VALID JSON ONLY:
+{"action":"ADVANCE|FILL|SUBMIT|SKIP","fields":[{"label":"...","fieldType":"text","answer":"..."}],"reason":"one line explanation"}`;
+
+  try {
+    const res = await activeLLM.invoke([
+      new SystemMessage('You are a professional autonomous job application assistant. Output valid JSON only.'),
+      new HumanMessage(prompt),
+    ]);
+
+    const content = typeof res.content === 'string' ? res.content : JSON.stringify(res.content);
+    const clean = content.replace(/```json\s*|```\s*/gi, '').trim();
+    const match = clean.match(/\{[\s\S]*\}/);
+    if (match) {
+      const parsed = JSON.parse(match[0]);
+      const action = String(parsed.action || '').toUpperCase();
+      if (['ADVANCE', 'FILL', 'SUBMIT', 'SKIP'].includes(action)) {
+        const validFieldTypes = ['text', 'number', 'radio', 'dropdown', 'checkbox'];
+        const fields = Array.isArray(parsed.fields)
+          ? (parsed.fields as Array<Record<string, unknown>>)
+              .filter(f => f && f.label && f.answer)
+              .map(f => {
+                const ft = String(f.fieldType || 'text');
+                return {
+                  label: String(f.label),
+                  fieldType: (validFieldTypes.includes(ft) ? ft : 'text') as ModalStepAnalysisField['fieldType'],
+                  answer: String(f.answer),
+                  options: Array.isArray(f.options) ? f.options.map(String) : undefined,
+                };
+              })
+          : undefined;
+        return {
+          action: action as ModalStepAnalysis['action'],
+          fields,
+          reason: parsed.reason ? String(parsed.reason) : undefined,
+        };
+      }
+    }
+  } catch (err) {
+    if (isNetworkError(err)) {
+      recordLlmNetworkFailure(err);
+    } else {
+      logger.warning('[FormQuestionResolver] Error in analyzeModalStepWithLLM:', err);
+    }
+  }
+
+  return null;
 }
 
 /**
