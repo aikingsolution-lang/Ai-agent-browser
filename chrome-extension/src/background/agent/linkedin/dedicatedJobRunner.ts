@@ -1962,11 +1962,17 @@ export class DedicatedJobRunner {
         logger.debug('[DedicatedJobRunner] Could not inspect active runner tab URL:', err);
       }
 
-      // 5. In-Page Split-Pane Auto Apply Engine across prioritized locations (until BATCH_CAP is satisfied)
+      // 5. Read Left-Hand Job List Pane across prioritized locations (until BATCH_CAP is satisfied)
+      const queue: Array<{
+        jobId: string;
+        title: string;
+        company: string;
+        url: string;
+        searchPageUrl: string;
+        searchRole: string;
+      }> = [];
       const seenJobIds = new Set<string>();
       let totalLinkedInScanned = 0;
-      let totalCandidateAttempted = 0;
-      let quotaHalted = false;
 
       const navigateLinkedInTab = async (url: string) => {
         try {
@@ -2007,154 +2013,35 @@ export class DedicatedJobRunner {
         }
       };
 
-      const processPageCards = async (
-        cards: Array<{ jobId: string; title: string; company: string; url: string }>,
-        searchPageUrl: string,
-        targetRole: string,
-      ): Promise<boolean> => {
-        const eligibleOnPage: Array<{ jobId: string; title: string; company: string; url: string }> = [];
-        for (const card of cards) {
-          if (seenJobIds.has(card.jobId)) continue;
-          seenJobIds.add(card.jobId);
-
-          const proc = await processedJobsStore.isJobProcessed(card.jobId);
-          if (proc.isProcessed && proc.status === 'applied') {
-            recordSkip(stats, 'already applied previously');
-            this.notifyActivity(portToSend, onLiveActivity, {
-              jobId: card.jobId,
-              url: card.url,
-              title: card.title,
-              company: card.company,
-              status: 'skipped',
-              reason: 'Already applied previously',
-              creditsUsed: 0,
-            });
-            continue;
-          }
-
-          // 1-day negative cache: jobs that FAILED recently are skipped without
-          // re-burning credits on the same deterministic failure. They become
-          // eligible again automatically after the TTL (24h).
-          const recentFail = await processedJobsStore.isJobRecentlyFailed(card.jobId);
-          if (recentFail.recentlyFailed) {
-            recordSkip(stats, 'negative cache (failed within 24h)');
-            this.notifyStatus(
-              portToSend,
-              `⏳ Skipped "${card.title}": failed recently (${recentFail.reason || 'application error'}). Retry available tomorrow.`,
-              'info',
-            );
-            this.notifyActivity(portToSend, onLiveActivity, {
-              jobId: card.jobId,
-              url: card.url,
-              title: card.title,
-              company: card.company,
-              status: 'skipped',
-              reason: 'Failed recently (retry available tomorrow)',
-              creditsUsed: 0,
-            });
-            continue;
-          }
-          eligibleOnPage.push(card);
-        }
-
-        if (eligibleOnPage.length > 0) {
-          this.notifyStatus(
-            portToSend,
-            `📋 Discovered ${eligibleOnPage.length} new eligible job card${eligibleOnPage.length > 1 ? 's' : ''} in search list. Processing in Split-Pane...`,
-            'info',
-          );
-        }
-
-        for (let i = 0; i < eligibleOnPage.length; i++) {
-          if (stats.applied >= BATCH_CAP || !this.isRunning) break;
-          const job = eligibleOnPage[i];
-          totalCandidateAttempted++;
-
-          const res = await this.applySingleLinkedInJobInSplitPane(
-            currentPage,
-            job,
-            searchPageUrl,
-            targetRole,
-            candidateNameSources,
-            config,
-            careerBrain,
-            runId,
-            portToSend,
-            onLiveActivity,
-            stats,
-            totalCandidateAttempted,
-            BATCH_CAP,
-          );
-
-          if (res.status === 'halt') {
-            quotaHalted = true;
-            return false;
-          }
-
-          if (res.usedDirectFallback && i + 1 < eligibleOnPage.length && this.isRunning && stats.applied < BATCH_CAP) {
-            logger.info(`[DedicatedJobRunner] Restoring split-pane search page ${searchPageUrl} for next card...`);
-            await navigateLinkedInTab(searchPageUrl);
-            await currentPage.waitForDomSettlement?.(
-              '.jobs-search-results-list, .scaffold-layout__list, [data-view-name="job-card"]',
-              { maxWaitMs: 3500, quietPeriodMs: 200 },
-            );
-          }
-
-          if (this.isRunning && stats.applied < BATCH_CAP) {
-            // Strict sequential completion: Ensure previous application modal is fully completed/closed before picking next job
-            const isModalStillOpen = await currentPage.isEasyApplyModalOpen();
-            if (isModalStillOpen) {
-              logger.info(
-                '[DedicatedJobRunner] Waiting for previous job application to fully conclude before next candidate...',
-              );
-              await currentPage.dismissEasyApplyModal(5000).catch(() => {});
-              await new Promise(r => setTimeout(r, 1000));
-            }
-
-            const jitterMs = 1500 + Math.floor(Math.random() * 1000);
-            this.notifyStatus(
-              portToSend,
-              `⏳ Pacing safety delay (${Math.round(jitterMs / 100) / 10}s) before next candidate job...`,
-              'info',
-            );
-            const paceAborted = await this.interruptibleSleep(jitterMs);
-            if (paceAborted || !this.isRunning) return false;
-          }
-        }
-        return true;
-      };
-
       for (let locIdx = 0; locIdx < prioritizedLocations.length; locIdx++) {
-        if (stats.applied >= BATCH_CAP || !this.isRunning || quotaHalted) break;
+        if (queue.length >= BATCH_CAP || !this.isRunning) break;
 
         const currentLoc = prioritizedLocations[locIdx];
         const locRank = locIdx + 1;
 
-        for (let pageIdx = 0; pageIdx < 3 && stats.applied < BATCH_CAP; pageIdx++) {
-          if (!this.isRunning || quotaHalted) break;
+        // Scan up to 3 pages per location (start=0, start=25, start=50) to satisfy BATCH_CAP
+        for (let pageIdx = 0; pageIdx < 3 && queue.length < BATCH_CAP; pageIdx++) {
+          if (!this.isRunning) break;
 
           const pageOffset = pageIdx * 25;
           const searchPageUrl = linkedinAdapter.buildSearchUrl(role, currentLoc, candidateNameSources, pageOffset);
-
-          if (pageIdx > 0 || locIdx > 0) {
+          if (locIdx > 0 || pageIdx > 0) {
             if (pageIdx > 0) {
               this.notifyStatus(
                 portToSend,
-                `📄 [LinkedIn] [${currentLoc}] Checking page ${pageIdx + 1} (${stats.applied}/${BATCH_CAP} applied so far)...`,
+                `📄 [LinkedIn] [${currentLoc}] Checking page ${pageIdx + 1} (${queue.length}/${BATCH_CAP} jobs gathered so far)...`,
                 'info',
               );
             } else {
               this.notifyStatus(
                 portToSend,
-                `📍 [LinkedIn] Checking Location #${locRank}: "${currentLoc}" (${stats.applied}/${BATCH_CAP} applied so far)...`,
+                `📍 [LinkedIn] Location #${locRank - 1} yielded ${queue.length}/${BATCH_CAP} jobs. Checking Location #${locRank}: "${currentLoc}"...`,
                 'info',
               );
             }
-
             await navigateLinkedInTab(searchPageUrl);
-            const sleepAborted = await this.interruptibleSleep(2500);
+            const sleepAborted = await this.interruptibleSleep(3000);
             if (sleepAborted || !this.isRunning) break;
-
             if (typeof currentPage.waitForDomSettlement === 'function') {
               await currentPage.waitForDomSettlement(
                 '.jobs-search-results-list, .scaffold-layout__list, [data-view-name="job-card"]',
@@ -2181,65 +2068,207 @@ export class DedicatedJobRunner {
           }
 
           totalLinkedInScanned += jobCards.length;
-          if (jobCards.length === 0) break;
 
-          const keepGoing = await processPageCards(jobCards, searchPageUrl, role);
-          if (!keepGoing || stats.applied >= BATCH_CAP) break;
+          if (jobCards.length > 0) {
+            this.notifyStatus(
+              portToSend,
+              `📋 Found ${jobCards.length} job cards on LinkedIn for "${currentLoc}"${pageIdx > 0 ? ` (page ${pageIdx + 1})` : ''}. Checking previous applications...`,
+              'info',
+            );
+          }
+
+          for (const card of jobCards) {
+            if (seenJobIds.has(card.jobId)) continue;
+            seenJobIds.add(card.jobId);
+
+            const proc = await processedJobsStore.isJobProcessed(card.jobId);
+            if (proc.isProcessed && proc.status === 'applied') {
+              recordSkip(stats, 'already applied previously');
+              this.notifyActivity(portToSend, onLiveActivity, {
+                jobId: card.jobId,
+                url: card.url,
+                title: card.title,
+                company: card.company,
+                status: 'skipped',
+                reason: 'Already applied previously',
+                creditsUsed: 0,
+              });
+              continue;
+            }
+
+            // 1-day negative cache: jobs that FAILED recently are skipped without
+            // re-burning credits on the same deterministic failure. They become
+            // eligible again automatically after the TTL (24h).
+            const recentFail = await processedJobsStore.isJobRecentlyFailed(card.jobId);
+            if (recentFail.recentlyFailed) {
+              recordSkip(stats, 'negative cache (failed within 24h)');
+              this.notifyStatus(
+                portToSend,
+                `⏳ Skipped "${card.title}": failed recently (${recentFail.reason || 'application error'}). Retry available tomorrow.`,
+                'info',
+              );
+              this.notifyActivity(portToSend, onLiveActivity, {
+                jobId: card.jobId,
+                url: card.url,
+                title: card.title,
+                company: card.company,
+                status: 'skipped',
+                reason: 'Failed recently (retry available tomorrow)',
+                creditsUsed: 0,
+              });
+              continue;
+            }
+            queue.push({ ...card, searchPageUrl, searchRole: role });
+            if (queue.length >= BATCH_CAP) break;
+          }
+
+          // If no cards were found on this page at all, stop paginating this location
+          if (jobCards.length === 0) break;
+        }
+
+        if (queue.length >= BATCH_CAP) {
+          this.notifyStatus(
+            portToSend,
+            `🎯 [LinkedIn] Batch cap of ${BATCH_CAP} jobs reached with Location #${locRank} (${currentLoc}). Stopping location search.`,
+            'ok',
+          );
+          break;
         }
       }
 
-      // Fallback search trigger: If fewer than 3 genuine Easy Apply jobs were applied,
+      // Fallback search trigger: If fewer than 3 genuine Easy Apply jobs were found,
       // fallback to candidate's other predefined target roles from profile
-      if (!quotaHalted && stats.applied < 3 && stats.applied < BATCH_CAP && this.isRunning) {
-        const candidateAlternateRoles = (careerBrain.predefinedRoles || [])
-          .map(r => (r || '').trim())
-          .filter(r => r && r.toLowerCase() !== role.toLowerCase());
+      const candidateAlternateRoles = (careerBrain.predefinedRoles || [])
+        .map(r => (r || '').trim())
+        .filter(r => r && r.toLowerCase() !== role.toLowerCase());
 
-        for (const altRole of candidateAlternateRoles) {
-          if (stats.applied >= BATCH_CAP || !this.isRunning || quotaHalted) break;
-          const cleanAltRole = sanitizeRoleSearchQuery(altRole, candidateNameSources, 'Software Engineer');
-          if (!cleanAltRole || cleanAltRole.toLowerCase() === role.toLowerCase()) continue;
+      for (const altRole of candidateAlternateRoles) {
+        if (queue.length >= BATCH_CAP || !this.isRunning) break;
+        const cleanAltRole = sanitizeRoleSearchQuery(altRole, candidateNameSources, 'Software Engineer');
+        if (!cleanAltRole || cleanAltRole.toLowerCase() === role.toLowerCase()) continue;
 
-          this.notifyStatus(
-            portToSend,
-            `🔍 Checking alternate role from profile: "${cleanAltRole}" (${stats.applied}/${BATCH_CAP} applied so far)...`,
-            'info',
-          );
+        this.notifyStatus(
+          portToSend,
+          `🔍 Checking alternate role from profile: "${cleanAltRole}" (${queue.length}/${BATCH_CAP} jobs gathered so far)...`,
+          'info',
+        );
 
-          for (let locIdx = 0; locIdx < prioritizedLocations.length && stats.applied < BATCH_CAP; locIdx++) {
-            if (!this.isRunning || quotaHalted) break;
-            const currentLoc = prioritizedLocations[locIdx];
-            const altSearchUrl = linkedinAdapter.buildSearchUrl(cleanAltRole, currentLoc, candidateNameSources);
-
-            await navigateLinkedInTab(altSearchUrl);
-            const sleepAborted = await this.interruptibleSleep(2500);
-            if (sleepAborted || !this.isRunning) break;
-
-            if (typeof currentPage.waitForDomSettlement === 'function') {
-              await currentPage.waitForDomSettlement(
-                '.jobs-search-results-list, .scaffold-layout__list, [data-view-name="job-card"]',
-                { maxWaitMs: 4000, quietPeriodMs: 200 },
-              );
-            }
-
-            const altJobCards = await currentPage.readJobListFromSearchPane(4);
-            totalLinkedInScanned += altJobCards.length;
-            if (altJobCards.length === 0) continue;
-
-            const keepGoing = await processPageCards(altJobCards, altSearchUrl, cleanAltRole);
-            if (!keepGoing || stats.applied >= BATCH_CAP) break;
+        for (let locIdx = 0; locIdx < prioritizedLocations.length && queue.length < BATCH_CAP; locIdx++) {
+          if (!this.isRunning) break;
+          const currentLoc = prioritizedLocations[locIdx];
+          const altSearchUrl = linkedinAdapter.buildSearchUrl(cleanAltRole, currentLoc, candidateNameSources);
+          await navigateLinkedInTab(altSearchUrl);
+          const sleepAborted = await this.interruptibleSleep(3000);
+          if (sleepAborted || !this.isRunning) break;
+          if (typeof currentPage.waitForDomSettlement === 'function') {
+            await currentPage.waitForDomSettlement(
+              '.jobs-search-results-list, .scaffold-layout__list, [data-view-name="job-card"]',
+              { maxWaitMs: 4000, quietPeriodMs: 200 },
+            );
           }
+
+          const altJobCards = await currentPage.readJobListFromSearchPane(4);
+          for (const card of altJobCards) {
+            if (seenJobIds.has(card.jobId)) continue;
+            seenJobIds.add(card.jobId);
+
+            const proc = await processedJobsStore.isJobProcessed(card.jobId);
+            if (proc.isProcessed && proc.status === 'applied') {
+              recordSkip(stats, 'already applied previously');
+              continue;
+            }
+            const recentFail = await processedJobsStore.isJobRecentlyFailed(card.jobId);
+            if (recentFail.recentlyFailed) {
+              recordSkip(stats, 'negative cache (failed within 24h)');
+              continue;
+            }
+            queue.push({ ...card, searchPageUrl: altSearchUrl, searchRole: cleanAltRole });
+            if (queue.length >= BATCH_CAP) break;
+          }
+          if (queue.length >= BATCH_CAP) break;
         }
       }
 
       stats.totalFound = totalLinkedInScanned;
 
-      if (totalLinkedInScanned === 0 && stats.applied === 0 && stats.skipped === 0 && stats.failed === 0) {
+      if (queue.length === 0) {
         const noJobsMsg =
           'No jobs found across target locations. Please check your role/location criteria or search filters.';
         this.notifyStatus(portToSend, `⚠️ ${noJobsMsg}`, 'fail');
         this.cleanupRun(noJobsMsg, stats);
         return { status: 'error', message: noJobsMsg, stats };
+      }
+
+      this.notifyStatus(
+        portToSend,
+        `🎯 Queued ${queue.length} eligible jobs for this run (capped at max ${BATCH_CAP}).`,
+        'info',
+      );
+
+      // 6. Loop Through Each Job in Queue (restored Oct-18 proven two-phase flow; per-job
+      // logic lives in applySingleLinkedInJobInSplitPane so all later fixes — arbitration,
+      // stuck-step guard, 24h negative cache, fill verification — remain in effect)
+      for (let i = 0; i < queue.length; i++) {
+        if (!this.isRunning) {
+          logger.info('[DedicatedJobRunner] Autonomous loop halted (user stopped).');
+          break;
+        }
+
+        const job = queue[i];
+        const res = await this.applySingleLinkedInJobInSplitPane(
+          currentPage,
+          { jobId: job.jobId, title: job.title, company: job.company, url: job.url },
+          job.searchPageUrl,
+          job.searchRole,
+          candidateNameSources,
+          config,
+          careerBrain,
+          runId,
+          portToSend,
+          onLiveActivity,
+          stats,
+          i + 1,
+          BATCH_CAP,
+        );
+
+        if (res.status === 'halt') {
+          // Quota or credit budget exhausted — stop processing the rest of the queue.
+          break;
+        }
+
+        // Restore the search page if the job was applied via direct URL navigation, so the
+        // next queued card is clickable in the left pane again.
+        if (res.usedDirectFallback && i + 1 < queue.length && this.isRunning && stats.applied < BATCH_CAP) {
+          logger.info(`[DedicatedJobRunner] Restoring search page ${job.searchPageUrl} for next queued job...`);
+          await navigateLinkedInTab(job.searchPageUrl);
+          await currentPage.waitForDomSettlement?.(
+            '.jobs-search-results-list, .scaffold-layout__list, [data-view-name="job-card"]',
+            { maxWaitMs: 3500, quietPeriodMs: 200 },
+          );
+        }
+
+        // Inter-job pacing & anti-bot safety jitter (natural human cadence without sluggish lag)
+        if (this.isRunning && i + 1 < queue.length) {
+          // Strict sequential completion: ensure the previous application modal is fully
+          // closed before picking the next job (prevents overlap between jobs).
+          const isModalStillOpen = await currentPage.isEasyApplyModalOpen();
+          if (isModalStillOpen) {
+            logger.info(
+              '[DedicatedJobRunner] Waiting for previous job application to fully conclude before next candidate...',
+            );
+            await currentPage.dismissEasyApplyModal(5000).catch(() => {});
+            await new Promise(r => setTimeout(r, 1000));
+          }
+
+          const jitterMs = 1500 + Math.floor(Math.random() * 1000); // 1.5s - 2.5s natural human cadence
+          this.notifyStatus(
+            portToSend,
+            `⏳ Pacing safety delay (${Math.round(jitterMs / 100) / 10}s) before next candidate job...`,
+            'info',
+          );
+          const jitterAborted = await this.interruptibleSleep(jitterMs);
+          if (jitterAborted || !this.isRunning) break;
+        }
       }
 
       // 6. Final Summary
