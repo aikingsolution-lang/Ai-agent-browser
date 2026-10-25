@@ -4663,7 +4663,16 @@ export class DedicatedJobRunner {
       }
 
       // 2. Discover interactive form fields on current step
-      const fields = await page.discoverModalFormFields();
+      let fields = await page.discoverModalFormFields();
+      if (fields.length === 0) {
+        // LinkedIn re-renders the step body just after the Next/Review transition.
+        // Re-scan once so a transient mid-render DOM isn't mistaken for an empty step.
+        await new Promise(r => setTimeout(r, 450));
+        fields = await page.discoverModalFormFields();
+        if (fields.length > 0) {
+          logger.info(`[DedicatedJobRunner] Step ${step}: form fields appeared on re-scan (${fields.length} found).`);
+        }
+      }
       if (fields.length > 0) {
         fieldsZeroStreak = 0;
         this.notifyStatus(
@@ -5244,6 +5253,17 @@ export class DedicatedJobRunner {
             `iframes=${zeroSnap.iframesCount} spinners=${zeroSnap.spinnersCount} shadowHosts=${zeroSnap.shadowHosts} shadowInputs=${zeroSnap.shadowInputs}`,
           ].join(' | ');
           this.notifyStatus(portToSend, `🧐 Step ${step}: zero form fields found. ${compact}`, 'info');
+        } else if (fieldsZeroStreak === 1) {
+          // The modal was reported open by waitForEasyApplyModal but every helper
+          // (discovery/snapshot/action buttons) failed to locate its container.
+          logger.error(
+            `[DedicatedJobRunner] Step ${step}: Easy Apply modal is open but its container was not found in the DOM.`,
+          );
+          this.notifyStatus(
+            portToSend,
+            `⚠️ Step ${step}: Easy Apply modal is open but its form container was not found in the DOM. Retrying...`,
+            'info',
+          );
         }
 
         // LLM modal-step brain: when the DOM extractor sees nothing, let the LLM

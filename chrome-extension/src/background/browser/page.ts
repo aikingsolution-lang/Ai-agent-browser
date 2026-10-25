@@ -2812,7 +2812,9 @@ export default class Page {
         // 2. Check dialog text if present (skip the LinkedIn footer language panel)
         const dialogs = root.querySelectorAll
           ? (Array.from(
-              root.querySelectorAll('div[role="dialog"], .artdeco-modal, .jobs-easy-apply-modal'),
+              root.querySelectorAll(
+                'div[role="dialog"], dialog[open], [aria-modal="true"], .artdeco-modal, .jobs-easy-apply-modal',
+              ),
             ) as HTMLElement[])
           : [];
         for (const dialog of dialogs) {
@@ -2906,7 +2908,7 @@ export default class Page {
         const candidates = root.querySelectorAll
           ? (Array.from(
               root.querySelectorAll(
-                '.jobs-easy-apply-modal, [data-test-modal-id="easy-apply-modal"], [data-easy-apply-modal], div.artdeco-modal[role="dialog"], div.artdeco-modal, div[role="dialog"][aria-modal="true"], div[role="dialog"], [data-test-modal]',
+                '.jobs-easy-apply-modal, [data-test-modal-id="easy-apply-modal"], [data-easy-apply-modal], div.artdeco-modal[role="dialog"], div.artdeco-modal, div[role="dialog"][aria-modal="true"], div[role="dialog"], [data-test-modal], dialog[open], [aria-modal="true"]',
               ),
             ) as HTMLElement[])
           : [];
@@ -2953,8 +2955,17 @@ export default class Page {
             c.querySelector(
               'button.artdeco-button--primary, button[data-easy-apply-next-button], button[aria-label*="next" i], button[aria-label*="submit" i], button[aria-label*="review" i], button[aria-label*="continue" i]',
             ) !== null;
+          // Mirror waitForEasyApplyModal's acceptance rule: a visible dialog that has
+          // form controls AND a navigation button is the Easy Apply modal even when
+          // its heading text is unusual or missing.
+          const hasFormControls =
+            c.querySelector('input:not([type="hidden"]), textarea, select, [contenteditable="true"]') !== null;
+          const hasNavButton =
+            c.querySelector(
+              'button[data-easy-apply-next-button], button[aria-label*="next" i], button[aria-label*="review" i], button[aria-label*="submit" i], button[aria-label*="continue" i]',
+            ) !== null;
 
-          if (hasApplyTitle || hasPrimaryBtn) {
+          if (hasApplyTitle || hasPrimaryBtn || (hasFormControls && hasNavButton)) {
             return c;
           }
         }
@@ -4112,7 +4123,7 @@ export default class Page {
         const candidates = root.querySelectorAll
           ? (Array.from(
               root.querySelectorAll(
-                '.jobs-easy-apply-modal, [data-test-modal-id="easy-apply-modal"], [data-easy-apply-modal], div.artdeco-modal[role="dialog"], div.artdeco-modal, div[role="dialog"][aria-modal="true"], div[role="dialog"], [data-test-modal]',
+                '.jobs-easy-apply-modal, [data-test-modal-id="easy-apply-modal"], [data-easy-apply-modal], div.artdeco-modal[role="dialog"], div.artdeco-modal, div[role="dialog"][aria-modal="true"], div[role="dialog"], [data-test-modal], dialog[open], [aria-modal="true"]',
               ),
             ) as HTMLElement[])
           : [];
@@ -4159,8 +4170,17 @@ export default class Page {
             c.querySelector(
               'button.artdeco-button--primary, button[data-easy-apply-next-button], button[aria-label*="next" i], button[aria-label*="submit" i], button[aria-label*="review" i], button[aria-label*="continue" i]',
             ) !== null;
+          // Mirror waitForEasyApplyModal's acceptance rule: a visible dialog that has
+          // form controls AND a navigation button is the Easy Apply modal even when
+          // its heading text is unusual or missing.
+          const hasFormControls =
+            c.querySelector('input:not([type="hidden"]), textarea, select, [contenteditable="true"]') !== null;
+          const hasNavButton =
+            c.querySelector(
+              'button[data-easy-apply-next-button], button[aria-label*="next" i], button[aria-label*="review" i], button[aria-label*="submit" i], button[aria-label*="continue" i]',
+            ) !== null;
 
-          if (hasApplyTitle || hasPrimaryBtn) {
+          if (hasApplyTitle || hasPrimaryBtn || (hasFormControls && hasNavButton)) {
             return c;
           }
         }
@@ -6046,10 +6066,21 @@ export default class Page {
       // 1. Easy Apply modal itself still open -> close it ONLY via its own dismiss button.
       //    Never click "Discard" while the form is open: LinkedIn's save-dialog Discard
       //    destroys the candidate's filled draft.
-      const eaModal = document.querySelector(
-        'div.jobs-easy-apply-modal, [data-test-modal-id="easy-apply-modal"], [data-easy-apply-modal]',
-      ) as HTMLElement | null;
-      if (eaModal && isVisible(eaModal)) {
+      const modalCandidates = Array.from(
+        document.querySelectorAll(
+          'div.jobs-easy-apply-modal, [data-test-modal-id="easy-apply-modal"], [data-easy-apply-modal], dialog[open], [aria-modal="true"]',
+        ),
+      ) as HTMLElement[];
+      const eaModal =
+        modalCandidates.find(
+          m =>
+            isVisible(m) &&
+            (m.classList.contains('jobs-easy-apply-modal') ||
+              m.hasAttribute('data-easy-apply-modal') ||
+              m.getAttribute('data-test-modal-id') === 'easy-apply-modal' ||
+              /easy apply|apply to |submit application|contact info|resume/i.test((m.textContent || '').slice(0, 400))),
+        ) || null;
+      if (eaModal) {
         const closeBtn = eaModal.querySelector<HTMLButtonElement>(
           'button[aria-label*="Dismiss" i], button[aria-label*="Close" i], button[data-test-modal-close-btn]',
         );
@@ -6140,7 +6171,7 @@ export default class Page {
         const candidates = root.querySelectorAll
           ? (Array.from(
               root.querySelectorAll(
-                '.jobs-easy-apply-modal, [data-test-modal-id="easy-apply-modal"], [data-easy-apply-modal], div.artdeco-modal[role="dialog"], div.artdeco-modal, div[role="dialog"][aria-modal="true"], div[role="dialog"], [data-test-modal]',
+                '.jobs-easy-apply-modal, [data-test-modal-id="easy-apply-modal"], [data-easy-apply-modal], div.artdeco-modal[role="dialog"], div.artdeco-modal, div[role="dialog"][aria-modal="true"], div[role="dialog"], [data-test-modal], dialog[open], [aria-modal="true"]',
               ),
             ) as HTMLElement[])
           : [];
@@ -6187,8 +6218,17 @@ export default class Page {
             c.querySelector(
               'button.artdeco-button--primary, button[data-easy-apply-next-button], button[aria-label*="next" i], button[aria-label*="submit" i], button[aria-label*="review" i], button[aria-label*="continue" i]',
             ) !== null;
+          // Mirror waitForEasyApplyModal's acceptance rule: a visible dialog that has
+          // form controls AND a navigation button is the Easy Apply modal even when
+          // its heading text is unusual or missing.
+          const hasFormControls =
+            c.querySelector('input:not([type="hidden"]), textarea, select, [contenteditable="true"]') !== null;
+          const hasNavButton =
+            c.querySelector(
+              'button[data-easy-apply-next-button], button[aria-label*="next" i], button[aria-label*="review" i], button[aria-label*="submit" i], button[aria-label*="continue" i]',
+            ) !== null;
 
-          if (hasApplyTitle || hasPrimaryBtn) {
+          if (hasApplyTitle || hasPrimaryBtn || (hasFormControls && hasNavButton)) {
             return c;
           }
         }
@@ -6843,7 +6883,7 @@ export default class Page {
         const candidates = root.querySelectorAll
           ? (Array.from(
               root.querySelectorAll(
-                'div.jobs-easy-apply-modal, [data-easy-apply-modal], [data-test-modal-id="easy-apply-modal"], div[data-test-modal], div.artdeco-modal, div[role="dialog"]',
+                'div.jobs-easy-apply-modal, [data-easy-apply-modal], [data-test-modal-id="easy-apply-modal"], div[data-test-modal], div.artdeco-modal, div[role="dialog"], dialog[open], [aria-modal="true"]',
               ),
             ) as HTMLElement[])
           : [];
@@ -6881,16 +6921,17 @@ export default class Page {
         return null;
       }
 
-      const modal =
-        findActiveModal(document) ||
+      // Never fall back to document.body here: when no Easy Apply modal is present
+      // this would scan/click unrelated page controls (e.g. job-search pagination).
+      const modal = (findActiveModal(document) ||
         (Array.from(
           document.querySelectorAll(
-            '.jobs-easy-apply-modal, [data-easy-apply-modal], [data-test-modal-id="easy-apply-modal"], div.artdeco-modal, div[role="dialog"]',
+            '.jobs-easy-apply-modal, [data-easy-apply-modal], [data-test-modal-id="easy-apply-modal"], div.artdeco-modal, div[role="dialog"], dialog[open], [aria-modal="true"]',
           ),
         ).find(
           el => !(el as HTMLElement).closest('footer, #footer, .artdeco-footer, [data-view-name="footer"]'),
-        ) as HTMLElement | null) ||
-        document.body;
+        ) as HTMLElement | null)) as HTMLElement | null;
+      if (!modal) return { hasNext: false, hasReview: false, hasSubmit: false };
 
       // Auto-scroll modal content to bottom so bottom questions & action buttons are in view
       const contentEl = (modal || document).querySelector(
@@ -6904,7 +6945,7 @@ export default class Page {
       const buttons = Array.from(modal.querySelectorAll('button, [role="button"]')) as HTMLElement[];
       const primaryBtns = Array.from(
         document.querySelectorAll(
-          '.jobs-easy-apply-modal__footer button, .artdeco-modal__actionbar button, button.artdeco-button--primary, button[data-easy-apply-next-button]',
+          '.jobs-easy-apply-modal__footer button, .artdeco-modal__actionbar button, button[data-easy-apply-next-button]',
         ),
       ) as HTMLElement[];
       for (const pb of primaryBtns) {
@@ -7033,7 +7074,7 @@ export default class Page {
         const candidates = root.querySelectorAll
           ? (Array.from(
               root.querySelectorAll(
-                'div.jobs-easy-apply-modal, [data-easy-apply-modal], [data-test-modal-id="easy-apply-modal"], div[data-test-modal], div.artdeco-modal, div[role="dialog"]',
+                'div.jobs-easy-apply-modal, [data-easy-apply-modal], [data-test-modal-id="easy-apply-modal"], div[data-test-modal], div.artdeco-modal, div[role="dialog"], dialog[open], [aria-modal="true"]',
               ),
             ) as HTMLElement[])
           : [];
@@ -7158,7 +7199,7 @@ export default class Page {
         const candidates = root.querySelectorAll
           ? (Array.from(
               root.querySelectorAll(
-                'div.jobs-easy-apply-modal, [data-easy-apply-modal], [data-test-modal-id="easy-apply-modal"], div[data-test-modal], div.artdeco-modal, div[role="dialog"]',
+                'div.jobs-easy-apply-modal, [data-easy-apply-modal], [data-test-modal-id="easy-apply-modal"], div[data-test-modal], div.artdeco-modal, div[role="dialog"], dialog[open], [aria-modal="true"]',
               ),
             ) as HTMLElement[])
           : [];
@@ -7230,8 +7271,12 @@ export default class Page {
       walkShadow(modal, 0);
 
       const titleEl = modal.querySelector('h1, h2, h3, [data-test-modal-title]');
-      const title = (titleEl?.textContent || '').trim().slice(0, 120);
       const textSnippet = (modal.innerText || modal.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 200);
+      // Native <dialog> / aria-modal containers may carry no heading; fall back to
+      // aria-label or the first visible line so diagnostics never say "unknown page".
+      const title =
+        (titleEl?.textContent || modal.getAttribute('aria-label') || '').trim().slice(0, 120) ||
+        textSnippet.slice(0, 80);
       const buttonTexts = (Array.from(modal.querySelectorAll('button, [role="button"]')) as HTMLElement[])
         .map(b => (b.textContent || b.getAttribute('aria-label') || '').trim().slice(0, 40))
         .filter(t => t.length > 0)
@@ -7297,7 +7342,7 @@ export default class Page {
         const candidates = root.querySelectorAll
           ? (Array.from(
               root.querySelectorAll(
-                '.jobs-easy-apply-modal, [data-test-modal-id="easy-apply-modal"], [data-easy-apply-modal], div.artdeco-modal[role="dialog"], div.artdeco-modal, div[role="dialog"][aria-modal="true"], div[role="dialog"], [data-test-modal]',
+                '.jobs-easy-apply-modal, [data-test-modal-id="easy-apply-modal"], [data-easy-apply-modal], div.artdeco-modal[role="dialog"], div.artdeco-modal, div[role="dialog"][aria-modal="true"], div[role="dialog"], [data-test-modal], dialog[open], [aria-modal="true"]',
               ),
             ) as HTMLElement[])
           : [];
@@ -7416,7 +7461,7 @@ export default class Page {
         const candidates = root.querySelectorAll
           ? (Array.from(
               root.querySelectorAll(
-                'div.jobs-easy-apply-modal, [data-easy-apply-modal], [data-test-modal-id="easy-apply-modal"], div[data-test-modal], div.artdeco-modal, div[role="dialog"]',
+                'div.jobs-easy-apply-modal, [data-easy-apply-modal], [data-test-modal-id="easy-apply-modal"], div[data-test-modal], div.artdeco-modal, div[role="dialog"], dialog[open], [aria-modal="true"]',
               ),
             ) as HTMLElement[])
           : [];
@@ -7454,16 +7499,17 @@ export default class Page {
         return null;
       }
 
-      const modal =
-        findActiveModal(document) ||
+      // Never fall back to document.body here: when no Easy Apply modal is present
+      // this would scan/click unrelated page controls (e.g. job-search pagination).
+      const modal = (findActiveModal(document) ||
         (Array.from(
           document.querySelectorAll(
-            '.jobs-easy-apply-modal, [data-easy-apply-modal], [data-test-modal-id="easy-apply-modal"], div.artdeco-modal, div[role="dialog"]',
+            '.jobs-easy-apply-modal, [data-easy-apply-modal], [data-test-modal-id="easy-apply-modal"], div.artdeco-modal, div[role="dialog"], dialog[open], [aria-modal="true"]',
           ),
         ).find(
           el => !(el as HTMLElement).closest('footer, #footer, .artdeco-footer, [data-view-name="footer"]'),
-        ) as HTMLElement | null) ||
-        document.body;
+        ) as HTMLElement | null)) as HTMLElement | null;
+      if (!modal) return { clicked: false };
 
       // Auto-scroll modal content to bottom so bottom questions & consent checkboxes are in view
       const contentEl = (modal || document).querySelector(
@@ -7507,7 +7553,7 @@ export default class Page {
       const buttons = Array.from(modal.querySelectorAll('button, [role="button"]')) as HTMLElement[];
       const primaryBtns = Array.from(
         document.querySelectorAll(
-          '.jobs-easy-apply-modal__footer button, .artdeco-modal__actionbar button, button.artdeco-button--primary, button[data-easy-apply-next-button]',
+          '.jobs-easy-apply-modal__footer button, .artdeco-modal__actionbar button, button[data-easy-apply-next-button]',
         ),
       ) as HTMLElement[];
       for (const pb of primaryBtns) {
@@ -7647,7 +7693,7 @@ export default class Page {
         const candidates = root.querySelectorAll
           ? (Array.from(
               root.querySelectorAll(
-                'div.jobs-easy-apply-modal, [data-easy-apply-modal], [data-test-modal-id="easy-apply-modal"], div[data-test-modal], div.artdeco-modal, div[role="dialog"]',
+                'div.jobs-easy-apply-modal, [data-easy-apply-modal], [data-test-modal-id="easy-apply-modal"], div[data-test-modal], div.artdeco-modal, div[role="dialog"], dialog[open], [aria-modal="true"]',
               ),
             ) as HTMLElement[])
           : [];
@@ -7685,16 +7731,17 @@ export default class Page {
         return null;
       }
 
-      const modal =
-        findActiveModal(document) ||
+      // Never fall back to document.body here: when no Easy Apply modal is present
+      // this would scan/click unrelated page controls (e.g. job-search pagination).
+      const modal = (findActiveModal(document) ||
         (Array.from(
           document.querySelectorAll(
-            '.jobs-easy-apply-modal, [data-easy-apply-modal], [data-test-modal-id="easy-apply-modal"], div.artdeco-modal, div[role="dialog"]',
+            '.jobs-easy-apply-modal, [data-easy-apply-modal], [data-test-modal-id="easy-apply-modal"], div.artdeco-modal, div[role="dialog"], dialog[open], [aria-modal="true"]',
           ),
         ).find(
           el => !(el as HTMLElement).closest('footer, #footer, .artdeco-footer, [data-view-name="footer"]'),
-        ) as HTMLElement | null) ||
-        document.body;
+        ) as HTMLElement | null)) as HTMLElement | null;
+      if (!modal) return { clicked: false, error: 'Easy Apply modal not found in DOM' };
 
       // 1. Scroll content to bottom to ensure review screen is fully loaded
       const scrollable = (modal || document).querySelector(
@@ -7722,9 +7769,7 @@ export default class Page {
 
       const buttons = Array.from(modal.querySelectorAll('button, [role="button"]')) as HTMLElement[];
       const primaryBtns = Array.from(
-        document.querySelectorAll(
-          '.jobs-easy-apply-modal__footer button, .artdeco-modal__actionbar button, button.artdeco-button--primary',
-        ),
+        document.querySelectorAll('.jobs-easy-apply-modal__footer button, .artdeco-modal__actionbar button'),
       ) as HTMLElement[];
       for (const pb of primaryBtns) {
         if (pb.closest('footer, #footer, .artdeco-footer, [data-view-name="footer"]')) continue;
@@ -7968,7 +8013,7 @@ export default class Page {
    * instant near-zero latency on high-end hardware (i9, gigabit).
    */
   async waitForDomSettlement(
-    targetSelector = 'div.jobs-easy-apply-modal, div[data-test-modal], div.artdeco-modal, div[role="dialog"]',
+    targetSelector = 'div.jobs-easy-apply-modal, div[data-test-modal], div.artdeco-modal, div[role="dialog"], dialog[open], [aria-modal="true"]',
     options: {
       maxWaitMs?: number;
       quietPeriodMs?: number;
@@ -8105,7 +8150,7 @@ export default class Page {
         const candidates = root.querySelectorAll
           ? (Array.from(
               root.querySelectorAll(
-                '.jobs-easy-apply-modal, [data-test-modal-id="easy-apply-modal"], [data-easy-apply-modal], div.artdeco-modal[role="dialog"], div.artdeco-modal, div[role="dialog"][aria-modal="true"], div[role="dialog"], [data-test-modal]',
+                '.jobs-easy-apply-modal, [data-test-modal-id="easy-apply-modal"], [data-easy-apply-modal], div.artdeco-modal[role="dialog"], div.artdeco-modal, div[role="dialog"][aria-modal="true"], div[role="dialog"], [data-test-modal], dialog[open], [aria-modal="true"]',
               ),
             ) as HTMLElement[])
           : [];
@@ -8144,8 +8189,17 @@ export default class Page {
             c.querySelector(
               'button.artdeco-button--primary, button[data-easy-apply-next-button], button[aria-label*="next" i], button[aria-label*="submit" i], button[aria-label*="review" i], button[aria-label*="continue" i]',
             ) !== null;
+          // Mirror waitForEasyApplyModal's acceptance rule: a visible dialog that has
+          // form controls AND a navigation button is the Easy Apply modal even when
+          // its heading text is unusual or missing.
+          const hasFormControls =
+            c.querySelector('input:not([type="hidden"]), textarea, select, [contenteditable="true"]') !== null;
+          const hasNavButton =
+            c.querySelector(
+              'button[data-easy-apply-next-button], button[aria-label*="next" i], button[aria-label*="review" i], button[aria-label*="submit" i], button[aria-label*="continue" i]',
+            ) !== null;
 
-          if (hasApplyTitle || hasPrimaryBtn) {
+          if (hasApplyTitle || hasPrimaryBtn || (hasFormControls && hasNavButton)) {
             return c;
           }
         }
