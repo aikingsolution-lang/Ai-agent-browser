@@ -4630,7 +4630,34 @@ export class DedicatedJobRunner {
       step++;
       this.notifyStatus(portToSend, `📄 Reviewing Step ${step} of the application...`, 'info');
 
-      // 0. Check for security checkpoint or OTP challenge during modal filling
+      // 0. A leftover "Save this application?" prompt (from an earlier dismiss or a
+      //    rejected Next) shadows the real form and contains no fillable controls.
+      //    Resolve it by clicking Save — never Discard — so the draft survives.
+      if (typeof page.resolveDraftSaveDialog === 'function') {
+        try {
+          const draftSave = await page.resolveDraftSaveDialog(2500);
+          if (draftSave.found) {
+            this.notifyStatus(
+              portToSend,
+              '💾 Leftover "Save this application?" prompt found — saving the draft (never discarding).',
+              'info',
+            );
+            await new Promise(r => setTimeout(r, 700));
+            const formStillOpen = await page.isEasyApplyModalOpen().catch(() => true);
+            if (!formStillOpen) {
+              return {
+                success: false,
+                reason:
+                  'Draft saved: LinkedIn closed the application form after a leftover "Save this application?" prompt. Draft preserved for later.',
+              };
+            }
+          }
+        } catch (draftErr) {
+          logger.warning('[DedicatedJobRunner] Failed to resolve leftover save dialog:', draftErr);
+        }
+      }
+
+      // 0b. Check for security checkpoint or OTP challenge during modal filling
       if (typeof page.detectSecurityCheckpoint === 'function') {
         const stepCheckpoint = await page.detectSecurityCheckpoint().catch(() => ({ isCheckpoint: false }));
         if (stepCheckpoint.isCheckpoint) {

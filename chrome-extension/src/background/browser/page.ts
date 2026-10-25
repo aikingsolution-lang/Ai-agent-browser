@@ -2116,6 +2116,10 @@ export default class Page {
           if (d.closest('footer, #footer, .artdeco-footer, [data-view-name="footer"]')) continue;
           const txt = (d.innerText || d.textContent || '').trim().toLowerCase();
           if (txt.includes('select language') && (txt.includes('privacy') || txt.includes('help center'))) continue;
+          // A native "Save this application?" / "Discard draft?" confirmation is not the
+          // Easy Apply form. Counting it as "modal open" made the runner believe the form
+          // was still alive while the real step was gone.
+          if (/save this application|save application|discard draft/i.test(txt)) continue;
           return true;
         }
         const all = root.querySelectorAll ? root.querySelectorAll('*') : [];
@@ -2951,6 +2955,8 @@ export default class Page {
           if (text.includes('select language') && (text.includes('privacy') || text.includes('help center'))) {
             continue;
           }
+          // A native "Save this application?" / "Discard draft?" sheet is not the form.
+          if (/save this application|save application|discard draft/i.test(text)) continue;
           const style = window.getComputedStyle(c);
           if (style.display === 'none' || style.visibility === 'hidden') continue;
           const rect = c.getBoundingClientRect();
@@ -4166,6 +4172,8 @@ export default class Page {
           if (text.includes('select language') && (text.includes('privacy') || text.includes('help center'))) {
             continue;
           }
+          // A native "Save this application?" / "Discard draft?" sheet is not the form.
+          if (/save this application|save application|discard draft/i.test(text)) continue;
           const style = window.getComputedStyle(c);
           if (style.display === 'none' || style.visibility === 'hidden') continue;
           const rect = c.getBoundingClientRect();
@@ -6068,6 +6076,93 @@ export default class Page {
   }
 
   /**
+   * Resolves a leftover LinkedIn "Save this application?" dialog.
+   * Clicks "Save" (never "Discard") so the candidate's filled draft is preserved.
+   * Returns whether such a dialog was found and whether it is gone afterwards.
+   */
+  async resolveDraftSaveDialog(maxWaitMs = 4000): Promise<{ found: boolean; resolved: boolean }> {
+    const resolveInPage = () => {
+      function isVisible(el: HTMLElement): boolean {
+        if (!el || !el.isConnected) return false;
+        const style = window.getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden') return false;
+        return parseFloat(style.opacity || '1') > 0.05;
+      }
+
+      function findDraftSaveDialog(): HTMLElement | null {
+        const dialogs = document.querySelectorAll
+          ? (Array.from(
+              document.querySelectorAll('div[role="dialog"], div.artdeco-modal, dialog[open], [aria-modal="true"]'),
+            ) as HTMLElement[])
+          : [];
+        for (const d of dialogs) {
+          if (!isVisible(d)) continue;
+          const text = (d.innerText || d.textContent || '').trim();
+          if (!/save this application|save application|discard draft/i.test(text)) continue;
+          // The application form itself is never the confirmation sheet.
+          if (/contact info|home address|review your application|work experience/i.test(text)) continue;
+          return d;
+        }
+        return null;
+      }
+
+      const dialog = findDraftSaveDialog();
+      if (!dialog) return { found: false, handled: false };
+
+      const buttons = Array.from(dialog.querySelectorAll('button')) as HTMLElement[];
+      const saveBtn = buttons.find(b => {
+        const t = (b.textContent || '').trim();
+        return /^save$/i.test(t) || (/save/i.test(t) && !/discard|saved|save to/i.test(t));
+      });
+      if (saveBtn) {
+        saveBtn.click();
+        return { found: true, handled: true };
+      }
+      // Fall back to the dialog's own dismiss X — still never "Discard".
+      const closeBtn = dialog.querySelector<HTMLButtonElement>(
+        'button[aria-label*="Dismiss" i], button[aria-label*="Close" i], button[data-test-modal-close-btn], .artdeco-modal__dismiss',
+      );
+      if (closeBtn) {
+        closeBtn.click();
+        return { found: true, handled: true };
+      }
+      return { found: true, handled: false };
+    };
+
+    let found = false;
+    const startTime = Date.now();
+    while (Date.now() - startTime < maxWaitMs) {
+      let status: { found?: boolean; handled?: boolean } | null = null;
+
+      if (!this._puppeteerPage) {
+        await this.attachPuppeteer().catch(() => false);
+      }
+
+      if (this._puppeteerPage) {
+        try {
+          status = await this._puppeteerPage.evaluate(resolveInPage);
+        } catch {}
+      } else if (this._tabId && typeof chrome !== 'undefined' && chrome.scripting?.executeScript) {
+        try {
+          const results = await chrome.scripting.executeScript({
+            target: { tabId: this._tabId },
+            func: resolveInPage,
+          });
+          status = results?.[0]?.result ?? null;
+        } catch {}
+      }
+
+      if (!status) break;
+      if (!status.found) return { found, resolved: true };
+      found = true;
+      if (!status.handled) break;
+      await new Promise(r => setTimeout(r, 300));
+    }
+
+    return { found, resolved: false };
+  }
+
+  /**
    * Dismisses the active Easy Apply modal cleanly.
    * Preserves any in-progress draft: if LinkedIn shows a "Save this application?"
    * dialog after closing, this clicks "Save" (or the dialog X) — never "Discard",
@@ -6082,7 +6177,47 @@ export default class Page {
         return parseFloat(style.opacity || '1') > 0.05;
       }
 
-      // 1. Easy Apply modal itself still open -> close it ONLY via its own dismiss button.
+      function findDraftSaveDialog(): HTMLElement | null {
+        const dialogs = document.querySelectorAll
+          ? (Array.from(
+              document.querySelectorAll('div[role="dialog"], div.artdeco-modal, dialog[open], [aria-modal="true"]'),
+            ) as HTMLElement[])
+          : [];
+        for (const d of dialogs) {
+          if (!isVisible(d)) continue;
+          const text = (d.innerText || d.textContent || '').trim();
+          if (!/save this application|save application|discard draft/i.test(text)) continue;
+          if (/contact info|home address|review your application|work experience/i.test(text)) continue;
+          return d;
+        }
+        return null;
+      }
+
+      // 1. A leftover "Save this application?" prompt sits on top of everything.
+      //    Resolve it FIRST by clicking "Save" (never "Discard"): the filled draft
+      //    survives and the dialog stops shadowing the real form.
+      const saveDialog = findDraftSaveDialog();
+      if (saveDialog) {
+        const buttons = Array.from(saveDialog.querySelectorAll('button')) as HTMLElement[];
+        const saveBtn = buttons.find(b => {
+          const t = (b.textContent || '').trim();
+          return /^save$/i.test(t) || (/save/i.test(t) && !/discard|saved|save to/i.test(t));
+        });
+        if (saveBtn) {
+          saveBtn.click();
+          return { clickedSave: true };
+        }
+        const dialogClose = saveDialog.querySelector<HTMLButtonElement>(
+          'button[aria-label*="Dismiss" i], button[aria-label*="Close" i], button[data-test-modal-close-btn], .artdeco-modal__dismiss',
+        );
+        if (dialogClose) {
+          dialogClose.click();
+          return { clickedClose: true };
+        }
+        return { notClosed: true };
+      }
+
+      // 2. Easy Apply modal itself still open -> close it ONLY via its own dismiss button.
       //    Never click "Discard" while the form is open: LinkedIn's save-dialog Discard
       //    destroys the candidate's filled draft.
       const modalCandidates = Array.from(
@@ -6110,35 +6245,7 @@ export default class Page {
         return { notClosed: true };
       }
 
-      // 2. Modal already closed; check for a leftover "Save this application?" draft dialog.
-      //    Preserve the draft: click "Save" (or the dialog's dismiss X). Never Discard.
-      const dialogs = Array.from(
-        document.querySelectorAll('div[role="dialog"], div.artdeco-modal, dialog[open]'),
-      ) as HTMLElement[];
-      for (const d of dialogs) {
-        if (!isVisible(d)) continue;
-        const text = (d.textContent || '').slice(0, 400);
-        if (!/save this application|save application|discard draft/i.test(text)) continue;
-
-        const buttons = Array.from(d.querySelectorAll('button')) as HTMLElement[];
-        const saveBtn = buttons.find(b => {
-          const t = (b.textContent || '').trim();
-          return /save/i.test(t) && !/discard/i.test(t);
-        });
-        if (saveBtn) {
-          saveBtn.click();
-          return { clickedSave: true };
-        }
-        const dialogClose = d.querySelector<HTMLButtonElement>(
-          'button[aria-label*="Dismiss" i], button[aria-label*="Close" i], button[data-test-modal-close-btn], .artdeco-modal__dismiss',
-        );
-        if (dialogClose) {
-          dialogClose.click();
-          return { clickedClose: true };
-        }
-        return { notClosed: true };
-      }
-
+      // 3. Nothing left to close.
       return { isClosed: true };
     };
 
@@ -6172,13 +6279,18 @@ export default class Page {
       }
 
       if (status.isClosed) {
+        // The save prompt can render a moment after the form starts closing — catch it
+        // here instead of leaving it floating over the job page.
+        const draftSave = await this.resolveDraftSaveDialog(1500);
+        if (draftSave.found && !draftSave.resolved) continue;
         return true;
       }
       await new Promise(r => setTimeout(r, 400));
     }
 
     const isOpen = await this.isEasyApplyModalOpen();
-    return !isOpen;
+    const draftSave = await this.resolveDraftSaveDialog(1200);
+    return !isOpen && draftSave.resolved;
   }
 
   /**
@@ -6214,6 +6326,8 @@ export default class Page {
           if (text.includes('select language') && (text.includes('privacy') || text.includes('help center'))) {
             continue;
           }
+          // A native "Save this application?" / "Discard draft?" sheet is not the form.
+          if (/save this application|save application|discard draft/i.test(text)) continue;
           const style = window.getComputedStyle(c);
           if (style.display === 'none' || style.visibility === 'hidden') continue;
           const rect = c.getBoundingClientRect();
@@ -6940,6 +7054,8 @@ export default class Page {
           const text = (c.innerText || c.textContent || '').trim().toLowerCase();
           if (/^\d+\s*notifications?$/i.test(text) || c.closest('.notifications-badge')) continue;
           if (text.includes('select language') && (text.includes('privacy') || text.includes('help center'))) continue;
+          // A native "Save this application?" / "Discard draft?" sheet is not the form.
+          if (/save this application|save application|discard draft/i.test(text)) continue;
           const style = window.getComputedStyle(c);
           if (style.display === 'none' || style.visibility === 'hidden') continue;
           const rect = c.getBoundingClientRect();
@@ -6969,9 +7085,13 @@ export default class Page {
           document.querySelectorAll(
             '.jobs-easy-apply-modal, [data-easy-apply-modal], [data-test-modal-id="easy-apply-modal"], div.artdeco-modal, div[role="dialog"], dialog[open], [aria-modal="true"]',
           ),
-        ).find(
-          el => !(el as HTMLElement).closest('footer, #footer, .artdeco-footer, [data-view-name="footer"]'),
-        ) as HTMLElement | null)) as HTMLElement | null;
+        ).find(el => {
+          const elHTMLElement = el as HTMLElement;
+          if (elHTMLElement.closest('footer, #footer, .artdeco-footer, [data-view-name="footer"]')) return false;
+          return !/save this application|save application|discard draft/i.test(
+            (elHTMLElement.innerText || elHTMLElement.textContent || '').slice(0, 400),
+          );
+        }) as HTMLElement | null)) as HTMLElement | null;
       if (!modal) return { hasNext: false, hasReview: false, hasSubmit: false };
 
       // Auto-scroll modal content to bottom so bottom questions & action buttons are in view
@@ -6991,6 +7111,15 @@ export default class Page {
       ) as HTMLElement[];
       for (const pb of primaryBtns) {
         if (pb.closest('footer, #footer, .artdeco-footer, [data-view-name="footer"]')) continue;
+        const pbDialog = pb.closest(
+          'div[role="dialog"], div.artdeco-modal, dialog[open], [aria-modal="true"]',
+        ) as HTMLElement | null;
+        if (
+          pbDialog &&
+          /save this application|save application|discard draft/i.test(pbDialog.innerText || pbDialog.textContent || '')
+        ) {
+          continue;
+        }
         if (!buttons.includes(pb)) buttons.push(pb);
       }
 
@@ -7131,6 +7260,8 @@ export default class Page {
           const text = (c.innerText || c.textContent || '').trim().toLowerCase();
           if (/^\d+\s*notifications?$/i.test(text) || c.closest('.notifications-badge')) continue;
           if (text.includes('select language') && (text.includes('privacy') || text.includes('help center'))) continue;
+          // A native "Save this application?" / "Discard draft?" sheet is not the form.
+          if (/save this application|save application|discard draft/i.test(text)) continue;
           const style = window.getComputedStyle(c);
           if (style.display === 'none' || style.visibility === 'hidden') continue;
           const rect = c.getBoundingClientRect();
@@ -7256,6 +7387,8 @@ export default class Page {
           const text = (c.innerText || c.textContent || '').trim().toLowerCase();
           if (/^\d+\s*notifications?$/i.test(text) || c.closest('.notifications-badge')) continue;
           if (text.includes('select language') && (text.includes('privacy') || text.includes('help center'))) continue;
+          // A native "Save this application?" / "Discard draft?" sheet is not the form.
+          if (/save this application|save application|discard draft/i.test(text)) continue;
           const style = window.getComputedStyle(c);
           if (style.display === 'none' || style.visibility === 'hidden') continue;
           const rect = c.getBoundingClientRect();
@@ -7403,6 +7536,8 @@ export default class Page {
           const text = (c.innerText || c.textContent || '').trim().toLowerCase();
           if (/^\d+\s*notifications?$/i.test(text) || c.closest('.notifications-badge')) continue;
           if (text.includes('select language') && (text.includes('privacy') || text.includes('help center'))) continue;
+          // A native "Save this application?" / "Discard draft?" sheet is not the form.
+          if (/save this application|save application|discard draft/i.test(text)) continue;
           const style = window.getComputedStyle(c);
           if (style.display === 'none' || style.visibility === 'hidden') continue;
           const rect = c.getBoundingClientRect();
@@ -7520,6 +7655,8 @@ export default class Page {
           const text = (c.innerText || c.textContent || '').trim().toLowerCase();
           if (/^\d+\s*notifications?$/i.test(text) || c.closest('.notifications-badge')) continue;
           if (text.includes('select language') && (text.includes('privacy') || text.includes('help center'))) continue;
+          // A native "Save this application?" / "Discard draft?" sheet is not the form.
+          if (/save this application|save application|discard draft/i.test(text)) continue;
           const style = window.getComputedStyle(c);
           if (style.display === 'none' || style.visibility === 'hidden') continue;
           const rect = c.getBoundingClientRect();
@@ -7549,9 +7686,13 @@ export default class Page {
           document.querySelectorAll(
             '.jobs-easy-apply-modal, [data-easy-apply-modal], [data-test-modal-id="easy-apply-modal"], div.artdeco-modal, div[role="dialog"], dialog[open], [aria-modal="true"]',
           ),
-        ).find(
-          el => !(el as HTMLElement).closest('footer, #footer, .artdeco-footer, [data-view-name="footer"]'),
-        ) as HTMLElement | null)) as HTMLElement | null;
+        ).find(el => {
+          const elHTMLElement = el as HTMLElement;
+          if (elHTMLElement.closest('footer, #footer, .artdeco-footer, [data-view-name="footer"]')) return false;
+          return !/save this application|save application|discard draft/i.test(
+            (elHTMLElement.innerText || elHTMLElement.textContent || '').slice(0, 400),
+          );
+        }) as HTMLElement | null)) as HTMLElement | null;
       if (!modal) return { clicked: false };
 
       // Auto-scroll modal content to bottom so bottom questions & consent checkboxes are in view
@@ -7601,6 +7742,15 @@ export default class Page {
       ) as HTMLElement[];
       for (const pb of primaryBtns) {
         if (pb.closest('footer, #footer, .artdeco-footer, [data-view-name="footer"]')) continue;
+        const pbDialog = pb.closest(
+          'div[role="dialog"], div.artdeco-modal, dialog[open], [aria-modal="true"]',
+        ) as HTMLElement | null;
+        if (
+          pbDialog &&
+          /save this application|save application|discard draft/i.test(pbDialog.innerText || pbDialog.textContent || '')
+        ) {
+          continue;
+        }
         if (!buttons.includes(pb)) buttons.push(pb);
       }
 
@@ -7752,6 +7902,8 @@ export default class Page {
           const text = (c.innerText || c.textContent || '').trim().toLowerCase();
           if (/^\d+\s*notifications?$/i.test(text) || c.closest('.notifications-badge')) continue;
           if (text.includes('select language') && (text.includes('privacy') || text.includes('help center'))) continue;
+          // A native "Save this application?" / "Discard draft?" sheet is not the form.
+          if (/save this application|save application|discard draft/i.test(text)) continue;
           const style = window.getComputedStyle(c);
           if (style.display === 'none' || style.visibility === 'hidden') continue;
           const rect = c.getBoundingClientRect();
@@ -7781,9 +7933,13 @@ export default class Page {
           document.querySelectorAll(
             '.jobs-easy-apply-modal, [data-easy-apply-modal], [data-test-modal-id="easy-apply-modal"], div.artdeco-modal, div[role="dialog"], dialog[open], [aria-modal="true"]',
           ),
-        ).find(
-          el => !(el as HTMLElement).closest('footer, #footer, .artdeco-footer, [data-view-name="footer"]'),
-        ) as HTMLElement | null)) as HTMLElement | null;
+        ).find(el => {
+          const elHTMLElement = el as HTMLElement;
+          if (elHTMLElement.closest('footer, #footer, .artdeco-footer, [data-view-name="footer"]')) return false;
+          return !/save this application|save application|discard draft/i.test(
+            (elHTMLElement.innerText || elHTMLElement.textContent || '').slice(0, 400),
+          );
+        }) as HTMLElement | null)) as HTMLElement | null;
       if (!modal) return { clicked: false, error: 'Easy Apply modal not found in DOM' };
 
       // 1. Scroll content to bottom to ensure review screen is fully loaded
@@ -7816,6 +7972,15 @@ export default class Page {
       ) as HTMLElement[];
       for (const pb of primaryBtns) {
         if (pb.closest('footer, #footer, .artdeco-footer, [data-view-name="footer"]')) continue;
+        const pbDialog = pb.closest(
+          'div[role="dialog"], div.artdeco-modal, dialog[open], [aria-modal="true"]',
+        ) as HTMLElement | null;
+        if (
+          pbDialog &&
+          /save this application|save application|discard draft/i.test(pbDialog.innerText || pbDialog.textContent || '')
+        ) {
+          continue;
+        }
         if (!buttons.includes(pb)) buttons.push(pb);
       }
 
@@ -8209,6 +8374,8 @@ export default class Page {
           if (text.includes('select language') && (text.includes('privacy') || text.includes('help center'))) {
             continue;
           }
+          // A native "Save this application?" / "Discard draft?" sheet is not the form.
+          if (/save this application|save application|discard draft/i.test(text)) continue;
           const style = window.getComputedStyle(c);
           if (style.display === 'none' || style.visibility === 'hidden') continue;
           const rect = c.getBoundingClientRect();
