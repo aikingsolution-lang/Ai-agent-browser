@@ -1365,9 +1365,22 @@ export function matchRuleBased(
 
   if (!isExperienceOrDurationQuestion) {
     const primaryWork = getPrimaryWorkExperience(careerBrain);
+    // Work-experience sub-form labels often carry a required marker ("Position *") or an
+    // accessibility suffix ("Month (required)"). Normalize before matching.
+    const workLabel = labelLower
+      .replace(/[*✱]+/g, ' ')
+      .replace(/\(?\b(?:required|optional)\b\)?/gi, ' ')
+      .replace(/\s+/g, ' ')
+      .replace(/^[\s:*-]+|[\s:*-]+$/g, '')
+      .trim();
 
-    // Job Title / Position
-    if (primaryWork?.title && /^(?:job\s*)?title$|^(?:current\s*)?(?:job\s*)?title$|^position$/i.test(labelLower)) {
+    // Job Title / Position (work-experience sub-form labels)
+    if (
+      primaryWork?.title &&
+      /^(?:job\s*)?title$|^(?:current\s*)?(?:job\s*)?title$|^position$|^role$|^designation$|^job\s*role$/i.test(
+        workLabel,
+      )
+    ) {
       return {
         matched: true,
         answer: primaryWork.title,
@@ -1378,7 +1391,9 @@ export function matchRuleBased(
     // Company / Employer
     if (
       primaryWork?.company &&
-      /^(?:company|company\s*name|employer)$|^(?:current\s*)?(?:company|employer)$/i.test(labelLower)
+      /^(?:company|company\s*name|employer|organization|organisation)$|^(?:current\s*)?(?:company|employer)$/i.test(
+        workLabel,
+      )
     ) {
       return {
         matched: true,
@@ -1390,7 +1405,7 @@ export function matchRuleBased(
     // Role description / summary
     if (
       primaryWork?.description &&
-      /^(?:role\s*)?description$|^summary$|^(?:work|job)\s*description$/i.test(labelLower)
+      /^(?:role\s*)?description$|^summary$|^(?:work|job)\s*description$/i.test(workLabel)
     ) {
       return {
         matched: true,
@@ -1399,11 +1414,24 @@ export function matchRuleBased(
       };
     }
 
+    // City / Location row of the work-experience sub-form
+    if (/^(?:city|work\s*city|job\s*city|location)$/i.test(workLabel)) {
+      const rawLoc = (careerBrain.currentLocation || careerBrain.preferredLocation || '').trim();
+      const city = cleanLocationForCityField(rawLoc).split(',')[0]?.trim() || '';
+      if (city) {
+        return {
+          matched: true,
+          answer: city,
+          sourceDetail: `work history: city from profile location (${city})`,
+        };
+      }
+    }
+
     // Start Month: "Month of From", "From: Month", "Start Month", etc.
     if (
-      (/\b(?:from|start)\s*(?:month|date)\b|\bmonth\s+(?:of\s+)?(?:from|start)\b/i.test(labelLower) ||
-        /^(?:start|from)\s*month$/i.test(labelLower)) &&
-      !/start\s*(?:salary|ctc|compensation)/i.test(labelLower)
+      (/\b(?:from|start)\s*(?:month|date)\b|\bmonth\s+(?:of\s+)?(?:from|start)\b/i.test(workLabel) ||
+        /^(?:start|from)\s*month$/i.test(workLabel)) &&
+      !/start\s*(?:salary|ctc|compensation)/i.test(workLabel)
     ) {
       const dates = extractWorkHistoryDates(careerBrain);
       const ans = matchDateOption(field, dates.startMonth, 'month');
@@ -1418,9 +1446,9 @@ export function matchRuleBased(
 
     // Start Year: "Year of From", "From: Year", "Start Year", etc.
     if (
-      (/\b(?:from|start)\s*year\b|\byear\s+(?:of\s+)?(?:from|start)\b/i.test(labelLower) ||
-        /^(?:start|from)\s*year$/i.test(labelLower)) &&
-      !/start\s*(?:salary|ctc|compensation)/i.test(labelLower)
+      (/\b(?:from|start)\s*year\b|\byear\s+(?:of\s+)?(?:from|start)\b/i.test(workLabel) ||
+        /^(?:start|from)\s*year$/i.test(workLabel)) &&
+      !/start\s*(?:salary|ctc|compensation)/i.test(workLabel)
     ) {
       const dates = extractWorkHistoryDates(careerBrain);
       const ans = matchDateOption(field, dates.startYear, 'year');
@@ -1435,9 +1463,9 @@ export function matchRuleBased(
 
     // End Month: "Month of To", "To: Month", "End Month", etc.
     if (
-      !/front[-\s]*end|back[-\s]*end|end[-\s]*to[-\s]*end/i.test(labelLower) &&
-      (/\b(?:to|end|completion|finish)\s*(?:month|date)\b|\bmonth\s+(?:of\s+)?(?:to|end)\b/i.test(labelLower) ||
-        /^(?:end|to)\s*month$/i.test(labelLower))
+      !/front[-\s]*end|back[-\s]*end|end[-\s]*to[-\s]*end/i.test(workLabel) &&
+      (/\b(?:to|end|completion|finish)\s*(?:month|date)\b|\bmonth\s+(?:of\s+)?(?:to|end)\b/i.test(workLabel) ||
+        /^(?:end|to)\s*month$/i.test(workLabel))
     ) {
       const dates = extractWorkHistoryDates(careerBrain);
       const ans = matchDateOption(field, dates.endMonth, 'month');
@@ -1452,9 +1480,9 @@ export function matchRuleBased(
 
     // End Year: "Year of To", "To: Year", "End Year", etc.
     if (
-      !/front[-\s]*end|back[-\s]*end|end[-\s]*to[-\s]*end/i.test(labelLower) &&
-      (/\b(?:to|end|completion|finish)\s*year\b|\byear\s+(?:of\s+)?(?:to|end)\b/i.test(labelLower) ||
-        /^(?:end|to)\s*year$/i.test(labelLower))
+      !/front[-\s]*end|back[-\s]*end|end[-\s]*to[-\s]*end/i.test(workLabel) &&
+      (/\b(?:to|end|completion|finish)\s*year\b|\byear\s+(?:of\s+)?(?:to|end)\b/i.test(workLabel) ||
+        /^(?:end|to)\s*year$/i.test(workLabel))
     ) {
       const dates = extractWorkHistoryDates(careerBrain);
       const ans = matchDateOption(field, dates.endYear, 'year');
@@ -2663,6 +2691,12 @@ export async function solveQuestionAutonomousWithLLM(
     })
     .join('\n');
 
+  const primaryWork = getPrimaryWorkExperience(careerBrain);
+  const primaryStartDate = [primaryWork?.startMonth, primaryWork?.startYear].filter(Boolean).join(' ') || 'unknown';
+  const primaryEndDate = primaryWork?.isCurrent
+    ? 'Present'
+    : [primaryWork?.endMonth, primaryWork?.endYear].filter(Boolean).join(' ') || 'unknown';
+
   const rawProjects = ((careerBrain as any).projects || []) as Array<{
     title?: string;
     description?: string;
@@ -2790,6 +2824,11 @@ DECISION RULES:
    - Do NOT guess or hallucinate unverified qualifications, certifications, or experience.
    - If a multiple-choice question asks if the candidate has a skill they do NOT have, choose "No" or the lowest option.
    - If asked for experience in a skill not in the profile or resume, return "0".
+15. MONTH/YEAR DATE SELECTS & WORK-EXPERIENCE SUB-FORMS:
+   - A month dropdown (labels such as "From Month", "To Month", "Start Month", "End Month", "Month") MUST receive a MONTH NAME from OPTIONS (e.g. "January"). NEVER a year, a number like "2023", or a full date.
+   - A year dropdown ("From Year", "To Year", "Start Year", "End Year", "Year") MUST receive a 4-digit YEAR that exists in OPTIONS (e.g. "2023"). NEVER a month name.
+   - "From" is the role's START date; "To" is the role's END date. For the candidate's primary role: start = ${primaryStartDate}, end = ${primaryEndDate}. Use the Detailed Work History above for other roles.
+   - Inside a work-experience sub-form: Position = "${primaryWork?.title || careerBrain.currentTitle || 'Software Engineer'}", Company = "${primaryWork?.company || 'Company'}", City = candidate's current city, Description = a concise 1-2 sentence summary grounded in the resume (no invented metrics).
 
 OUTPUT STRICTLY VALID JSON ONLY:
 {

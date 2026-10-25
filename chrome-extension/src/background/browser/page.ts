@@ -3075,6 +3075,154 @@ export default class Page {
       if (!modal) {
         return { hasErrors: false, errors: [], emptyRequiredFields: [], invalidFieldsWithErrors: [] };
       }
+
+      // Date (Month/Year) select context. LinkedIn work-experience sub-forms expose only
+      // "Month"/"Year" as the control name; without the From/To role all four controls look
+      // identical, so label-based dedupe collapsed them into a single healable field.
+      const monthYearKindOf = (el: Element | null): 'month' | 'year' | '' => {
+        if (!(el instanceof HTMLSelectElement)) return '';
+        const first = (el.options[0]?.text || el.selectedOptions[0]?.text || '').replace(/\s+/g, ' ').trim();
+        const aria = (el.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim();
+        if (/^month$/i.test(first) || /^month$/i.test(aria)) return 'month';
+        if (/^year$/i.test(first) || /^year$/i.test(aria)) return 'year';
+        return '';
+      };
+      const dateKindBySelect = new Map<HTMLSelectElement, 'month' | 'year'>();
+      const dateRoleBySelect = new Map<HTMLSelectElement, 'From' | 'To'>();
+      {
+        const allSelects = Array.from(modal.querySelectorAll('select')) as HTMLSelectElement[];
+        for (const s of allSelects) {
+          const kind = monthYearKindOf(s);
+          const r = s.getBoundingClientRect();
+          if (kind && (r.width > 0 || r.height > 0)) dateKindBySelect.set(s, kind);
+        }
+        if (dateKindBySelect.size > 0) {
+          const dateRoleText = /^(from|to|start(?:\s*date)?|end(?:\s*date)?)$/i;
+          const roleHeadings = Array.from(modal.querySelectorAll('span, div, p, label, strong, h1, h2, h3, h4, h5, h6'))
+            .filter(el => {
+              const t = (el.textContent || '').replace(/\s+/g, ' ').trim();
+              if (!t || t.length > 24 || !dateRoleText.test(t)) return false;
+              const r = el.getBoundingClientRect();
+              return r.width > 0 && r.height > 0;
+            })
+            .map(el => ({
+              role: (/^(to|end)/i.test((el.textContent || '').trim()) ? 'To' : 'From') as 'From' | 'To',
+              rect: el.getBoundingClientRect(),
+            }));
+
+          const dateRows: Array<{
+            centerY: number;
+            top: number;
+            bottom: number;
+            left: number;
+            right: number;
+            sels: HTMLSelectElement[];
+          }> = [];
+          for (const [s] of dateKindBySelect) {
+            const r = s.getBoundingClientRect();
+            const cy = r.top + r.height / 2;
+            let row = dateRows.find(x => Math.abs(x.centerY - cy) < 12);
+            if (!row) {
+              row = { centerY: cy, top: r.top, bottom: r.bottom, left: r.left, right: r.right, sels: [] };
+              dateRows.push(row);
+            }
+            row.sels.push(s);
+            row.top = Math.min(row.top, r.top);
+            row.bottom = Math.max(row.bottom, r.bottom);
+            row.left = Math.min(row.left, r.left);
+            row.right = Math.max(row.right, r.right);
+          }
+          dateRows.sort((a, b) => a.top - b.top);
+          dateRows.forEach((row, rowIdx) => {
+            let role: 'From' | 'To' | null = null;
+            let bestGap = Infinity;
+            for (const h of roleHeadings) {
+              if (h.rect.bottom > row.top + 14) continue;
+              const sameColumn = h.rect.right >= row.left - 60 && h.rect.left <= row.right + 60;
+              if (!sameColumn) continue;
+              const gap = row.top - h.rect.bottom;
+              if (gap <= 160 && gap < bestGap) {
+                bestGap = gap;
+                role = h.role;
+              }
+            }
+            if (!role && dateRows.length >= 2) role = rowIdx % 2 === 0 ? 'From' : 'To';
+            if (role) for (const s of row.sels) dateRoleBySelect.set(s, role);
+          });
+        }
+      }
+
+      const labelForControl = (el: Element | null): string => {
+        if (!el) return '';
+        let label = '';
+        const id = el.getAttribute('id');
+        if (id) {
+          const lbl = modal.querySelector(`label[for="${CSS.escape(id)}"]`);
+          if (lbl) label = cleanElementText(lbl);
+        }
+        if (!label) {
+          const container = el.closest(
+            '.fb-dash-form-element, .jobs-easy-apply-form-element, [data-test-form-element], .jobs-easy-apply-form-section__grouping, fieldset',
+          );
+          const lbl = container?.querySelector('label, legend');
+          if (lbl) label = cleanElementText(lbl);
+        }
+        if (!label) label = cleanDuplicateString(el.getAttribute('aria-label') || '');
+        if (el instanceof HTMLSelectElement) {
+          // Discovery tags date selects with their From/To role; trust that over geometry.
+          const marker = /^(from|to)-(month|year)$/i.exec(el.getAttribute('data-qoder-date-field') || '');
+          if (marker) {
+            const role = marker[1].toLowerCase() === 'to' ? 'To' : 'From';
+            const typeLabel = marker[2].toLowerCase() === 'month' ? 'Month' : 'Year';
+            if (!label || /^(?:month|year|form field)$/i.test(label)) {
+              label = `${role} ${typeLabel}`;
+            } else if (!/\b(?:from|to|start|end)\b/i.test(label)) {
+              label = `${role} ${label}`;
+            }
+            return label;
+          }
+          const kind = dateKindBySelect.get(el);
+          if (kind) {
+            const role = dateRoleBySelect.get(el);
+            const typeLabel = kind === 'month' ? 'Month' : 'Year';
+            if (!label || /^(?:month|year|form field)$/i.test(label)) {
+              label = `${role ? `${role} ` : ''}${typeLabel}`;
+            } else if (role && !/\b(?:from|to|start|end)\b/i.test(label)) {
+              label = `${role} ${label}`;
+            }
+          }
+        }
+        return label;
+      };
+
+      // Error messages sit under one specific control. A shared container (e.g. a From row
+      // holding Month + Year) must map each error to the control closest to it, otherwise
+      // the Year error was attributed to the Month select and never healed.
+      const pickControlForError = (
+        container: HTMLElement | null,
+        errEl: HTMLElement,
+      ): HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement | null => {
+        if (!container) return null;
+        const controls = Array.from(
+          container.querySelectorAll('input:not([type="hidden"]), select, textarea'),
+        ) as Array<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>;
+        if (controls.length <= 1) return controls[0] || null;
+        const er = errEl.getBoundingClientRect();
+        let best: HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement | null = null;
+        let bestScore = Infinity;
+        for (const c of controls) {
+          const r = c.getBoundingClientRect();
+          const dx = Math.abs(r.left + r.width / 2 - (er.left + er.width / 2));
+          const dy = Math.abs(r.bottom - er.top);
+          const score = dx + dy * 0.25;
+          if (score < bestScore) {
+            bestScore = score;
+            best = c;
+          }
+        }
+        return best;
+      };
+
       const errors: Array<{ fieldLabel: string; errorText: string }> = [];
       const emptyRequiredFields: Array<{
         id?: string;
@@ -3108,24 +3256,9 @@ export default class Page {
         modal.querySelectorAll('[aria-invalid="true"], .artdeco-text-input--error input'),
       ) as HTMLElement[];
       for (const el of invalidEls) {
-        let label = '';
-        const id = el.getAttribute('id');
-        if (id) {
-          const lbl = modal.querySelector(`label[for="${id}"]`);
-          if (lbl) label = cleanElementText(lbl);
-        }
-        if (!label) {
-          const closestContainer = el.closest(
-            '.fb-dash-form-element, .jobs-easy-apply-form-element, fieldset, div[data-test-form-element]',
-          );
-          if (closestContainer) {
-            const legend = closestContainer.querySelector('legend, label');
-            if (legend) label = cleanElementText(legend);
-          }
-        }
-        if (!label) {
-          label = cleanDuplicateString(el.getAttribute('aria-label') || '');
-        }
+        // labelForControl adds the From/To role for bare Month/Year selects, so the two
+        // selects in one date row are no longer indistinguishable.
+        const label = labelForControl(el);
 
         let errorMsg = '';
         const describedBy = el.getAttribute('aria-describedby');
@@ -3205,10 +3338,10 @@ export default class Page {
             hintText: errorMsg || undefined,
           };
 
-          if (!invalidFieldsWithErrors.some(e => e.label === invalidDesc.label)) {
+          if (!invalidFieldsWithErrors.some(e => e.label === invalidDesc.label && e.id === invalidDesc.id)) {
             invalidFieldsWithErrors.push(invalidDesc);
           }
-          if (!emptyRequiredFields.some(e => e.label === invalidDesc.label)) {
+          if (!emptyRequiredFields.some(e => e.label === invalidDesc.label && e.id === invalidDesc.id)) {
             emptyRequiredFields.push(invalidDesc);
           }
         }
@@ -3257,26 +3390,17 @@ export default class Page {
           errEl.parentElement?.parentElement ||
           errEl.parentElement;
 
-        const inputEl = container
-          ? (container.querySelector('input, select, textarea') as
-              | HTMLInputElement
-              | HTMLSelectElement
-              | HTMLTextAreaElement
-              | null)
-          : null;
+        const inputEl = pickControlForError(container as HTMLElement | null, errEl);
 
-        if (container) {
+        if (inputEl) {
+          // Use the per-control label so an error under a Month+Year row maps to its own select.
+          label = labelForControl(inputEl);
+        }
+        if (!label && container) {
           const lbl = container.querySelector('label, legend');
           if (lbl) label = cleanElementText(lbl);
         }
-        if (!label && inputEl) {
-          const id = inputEl.getAttribute('id');
-          if (id) {
-            const lbl = modal.querySelector(`label[for="${id}"]`);
-            if (lbl) label = cleanElementText(lbl);
-          }
-          if (!label) label = cleanDuplicateString(inputEl.getAttribute('aria-label') || '');
-        }
+        if (!label && inputEl) label = cleanDuplicateString(inputEl.getAttribute('aria-label') || '');
 
         if (!errors.some(e => e.errorText === txt)) {
           errors.push({ fieldLabel: label || 'Field', errorText: txt });
@@ -3321,10 +3445,12 @@ export default class Page {
             hintText: txt,
           };
 
-          if (!invalidFieldsWithErrors.some(e => e.label === errDesc.label && e.errorText === txt)) {
+          if (
+            !invalidFieldsWithErrors.some(e => e.label === errDesc.label && e.id === errDesc.id && e.errorText === txt)
+          ) {
             invalidFieldsWithErrors.push(errDesc);
           }
-          if (!emptyRequiredFields.some(e => e.label === errDesc.label)) {
+          if (!emptyRequiredFields.some(e => e.label === errDesc.label && e.id === errDesc.id)) {
             emptyRequiredFields.push(errDesc);
           }
         }
@@ -3580,12 +3706,6 @@ export default class Page {
         const val = (input.value || '').trim();
         const isSelect = input.tagName.toLowerCase() === 'select';
 
-        let label = '';
-        const id = input.getAttribute('id');
-        if (id) {
-          const lbl = modal.querySelector(`label[for="${id}"]`);
-          if (lbl) label = cleanElementText(lbl);
-        }
         const parentEl =
           input.closest(
             'div.fb-dash-form-element, div.jobs-easy-apply-form-element, div[data-test-form-element], .jobs-easy-apply-form-section__grouping, fieldset, div[class*="form-element" i]',
@@ -3593,15 +3713,18 @@ export default class Page {
           input.parentElement?.parentElement ||
           input.parentElement;
 
+        // labelForControl resolves the From/To role for bare Month/Year selects, so each
+        // of the four date controls is reported with a distinct label.
+        let label = labelForControl(input);
         if (!label && parentEl) {
           const lbl = parentEl.querySelector('label');
           if (lbl) label = cleanElementText(lbl);
         }
-        if (!label) {
-          label = cleanDuplicateString(input.getAttribute('aria-label') || '');
-        }
 
+        const dateSelectKind = isSelect ? dateKindBySelect.get(input as HTMLSelectElement) : undefined;
+        const dateSelectRole = isSelect ? dateRoleBySelect.get(input as HTMLSelectElement) : undefined;
         const isRequired =
+          Boolean(dateSelectRole) ||
           input.required ||
           input.hasAttribute('required') ||
           input.getAttribute('aria-required') === 'true' ||
@@ -3673,8 +3796,15 @@ export default class Page {
 
         const hasActiveError =
           Boolean(activeErrorText) && (errorRegex.test(activeErrorText) || activeErrorText.length > 5);
+        // LinkedIn leaves the Month/Year selects on their placeholder until Next is pressed,
+        // so an untouched date control is genuinely unanswered even without a visible error.
+        const selectedDateText = isSelect ? ((input as HTMLSelectElement).selectedOptions[0]?.text || '').trim() : '';
+        const emptyDateSelect = Boolean(dateSelectRole) && (!val || /^(?:month|year)$/i.test(selectedDateText));
         const isInvalidValue =
-          hasActiveError || (!val && (isRequired || isSkillOrNumeric)) || (isSelect && /select an option/i.test(val));
+          hasActiveError ||
+          emptyDateSelect ||
+          (!val && (isRequired || isSkillOrNumeric)) ||
+          (isSelect && /select an option/i.test(val));
 
         if (isInvalidValue) {
           let fieldType: 'text' | 'number' | 'dropdown' = 'text';
@@ -3692,7 +3822,9 @@ export default class Page {
           if (isSelect) {
             options = Array.from((input as HTMLSelectElement).options)
               .map(o => cleanDuplicateString(o.text.trim()))
-              .filter(t => !/select an option/i.test(t));
+              .filter(t => !/select an option/i.test(t))
+              // "Month"/"Year" is the placeholder row, never a valid answer.
+              .filter(t => (dateSelectKind ? !/^(?:month|year)$/i.test(t) : true));
           }
 
           const fieldDesc = {
@@ -3708,11 +3840,14 @@ export default class Page {
             errorText: activeErrorText || undefined,
           };
 
-          if (!emptyRequiredFields.some(e => e.label === fieldDesc.label)) {
+          if (!emptyRequiredFields.some(e => e.label === fieldDesc.label && e.id === fieldDesc.id)) {
             emptyRequiredFields.push(fieldDesc);
           }
 
-          if (hasActiveError && !invalidFieldsWithErrors.some(e => e.label === fieldDesc.label)) {
+          if (
+            hasActiveError &&
+            !invalidFieldsWithErrors.some(e => e.label === fieldDesc.label && e.id === fieldDesc.id)
+          ) {
             invalidFieldsWithErrors.push({
               ...fieldDesc,
               currentValue: val,
@@ -4092,6 +4227,54 @@ export default class Page {
 
       if (!targetEl && ident.label) {
         const cleanLabel = cleanDuplicateString(ident.label).toLowerCase().trim();
+
+        // Work-history date selects are tagged during discovery with their From/To role.
+        // Their only accessible name is "Month"/"Year", so a plain label lookup cannot
+        // single them out and would keep re-filling the first one.
+        if (!targetEl) {
+          const dateKey = /^(from|to)\s+(month|year)$/i.exec(cleanLabel);
+          if (dateKey) {
+            const wantRole = dateKey[1].toLowerCase() === 'to' ? 'To' : 'From';
+            const wantKind = dateKey[2].toLowerCase();
+            try {
+              targetEl = modal.querySelector(
+                `[data-qoder-date-field="${wantRole.toLowerCase()}-${wantKind}"]`,
+              ) as HTMLElement | null;
+            } catch {}
+            if (!targetEl) {
+              // Marker lost after a React re-render: reconstruct From/To from row order among
+              // the visible Month/Year selects (the From row always precedes the To row).
+              const dateSel = (Array.from(modal.querySelectorAll('select')) as HTMLSelectElement[]).filter(s => {
+                const r = s.getBoundingClientRect();
+                if (!(r.width > 0 || r.height > 0)) return false;
+                const aria = (s.getAttribute('aria-label') || '').trim();
+                const first = (s.options[0]?.text || '').trim();
+                const kind =
+                  /^month$/i.test(aria) || /^month$/i.test(first)
+                    ? 'month'
+                    : /^year$/i.test(aria) || /^year$/i.test(first)
+                      ? 'year'
+                      : '';
+                return kind === wantKind;
+              });
+              const rowCenters: number[] = [];
+              for (const s of dateSel) {
+                const r = s.getBoundingClientRect();
+                const cy = r.top + r.height / 2;
+                if (!rowCenters.some(y => Math.abs(y - cy) < 12)) rowCenters.push(cy);
+              }
+              rowCenters.sort((a, b) => a - b);
+              if (rowCenters.length > 0) {
+                const rowY = rowCenters[Math.min(wantRole === 'To' ? 1 : 0, rowCenters.length - 1)];
+                targetEl =
+                  dateSel.find(s => {
+                    const r = s.getBoundingClientRect();
+                    return Math.abs(r.top + r.height / 2 - rowY) < 12;
+                  }) || null;
+              }
+            }
+          }
+        }
 
         // 1. Check radio groups, checkbox groups and question-library button groups
         // (fieldsets / role="radiogroup" / fb-dash form-builder wrappers) first
@@ -6218,11 +6401,97 @@ export default class Page {
       }
 
       // 2. Selects / Dropdowns
+      // LinkedIn's work-experience / education sub-forms render the period as month+year
+      // <select> rows whose only accessible name is "Month"/"Year" — the From/To role lives
+      // in a separate heading. Without that context the rules engine never recognises a date
+      // question and the pair stays empty, blocking Next with "This field is required".
+      // Derive the role from the nearest heading above the row, falling back to row order
+      // (the From row always precedes the To row).
+      const selectFirstOptionText = (s: HTMLSelectElement) =>
+        (s.options[0]?.text || s.selectedOptions[0]?.text || '').replace(/\s+/g, ' ').trim();
+      const monthYearKindOf = (s: HTMLSelectElement): 'month' | 'year' | '' => {
+        const aria = (s.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim();
+        const first = selectFirstOptionText(s);
+        if (/^month$/i.test(first) || /^month$/i.test(aria)) return 'month';
+        if (/^year$/i.test(first) || /^year$/i.test(aria)) return 'year';
+        return '';
+      };
       const selects = Array.from(modal.querySelectorAll('select')) as HTMLSelectElement[];
+      const dateSelectKinds = new Map<HTMLSelectElement, 'month' | 'year'>();
+      for (const s of selects) {
+        const kind = monthYearKindOf(s);
+        const rect = s.getBoundingClientRect();
+        // Hidden To/From selects (e.g. after "I currently work here" is checked) are not
+        // part of the active form and must not be reported as required.
+        if (kind && (rect.width > 0 || rect.height > 0)) dateSelectKinds.set(s, kind);
+      }
+      const dateSelectRoles = new Map<HTMLSelectElement, 'From' | 'To'>();
+      if (dateSelectKinds.size > 0) {
+        const dateRoleText = /^(from|to|start(?:\s*date)?|end(?:\s*date)?)$/i;
+        const roleHeadings = Array.from(modal.querySelectorAll('span, div, p, label, strong, h1, h2, h3, h4, h5, h6'))
+          .filter(el => {
+            const t = (el.textContent || '').replace(/\s+/g, ' ').trim();
+            if (!t || t.length > 24 || !dateRoleText.test(t)) return false;
+            const r = el.getBoundingClientRect();
+            return r.width > 0 && r.height > 0;
+          })
+          .map(el => ({
+            role: (/^(to|end)/i.test((el.textContent || '').trim()) ? 'To' : 'From') as 'From' | 'To',
+            rect: el.getBoundingClientRect(),
+          }));
+
+        const dateRows: Array<{
+          centerY: number;
+          top: number;
+          bottom: number;
+          left: number;
+          right: number;
+          sels: HTMLSelectElement[];
+        }> = [];
+        for (const [s] of dateSelectKinds) {
+          const r = s.getBoundingClientRect();
+          const cy = r.top + r.height / 2;
+          let row = dateRows.find(x => Math.abs(x.centerY - cy) < 12);
+          if (!row) {
+            row = { centerY: cy, top: r.top, bottom: r.bottom, left: r.left, right: r.right, sels: [] };
+            dateRows.push(row);
+          }
+          row.sels.push(s);
+          row.top = Math.min(row.top, r.top);
+          row.bottom = Math.max(row.bottom, r.bottom);
+          row.left = Math.min(row.left, r.left);
+          row.right = Math.max(row.right, r.right);
+        }
+        dateRows.sort((a, b) => a.top - b.top);
+        dateRows.forEach((row, rowIdx) => {
+          let role: 'From' | 'To' | null = null;
+          let bestGap = Infinity;
+          for (const h of roleHeadings) {
+            if (h.rect.bottom > row.top + 14) continue;
+            const sameColumn = h.rect.right >= row.left - 60 && h.rect.left <= row.right + 60;
+            if (!sameColumn) continue;
+            const gap = row.top - h.rect.bottom;
+            if (gap <= 160 && gap < bestGap) {
+              bestGap = gap;
+              role = h.role;
+            }
+          }
+          // Fall back to row order only when a From/To pair exists. A lone Month/Year row
+          // without a heading may belong to another optional date (e.g. expiry) and must
+          // not be mislabelled or forced to the work-history start date.
+          if (!role && dateRows.length >= 2) role = rowIdx % 2 === 0 ? 'From' : 'To';
+          if (role) for (const s of row.sels) dateSelectRoles.set(s, role);
+        });
+      }
+
       for (const sel of selects) {
         const val = sel.value || '';
         const selectedText = sel.selectedOptions[0]?.text || '';
-        if (!val || /select an option|please select|^--/i.test(selectedText)) {
+        const dateKind = dateSelectKinds.get(sel);
+        // A date select sitting on its "Month"/"Year" placeholder is still unanswered even
+        // when the placeholder option carries a non-empty value.
+        const isDatePlaceholder = Boolean(dateKind) && /^(?:month|year)$/i.test(selectedText.trim());
+        if (!val || isDatePlaceholder || /select an option|please select|^--/i.test(selectedText)) {
           let label = '';
           const id = sel.getAttribute('id');
           if (id) {
@@ -6238,6 +6507,21 @@ export default class Page {
             if (lbl) label = cleanElementText(lbl);
           }
           if (!label) label = cleanDuplicateString(sel.getAttribute('aria-label') || '');
+
+          if (dateKind) {
+            const dateRole = dateSelectRoles.get(sel);
+            const typeLabel = dateKind === 'month' ? 'Month' : 'Year';
+            // Generic "Month"/"Year" labels are useless to the resolver and make all four
+            // date controls indistinguishable — prefix the From/To role when known.
+            if (!label || /^(?:month|year|form field)$/i.test(label)) {
+              label = `${dateRole ? `${dateRole} ` : ''}${typeLabel}`;
+            } else if (dateRole && !/\b(?:from|to|start|end)\b/i.test(label)) {
+              label = `${dateRole} ${label}`;
+            }
+            // Tag the control so fillModalFieldDirect can resolve it again from the
+            // synthesized label ("From Month" ...) even though its accessible name is bare.
+            if (dateRole) sel.setAttribute('data-qoder-date-field', `${dateRole.toLowerCase()}-${dateKind}`);
+          }
 
           let hintText = '';
           const describedBy = sel.getAttribute('aria-describedby');
@@ -6270,7 +6554,9 @@ export default class Page {
 
           const options = Array.from(sel.options)
             .map(o => cleanDuplicateString(o.text.trim()))
-            .filter(t => !/select an option|please select|^--/i.test(t));
+            .filter(t => !/select an option|please select|^--/i.test(t))
+            // "Month"/"Year" is the placeholder row of a date select, not a valid answer.
+            .filter(t => (dateKind ? !/^(?:month|year)$/i.test(t) : true));
 
           const isExplicitlyOptional =
             /\boptional\b/i.test(label) ||
@@ -6284,7 +6570,12 @@ export default class Page {
                 ),
             );
           const isRequired =
-            sel.hasAttribute('required') || sel.getAttribute('aria-required') === 'true' || !isExplicitlyOptional;
+            sel.hasAttribute('required') ||
+            sel.getAttribute('aria-required') === 'true' ||
+            // Work-history start/end period is mandatory while "I currently work here" is
+            // unchecked; LinkedIn marks it required only after Next is pressed.
+            Boolean(dateSelectRoles.get(sel)) ||
+            !isExplicitlyOptional;
 
           descriptors.push({
             id: sel.id || undefined,
