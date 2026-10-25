@@ -1801,6 +1801,43 @@ export function matchRuleBased(
     field.fieldType === 'checkbox' ||
     (field.options && field.options.some(o => /^(yes|no)$/i.test(o.trim())));
 
+  // 4a. Work-experience screening ("Do you have work experience?") -> [MATCHED] from
+  // structured Career Brain data. Golden/custom answers above always take precedence;
+  // LLM/ask_user is used only when the profile has no work-experience evidence at all.
+  if (isBinaryOrSelect) {
+    const isSkillAttributed =
+      /\byears?\b|\bmonths?\b/i.test(labelLower) || /\b(?:with|in|using)\s+[a-z0-9#+][\w.#+-]*/i.test(labelLower);
+    const asksForWorkExperience =
+      !isSkillAttributed &&
+      (/\b(?:do|did)\s*you\s*(?:have|possess)\s*(?:any\s*)?(?:(?:prior|previous|professional|work|job|industry)\s+)*experience\s*(?:\?|$|\*)/i.test(
+        labelLower,
+      ) ||
+        /\bhave\s*you\b[^?]*\b(?:work|professional|job|industry)\s+experience\b/i.test(labelLower) ||
+        /^(?:any\s*)?(?:work|professional|job|industry)\s*experience\s*[?:*]*$/i.test(labelLower));
+    const asksFresher =
+      /\b(?:are\s*you|would\s*you\s*consider\s*yourself)\b[^?]*\b(?:fresher|entry[-\s]*level)\b/i.test(labelLower) ||
+      /\bis\s*(?:this|it)\s*your\s*first\s*(?:job|role)\b/i.test(labelLower);
+
+    if (asksForWorkExperience || asksFresher) {
+      const roles = Array.isArray(careerBrain.workExperience) ? careerBrain.workExperience : [];
+      const yoe = Number(careerBrain.yearsOfExperience || 0);
+      // The schema defaults hasWorkExperience to true, so only trust it when the profile
+      // also has structured roles or non-zero years; otherwise treat the answer as unknown.
+      const hasEvidence = careerBrain.hasWorkExperience === false || roles.length > 0 || yoe > 0;
+      if (hasEvidence) {
+        const hasWork = careerBrain.hasWorkExperience === false ? false : roles.length > 0 || yoe > 0;
+        const wantsYes = asksFresher ? !hasWork : hasWork;
+        const ans = wantsYes ? 'Yes' : 'No';
+        const adapted = adaptAnswerToFieldFormat(ans, field);
+        return {
+          matched: true,
+          answer: adapted.valid ? adapted.value : ans,
+          sourceDetail: `profile: ${hasWork ? 'has' : 'no'} work experience (${roles.length} role(s), ${yoe} yrs)`,
+        };
+      }
+    }
+  }
+
   // Phone country code / Country dialing code (dropdown, combobox, or text)
   const isPhoneCountryCodeQuestion =
     /country\s*code|phone\s*country|dialing\s*code|country\s*calling\s*code|country\/region\s*code/i.test(labelLower) ||
@@ -2383,11 +2420,19 @@ export function matchRuleBased(
     };
   }
   if (/currently\s*employed|are\s*you\s*currently\s*working/i.test(labelLower)) {
-    return {
-      matched: true,
-      answer: 'Yes',
-      sourceDetail: 'profile standard: currently employed',
-    };
+    const roles = Array.isArray(careerBrain.workExperience) ? careerBrain.workExperience : [];
+    const yoe = Number(careerBrain.yearsOfExperience || 0);
+    if (careerBrain.hasWorkExperience === false || roles.length > 0 || yoe > 0) {
+      const isEmployed =
+        careerBrain.hasWorkExperience === false ? false : roles.length > 0 ? roles.some(r => r.isCurrent) : yoe > 0;
+      const ans = isEmployed ? 'Yes' : 'No';
+      const adapted = adaptAnswerToFieldFormat(ans, field);
+      return {
+        matched: true,
+        answer: adapted.valid ? adapted.value : ans,
+        sourceDetail: `profile: ${isEmployed ? 'currently employed' : 'not currently employed'} (${roles.length} role(s), ${yoe} yrs)`,
+      };
+    }
   }
 
   // o) Salary range acceptable

@@ -60,6 +60,76 @@ function dateField(label: string, kind: 'month' | 'year'): FormFieldDescriptor {
   };
 }
 
+function yesNoField(label: string): FormFieldDescriptor {
+  return { label, fieldType: 'radio', options: ['Yes', 'No'] };
+}
+
+describe('Work-experience screening answers from Career Brain', () => {
+  it('answers "Do you have work experience?" with Yes from structured roles', () => {
+    const res = matchRuleBased(yesNoField('Do you have work experience?'), makeBrain());
+    expect(res.matched).toBe(true);
+    expect(res.answer).toBe('Yes');
+    expect(res.sourceDetail).toContain('has work experience');
+  });
+
+  it('answers "Work Experience" select with Yes when yearsOfExperience > 0', () => {
+    const res = matchRuleBased(yesNoField('Work Experience'), makeBrain({ workExperience: [], yearsOfExperience: 2 }));
+    expect(res.matched).toBe(true);
+    expect(res.answer).toBe('Yes');
+  });
+
+  it('answers No for an explicitly fresher profile', () => {
+    const res = matchRuleBased(
+      yesNoField('Do you have any work experience?'),
+      makeBrain({ hasWorkExperience: false, workExperience: [], yearsOfExperience: 0 }),
+    );
+    expect(res.matched).toBe(true);
+    expect(res.answer).toBe('No');
+  });
+
+  it('answers "Are you a fresher?" from the same profile evidence', () => {
+    const fresher = matchRuleBased(
+      yesNoField('Are you a fresher?'),
+      makeBrain({ hasWorkExperience: false, workExperience: [], yearsOfExperience: 0 }),
+    );
+    expect(fresher.matched).toBe(true);
+    expect(fresher.answer).toBe('Yes');
+
+    const experienced = matchRuleBased(yesNoField('Are you a fresher?'), makeBrain());
+    expect(experienced.matched).toBe(true);
+    expect(experienced.answer).toBe('No');
+  });
+
+  it('answers "Are you currently employed?" from the current-role flag', () => {
+    const currentRole = makeBrain({
+      workExperience: [{ ...makeBrain().workExperience[0], isCurrent: true }],
+    });
+    const current = matchRuleBased(yesNoField('Are you currently employed?'), currentRole);
+    expect(current.matched).toBe(true);
+    expect(current.answer).toBe('Yes');
+
+    const pastRole = makeBrain({
+      workExperience: [{ ...makeBrain().workExperience[0], isCurrent: false }],
+    });
+    const past = matchRuleBased(yesNoField('Are you currently employed?'), pastRole);
+    expect(past.matched).toBe(true);
+    expect(past.answer).toBe('No');
+  });
+
+  it('does not guess when the profile has no work-experience evidence', () => {
+    const res = matchRuleBased(
+      yesNoField('Do you have work experience?'),
+      makeBrain({ workExperience: [], yearsOfExperience: 0 }),
+    );
+    expect(res.matched).toBe(false);
+  });
+
+  it('does not hijack skill-specific experience questions', () => {
+    expect(matchRuleBased(yesNoField('Do you have experience with React?'), makeBrain()).matched).toBe(false);
+    expect(matchRuleBased(yesNoField('Do you have experience in sales?'), makeBrain()).matched).toBe(false);
+  });
+});
+
 describe('LinkedIn work-experience sub-form (Month/Year date selects)', () => {
   const brain = makeBrain();
 
