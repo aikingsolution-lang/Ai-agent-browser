@@ -4,6 +4,7 @@ import {
   matchRuleBased,
   matchDateOption,
   extractWorkHistoryDates,
+  isGenericFieldLabel,
   type FormFieldDescriptor,
 } from '../linkedin/formQuestionResolver';
 
@@ -224,5 +225,52 @@ describe('LinkedIn work-experience sub-form (text fields)', () => {
     const res = matchRuleBased({ label: 'City', fieldType: 'text' }, brain);
     expect(res.matched).toBe(true);
     expect(res.answer).toBe('Bengaluru');
+  });
+});
+
+describe('Generic placeholder labels (new LinkedIn UI with no accessible name)', () => {
+  it('detects placeholder labels emitted by the DOM extractor', () => {
+    expect(isGenericFieldLabel('')).toBe(true);
+    expect(isGenericFieldLabel('   ')).toBe(true);
+    expect(isGenericFieldLabel('Form Field')).toBe(true);
+    expect(isGenericFieldLabel('Form Field *')).toBe(true);
+    expect(isGenericFieldLabel('field')).toBe(true);
+    expect(isGenericFieldLabel('Photo')).toBe(true);
+    expect(isGenericFieldLabel('7')).toBe(true);
+  });
+
+  it('keeps real questions usable', () => {
+    expect(isGenericFieldLabel('Are you willing to relocate?')).toBe(false);
+    expect(isGenericFieldLabel('From Month')).toBe(false);
+    expect(isGenericFieldLabel('Phone number')).toBe(false);
+    expect(isGenericFieldLabel('Photo ID number')).toBe(false);
+  });
+
+  it('never replays a golden answer stored under "Form Field"', () => {
+    const polluted = makeBrain({
+      goldenAnswers: [{ id: 'polluted', question: 'Form Field', answer: 'on', category: 'Screening' }],
+    });
+    const res = matchRuleBased({ label: 'Form Field', fieldType: 'text' }, polluted);
+    expect(res.matched).toBe(false);
+  });
+
+  it('never replays a custom answer stored under a placeholder key', () => {
+    const polluted = makeBrain({ customAnswers: { 'Form Field': 'on' } });
+    const res = matchRuleBased({ label: '', fieldType: 'text' }, polluted);
+    expect(res.matched).toBe(false);
+  });
+
+  it('still matches a real golden answer', () => {
+    const brain = makeBrain({
+      goldenAnswers: [
+        { id: 'relocate', question: 'Are you willing to relocate?', answer: 'Yes', category: 'Screening' },
+      ],
+    });
+    const res = matchRuleBased(
+      { label: 'Are you willing to relocate?', fieldType: 'radio', options: ['Yes', 'No'] },
+      brain,
+    );
+    expect(res.matched).toBe(true);
+    expect(res.answer).toBe('Yes');
   });
 });

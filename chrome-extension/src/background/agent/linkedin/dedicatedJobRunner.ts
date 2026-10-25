@@ -4301,8 +4301,9 @@ export class DedicatedJobRunner {
       }
     }
 
-    // Poll for modal with generous timeout
-    let modalRes = await currentPage.waitForEasyApplyModal(8000, 300);
+    // Poll for modal with generous timeout. The 2025 native-<dialog> UI can paint its
+    // shell (and accept the click) well before the first step's controls exist.
+    let modalRes = await currentPage.waitForEasyApplyModal(15000, 300);
     logger.info(`[DedicatedJobRunner] waitForEasyApplyModal result:`, modalRes);
     let retryClickRes: { success: boolean; error?: string; diagnostics?: string } | null = null;
     if (!modalRes.opened) {
@@ -4335,7 +4336,7 @@ export class DedicatedJobRunner {
       if (modalSleepAborted || !this.isRunning) return { status: 'halt' };
       retryClickRes = await currentPage.clickEasyApplyButton();
       logger.info(`[DedicatedJobRunner] clickEasyApplyButton retry (after modal miss):`, retryClickRes);
-      modalRes = await currentPage.waitForEasyApplyModal(8000, 300);
+      modalRes = await currentPage.waitForEasyApplyModal(15000, 300);
     }
 
     // 4d. Handle Modal Form-Filling & Verified Submission
@@ -4436,9 +4437,20 @@ export class DedicatedJobRunner {
     } else {
       if (stats) stats.failed++;
       const lastClickDiag = retryClickRes?.diagnostics || clickRes?.diagnostics;
+      // Capture what the page actually showed at timeout so the next report is not guesswork.
+      const failSnap = await currentPage.captureModalSnapshot().catch(() => null);
+      const failDom = failSnap
+        ? `dom=${failSnap.modalTag || 'none'} inputs=${failSnap.inputsCount} selects=${failSnap.selectsCount} buttons=${(
+            failSnap.buttonTexts || []
+          )
+            .slice(0, 4)
+            .join('/')}`
+        : 'dom=unavailable';
+      logger.warning(`[DedicatedJobRunner] Modal-open diagnostics for "${displayTitle}": ${failDom}`);
       const failReason = [
         modalRes.error || clickRes.error || 'Easy Apply modal failed to open within timeout',
         lastClickDiag,
+        failDom,
       ]
         .filter(Boolean)
         .join(' | ');
@@ -4579,6 +4591,27 @@ export class DedicatedJobRunner {
     const MAX_FIELD_ATTEMPTS = 6;
     const stepRetryCounts = new Map<number, number>();
     const MAX_STEP_RETRIES = 4;
+
+    // A document/resume step blocks on an <input type="file"> that the field extractor
+    // ignores and an LLM answer can never satisfy. Generate the draft resume PDF and
+    // upload it once per job. Returns true only when a file was actually attached.
+    const tryUploadDraftResume = async (liveMessage: string): Promise<boolean> => {
+      if (uploadAttempted || !hasNoStoredResume || !hasProfileData) return false;
+      try {
+        const draftFileName = buildDraftResumeFileName(careerBrain);
+        const draftPdf = buildDraftResumePdf(careerBrain);
+        const draftB64 = bytesToBase64(draftPdf);
+        this.notifyStatus(portToSend, liveMessage, 'info');
+        const uploaded = await page.uploadResumeDraftFile(draftFileName, draftB64);
+        if (!uploaded) return false;
+        uploadAttempted = true;
+        await new Promise(r => setTimeout(r, 1500));
+        return true;
+      } catch (uploadErr: any) {
+        logger.warning(`[DedicatedJobRunner] Draft resume upload failed: ${uploadErr?.message || uploadErr}`);
+        return false;
+      }
+    };
 
     const checkFieldRepeat = (fieldDesc: FormFieldDescriptor): boolean => {
       const key = `${(fieldDesc.label || '').trim().toLowerCase()}:::${fieldDesc.fieldType || 'text'}`;
@@ -5266,10 +5299,64 @@ export class DedicatedJobRunner {
           );
         }
 
-        // LLM modal-step brain: when the DOM extractor sees nothing, let the LLM
-        // read the rendered modal and decide the actual next action. Limited to the
-        // first 2 zero-field steps to keep token cost bounded.
-        if (zeroSnap && fieldsZeroStreak <= 2) {
+        // Zero descriptors does NOT mean an empty step. discoverModalFormFields() skips
+        // controls that already carry a value, so a fully pre-filled contact step reports
+        // 0 fields while the modal is healthy and only needs Next/Review. It can also be a
+        // transient React re-render where the body is momentarily detached.
+        const zeroControls = zeroSnap
+          ? zeroSnap.inputsCount + zeroSnap.selectsCount + zeroSnap.contenteditableCount
+          : 0;
+        const zeroButtons = (zeroSnap?.buttonTexts || []).join(' | ');
+        const zeroHasForward = /next|review|submit|continue/i.test(zeroButtons);
+
+        // A resume-upload step hides its requirement in an <input type="file">, which the
+        // field extractor ignores by design and which an LLM "FILL" action can never
+        // satisfy. Run the existing draft-resume upload immediately instead of waiting
+        // for the stuck-step guard to reach its third failure.
+        if (zeroSnap?.hasFileInput) {
+          const uploaded = await tryUploadDraftResume('📄 Uploading a draft resume to satisfy this document step...');
+          if (uploaded) {
+            fieldsZeroStreak = 0;
+            stuckStreak = 0;
+            lastIterationSignature = null;
+            continue;
+          }
+        }
+
+        // Healthy form with every visible control already answered, or an advanced step
+        // whose footer is present: skip the LLM entirely and let the action-button flow
+        // below advance. Only a modal with no controls AND no forward button is a true
+        // dead end worth asking the LLM about.
+        if (zeroControls > 0 || zeroHasForward) {
+          logger.info(
+            `[DedicatedJobRunner] Step ${step}: zero unanswered fields but ${zeroControls} control(s) / forward=${
+              zeroHasForward ? 'yes' : 'no'
+            } present — skipping LLM step analysis and advancing.`,
+          );
+          if (zeroControls > 0) fieldsZeroStreak = 0;
+        } else if (zeroSnap) {
+          // Give a slow first render a chance before spending LLM tokens. New LinkedIn UI
+          // paints the native <dialog> shell before its fields exist.
+          await new Promise(r => setTimeout(r, 900));
+          const retrySnap = await page.captureModalSnapshot().catch(() => null);
+          const retryControls = retrySnap
+            ? retrySnap.inputsCount + retrySnap.selectsCount + retrySnap.contenteditableCount
+            : 0;
+          const retryHasForward = /next|review|submit|continue/i.test((retrySnap?.buttonTexts || []).join(' | '));
+          if (retryControls > 0 || retryHasForward || retrySnap?.hasFileInput) {
+            logger.info(
+              `[DedicatedJobRunner] Step ${step}: modal content appeared after ${900}ms re-check (controls=${retryControls}, forward=${retryHasForward}) — retrying step.`,
+            );
+            fieldsZeroStreak = Math.max(0, fieldsZeroStreak - 1);
+            lastIterationSignature = null;
+            continue;
+          }
+        }
+
+        // LLM modal-step brain: only reached when the modal genuinely has no controls and
+        // no Next/Review/Submit control, so SKIP cannot discard a healthy prefilled step.
+        // Limited to the first 2 zero-field steps to keep token cost bounded.
+        if (zeroSnap && fieldsZeroStreak <= 2 && zeroControls === 0 && !zeroHasForward) {
           try {
             const analysis = await analyzeModalStepWithLLM(
               {
@@ -5313,10 +5400,19 @@ export class DedicatedJobRunner {
                   }
                 }
               } else if (analysis.action === 'SKIP') {
-                return {
-                  success: false,
-                  reason: analysis.reason || 'LLM determined this step cannot be handled',
-                };
+                // Never let a skip verdict win over a live form: the step may have rendered
+                // between the snapshot and the LLM response (the exact false-skip that used
+                // to report "modal with no input fields" on a filled contact step).
+                if (zeroControls > 0 || zeroHasForward) {
+                  logger.warning(
+                    `[DedicatedJobRunner] Ignoring LLM SKIP on step ${step}: snapshot still shows ${zeroControls} control(s) / forward=${zeroHasForward}. Advancing instead.`,
+                  );
+                } else {
+                  return {
+                    success: false,
+                    reason: analysis.reason || 'LLM determined this step cannot be handled',
+                  };
+                }
               }
               // ADVANCE: fall through to the normal action-button flow below
             }
@@ -5428,6 +5524,18 @@ export class DedicatedJobRunner {
               '[DedicatedJobRunner] Forward click was silently rejected by LinkedIn (step content unchanged). Healing surfaced validation errors and retrying once...',
             );
             const blockedValidation = await page.validateModalFormState();
+            // A blocked resume/document step cannot be healed with text answers —
+            // attach the draft resume once, then let the retry click below proceed.
+            if (!uploadAttempted) {
+              const blockedSnap = await page.captureModalSnapshot().catch(() => null);
+              if (blockedSnap?.hasFileInput || blockedValidation.unfulfilledMandatoryFileUpload) {
+                const uploaded = await tryUploadDraftResume('📄 Uploading a draft resume to unblock this form step...');
+                if (uploaded) {
+                  stuckStreak = 0;
+                  lastIterationSignature = null;
+                }
+              }
+            }
             if (blockedValidation.hasErrors && scopedLLM) {
               for (const invF of blockedValidation.invalidFieldsWithErrors) {
                 try {
@@ -5655,22 +5763,12 @@ export class DedicatedJobRunner {
       // Next button), auto-upload the draft resume PDF once to unlock the form.
       if (stuckStreak >= 1 && !uploadAttempted) {
         const snap = await page.captureModalSnapshot().catch(() => null);
-        if (snap?.hasFileInput && hasNoStoredResume && hasProfileData) {
-          try {
-            const draftFileName = buildDraftResumeFileName(careerBrain);
-            const draftPdf = buildDraftResumePdf(careerBrain);
-            const draftB64 = bytesToBase64(draftPdf);
-            this.notifyStatus(portToSend, `📄 Auto-uploading "${draftFileName}" to unlock this form step...`, 'info');
-            const uploaded = await page.uploadResumeDraftFile(draftFileName, draftB64);
-            if (uploaded) {
-              await new Promise(r => setTimeout(r, 1500));
-              uploadAttempted = true;
-              stuckStreak = 0;
-              lastIterationSignature = null;
-              this.notifyStatus(portToSend, `✅ Draft resume uploaded. Re-checking form buttons...`, 'info');
-            }
-          } catch (uploadErr: any) {
-            logger.warning(`[DedicatedJobRunner] Draft resume auto-upload failed: ${uploadErr?.message || uploadErr}`);
+        if (snap?.hasFileInput) {
+          const uploaded = await tryUploadDraftResume('📄 Auto-uploading a draft resume to unlock this form step...');
+          if (uploaded) {
+            stuckStreak = 0;
+            lastIterationSignature = null;
+            this.notifyStatus(portToSend, `✅ Draft resume uploaded. Re-checking form buttons...`, 'info');
           }
         }
       }

@@ -163,6 +163,25 @@ export function cleanLinkedInText(rawText: string): string {
 }
 
 /**
+ * Placeholder label the DOM extractors emit when a control has no accessible name.
+ * Such labels must never be treated as real questions: matching them against stored
+ * golden answers (or saving LLM guesses under them) pollutes the candidate profile
+ * with meaningless entries like `"Form Field" -> "on"`.
+ */
+const GENERIC_FIELD_LABEL_PATTERN =
+  /^(?:form\s*field|form|field|fields|question|questions|answer|answers|input|text(?:\s*field)?|textbox|select|selection|dropdown|checkbox|radio(?:\s*button)?|option|options|value|photo|photograph|n\/?a|none|null|undefined|-+|_+|\d{1,3})$/i;
+
+export function isGenericFieldLabel(rawLabel: string | undefined | null): boolean {
+  const label = (rawLabel || '')
+    .replace(/[\u200B-\u200D\uFEFF]/g, '')
+    .replace(/[*?:.]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!label || label.length <= 2) return true;
+  return GENERIC_FIELD_LABEL_PATTERN.test(label);
+}
+
+/**
  * Normalizes question text for loose duplicate detection:
  * - Cleans LinkedIn text artifacts
  * - Lowercases and trims
@@ -1741,10 +1760,17 @@ export function matchRuleBased(
   }
 
   // 2. Golden Answers (semantic cluster matching + format adaptation)
-  if (!isGenericWorkExperienceDateField(label)) {
+  // A placeholder label ("Form Field") carries no question at all — matching it would
+  // replay a meaningless stored answer onto an unrelated control.
+  if (!isGenericWorkExperienceDateField(label) && !isGenericFieldLabel(label)) {
     const goldenAnswers = Array.isArray(careerBrain.goldenAnswers) ? careerBrain.goldenAnswers : [];
     const validGolden = goldenAnswers.filter(
-      ga => ga && ga.question && ga.answer && !isGenericWorkExperienceDateField(ga.question),
+      ga =>
+        ga &&
+        ga.question &&
+        ga.answer &&
+        !isGenericWorkExperienceDateField(ga.question) &&
+        !isGenericFieldLabel(ga.question),
     );
 
     // First attempt: Smart semantic matching (normalization + curated synonym clusters + token ranking)
@@ -1778,9 +1804,9 @@ export function matchRuleBased(
   }
 
   // 3. Custom Answers (loose match check with format adaptation)
-  if (!isGenericWorkExperienceDateField(label)) {
+  if (!isGenericWorkExperienceDateField(label) && !isGenericFieldLabel(label)) {
     for (const [key, ans] of Object.entries(careerBrain.customAnswers || {})) {
-      if (isGenericWorkExperienceDateField(key)) continue;
+      if (isGenericWorkExperienceDateField(key) || isGenericFieldLabel(key)) continue;
       if (matchesQuestionLoosely(label, key)) {
         const adapted = adaptAnswerToFieldFormat(String(ans), field);
         if (adapted.valid) {
@@ -3149,7 +3175,12 @@ OUTPUT STRICTLY VALID JSON ONLY:
         }
 
         // Auto-save to goldenAnswers and customAnswers for instantaneous 0-credit future reuse
-        if (!isGenericWorkExperienceDateField(cleanLabel) && !isSocialMediaOrUrlQuestion(cleanLabel)) {
+        // Never persist placeholder labels — they would replay this answer on unrelated controls.
+        if (
+          !isGenericWorkExperienceDateField(cleanLabel) &&
+          !isSocialMediaOrUrlQuestion(cleanLabel) &&
+          !isGenericFieldLabel(cleanLabel)
+        ) {
           await careerBrainStore.saveGoldenAnswer(cleanLabel, ans, 'Screening').catch(() => {});
           await careerBrainStore.setCustomAnswer(cleanLabel, ans).catch(() => {});
           if (!careerBrain.goldenAnswers) careerBrain.goldenAnswers = [];
@@ -3403,7 +3434,11 @@ OUTPUT STRICTLY VALID JSON ONLY:
         );
 
         // Auto-save healed answer to golden answers
-        if (!isGenericWorkExperienceDateField(cleanLabel) && !isSocialMediaOrUrlQuestion(cleanLabel)) {
+        if (
+          !isGenericWorkExperienceDateField(cleanLabel) &&
+          !isSocialMediaOrUrlQuestion(cleanLabel) &&
+          !isGenericFieldLabel(cleanLabel)
+        ) {
           await careerBrainStore.saveGoldenAnswer(cleanLabel, ans, 'Screening').catch(() => {});
           if (!careerBrain.goldenAnswers) careerBrain.goldenAnswers = [];
           careerBrain.goldenAnswers.push({
@@ -3783,7 +3818,11 @@ export async function resolveModalFieldWithAudit(
         }
 
         // Auto-save to goldenAnswers so future encounters of this question resolve immediately in Step 1
-        if (!isGenericWorkExperienceDateField(label) && !isSocialMediaOrUrlQuestion(label)) {
+        if (
+          !isGenericWorkExperienceDateField(label) &&
+          !isSocialMediaOrUrlQuestion(label) &&
+          !isGenericFieldLabel(label)
+        ) {
           await careerBrainStore.saveGoldenAnswer(label, subjectiveMatch.answer, 'Screening').catch(() => {});
         }
 
@@ -3896,7 +3935,11 @@ export async function resolveModalFieldWithAudit(
       );
 
       // Auto-save to goldenAnswers
-      if (!isGenericWorkExperienceDateField(label) && !isSocialMediaOrUrlQuestion(label)) {
+      if (
+        !isGenericWorkExperienceDateField(label) &&
+        !isSocialMediaOrUrlQuestion(label) &&
+        !isGenericFieldLabel(label)
+      ) {
         await careerBrainStore.saveGoldenAnswer(label, userAnswer, 'Screening');
       }
 
@@ -3935,7 +3978,7 @@ export async function resolveModalFieldWithAudit(
       }
 
       // Update in-memory careerBrain goldenAnswers array so subsequent checks in the current run see it
-      if (!isGenericWorkExperienceDateField(label)) {
+      if (!isGenericWorkExperienceDateField(label) && !isGenericFieldLabel(label)) {
         careerBrain.goldenAnswers = [
           ...(careerBrain.goldenAnswers || []),
           {

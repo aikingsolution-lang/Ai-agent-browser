@@ -2563,18 +2563,37 @@ export default class Page {
               '.jobs-easy-apply-modal, .jobs-easy-apply-content, [data-easy-apply-modal], .jobs-easy-apply-form-section, .jobs-easy-apply-form-element, form.jobs-easy-apply-form, [data-test-modal-id="easy-apply-modal"]',
             ) !== null;
 
+          // Confirmation / intermediate dialogs must never be mistaken for the form itself.
+          const rawText = (dialog.innerText || dialog.textContent || '').trim().slice(0, 900);
+          const isIntermediateConfirm =
+            /save this application|save application|discard draft|job search safety|continue applying/i.test(rawText);
+
+          // LinkedIn's 2025 Easy Apply UI is a native <dialog> with atomic utility classes
+          // (no artdeco/jobs markers) and often paints its fields a moment after opening.
+          // Accept it by its application-flow text / navigation control so a slow first
+          // render is not reported as "modal failed to open".
+          const isNativeDialog = dialog.tagName.toLowerCase() === 'dialog';
+          const hasApplyFlowText =
+            /easy apply|apply to |apply for |contact info|home address|resume|review your application|work experience|education/i.test(
+              rawText,
+            );
+          const isNewUiEasyApply =
+            isNativeDialog && !isIntermediateConfirm && (hasNavButtons || hasApplyFlowText || formInputs.length > 0);
+
           const isEasyApply =
-            hasExplicitEasyApplyClass ||
-            dialog.querySelector('.jobs-easy-apply-content, [data-easy-apply-modal], form.jobs-easy-apply-form') !==
-              null ||
-            ((formInputs.length > 0 || hasDocumentUpload) && hasNavButtons) ||
-            ((formInputs.length > 0 || hasDocumentUpload) &&
-              (/easy apply/i.test(title) ||
-                /apply to/i.test(title) ||
-                /apply for/i.test(title) ||
-                /contact info/i.test(title) ||
-                /home address/i.test(title) ||
-                /resume/i.test(title)));
+            !isIntermediateConfirm &&
+            (hasExplicitEasyApplyClass ||
+              dialog.querySelector('.jobs-easy-apply-content, [data-easy-apply-modal], form.jobs-easy-apply-form') !==
+                null ||
+              isNewUiEasyApply ||
+              ((formInputs.length > 0 || hasDocumentUpload) && hasNavButtons) ||
+              ((formInputs.length > 0 || hasDocumentUpload) &&
+                (/easy apply/i.test(title) ||
+                  /apply to/i.test(title) ||
+                  /apply for/i.test(title) ||
+                  /contact info/i.test(title) ||
+                  /home address/i.test(title) ||
+                  /resume/i.test(title))));
 
           if (isEasyApply) {
             return {
@@ -6324,6 +6343,24 @@ export default class Page {
         return cleanDuplicateText(text);
       }
 
+      // LinkedIn's 2025 form UI often labels controls via aria-labelledby pointing at an
+      // atomic-class <span> instead of <label for>. Resolve those references so fields
+      // don't fall through to the meaningless "Form Field" placeholder.
+      function labelFromIdRefs(root: HTMLElement, el: Element): string {
+        const labelledBy = el.getAttribute('aria-labelledby');
+        if (!labelledBy) return '';
+        const parts: string[] = [];
+        for (const id of labelledBy.split(/\s+/)) {
+          if (!id) continue;
+          try {
+            const ref = root.querySelector(`[id="${CSS.escape(id)}"]`);
+            const t = cleanElementText(ref);
+            if (t) parts.push(t);
+          } catch {}
+        }
+        return parts.join(' ');
+      }
+
       const modal = findActiveModal(document);
       if (!modal) return [];
       const descriptors: FormFieldDescriptor[] = [];
@@ -6418,6 +6455,7 @@ export default class Page {
           const lbl = modal.querySelector(`label[for="${id}"]`);
           if (lbl) label = cleanElementText(lbl);
         }
+        if (!label) label = labelFromIdRefs(modal, cb);
         if (!label) {
           const parent = cb.closest('.fb-dash-form-element, div[data-test-form-element], label');
           if (parent) label = cleanElementText(parent);
@@ -6538,6 +6576,7 @@ export default class Page {
             const lbl = modal.querySelector(`label[for="${id}"]`);
             if (lbl) label = cleanElementText(lbl);
           }
+          if (!label) label = labelFromIdRefs(modal, sel);
           let parent: HTMLElement | null = null;
           if (!label) {
             parent = sel.closest(
@@ -6644,6 +6683,7 @@ export default class Page {
             const lbl = modal.querySelector(`label[for="${id}"]`);
             if (lbl) label = cleanElementText(lbl);
           }
+          if (!label) label = labelFromIdRefs(modal, input);
           let parent: HTMLElement | null = null;
           if (!label) {
             parent = input.closest(
@@ -6807,6 +6847,7 @@ export default class Page {
           const lbl = modal.querySelector(`label[for="${id}"]`);
           if (lbl) label = cleanElementText(lbl);
         }
+        if (!label) label = labelFromIdRefs(modal, cb);
         let parent: HTMLElement | null = null;
         if (!label) {
           parent = cb.closest(
@@ -7297,8 +7338,10 @@ export default class Page {
         fieldsetsCount: countSel('fieldset'),
         contenteditableCount: countSel('[contenteditable="true"]'),
         iframesCount: countSel('iframe'),
+        // NOTE: [role="progressbar"] is the step progress indicator, not a loader —
+        // counting it made every snapshot look like the step was still loading.
         spinnersCount: countSel(
-          '.artdeco-spinner, [role="progressbar"], .loader, [data-test-spinner], .fb-dash-form-element__spinner, .jobs-easy-apply-modal__loading',
+          '.artdeco-spinner, .artdeco-loader, .loading-spinner, .loader, [data-test-spinner], [data-test-loading-indicator], .fb-dash-form-element__spinner, .jobs-easy-apply-modal__loading, [aria-busy="true"]',
         ),
         shadowHosts,
         shadowInputs,
