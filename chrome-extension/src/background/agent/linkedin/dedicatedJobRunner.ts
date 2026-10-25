@@ -33,6 +33,7 @@ import { indeedAdapter } from '../platforms/indeed/indeedAdapter';
 import type { SupportedPlatform, IJobQueueItem } from '../platforms/types';
 import { Actors, ExecutionState } from '../event/types';
 import { createChatModel } from '../helper';
+import { getActiveChatModel } from '../activeModelHelper';
 import { ChatOpenAI } from '@langchain/openai';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import {
@@ -44,6 +45,7 @@ import {
   analyzeModalStepWithLLM,
   matchRuleBased,
   rememberResolvedAnswer,
+  generateAutonomousFallbackAnswer,
 } from './formQuestionResolver';
 import {
   evaluateDeepRelevance,
@@ -452,6 +454,9 @@ async function getJobScopedLLM(jobRunId: string): Promise<BaseChatModel | undefi
         maxTokens: 4096,
       });
     }
+
+    const active = await getActiveChatModel(jobRunId);
+    if (active) return active;
 
     const providers = await llmProviderStore.getAllProviders();
     const agentModels = await agentModelStore.getAllAgentModels();
@@ -4824,24 +4829,37 @@ export class DedicatedJobRunner {
             `🧠 Auto-answering ${unresolvedFields.length} unlisted question${unresolvedFields.length > 1 ? 's' : ''} from your profile...`,
             'info',
           );
+          const activeSolverLLM =
+            scopedLLM || (await getJobScopedLLM(jobRunId)) || (await getActiveChatModel(jobRunId));
           for (const f of unresolvedFields) {
             if (!this.isRunning) break;
             try {
-              if (!scopedLLM) {
-                logger.warning(`[DedicatedJobRunner] No LLM available to answer "${f.label}"; leaving it unanswered.`);
-                continue;
+              let answer = '';
+              let reason = '';
+              if (activeSolverLLM) {
+                const autoSol = await solveQuestionAutonomousWithLLM(f, careerBrain, activeSolverLLM);
+                if (autoSol.success && autoSol.answer) {
+                  answer = autoSol.answer;
+                  reason = autoSol.reason || 'Autonomous LLM resolution';
+                }
               }
-              const autoSol = await solveQuestionAutonomousWithLLM(f, careerBrain, scopedLLM);
-              if (autoSol.success && autoSol.answer) {
-                const fillSuccess = await fillAnswerWithFormat(f, autoSol.answer);
+              if (!answer) {
+                answer = generateAutonomousFallbackAnswer(f, careerBrain);
+                reason = 'Profile-derived autonomous fallback';
+              }
+              if (answer) {
+                let fillSuccess = await fillAnswerWithFormat(f, answer);
+                if (!fillSuccess && typeof page.fillModalFieldDirect === 'function') {
+                  fillSuccess = await page.fillModalFieldDirect(f, answer).catch(() => false);
+                }
                 onAuditLog(
                   'GENERATED',
                   f.label,
-                  autoSol.answer,
-                  `Autonomous LLM resolution | DOM fill: ${fillSuccess ? 'SUCCESS' : 'FAILED'}`,
+                  answer,
+                  `${reason} | DOM fill: ${fillSuccess ? 'SUCCESS' : 'FAILED'}`,
                 );
                 if (fillSuccess) {
-                  await rememberResolvedAnswer(f.label, autoSol.answer);
+                  await rememberResolvedAnswer(f.label, answer);
                   careerBrain = await careerBrainStore.getCareerBrain();
                 }
               } else {
@@ -5003,24 +5021,37 @@ export class DedicatedJobRunner {
           if (unresolvedReqFields.length > 0 && this.isRunning) {
             // Zero-interaction rule: required leftovers are answered from the profile via
             // the autonomous solver — no side-panel prompt, no timeout, no user action.
+            const activeReqLLM =
+              scopedLLM || (await getJobScopedLLM(jobRunId)) || (await getActiveChatModel(jobRunId));
             for (const req of unresolvedReqFields) {
               if (!this.isRunning) break;
               try {
-                if (!scopedLLM) {
-                  logger.warning(`[DedicatedJobRunner] No LLM available for required field "${req.label}".`);
-                  continue;
+                let answer = '';
+                let reason = '';
+                if (activeReqLLM) {
+                  const autoSol = await solveQuestionAutonomousWithLLM(req, careerBrain, activeReqLLM);
+                  if (autoSol.success && autoSol.answer) {
+                    answer = autoSol.answer;
+                    reason = autoSol.reason || 'Autonomous LLM resolution';
+                  }
                 }
-                const autoSol = await solveQuestionAutonomousWithLLM(req, careerBrain, scopedLLM);
-                if (autoSol.success && autoSol.answer) {
-                  const fillSuccess = await fillAnswerWithFormat(req, autoSol.answer);
+                if (!answer) {
+                  answer = generateAutonomousFallbackAnswer(req, careerBrain);
+                  reason = 'Profile-derived autonomous fallback';
+                }
+                if (answer) {
+                  let fillSuccess = await fillAnswerWithFormat(req, answer);
+                  if (!fillSuccess && typeof page.fillModalFieldDirect === 'function') {
+                    fillSuccess = await page.fillModalFieldDirect(req, answer).catch(() => false);
+                  }
                   onAuditLog(
                     'GENERATED',
                     req.label,
-                    autoSol.answer,
-                    `Autonomous LLM resolution (required) | DOM fill: ${fillSuccess ? 'SUCCESS' : 'FAILED'}`,
+                    answer,
+                    `${reason} (required) | DOM fill: ${fillSuccess ? 'SUCCESS' : 'FAILED'}`,
                   );
                   if (fillSuccess) {
-                    await rememberResolvedAnswer(req.label, autoSol.answer);
+                    await rememberResolvedAnswer(req.label, answer);
                     careerBrain = await careerBrainStore.getCareerBrain();
                   }
                 }

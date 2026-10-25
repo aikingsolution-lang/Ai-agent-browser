@@ -430,4 +430,64 @@ describe('Real-World User Scenario Test Suite (End-to-End)', () => {
       });
     });
   });
+
+  /* ──────────────────────────────────────────────────────────────────────────
+   * Scenario 6: Autonomous Screening & Profile Intent Matching (Live User Cases)
+   * ────────────────────────────────────────────────────────────────────────── */
+  describe('User Scenario 6: Live Unlisted Screening Questions & Profile Match', () => {
+    it('6.1: matches "Where are you currently based?" directly to profile location', () => {
+      const field: FormFieldDescriptor = {
+        fieldType: 'text',
+        label: 'Where are you currently based?',
+      };
+      const match = matchRuleBased(field, baseCareerBrain);
+      expect(match.matched).toBe(true);
+      expect(match.answer).toContain('Noida');
+    });
+
+    it('6.2: matches "What is your current total annual compensation (CTC)?" to current CTC', () => {
+      const field: FormFieldDescriptor = {
+        fieldType: 'text',
+        label: 'What is your current total annual compensation (CTC)?',
+      };
+      const match = matchRuleBased(field, baseCareerBrain);
+      expect(match.matched).toBe(true);
+      expect(match.answer).toBe('1200000');
+    });
+
+    it('6.3: matches "What is your expected total annual compensation (CTC)?" to expected CTC', () => {
+      const field: FormFieldDescriptor = {
+        fieldType: 'text',
+        label: 'What is your expected total annual compensation (CTC)?',
+      };
+      const match = matchRuleBased(field, baseCareerBrain);
+      expect(match.matched).toBe(true);
+      expect(match.answer).toBe('1800000');
+    });
+
+    it('6.4: does NOT match tools question with GitHub URL even if Jira/GitHub is in example text', () => {
+      const brainWithGithub = {
+        ...baseCareerBrain,
+        githubUrl: 'https://github.com/MUBASSHIRALI0710',
+      };
+      const field: FormFieldDescriptor = {
+        fieldType: 'text',
+        label: 'Which tools, platforms, or technologies are you proficient in? (e.g., Jira, GitHub, MS Project, AI tools, etc.)',
+      };
+      const match = matchRuleBased(field, brainWithGithub);
+      // Must not match githubUrl!
+      expect(match.matched).toBe(false);
+    });
+
+    it('6.5: adaptAnswerToFieldFormat does NOT reject open-ended text answers containing the word "experience"', () => {
+      const field: FormFieldDescriptor = {
+        fieldType: 'text',
+        label: 'Have you worked on both small-scale and large-scale projects/products? Please provide examples.',
+      };
+      const answer = 'Yes, I have 4 years of hands-on experience building both MVPs and production scale web apps.';
+      const adapted = adaptAnswerToFieldFormat(answer, field);
+      expect(adapted.valid).toBe(true);
+      expect(adapted.value).toBe(answer);
+    });
+  });
 });
