@@ -22,6 +22,7 @@ import {
   cleanLocationForCityField,
   parseLocationParts,
   isSocialMediaOrUrlQuestion,
+  isGenericPlaceholderFieldLabel,
   areQuestionsSemanticallyEquivalent,
   findBestMatchingGoldenAnswer,
 } from '@extension/storage';
@@ -167,19 +168,11 @@ export function cleanLinkedInText(rawText: string): string {
  * Such labels must never be treated as real questions: matching them against stored
  * golden answers (or saving LLM guesses under them) pollutes the candidate profile
  * with meaningless entries like `"Form Field" -> "on"`.
+ *
+ * The canonical rule lives in @extension/storage so the same guard also sanitizes
+ * already-stored answers; the historical export name is kept for existing callers.
  */
-const GENERIC_FIELD_LABEL_PATTERN =
-  /^(?:form\s*field|form|field|fields|question|questions|answer|answers|input|text(?:\s*field)?|textbox|select|selection|dropdown|checkbox|radio(?:\s*button)?|option|options|value|photo|photograph|n\/?a|none|null|undefined|-+|_+|\d{1,3})$/i;
-
-export function isGenericFieldLabel(rawLabel: string | undefined | null): boolean {
-  const label = (rawLabel || '')
-    .replace(/[\u200B-\u200D\uFEFF]/g, '')
-    .replace(/[*?:.]+/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-  if (!label || label.length <= 2) return true;
-  return GENERIC_FIELD_LABEL_PATTERN.test(label);
-}
+export const isGenericFieldLabel = isGenericPlaceholderFieldLabel;
 
 /**
  * Normalizes question text for loose duplicate detection:

@@ -48,8 +48,12 @@ export const FAILED_JOB_TTL_MS = 24 * 60 * 60 * 1000;
  * Bump whenever a code change invalidates previously recorded failure reasons
  * (UI-mismatch fixes, click fixes, form-discovery fixes). Entries written by a
  * build with a different version are discarded on next read.
+ *
+ * v2 (2026-10-25): invalidates failures recorded before the new-UI Easy Apply
+ * modal detection fix and the save-application-overlay fix, so jobs that were
+ * false-skipped as "modal failed to open" become retryable immediately.
  */
-export const NEGATIVE_CACHE_SCHEMA_VERSION = 1;
+export const NEGATIVE_CACHE_SCHEMA_VERSION = 2;
 
 const DEFAULT_PROCESSED_JOBS: ProcessedJobsData = {
   appliedJobIds: [],

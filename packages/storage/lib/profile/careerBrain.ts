@@ -62,6 +62,27 @@ export function isSocialMediaOrUrlQuestion(question: string): boolean {
 }
 
 /**
+ * Detects placeholder field labels emitted by DOM discovery on newer LinkedIn
+ * Easy Apply steps when a control has no accessible name (e.g. "Form Field",
+ * "Photo", "Input", a bare number). Such labels must never be stored as golden
+ * or custom answers: replaying them later answers a real question with garbage
+ * (e.g. `"Form Field" -> "on"`, `"Photo" -> "0"`).
+ *
+ * Canonical implementation — the LinkedIn form resolver imports this function.
+ */
+export function isGenericPlaceholderFieldLabel(rawLabel: string | undefined | null): boolean {
+  const label = (rawLabel || '')
+    .replace(/[\u200B-\u200D\uFEFF]/g, '')
+    .replace(/[*?:.]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!label || label.length <= 2) return true;
+  return /^(?:form\s*field|form|field|fields|question|questions|answer|answers|input|text(?:\s*field)?|textbox|select|selection|dropdown|checkbox|radio(?:\s*button)?|option|options|value|photo|photograph|n\/?a|none|null|undefined|-+|_+|\d{1,3})$/i.test(
+    label,
+  );
+}
+
+/**
  * Detects questions that can and should be answered dynamically from Candidate Background Narrative,
  * resume work history, or dedicated profile fields (e.g. years of experience, highest degree,
  * current/expected CTC, notice period, technical skills, employment status).
@@ -949,10 +970,20 @@ export async function saveCareerBrainData(data: unknown): Promise<SaveCareerBrai
       };
     }
 
-    // 2. Add timestamp & enforce clean priority sorting + filter social media questions
+    // 2. Add timestamp & enforce clean priority sorting + filter social media / placeholder questions
     const cleanGoldenAnswers = sortGoldenAnswersByPriority(
-      (parseResult.data.goldenAnswers || []).filter(ga => !isSocialMediaOrUrlQuestion(ga.question)),
+      (parseResult.data.goldenAnswers || []).filter(
+        ga => !isSocialMediaOrUrlQuestion(ga.question) && !isGenericPlaceholderFieldLabel(ga.question),
+      ),
     );
+
+    // Drop custom answers keyed by placeholder labels ("Form Field", "Photo", …)
+    const cleanCustomAnswers: Record<string, string> = {};
+    for (const [questionKey, answer] of Object.entries(parseResult.data.customAnswers || {})) {
+      if (!isGenericPlaceholderFieldLabel(questionKey)) {
+        cleanCustomAnswers[questionKey] = answer;
+      }
+    }
 
     // Enforce 3 prioritized locations (Priority 1 mirrored to preferredLocation)
     let finalPreferredLocations = (parseResult.data.preferredLocations || [])
@@ -986,6 +1017,7 @@ export async function saveCareerBrainData(data: unknown): Promise<SaveCareerBrai
       preferredLocation: finalPreferredLocation,
       preferredLocations: finalPreferredLocations,
       goldenAnswers: cleanGoldenAnswers,
+      customAnswers: cleanCustomAnswers,
       skillExperience: mergedSkillExp,
       autoExtractedSkills: hasNewSkillExp
         ? Array.from(new Set([...(parseResult.data.autoExtractedSkills || []), ...Object.keys(mergedSkillExp)]))
@@ -1064,16 +1096,35 @@ export async function getCareerBrainData(): Promise<ICareerBrain> {
       data = merged;
     }
 
-    // Seamless auto-migration: Purge any stale generic work-experience date fields and social media (Facebook, X, etc.) from goldenAnswers
+    // Seamless auto-migration: Purge any stale generic work-experience date fields, social media
+    // (Facebook, X, etc.) and placeholder labels ("Form Field", "Photo") from goldenAnswers
     let purgedStaleGolden = false;
     if (Array.isArray(data.goldenAnswers) && data.goldenAnswers.length > 0) {
       const filtered = data.goldenAnswers.filter(
-        ga => !isGenericWorkExperienceDateField(ga.question) && !isSocialMediaOrUrlQuestion(ga.question),
+        ga =>
+          !isGenericWorkExperienceDateField(ga.question) &&
+          !isSocialMediaOrUrlQuestion(ga.question) &&
+          !isGenericPlaceholderFieldLabel(ga.question),
       );
       if (filtered.length !== data.goldenAnswers.length) {
         data.goldenAnswers = filtered;
         purgedStaleGolden = true;
       }
+    }
+
+    // Seamless auto-migration: Drop custom answers keyed by placeholder labels that
+    // older builds auto-saved from unnamed form controls.
+    let purgedCustomAnswers = false;
+    if (data.customAnswers && Object.keys(data.customAnswers).length > 0) {
+      const cleanedCustom: Record<string, string> = {};
+      for (const [questionKey, answer] of Object.entries(data.customAnswers)) {
+        if (isGenericPlaceholderFieldLabel(questionKey)) {
+          purgedCustomAnswers = true;
+        } else {
+          cleanedCustom[questionKey] = answer;
+        }
+      }
+      if (purgedCustomAnswers) data.customAnswers = cleanedCustom;
     }
 
     // Seamless auto-migration: Sanitize and purge fabricated skillExperience (e.g. uniform "5 years" across 20+ skills)
@@ -1200,6 +1251,7 @@ export async function getCareerBrainData(): Promise<ICareerBrain> {
       missingDefaults.length > 0 ||
       cleanedGoldenAnswers ||
       purgedStaleGolden ||
+      purgedCustomAnswers ||
       sanitizedSkillExp ||
       migratedSkillExp ||
       cleanedLocation ||
@@ -1267,6 +1319,8 @@ export const careerBrainStore: CareerBrainStorage = {
   },
 
   async setCustomAnswer(questionKey: string, answer: string): Promise<void> {
+    // Never persist placeholder field labels ("Form Field", "Photo") as custom answers.
+    if (isGenericPlaceholderFieldLabel(questionKey)) return;
     const current = await this.getCareerBrain();
     const customAnswers = { ...current.customAnswers, [questionKey]: answer };
     await this.updateCareerBrain({ customAnswers });
@@ -1281,11 +1335,13 @@ export const careerBrainStore: CareerBrainStorage = {
   },
 
   async saveGoldenAnswer(question: string, answer: string, category?: string): Promise<void> {
-    // Never persist ambiguous relative work-experience date fields, social media questions, or narrative questions
+    // Never persist ambiguous relative work-experience date fields, social media questions,
+    // narrative questions, or placeholder labels emitted for unnamed form controls.
     if (
       isGenericWorkExperienceDateField(question) ||
       isSocialMediaOrUrlQuestion(question) ||
-      isNarrativeAnswerableQuestion(question)
+      isNarrativeAnswerableQuestion(question) ||
+      isGenericPlaceholderFieldLabel(question)
     ) {
       return;
     }

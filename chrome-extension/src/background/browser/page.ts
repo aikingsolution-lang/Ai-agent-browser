@@ -5414,6 +5414,18 @@ export default class Page {
         return txt.trim();
       }
 
+      /**
+       * Rejects menu / badge / fallback strings that surface when LinkedIn's
+       * selectors miss the real title ("More", "Easy Apply", "LinkedIn Job", …).
+       */
+      function isJunkJobTitle(raw: string): boolean {
+        const t = (raw || '').replace(/\s+/g, ' ').trim().toLowerCase();
+        if (!t || t.length < 3 || t.length > 120) return true;
+        return /^(?:more|less|see more|show more|view more|easy apply|promoted|verified|save|saved|dismiss|close|apply|applied|apply now|apply on company site|view job|job|job details|linkedin job|linkedin|unknown|n\/?a|none|null|undefined)$/.test(
+          t,
+        );
+      }
+
       function cleanElementText(el: Element | null): string {
         if (!el) return '';
         const clone = el.cloneNode(true) as HTMLElement;
@@ -5476,6 +5488,7 @@ export default class Page {
         'h1.job-details-jobs-unified-top-card__job-title, h2.job-details-jobs-unified-top-card__job-title, .job-details-jobs-unified-top-card__job-title a, .jobs-unified-top-card__job-title, .jobs-search__job-details--container h1, .jobs-search__job-details--container h2, .jobs-details__main-content h1, .jobs-details__main-content h2, h1.t-24, h1.top-card-layout__title, .job-view-layout h1, .job-view-layout h2, [data-job-id].jobs-search-results-list__list-item--active .job-card-list__title, [data-job-id].jobs-search-results-list__list-item--active a[href*="/jobs/view/"]',
       );
       let title = cleanLinkedInJobTitle(cleanElementText(titleEl));
+      if (isJunkJobTitle(title)) title = '';
 
       // 3. Extract Company (broadened selectors for search pane, collections & standalone view)
       const companyEl = document.querySelector(
@@ -5513,7 +5526,10 @@ export default class Page {
             parsedTitle = parts[0]?.trim();
             parsedCompany = parts[1]?.trim();
           }
-          if (!title && parsedTitle) title = cleanLinkedInJobTitle(cleanDuplicateString(parsedTitle));
+          if (!title && parsedTitle) {
+            const cleanedParsedTitle = cleanLinkedInJobTitle(cleanDuplicateString(parsedTitle));
+            title = isJunkJobTitle(cleanedParsedTitle) ? '' : cleanedParsedTitle;
+          }
           if (company === 'Unknown Company' && parsedCompany) company = cleanDuplicateString(parsedCompany);
         }
       }
@@ -5727,6 +5743,18 @@ export default class Page {
         return txt.trim();
       }
 
+      /**
+       * Rejects menu / badge / fallback strings that surface when LinkedIn's
+       * selectors miss the real title ("More", "Easy Apply", "LinkedIn Job", …).
+       */
+      function isJunkJobTitle(raw: string): boolean {
+        const t = (raw || '').replace(/\s+/g, ' ').trim().toLowerCase();
+        if (!t || t.length < 3 || t.length > 120) return true;
+        return /^(?:more|less|see more|show more|view more|easy apply|promoted|verified|save|saved|dismiss|close|apply|applied|apply now|apply on company site|view job|job|job details|linkedin job|linkedin|unknown|n\/?a|none|null|undefined)$/.test(
+          t,
+        );
+      }
+
       function cleanElementText(el: Element | null): string {
         if (!el) return '';
         const clone = el.cloneNode(true) as HTMLElement;
@@ -5881,12 +5909,28 @@ export default class Page {
         }
         seenJobIds.add(jobId);
 
-        // Extract title
+        // Extract title. Newer LinkedIn cards sometimes expose a menu/badge ("More")
+        // through generic strong/h3 selectors, so every source is validated.
         const titleEl = card.querySelector(
-          'a.job-card-list__title, .job-card-container__link, .artdeco-entity-lockup__title, strong, h3, [data-control-name="job_card_title"]',
+          'a.job-card-list__title, a.job-card-container__link, .job-card-container__link, .artdeco-entity-lockup__title, [data-control-name="job_card_title"], strong, h3',
         );
-        const rawTitle = cleanElementText(titleEl) || cleanElementText(link);
-        const title = cleanLinkedInJobTitle(rawTitle);
+        let rawTitle = cleanElementText(titleEl);
+        if (isJunkJobTitle(rawTitle)) rawTitle = cleanElementText(link);
+        if (isJunkJobTitle(rawTitle)) {
+          // When the anchor wraps the whole card, textContent collapses everything
+          // into one long string; the first rendered line is the job title.
+          const firstLine = ((link as HTMLElement | null)?.innerText || '')
+            .split(/\n+/)
+            .map(line => line.trim())
+            .find(line => !isJunkJobTitle(line));
+          if (firstLine) rawTitle = firstLine;
+        }
+        if (isJunkJobTitle(rawTitle)) {
+          rawTitle =
+            link?.getAttribute('aria-label') || link?.getAttribute('title') || card.getAttribute('aria-label') || '';
+        }
+        const cleanedCardTitle = cleanLinkedInJobTitle(rawTitle);
+        const title = isJunkJobTitle(cleanedCardTitle) ? '' : cleanedCardTitle;
 
         // Extract company
         const companyEl = card.querySelector(
