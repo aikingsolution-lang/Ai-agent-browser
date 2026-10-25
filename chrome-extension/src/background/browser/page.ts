@@ -2468,10 +2468,10 @@ export default class Page {
             return style.display !== 'none' && style.visibility !== 'hidden';
           }
 
-          // 1. Exclude global navigation, headers, footers, search list, filter list, or messaging docks/flyouts
+          // 1. Exclude global navigation, headers, footers, or messaging docks/flyouts
           if (
             dialog.closest(
-              'nav, header, footer, #footer, .artdeco-footer, [data-view-name="footer"], #global-nav, .global-nav, .global-nav__nav, .msg-overlay-container, #msg-overlay, .msg-overlay-bubble-header, .artdeco-dropdown, .artdeco-dropdown__content, .jobs-search-results-list, .scaffold-layout__list, [role="tooltip"], .tooltip, .search-reusables__filter-list, .search-reusables__filter-dropdown, .search-reusables__primary-filter, [data-view-name="search-filter-pills"], .artdeco-pill, .scaffold-layout__header, .jobs-search-box',
+              'nav, header, footer, #footer, .artdeco-footer, [data-view-name="footer"], #global-nav, .global-nav, .global-nav__nav, .msg-overlay-container, #msg-overlay, .msg-overlay-bubble-header, .artdeco-dropdown, .artdeco-dropdown__content, [role="tooltip"], .tooltip',
             )
           ) {
             return false;
@@ -2515,9 +2515,9 @@ export default class Page {
             return false;
           }
 
-          // 5. Must have genuine modal dimensions (minimum 200px width, 100px height)
+          // 5. Must have genuine modal dimensions (minimum 120px width, 60px height)
           const rect = dialog.getBoundingClientRect();
-          if (rect.width < 200 || rect.height < 100) {
+          if (rect.width < 120 || rect.height < 60) {
             return false;
           }
 
@@ -2528,7 +2528,7 @@ export default class Page {
         const rawDialogs = root.querySelectorAll
           ? (Array.from(
               root.querySelectorAll(
-                'div.jobs-easy-apply-modal, div[data-test-modal], div.artdeco-modal, dialog[open], div[role="dialog"], [aria-modal="true"]',
+                'div.jobs-easy-apply-modal, [data-easy-apply-modal], [data-test-modal-id="easy-apply-modal"], div[data-test-modal], div.artdeco-modal, dialog[open], dialog, div[role="dialog"], [aria-modal="true"]',
               ),
             ) as HTMLElement[])
           : [];
@@ -2544,7 +2544,7 @@ export default class Page {
           const formInputs = dialog.querySelectorAll(
             'input:not([type="hidden"]), textarea, select, [contenteditable="true"]',
           );
-          const buttons = Array.from(dialog.querySelectorAll('button'));
+          const buttons = Array.from(dialog.querySelectorAll('button, [role="button"]')) as HTMLElement[];
           const hasNavButtons = buttons.some(b => {
             const bt = (b.textContent || '').trim().toLowerCase();
             const bAria = (b.getAttribute('aria-label') || '').toLowerCase();
@@ -2939,7 +2939,7 @@ export default class Page {
         for (const c of candidates) {
           if (
             c.closest(
-              'nav, header, footer, #footer, .artdeco-footer, [data-view-name="footer"], #global-nav, .global-nav, .msg-overlay-container, #msg-overlay, .artdeco-dropdown, .search-reusables__filter-list, .search-reusables__filter-dropdown, .jobs-search-box, .scaffold-layout__header, .jobs-search-results-list, .scaffold-layout__list, .artdeco-pill',
+              'nav, header, footer, #footer, .artdeco-footer, [data-view-name="footer"], #global-nav, .global-nav, .msg-overlay-container, #msg-overlay, .artdeco-dropdown',
             )
           ) {
             continue;
@@ -4156,7 +4156,7 @@ export default class Page {
         for (const c of candidates) {
           if (
             c.closest(
-              'nav, header, footer, #footer, .artdeco-footer, [data-view-name="footer"], #global-nav, .global-nav, .msg-overlay-container, #msg-overlay, .artdeco-dropdown, .search-reusables__filter-list, .search-reusables__filter-dropdown, .jobs-search-box, .scaffold-layout__header, .jobs-search-results-list, .scaffold-layout__list, .artdeco-pill',
+              'nav, header, footer, #footer, .artdeco-footer, [data-view-name="footer"], #global-nav, .global-nav, .msg-overlay-container, #msg-overlay, .artdeco-dropdown',
             )
           ) {
             continue;
@@ -5421,7 +5421,14 @@ export default class Page {
       function isJunkJobTitle(raw: string): boolean {
         const t = (raw || '').replace(/\s+/g, ' ').trim().toLowerCase();
         if (!t || t.length < 3 || t.length > 120) return true;
-        return /^(?:more|less|see more|show more|view more|easy apply|promoted|verified|save|saved|dismiss|close|apply|applied|apply now|apply on company site|view job|job|job details|linkedin job|linkedin|unknown|n\/?a|none|null|undefined)$/.test(
+        if (
+          /\b(?:feedback|negative\s*feedback|share\s*feedback|report\s*this|report\s*job|save\s*job|follow|unfollow|hide\s*job|not\s*interested|send\s*feedback)\b/i.test(
+            t,
+          )
+        ) {
+          return true;
+        }
+        return /^(?:more|less|see more|show more|view more|easy apply|promoted|verified|save|saved|dismiss|close|apply|applied|apply now|apply on company site|view job|job|job details|linkedin job|linkedin|unknown|share|n\/?a|none|null|undefined)$/.test(
           t,
         );
       }
@@ -5573,23 +5580,26 @@ export default class Page {
       let hasEasyApply = false;
       const detailsRoot =
         document.querySelector('.jobs-search__job-details--container') ||
+        document.querySelector('.scaffold-layout__detail') ||
         document.querySelector('.jobs-details__main-content') ||
         document.querySelector('.job-view-layout') ||
         document.querySelector('.jobs-unified-top-card') ||
         document.querySelector('[data-view-name="job-details-top-card"]') ||
+        document.querySelector('[data-view-name="job-details"]') ||
         document;
 
-      const applyButtons = Array.from(detailsRoot.querySelectorAll('button, a'));
+      const applyButtons = Array.from(detailsRoot.querySelectorAll('button, a, [role="button"]'));
       for (const btn of applyButtons) {
-        if (btn.closest('.jobs-search-results-list, .scaffold-layout__list')) {
+        if (btn.closest('.jobs-search-results-list, .scaffold-layout__list, ul.scaffold-layout__list-container')) {
           continue;
         }
         const btnText = (btn.textContent || '').trim();
         const ariaLabel = (btn.getAttribute('aria-label') || '').trim();
         if (
-          /easy\s*apply/i.test(btnText) ||
-          /easy\s*apply/i.test(ariaLabel) ||
-          btn.querySelector('svg[data-test-icon*="easy-apply"]') !== null
+          /\beasy\s*apply\b/i.test(btnText) ||
+          /\beasy\s*apply\b/i.test(ariaLabel) ||
+          btn.querySelector('svg[data-test-icon*="easy-apply"]') !== null ||
+          btn.classList.contains('jobs-apply-button')
         ) {
           hasEasyApply = true;
           break;
@@ -5707,6 +5717,20 @@ export default class Page {
         }
         await new Promise(r => setTimeout(r, 400));
       }
+
+      // Restore scroll to top of search list so upper cards are in view and clickable
+      const scrollContainers = [
+        document.querySelector('.jobs-search-results-list'),
+        document.querySelector('.scaffold-layout__list'),
+        document.querySelector('.scaffold-layout__list-container'),
+        document.querySelector('.jobs-search-results-list__list'),
+        document.querySelector('ul.scaffold-layout__list-container'),
+      ].filter(Boolean) as HTMLElement[];
+      for (const sc of scrollContainers) {
+        if (typeof sc.scrollTo === 'function') sc.scrollTo(0, 0);
+      }
+      window.scrollTo(0, 0);
+      await new Promise(r => setTimeout(r, 200));
       function cleanLinkedInJobTitle(raw: string): string {
         if (!raw) return '';
         let txt = raw
@@ -5750,7 +5774,14 @@ export default class Page {
       function isJunkJobTitle(raw: string): boolean {
         const t = (raw || '').replace(/\s+/g, ' ').trim().toLowerCase();
         if (!t || t.length < 3 || t.length > 120) return true;
-        return /^(?:more|less|see more|show more|view more|easy apply|promoted|verified|save|saved|dismiss|close|apply|applied|apply now|apply on company site|view job|job|job details|linkedin job|linkedin|unknown|n\/?a|none|null|undefined)$/.test(
+        if (
+          /\b(?:feedback|negative\s*feedback|share\s*feedback|report\s*this|report\s*job|save\s*job|follow|unfollow|hide\s*job|not\s*interested|send\s*feedback)\b/i.test(
+            t,
+          )
+        ) {
+          return true;
+        }
+        return /^(?:more|less|see more|show more|view more|easy apply|promoted|verified|save|saved|dismiss|close|apply|applied|apply now|apply on company site|view job|job|job details|linkedin job|linkedin|unknown|share|n\/?a|none|null|undefined)$/.test(
           t,
         );
       }
@@ -5817,9 +5848,8 @@ export default class Page {
       let cards: HTMLElement[] = [];
       for (const container of candidateContainers) {
         const found = Array.from(container.querySelectorAll(cardSelectors)) as HTMLElement[];
-        if (found.length > 0) {
+        if (found.length > cards.length) {
           cards = found;
-          break;
         }
       }
 
@@ -5912,7 +5942,7 @@ export default class Page {
         // Extract title. Newer LinkedIn cards sometimes expose a menu/badge ("More")
         // through generic strong/h3 selectors, so every source is validated.
         const titleEl = card.querySelector(
-          'a.job-card-list__title, a.job-card-container__link, .job-card-container__link, .artdeco-entity-lockup__title, [data-control-name="job_card_title"], strong, h3',
+          'a.job-card-list__title, a.job-card-container__link, .job-card-container__link, .artdeco-entity-lockup__title a, .artdeco-entity-lockup__title, [data-control-name="job_card_title"], a[href*="/jobs/view/"], a[href*="currentJobId="], h3 a, strong a',
         );
         let rawTitle = cleanElementText(titleEl);
         if (isJunkJobTitle(rawTitle)) rawTitle = cleanElementText(link);
@@ -6354,7 +6384,7 @@ export default class Page {
         for (const c of candidates) {
           if (
             c.closest(
-              'nav, header, footer, #footer, .artdeco-footer, [data-view-name="footer"], #global-nav, .global-nav, .msg-overlay-container, #msg-overlay, .artdeco-dropdown, .search-reusables__filter-list, .search-reusables__filter-dropdown, .jobs-search-box, .scaffold-layout__header, .jobs-search-results-list, .scaffold-layout__list, .artdeco-pill',
+              'nav, header, footer, #footer, .artdeco-footer, [data-view-name="footer"], #global-nav, .global-nav, .msg-overlay-container, #msg-overlay, .artdeco-dropdown',
             )
           ) {
             continue;
@@ -7570,7 +7600,7 @@ export default class Page {
         for (const c of candidates) {
           if (
             c.closest(
-              'nav, header, footer, #footer, .artdeco-footer, [data-view-name="footer"], #global-nav, .global-nav, .msg-overlay-container, #msg-overlay, .artdeco-dropdown, .search-reusables__filter-list, .search-reusables__filter-dropdown, .jobs-search-box, .scaffold-layout__header, .jobs-search-results-list, .scaffold-layout__list, .artdeco-pill',
+              'nav, header, footer, #footer, .artdeco-footer, [data-view-name="footer"], #global-nav, .global-nav, .msg-overlay-container, #msg-overlay, .artdeco-dropdown',
             )
           ) {
             continue;
@@ -8409,7 +8439,7 @@ export default class Page {
         for (const c of candidates) {
           if (
             c.closest(
-              'nav, header, footer, #footer, .artdeco-footer, [data-view-name="footer"], #global-nav, .global-nav, .msg-overlay-container, #msg-overlay, .artdeco-dropdown, .search-reusables__filter-list, .search-reusables__filter-dropdown, .jobs-search-box, .scaffold-layout__header, .jobs-search-results-list, .scaffold-layout__list, .artdeco-pill',
+              'nav, header, footer, #footer, .artdeco-footer, [data-view-name="footer"], #global-nav, .global-nav, .msg-overlay-container, #msg-overlay, .artdeco-dropdown',
             )
           ) {
             continue;

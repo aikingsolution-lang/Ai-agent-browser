@@ -4104,6 +4104,19 @@ export class DedicatedJobRunner {
     }
 
     if (!topCard.hasEasyApply) {
+      // Re-verify: details pane often takes 1-2s to finish loading AJAX action buttons
+      for (let eaAttempt = 0; eaAttempt < 3; eaAttempt++) {
+        await this.interruptibleSleep(800);
+        if (!this.isRunning) return { status: 'halt' };
+        const recheckTopCard = await currentPage.extractJobTopCardContext(2000).catch(() => null);
+        if (recheckTopCard?.hasEasyApply) {
+          topCard = recheckTopCard;
+          break;
+        }
+      }
+    }
+
+    if (!topCard.hasEasyApply) {
       this.notifyStatus(
         portToSend,
         `ℹ️ Skipped "${displayTitle}": Requires applying directly on company website (not Easy Apply).`,
@@ -4472,6 +4485,7 @@ export class DedicatedJobRunner {
       await backendApiClient.refundCredits(jobRunId).catch(() => {});
       await currentPage.dismissEasyApplyModal(3000).catch(() => {});
 
+      const isTransientModalTimeout = /modal failed to open within timeout/i.test(failReason);
       await processedJobsStore.recordJob({
         jobId: job.jobId,
         url: job.url,
@@ -4480,7 +4494,7 @@ export class DedicatedJobRunner {
         location: topCard.location,
         platform: 'linkedin',
         fitScore: deepMatch.score,
-        status: 'failed',
+        status: isTransientModalTimeout ? 'skipped' : 'failed',
         reason: failReason,
         creditsUsed: 0,
       });

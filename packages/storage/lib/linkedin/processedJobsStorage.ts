@@ -49,11 +49,10 @@ export const FAILED_JOB_TTL_MS = 24 * 60 * 60 * 1000;
  * (UI-mismatch fixes, click fixes, form-discovery fixes). Entries written by a
  * build with a different version are discarded on next read.
  *
- * v2 (2026-10-25): invalidates failures recorded before the new-UI Easy Apply
- * modal detection fix and the save-application-overlay fix, so jobs that were
- * false-skipped as "modal failed to open" become retryable immediately.
+ * v3 (2026-10-26): invalidates false "modal failed to open" and "external site"
+ * failures recorded when scaffold-layout exclusions blocked native <dialog> detection.
  */
-export const NEGATIVE_CACHE_SCHEMA_VERSION = 2;
+export const NEGATIVE_CACHE_SCHEMA_VERSION = 3;
 
 const DEFAULT_PROCESSED_JOBS: ProcessedJobsData = {
   appliedJobIds: [],
