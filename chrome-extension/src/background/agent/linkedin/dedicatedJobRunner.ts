@@ -35,7 +35,6 @@ import { Actors, ExecutionState } from '../event/types';
 import { createChatModel } from '../helper';
 import { ChatOpenAI } from '@langchain/openai';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
-import { userQuestionManager, type BatchQuestionItem } from './userQuestionManager';
 import {
   resolveModalFieldWithAudit,
   cleanLinkedInJobTitle,
@@ -44,6 +43,7 @@ import {
   solveValidationErrorWithLLM,
   analyzeModalStepWithLLM,
   matchRuleBased,
+  rememberResolvedAnswer,
 } from './formQuestionResolver';
 import {
   evaluateDeepRelevance,
@@ -1628,7 +1628,8 @@ export class DedicatedJobRunner {
 
   /**
    * Core Autonomous Loop:
-   * 1. Reads candidate title & location (falls back to interactive question if missing).
+   * 1. Reads candidate title & location from Career Brain (deterministic fallbacks only —
+   *    auto-apply is one-click and never prompts the candidate mid-run).
    * 2. Navigates dedicated window to LinkedIn search with f_AL=true & sortBy=R.
    * 3. Scans left-hand search results pane, extracts job cards (max 3 retries).
    * 4. Deduplicates & checks against processedJobsStore, applies max 10 batch cap.
@@ -1733,6 +1734,18 @@ export class DedicatedJobRunner {
       // 2. Candidate Criteria Extraction + Fallback
       const careerBrain = await careerBrainStore.getCareerBrain();
       const config = await linkedInConfigStore.getConfig();
+
+      // 2a. One-click readiness gate: auto-apply must never pause mid-run to ask the
+      //     candidate anything, so the essential profile fields must exist up front.
+      const readiness = validateProfileCompleteness(careerBrain);
+      if (!readiness.isValid) {
+        const readinessMsg = `Incomplete candidate profile. Missing: ${readiness.missingFields.join(
+          ', ',
+        )}. Please complete Resume & Profile before starting auto-apply.`;
+        this.notifyStatus(portToSend, `⚠️ ${readinessMsg}`, 'fail');
+        this.cleanupRun();
+        return { status: 'error', message: readinessMsg, stats };
+      }
       let role = (careerBrain.currentTitle || '').trim();
 
       const candidateNameSources: string[] = [careerBrain.fullName, session?.user?.name].filter(Boolean) as string[];
@@ -1777,21 +1790,14 @@ export class DedicatedJobRunner {
       }
 
       if (!location) {
-        this.notifyStatus(portToSend, '❓ Target location missing in profile. Asking user...', 'info');
-        try {
-          location = await userQuestionManager.askQuestion({
-            questionText:
-              'What target location or city are you searching in? (e.g. Remote, Bengaluru, India, United States)',
-            fieldType: 'text',
-          });
-          location = (location || '').trim();
-          if (location) {
-            await careerBrainStore.updateCareerBrain({ currentLocation: location, preferredLocation: location });
-          }
-        } catch {
-          // If asking location fails, default to Remote rather than crashing
-          location = 'Remote';
-        }
+        // Zero-interaction rule: auto-apply is one click and the candidate never answers
+        // questions mid-run. Fall back deterministically instead of prompting.
+        location = (careerBrain.preferredLocation || careerBrain.currentLocation || '').trim() || 'Remote';
+        this.notifyStatus(
+          portToSend,
+          `📍 No target location in profile — continuing with "${location}". Update Career Brain to change it.`,
+          'info',
+        );
       }
 
       const prioritizedLocations: string[] =
@@ -4780,7 +4786,7 @@ export class DedicatedJobRunner {
               if (!isOptionalField) {
                 unresolvedFields.push(field);
               } else {
-                logger.info(`[DedicatedJobRunner] Skipping candidate prompt for optional field "${field.label}"`);
+                logger.info(`[DedicatedJobRunner] Leaving optional field "${field.label}" unanswered (no prompt).`);
               }
             } else if (!res.success) {
               logger.warning(`[DedicatedJobRunner] Field "${field.label}" was not filled successfully in DOM.`);
@@ -4795,100 +4801,42 @@ export class DedicatedJobRunner {
           await new Promise(r => setTimeout(r, 500));
         }
 
-        // Phase B: Handle unresolved fields via candidate prompt or autonomous LLM resolution
+        // Phase B: Resolve every remaining field autonomously. The run is one-click by
+        // design — the candidate never answers questions mid-run, so no side-panel prompt
+        // is issued and no timeout delays the step. Answers are learned for next time.
         if (unresolvedFields.length > 0 && this.isRunning) {
-          if (unresolvedFields.length === 1) {
-            const singleField = unresolvedFields[0];
+          this.notifyStatus(
+            portToSend,
+            `🧠 Auto-answering ${unresolvedFields.length} unlisted question${unresolvedFields.length > 1 ? 's' : ''} from your profile...`,
+            'info',
+          );
+          for (const f of unresolvedFields) {
+            if (!this.isRunning) break;
             try {
-              const res = await resolveModalFieldWithAudit(page, singleField, careerBrain, scopedLLM, onAuditLog, {
-                skipAskUser: false,
-              });
-              careerBrain = await careerBrainStore.getCareerBrain();
-              if (!res.success && scopedLLM) {
-                logger.info(
-                  `[DedicatedJobRunner] Field "${singleField.label}" was not filled. Attempting autonomous LLM solver...`,
+              if (!scopedLLM) {
+                logger.warning(`[DedicatedJobRunner] No LLM available to answer "${f.label}"; leaving it unanswered.`);
+                continue;
+              }
+              const autoSol = await solveQuestionAutonomousWithLLM(f, careerBrain, scopedLLM);
+              if (autoSol.success && autoSol.answer) {
+                const fillSuccess = await fillAnswerWithFormat(f, autoSol.answer);
+                onAuditLog(
+                  'GENERATED',
+                  f.label,
+                  autoSol.answer,
+                  `Autonomous LLM resolution | DOM fill: ${fillSuccess ? 'SUCCESS' : 'FAILED'}`,
                 );
-                const autoSol = await solveQuestionAutonomousWithLLM(singleField, careerBrain, scopedLLM);
-                if (autoSol.success && autoSol.answer) {
-                  await fillAnswerWithFormat(singleField, autoSol.answer);
+                if (fillSuccess) {
+                  await rememberResolvedAnswer(f.label, autoSol.answer);
+                  careerBrain = await careerBrainStore.getCareerBrain();
                 }
+              } else {
+                logger.warning(`[DedicatedJobRunner] Autonomous solver could not answer "${f.label}".`);
               }
-            } catch (err: any) {
-              const errStr = String(err?.message || err);
-              logger.warning(
-                `[DedicatedJobRunner] Field "${singleField.label}" prompt failed: ${errStr}. Attempting autonomous LLM fallback...`,
-              );
-              if (scopedLLM) {
-                const autoSol = await solveQuestionAutonomousWithLLM(singleField, careerBrain, scopedLLM);
-                if (autoSol.success && autoSol.answer) {
-                  await fillAnswerWithFormat(singleField, autoSol.answer);
-                }
-              }
+            } catch (solErr) {
+              logger.warning(`[DedicatedJobRunner] Failed to auto-solve "${f.label}":`, solErr);
             }
-          } else {
-            // Present multiple unresolved fields in Side Panel (10s timeout)
-            this.notifyStatus(
-              portToSend,
-              `🙋 Needs your input for ${unresolvedFields.length} question${unresolvedFields.length > 1 ? 's' : ''} (or answering automatically in 10s)...`,
-              'info',
-            );
-
-            const batchItems: BatchQuestionItem[] = unresolvedFields.map((f, idx) => ({
-              id: `field_${idx}_${Date.now()}`,
-              fieldIndex: idx,
-              questionText: f.label,
-              fieldType: f.fieldType,
-              options: f.options,
-              min: f.min,
-              max: f.max,
-              skillName: userQuestionManager.extractSkillName(f.label) || undefined,
-              required: f.required,
-            }));
-
-            try {
-              const batchAnswers = await userQuestionManager.askQuestionBatch(batchItems);
-              for (let i = 0; i < unresolvedFields.length; i++) {
-                const f = unresolvedFields[i];
-                const item = batchItems[i];
-                const rawAns = batchAnswers[item.id];
-                if (rawAns !== undefined && rawAns !== null && rawAns !== '') {
-                  const adapted = adaptAnswerToFieldFormat(rawAns, f);
-                  const valToFill = adapted.valid ? adapted.value : rawAns;
-                  const fillSuccess = await page.fillModalFieldDirect(f, valToFill);
-                  onAuditLog(
-                    'ASKED',
-                    f.label,
-                    valToFill,
-                    `Batch answer | DOM fill: ${fillSuccess ? 'SUCCESS' : 'FAILED'}`,
-                  );
-                }
-              }
-              careerBrain = await careerBrainStore.getCareerBrain();
-            } catch (err: any) {
-              const errStr = String(err?.message || err);
-              logger.warning(
-                `[DedicatedJobRunner] Batch question answering timed out or failed: ${errStr}. Resolving remaining fields autonomously with LLM...`,
-              );
-              if (scopedLLM) {
-                for (const f of unresolvedFields) {
-                  try {
-                    const autoSol = await solveQuestionAutonomousWithLLM(f, careerBrain, scopedLLM);
-                    if (autoSol.success && autoSol.answer) {
-                      const fillSuccess = await fillAnswerWithFormat(f, autoSol.answer);
-                      onAuditLog(
-                        'GENERATED',
-                        f.label,
-                        autoSol.answer,
-                        `Autonomous LLM resolution (batch timeout fallback) | DOM fill: ${fillSuccess ? 'SUCCESS' : 'FAILED'}`,
-                      );
-                    }
-                  } catch (solErr) {
-                    logger.warning(`[DedicatedJobRunner] Failed to auto-solve "${f.label}":`, solErr);
-                  }
-                }
-                careerBrain = await careerBrainStore.getCareerBrain();
-              }
-            }
+            await new Promise(r => setTimeout(r, 300));
           }
         }
       }
@@ -5039,78 +4987,33 @@ export class DedicatedJobRunner {
           }
 
           if (unresolvedReqFields.length > 0 && this.isRunning) {
-            if (unresolvedReqFields.length === 1) {
-              const singleReq = unresolvedReqFields[0];
+            // Zero-interaction rule: required leftovers are answered from the profile via
+            // the autonomous solver — no side-panel prompt, no timeout, no user action.
+            for (const req of unresolvedReqFields) {
+              if (!this.isRunning) break;
               try {
-                await resolveModalFieldWithAudit(page, singleReq, careerBrain, scopedLLM, onAuditLog, {
-                  skipAskUser: false,
-                });
-                careerBrain = await careerBrainStore.getCareerBrain();
-              } catch (err: any) {
-                logger.warning(
-                  `[DedicatedJobRunner] Single required field timed out. Attempting autonomous LLM fallback...`,
-                );
-                if (scopedLLM) {
-                  const autoSol = await solveQuestionAutonomousWithLLM(singleReq, careerBrain, scopedLLM);
-                  if (autoSol.success && autoSol.answer) {
-                    await fillAnswerWithFormat(singleReq, autoSol.answer);
+                if (!scopedLLM) {
+                  logger.warning(`[DedicatedJobRunner] No LLM available for required field "${req.label}".`);
+                  continue;
+                }
+                const autoSol = await solveQuestionAutonomousWithLLM(req, careerBrain, scopedLLM);
+                if (autoSol.success && autoSol.answer) {
+                  const fillSuccess = await fillAnswerWithFormat(req, autoSol.answer);
+                  onAuditLog(
+                    'GENERATED',
+                    req.label,
+                    autoSol.answer,
+                    `Autonomous LLM resolution (required) | DOM fill: ${fillSuccess ? 'SUCCESS' : 'FAILED'}`,
+                  );
+                  if (fillSuccess) {
+                    await rememberResolvedAnswer(req.label, autoSol.answer);
+                    careerBrain = await careerBrainStore.getCareerBrain();
                   }
                 }
+              } catch (solErr) {
+                logger.warning(`[DedicatedJobRunner] Required-field auto-answer failed for "${req.label}":`, solErr);
               }
-            } else {
-              const batchItems: BatchQuestionItem[] = unresolvedReqFields.map((f, idx) => ({
-                id: `req_field_${idx}_${Date.now()}`,
-                fieldIndex: idx,
-                questionText: f.label,
-                fieldType: f.fieldType,
-                options: f.options,
-                min: f.min,
-                max: f.max,
-                skillName: userQuestionManager.extractSkillName(f.label) || undefined,
-                required: f.required,
-              }));
-
-              try {
-                const batchAnswers = await userQuestionManager.askQuestionBatch(batchItems);
-                for (let i = 0; i < unresolvedReqFields.length; i++) {
-                  const f = unresolvedReqFields[i];
-                  const item = batchItems[i];
-                  const rawAns = batchAnswers[item.id];
-                  if (rawAns !== undefined && rawAns !== null && rawAns !== '') {
-                    const adapted = adaptAnswerToFieldFormat(rawAns, f);
-                    const valToFill = adapted.valid ? adapted.value : rawAns;
-                    const fillSuccess = await page.fillModalFieldDirect(f, valToFill);
-                    onAuditLog(
-                      'ASKED',
-                      f.label,
-                      valToFill,
-                      `Batch answer | DOM fill: ${fillSuccess ? 'SUCCESS' : 'FAILED'}`,
-                    );
-                  }
-                }
-                careerBrain = await careerBrainStore.getCareerBrain();
-              } catch (err: any) {
-                logger.warning(
-                  `[DedicatedJobRunner] Batch required input timed out. Auto-solving remaining fields with LLM...`,
-                );
-                if (scopedLLM) {
-                  for (const f of unresolvedReqFields) {
-                    try {
-                      const autoSol = await solveQuestionAutonomousWithLLM(f, careerBrain, scopedLLM);
-                      if (autoSol.success && autoSol.answer) {
-                        const fillSuccess = await fillAnswerWithFormat(f, autoSol.answer);
-                        onAuditLog(
-                          'GENERATED',
-                          f.label,
-                          autoSol.answer,
-                          `Autonomous LLM resolution (batch timeout fallback) | DOM fill: ${fillSuccess ? 'SUCCESS' : 'FAILED'}`,
-                        );
-                      }
-                    } catch {}
-                  }
-                  careerBrain = await careerBrainStore.getCareerBrain();
-                }
-              }
+              await new Promise(r => setTimeout(r, 300));
             }
           }
         }

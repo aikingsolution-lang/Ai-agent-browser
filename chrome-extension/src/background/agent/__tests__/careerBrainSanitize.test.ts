@@ -32,6 +32,7 @@ import {
   NEGATIVE_CACHE_SCHEMA_VERSION,
   FAILED_JOB_TTL_MS,
 } from '@extension/storage';
+import { rememberResolvedAnswer } from '../linkedin/formQuestionResolver';
 
 const BRAIN_KEY = 'linkedin_career_brain';
 const JOBS_KEY = 'linkedin_processed_jobs';
@@ -111,6 +112,30 @@ describe('Career brain auto-migration purges polluted answers', () => {
 
     const brain = await careerBrainStore.getCareerBrain();
     expect(brain.customAnswers['Photo']).toBeUndefined();
+  });
+});
+
+describe('Autonomous answer learning (one-click mode)', () => {
+  beforeEach(() => {
+    for (const key of Object.keys(storageData)) delete storageData[key];
+  });
+
+  it('remembers stable screening answers but never placeholders or job-specific narratives', async () => {
+    seedBrain({ goldenAnswers: [], customAnswers: {} });
+
+    await rememberResolvedAnswer('Do you have a valid driver license?', 'Yes');
+    await rememberResolvedAnswer('Why do you want to work here?', 'I admire the team and product vision.');
+    await rememberResolvedAnswer('Form Field', 'on');
+    await rememberResolvedAnswer('Notice period', '30 days');
+
+    const brain = await careerBrainStore.getCareerBrain();
+    expect(brain.goldenAnswers.some(ga => /driver license/i.test(ga.question))).toBe(true);
+    expect(brain.goldenAnswers.some(ga => /why do you want/i.test(ga.question))).toBe(false);
+    expect(brain.goldenAnswers.some(ga => ga.question === 'Form Field')).toBe(false);
+    // Narrative/profile-derived questions stay out of the reusable answer bank.
+    expect(brain.goldenAnswers.some(ga => /notice period/i.test(ga.question))).toBe(false);
+    expect(brain.customAnswers['Why do you want to work here?']).toBeUndefined();
+    expect(brain.customAnswers['Form Field']).toBeUndefined();
   });
 });
 

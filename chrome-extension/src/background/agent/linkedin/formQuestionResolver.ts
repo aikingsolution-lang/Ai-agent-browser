@@ -6,9 +6,9 @@
  *    golden answers, and skillExperience (e.g. "years with server-side JavaScript" -> Node.js).
  * 2. Free-Text Generation: Uses LLM to generate concise, non-factual narrative answers from
  *    resume/profile (e.g. "Why do you want this role?"). Never invents specific numbers/facts.
- * 3. Factual Zero-Invention: For factual/verifiable fields (CTC, skill experience, notice period,
- *    CGPA, work auth, compliance yes/no) with no basis in profile, triggers ask_user once and
- *    auto-saves to goldenAnswers or skillExperience with loose duplicate detection.
+ * 3. Factual Zero-Invention: for factual/verifiable fields (CTC, skill experience, notice period,
+ *    CGPA, work auth, compliance yes/no) with no basis in profile, defers to the autonomous
+ *    LLM solver, which answers from the profile and learns the answer for future runs.
  * 4. Auditable Live Activity: Categorizes each filled field as [MATCHED], [GENERATED], or [ASKED].
  */
 
@@ -23,6 +23,7 @@ import {
   parseLocationParts,
   isSocialMediaOrUrlQuestion,
   isGenericPlaceholderFieldLabel,
+  isNarrativeAnswerableQuestion,
   areQuestionsSemanticallyEquivalent,
   findBestMatchingGoldenAnswer,
 } from '@extension/storage';
@@ -3463,7 +3464,7 @@ OUTPUT STRICTLY VALID JSON ONLY:
 
 /**
  * Rule 3 & 4 Orchestrator:
- * Resolves or prompts the user for a modal form field, fills it in DOM, and emits Live Activity audit logs.
+ * Resolves a modal form field autonomously (no candidate prompt) and fills it in DOM.
  */
 export async function resolveModalFieldWithAudit(
   page: any,
@@ -3471,7 +3472,9 @@ export async function resolveModalFieldWithAudit(
   careerBrain: ICareerBrain,
   llm?: BaseChatModel,
   onAuditLog?: (category: QuestionResolutionCategory, label: string, answer: string, detail?: string) => void,
-  options?: { skipAskUser?: boolean },
+  // Retained for call-site compatibility; one-click mode has no prompts, so every
+  // unmatched field is deferred to the caller's autonomous solver regardless.
+  _options?: { skipAskUser?: boolean },
 ): Promise<QuestionResolutionResult> {
   // Apply cleanLinkedInText to strip duplicate question text
   field.label = cleanLinkedInText(field.label || 'Form Field');
@@ -3895,148 +3898,55 @@ export async function resolveModalFieldWithAudit(
     }
   }
 
-  // If skipAskUser is enabled, defer ask_user to batch handling
-  if (options?.skipAskUser) {
-    logger.info(`[FormQuestionResolver] Field "${label}" requires user answer, deferring to batch ask_user.`);
-    return {
-      success: false,
-      category: 'ASKED',
-      needsUserAnswer: true,
-    };
-  }
-
-  // Step 4: Factual / Unmatched Field -> Strict Zero-Invention -> [ASKED]
+  // Step 4: Factual / Unmatched Field -> defer to the autonomous LLM solver.
+  // Auto-apply is one-click: the candidate is never prompted mid-run, so an unmatched
+  // factual field is reported back to the caller, which answers it from the profile
+  // with the LLM and learns the answer for future runs. Optional fields exited above.
   logger.info(
-    `[FormQuestionResolver] Factual field "${label}" has no profile basis. Prompting user (3-min timeout)...`,
+    `[FormQuestionResolver] Factual field "${label}" has no profile basis. Deferring to autonomous LLM resolution (no user prompt).`,
   );
-  try {
-    if (onAuditLog) {
-      onAuditLog('ASKED', label, 'Waiting for candidate input...', 'Prompted in Side Panel');
-    }
-
-    const userAnswer = await userQuestionManager.askQuestion({
-      questionText: label,
-      fieldType: field.fieldType,
-      options: field.options,
-      min: field.min,
-      max: field.max,
-    });
-
-    if (userAnswer !== undefined && userAnswer !== null && userAnswer !== '') {
-      logger.info(
-        `[FormQuestionResolver] [ASKED] Received user answer for "${label}": "${userAnswer}". Saving to memory...`,
-      );
-
-      // Auto-save to goldenAnswers
-      if (
-        !isGenericWorkExperienceDateField(label) &&
-        !isSocialMediaOrUrlQuestion(label) &&
-        !isGenericFieldLabel(label)
-      ) {
-        await careerBrainStore.saveGoldenAnswer(label, userAnswer, 'Screening');
-      }
-
-      // Auto-save to skillExperience if this is a skill numeric question
-      const skillName = userQuestionManager.extractSkillName(label);
-      if (skillName && !isNaN(Number(userAnswer))) {
-        await careerBrainStore.saveSkillExperience(skillName, Number(userAnswer));
-        careerBrain.skillExperience = {
-          ...careerBrain.skillExperience,
-          [skillName]: Number(userAnswer),
-        };
-      }
-
-      // Auto-save to careerBrain profile fields if this was CTC or Notice Period
-      const labelLower = label.toLowerCase();
-      const isCurrentCTC =
-        /(?:current|present|existing)\s*(?:fixed\s*)?(?:ctc|salary|compensation)|\bctc\s*in\s*inr\b|\bfixed\s*ctc\b|\bannual\s*ctc\b|\bgross\s*ctc\b/i.test(
-          labelLower,
-        ) && !/expected|target|desired|seeking/i.test(labelLower);
-      const isExpectedCTC =
-        /(?:expected|target|desired|seeking)\s*(?:fixed\s*)?(?:ctc|salary|compensation)|\bexpected\s*ctc\b/i.test(
-          labelLower,
-        );
-      const isNoticePeriod =
-        /notice\s*period|how\s*soon\s*can\s*you\s*start|availability\s*to\s*join|joining\s*time/i.test(labelLower);
-
-      if (isCurrentCTC) {
-        await careerBrainStore.updateCareerBrain({ currentCTC: userAnswer }).catch(() => {});
-        careerBrain.currentCTC = userAnswer;
-      } else if (isExpectedCTC) {
-        await careerBrainStore.updateCareerBrain({ expectedCTC: userAnswer }).catch(() => {});
-        careerBrain.expectedCTC = userAnswer;
-      } else if (isNoticePeriod) {
-        await careerBrainStore.updateCareerBrain({ noticePeriod: userAnswer }).catch(() => {});
-        careerBrain.noticePeriod = userAnswer;
-      }
-
-      // Update in-memory careerBrain goldenAnswers array so subsequent checks in the current run see it
-      if (!isGenericWorkExperienceDateField(label) && !isGenericFieldLabel(label)) {
-        careerBrain.goldenAnswers = [
-          ...(careerBrain.goldenAnswers || []),
-          {
-            id: `ga_${Date.now()}`,
-            question: label,
-            answer: userAnswer,
-            category: 'Screening',
-          },
-        ];
-      }
-
-      const adaptedUser = adaptAnswerToFieldFormat(userAnswer, field);
-      const valToFill = adaptedUser.valid ? adaptedUser.value : userAnswer;
-      const fillSuccess = await page.fillModalFieldDirect(field, valToFill);
-      logger.info(`[FormQuestionResolver] DOM interaction outcome:`, {
-        fieldType: field.fieldType,
-        matchedQuestionText: label,
-        resolvedValue: userAnswer,
-        clickLanded: fillSuccess,
-      });
-      if (onAuditLog) {
-        onAuditLog(
-          'ASKED',
-          label,
-          userAnswer,
-          `Saved to goldenAnswers / skillExperience | DOM fill: ${fillSuccess ? 'SUCCESS' : 'FAILED'}`,
-        );
-      }
-
-      return {
-        success: fillSuccess,
-        category: 'ASKED',
-        answer: userAnswer,
-        sourceDetail: 'Saved to goldenAnswers / skillExperience',
-      };
-    }
-  } catch (err: any) {
-    logger.warning(
-      `[FormQuestionResolver] ask_user timed out or failed for "${label}": ${err?.message || err}. Invoking autonomous LLM solver to prevent application discard...`,
-    );
-    if (llm) {
-      try {
-        const autoSol = await solveQuestionAutonomousWithLLM(field, careerBrain, llm);
-        if (autoSol.success && autoSol.answer !== undefined) {
-          const fillSuccess = await fillWithOptionFallback(autoSol.answer);
-          if (onAuditLog) {
-            onAuditLog(
-              'GENERATED',
-              label,
-              autoSol.answer,
-              `Autonomous LLM resolution (candidate timeout fallback) | DOM fill: ${fillSuccess ? 'SUCCESS' : 'FAILED'}`,
-            );
-          }
-          return {
-            success: fillSuccess,
-            category: 'GENERATED',
-            answer: autoSol.answer,
-            sourceDetail: `Autonomous LLM resolution: ${autoSol.reason}`,
-          };
-        }
-      } catch (autoErr) {
-        logger.warning(`[FormQuestionResolver] Autonomous fallback failed for "${label}":`, autoErr);
-      }
-    }
+  if (onAuditLog) {
+    onAuditLog('ASKED', label, 'Deferred to autonomous resolution', 'No candidate prompt (one-click mode)');
   }
+  return {
+    success: false,
+    category: 'ASKED',
+    needsUserAnswer: true,
+  };
+}
 
-  return { success: false, error: `Could not resolve field: ${label}` };
+/**
+ * Persists an autonomously resolved answer so future runs answer it deterministically.
+ *
+ * In one-click mode the candidate is never prompted. The answer bank therefore grows
+ * from the autonomous solver: stable factual/screening answers are remembered, while
+ * placeholders, relative work-history dates, social links, and narrative questions
+ * (experience/CTC/notice/education) stay profile-derived and are never cached.
+ */
+export async function rememberResolvedAnswer(questionLabel: string, answer: string): Promise<void> {
+  const label = (questionLabel || '').trim();
+  const cleanAnswer = (answer || '').trim();
+  if (!label || !cleanAnswer) return;
+  if (
+    isGenericFieldLabel(label) ||
+    isGenericWorkExperienceDateField(label) ||
+    isSocialMediaOrUrlQuestion(label) ||
+    isNarrativeAnswerableQuestion(label)
+  ) {
+    return;
+  }
+  // Job-specific free text ("why this company", "describe a project", cover letters…)
+  // must never become a reusable answer for other applications.
+  const isJobSpecificNarrative =
+    /\b(?:why|describe|tell\s+us|explain|motivat|interested\s+in|how\s+did\s+you\s+hear|anything\s+else|additional\s+information|cover\s+letter)\b/i.test(
+      label,
+    ) || cleanAnswer.length > 240;
+  if (isJobSpecificNarrative) return;
+
+  try {
+    await careerBrainStore.saveGoldenAnswer(label, cleanAnswer, 'Screening');
+    await careerBrainStore.setCustomAnswer(label, cleanAnswer);
+  } catch (err) {
+    logger.warning(`[FormQuestionResolver] Failed to remember autonomous answer for "${label}":`, err);
+  }
 }
