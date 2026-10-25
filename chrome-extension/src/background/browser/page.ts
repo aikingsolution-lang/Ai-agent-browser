@@ -2105,12 +2105,19 @@ export default class Page {
   async isEasyApplyModalOpen(): Promise<boolean> {
     const checkInPage = () => {
       function check(root: any): boolean {
-        const dialog = root.querySelector
-          ? root.querySelector(
-              '.jobs-easy-apply-modal, [data-test-modal-id="easy-apply-modal"], [data-easy-apply-modal], div.artdeco-modal, .artdeco-modal, [role="dialog"], [aria-modal="true"], dialog[open], [data-test-modal]',
-            )
-          : null;
-        if (dialog) return true;
+        const dialogs = root.querySelectorAll
+          ? (Array.from(
+              root.querySelectorAll(
+                '.jobs-easy-apply-modal, [data-test-modal-id="easy-apply-modal"], [data-easy-apply-modal], div.artdeco-modal, .artdeco-modal, [role="dialog"], [aria-modal="true"], dialog[open], [data-test-modal]',
+              ),
+            ) as HTMLElement[])
+          : [];
+        for (const d of dialogs) {
+          if (d.closest('footer, #footer, .artdeco-footer, [data-view-name="footer"]')) continue;
+          const txt = (d.innerText || d.textContent || '').trim().toLowerCase();
+          if (txt.includes('select language') && (txt.includes('privacy') || txt.includes('help center'))) continue;
+          return true;
+        }
         const all = root.querySelectorAll ? root.querySelectorAll('*') : [];
         for (let i = 0; i < all.length; i++) {
           const el = all[i];
@@ -2163,7 +2170,7 @@ export default class Page {
         // Exclude global nav, search header, messaging overlays, and filter dropdowns
         if (
           el.closest(
-            'header, nav, #global-nav, .global-nav, .jobs-search-box, .search-reusables__filter-list, .search-reusables__filter-pill-button, .search-reusables__primary-filter, .artdeco-pill, [data-view-name="search-filter-pills"], .scaffold-layout__header, .msg-overlay-container, #msg-overlay',
+            'header, nav, footer, #footer, .artdeco-footer, [data-view-name="footer"], #global-nav, .global-nav, .jobs-search-box, .search-reusables__filter-list, .search-reusables__filter-pill-button, .search-reusables__primary-filter, .artdeco-pill, [data-view-name="search-filter-pills"], .scaffold-layout__header, .msg-overlay-container, #msg-overlay',
           )
         ) {
           return true;
@@ -2372,7 +2379,7 @@ export default class Page {
           // 1. Exclude global navigation, headers, footers, search list, filter list, or messaging docks/flyouts
           if (
             dialog.closest(
-              'nav, header, #global-nav, .global-nav, .global-nav__nav, .msg-overlay-container, #msg-overlay, .msg-overlay-bubble-header, .artdeco-dropdown, .artdeco-dropdown__content, .jobs-search-results-list, .scaffold-layout__list, [role="tooltip"], .tooltip, .search-reusables__filter-list, .search-reusables__filter-dropdown, .search-reusables__primary-filter, [data-view-name="search-filter-pills"], .artdeco-pill, .scaffold-layout__header, .jobs-search-box',
+              'nav, header, footer, #footer, .artdeco-footer, [data-view-name="footer"], #global-nav, .global-nav, .global-nav__nav, .msg-overlay-container, #msg-overlay, .msg-overlay-bubble-header, .artdeco-dropdown, .artdeco-dropdown__content, .jobs-search-results-list, .scaffold-layout__list, [role="tooltip"], .tooltip, .search-reusables__filter-list, .search-reusables__filter-dropdown, .search-reusables__primary-filter, [data-view-name="search-filter-pills"], .artdeco-pill, .scaffold-layout__header, .jobs-search-box',
             )
           ) {
             return false;
@@ -2714,11 +2721,14 @@ export default class Page {
           }
         }
 
-        // 2. Check dialog text if present
-        const dialog = root.querySelector
-          ? root.querySelector('div[role="dialog"], .artdeco-modal, .jobs-easy-apply-modal')
-          : null;
-        if (dialog) {
+        // 2. Check dialog text if present (skip the LinkedIn footer language panel)
+        const dialogs = root.querySelectorAll
+          ? (Array.from(
+              root.querySelectorAll('div[role="dialog"], .artdeco-modal, .jobs-easy-apply-modal'),
+            ) as HTMLElement[])
+          : [];
+        for (const dialog of dialogs) {
+          if (dialog.closest('footer, #footer, .artdeco-footer, [data-view-name="footer"]')) continue;
           const dialogText = (dialog.textContent || '').trim();
           for (const pattern of confirmationPatterns) {
             if (pattern.test(dialogText)) {
@@ -2816,7 +2826,7 @@ export default class Page {
         for (const c of candidates) {
           if (
             c.closest(
-              'nav, header, #global-nav, .global-nav, .msg-overlay-container, #msg-overlay, .artdeco-dropdown, .search-reusables__filter-list, .search-reusables__filter-dropdown, .jobs-search-box, .scaffold-layout__header, .jobs-search-results-list, .scaffold-layout__list, .artdeco-pill',
+              'nav, header, footer, #footer, .artdeco-footer, [data-view-name="footer"], #global-nav, .global-nav, .msg-overlay-container, #msg-overlay, .artdeco-dropdown, .search-reusables__filter-list, .search-reusables__filter-dropdown, .jobs-search-box, .scaffold-layout__header, .jobs-search-results-list, .scaffold-layout__list, .artdeco-pill',
             )
           ) {
             continue;
@@ -2827,6 +2837,9 @@ export default class Page {
           }
           const text = (c.innerText || c.textContent || '').trim().toLowerCase();
           if (/^\d+\s*notifications?$/i.test(text) || c.closest('.notifications-badge')) {
+            continue;
+          }
+          if (text.includes('select language') && (text.includes('privacy') || text.includes('help center'))) {
             continue;
           }
           const style = window.getComputedStyle(c);
@@ -3856,7 +3869,7 @@ export default class Page {
         for (const c of candidates) {
           if (
             c.closest(
-              'nav, header, #global-nav, .global-nav, .msg-overlay-container, #msg-overlay, .artdeco-dropdown, .search-reusables__filter-list, .search-reusables__filter-dropdown, .jobs-search-box, .scaffold-layout__header, .jobs-search-results-list, .scaffold-layout__list, .artdeco-pill',
+              'nav, header, footer, #footer, .artdeco-footer, [data-view-name="footer"], #global-nav, .global-nav, .msg-overlay-container, #msg-overlay, .artdeco-dropdown, .search-reusables__filter-list, .search-reusables__filter-dropdown, .jobs-search-box, .scaffold-layout__header, .jobs-search-results-list, .scaffold-layout__list, .artdeco-pill',
             )
           ) {
             continue;
@@ -3867,6 +3880,9 @@ export default class Page {
           }
           const text = (c.innerText || c.textContent || '').trim().toLowerCase();
           if (/^\d+\s*notifications?$/i.test(text) || c.closest('.notifications-badge')) {
+            continue;
+          }
+          if (text.includes('select language') && (text.includes('privacy') || text.includes('help center'))) {
             continue;
           }
           const style = window.getComputedStyle(c);
@@ -5711,7 +5727,7 @@ export default class Page {
         for (const c of candidates) {
           if (
             c.closest(
-              'nav, header, #global-nav, .global-nav, .msg-overlay-container, #msg-overlay, .artdeco-dropdown, .search-reusables__filter-list, .search-reusables__filter-dropdown, .jobs-search-box, .scaffold-layout__header, .jobs-search-results-list, .scaffold-layout__list, .artdeco-pill',
+              'nav, header, footer, #footer, .artdeco-footer, [data-view-name="footer"], #global-nav, .global-nav, .msg-overlay-container, #msg-overlay, .artdeco-dropdown, .search-reusables__filter-list, .search-reusables__filter-dropdown, .jobs-search-box, .scaffold-layout__header, .jobs-search-results-list, .scaffold-layout__list, .artdeco-pill',
             )
           ) {
             continue;
@@ -5722,6 +5738,9 @@ export default class Page {
           }
           const text = (c.innerText || c.textContent || '').trim().toLowerCase();
           if (/^\d+\s*notifications?$/i.test(text) || c.closest('.notifications-badge')) {
+            continue;
+          }
+          if (text.includes('select language') && (text.includes('privacy') || text.includes('help center'))) {
             continue;
           }
           const style = window.getComputedStyle(c);
@@ -6255,12 +6274,15 @@ export default class Page {
 
         for (const c of candidates) {
           if (
-            c.closest('nav, header, #global-nav, .global-nav, .msg-overlay-container, #msg-overlay, .artdeco-dropdown')
+            c.closest(
+              'nav, header, footer, #footer, .artdeco-footer, [data-view-name="footer"], #global-nav, .global-nav, .msg-overlay-container, #msg-overlay, .artdeco-dropdown',
+            )
           ) {
             continue;
           }
           const text = (c.innerText || c.textContent || '').trim().toLowerCase();
           if (/^\d+\s*notifications?$/i.test(text) || c.closest('.notifications-badge')) continue;
+          if (text.includes('select language') && (text.includes('privacy') || text.includes('help center'))) continue;
           const style = window.getComputedStyle(c);
           if (style.display === 'none' || style.visibility === 'hidden') continue;
           const rect = c.getBoundingClientRect();
@@ -6285,8 +6307,12 @@ export default class Page {
 
       const modal =
         findActiveModal(document) ||
-        (document.querySelector(
-          '.jobs-easy-apply-modal, [data-easy-apply-modal], [data-test-modal-id="easy-apply-modal"], div.artdeco-modal, div[role="dialog"]',
+        (Array.from(
+          document.querySelectorAll(
+            '.jobs-easy-apply-modal, [data-easy-apply-modal], [data-test-modal-id="easy-apply-modal"], div.artdeco-modal, div[role="dialog"]',
+          ),
+        ).find(
+          el => !(el as HTMLElement).closest('footer, #footer, .artdeco-footer, [data-view-name="footer"]'),
         ) as HTMLElement | null) ||
         document.body;
 
@@ -6306,6 +6332,7 @@ export default class Page {
         ),
       ) as HTMLElement[];
       for (const pb of primaryBtns) {
+        if (pb.closest('footer, #footer, .artdeco-footer, [data-view-name="footer"]')) continue;
         if (!buttons.includes(pb)) buttons.push(pb);
       }
 
@@ -6437,12 +6464,15 @@ export default class Page {
 
         for (const c of candidates) {
           if (
-            c.closest('nav, header, #global-nav, .global-nav, .msg-overlay-container, #msg-overlay, .artdeco-dropdown')
+            c.closest(
+              'nav, header, footer, #footer, .artdeco-footer, [data-view-name="footer"], #global-nav, .global-nav, .msg-overlay-container, #msg-overlay, .artdeco-dropdown',
+            )
           ) {
             continue;
           }
           const text = (c.innerText || c.textContent || '').trim().toLowerCase();
           if (/^\d+\s*notifications?$/i.test(text) || c.closest('.notifications-badge')) continue;
+          if (text.includes('select language') && (text.includes('privacy') || text.includes('help center'))) continue;
           const style = window.getComputedStyle(c);
           if (style.display === 'none' || style.visibility === 'hidden') continue;
           const rect = c.getBoundingClientRect();
@@ -6546,12 +6576,15 @@ export default class Page {
 
         for (const c of candidates) {
           if (
-            c.closest('nav, header, #global-nav, .global-nav, .msg-overlay-container, #msg-overlay, .artdeco-dropdown')
+            c.closest(
+              'nav, header, footer, #footer, .artdeco-footer, [data-view-name="footer"], #global-nav, .global-nav, .msg-overlay-container, #msg-overlay, .artdeco-dropdown',
+            )
           ) {
             continue;
           }
           const text = (c.innerText || c.textContent || '').trim().toLowerCase();
           if (/^\d+\s*notifications?$/i.test(text) || c.closest('.notifications-badge')) continue;
+          if (text.includes('select language') && (text.includes('privacy') || text.includes('help center'))) continue;
           const style = window.getComputedStyle(c);
           if (style.display === 'none' || style.visibility === 'hidden') continue;
           const rect = c.getBoundingClientRect();
@@ -6632,7 +6665,7 @@ export default class Page {
         for (const c of candidates) {
           if (
             c.closest(
-              'nav, header, #global-nav, .global-nav, .msg-overlay-container, #msg-overlay, .artdeco-dropdown, .search-reusables__filter-list, .search-reusables__filter-dropdown, .jobs-search-box, .scaffold-layout__header, .jobs-search-results-list, .scaffold-layout__list, .artdeco-pill',
+              'nav, header, footer, #footer, .artdeco-footer, [data-view-name="footer"], #global-nav, .global-nav, .msg-overlay-container, #msg-overlay, .artdeco-dropdown, .search-reusables__filter-list, .search-reusables__filter-dropdown, .jobs-search-box, .scaffold-layout__header, .jobs-search-results-list, .scaffold-layout__list, .artdeco-pill',
             )
           ) {
             continue;
@@ -6641,6 +6674,7 @@ export default class Page {
           if (aria.includes('messaging') || aria.includes('chat') || aria.includes('notification')) continue;
           const text = (c.innerText || c.textContent || '').trim().toLowerCase();
           if (/^\d+\s*notifications?$/i.test(text) || c.closest('.notifications-badge')) continue;
+          if (text.includes('select language') && (text.includes('privacy') || text.includes('help center'))) continue;
           const style = window.getComputedStyle(c);
           if (style.display === 'none' || style.visibility === 'hidden') continue;
           const rect = c.getBoundingClientRect();
@@ -6749,12 +6783,15 @@ export default class Page {
 
         for (const c of candidates) {
           if (
-            c.closest('nav, header, #global-nav, .global-nav, .msg-overlay-container, #msg-overlay, .artdeco-dropdown')
+            c.closest(
+              'nav, header, footer, #footer, .artdeco-footer, [data-view-name="footer"], #global-nav, .global-nav, .msg-overlay-container, #msg-overlay, .artdeco-dropdown',
+            )
           ) {
             continue;
           }
           const text = (c.innerText || c.textContent || '').trim().toLowerCase();
           if (/^\d+\s*notifications?$/i.test(text) || c.closest('.notifications-badge')) continue;
+          if (text.includes('select language') && (text.includes('privacy') || text.includes('help center'))) continue;
           const style = window.getComputedStyle(c);
           if (style.display === 'none' || style.visibility === 'hidden') continue;
           const rect = c.getBoundingClientRect();
@@ -6779,8 +6816,12 @@ export default class Page {
 
       const modal =
         findActiveModal(document) ||
-        (document.querySelector(
-          '.jobs-easy-apply-modal, [data-easy-apply-modal], [data-test-modal-id="easy-apply-modal"], div.artdeco-modal, div[role="dialog"]',
+        (Array.from(
+          document.querySelectorAll(
+            '.jobs-easy-apply-modal, [data-easy-apply-modal], [data-test-modal-id="easy-apply-modal"], div.artdeco-modal, div[role="dialog"]',
+          ),
+        ).find(
+          el => !(el as HTMLElement).closest('footer, #footer, .artdeco-footer, [data-view-name="footer"]'),
         ) as HTMLElement | null) ||
         document.body;
 
@@ -6830,6 +6871,7 @@ export default class Page {
         ),
       ) as HTMLElement[];
       for (const pb of primaryBtns) {
+        if (pb.closest('footer, #footer, .artdeco-footer, [data-view-name="footer"]')) continue;
         if (!buttons.includes(pb)) buttons.push(pb);
       }
 
@@ -6972,12 +7014,15 @@ export default class Page {
 
         for (const c of candidates) {
           if (
-            c.closest('nav, header, #global-nav, .global-nav, .msg-overlay-container, #msg-overlay, .artdeco-dropdown')
+            c.closest(
+              'nav, header, footer, #footer, .artdeco-footer, [data-view-name="footer"], #global-nav, .global-nav, .msg-overlay-container, #msg-overlay, .artdeco-dropdown',
+            )
           ) {
             continue;
           }
           const text = (c.innerText || c.textContent || '').trim().toLowerCase();
           if (/^\d+\s*notifications?$/i.test(text) || c.closest('.notifications-badge')) continue;
+          if (text.includes('select language') && (text.includes('privacy') || text.includes('help center'))) continue;
           const style = window.getComputedStyle(c);
           if (style.display === 'none' || style.visibility === 'hidden') continue;
           const rect = c.getBoundingClientRect();
@@ -7002,8 +7047,12 @@ export default class Page {
 
       const modal =
         findActiveModal(document) ||
-        (document.querySelector(
-          '.jobs-easy-apply-modal, [data-easy-apply-modal], [data-test-modal-id="easy-apply-modal"], div.artdeco-modal, div[role="dialog"]',
+        (Array.from(
+          document.querySelectorAll(
+            '.jobs-easy-apply-modal, [data-easy-apply-modal], [data-test-modal-id="easy-apply-modal"], div.artdeco-modal, div[role="dialog"]',
+          ),
+        ).find(
+          el => !(el as HTMLElement).closest('footer, #footer, .artdeco-footer, [data-view-name="footer"]'),
         ) as HTMLElement | null) ||
         document.body;
 
@@ -7038,6 +7087,7 @@ export default class Page {
         ),
       ) as HTMLElement[];
       for (const pb of primaryBtns) {
+        if (pb.closest('footer, #footer, .artdeco-footer, [data-view-name="footer"]')) continue;
         if (!buttons.includes(pb)) buttons.push(pb);
       }
 
@@ -7422,9 +7472,13 @@ export default class Page {
         for (const c of candidates) {
           if (
             c.closest(
-              'nav, header, #global-nav, .global-nav, .msg-overlay-container, #msg-overlay, .artdeco-dropdown, .search-reusables__filter-list, .search-reusables__filter-dropdown, .jobs-search-box, .scaffold-layout__header, .jobs-search-results-list, .scaffold-layout__list, .artdeco-pill',
+              'nav, header, footer, #footer, .artdeco-footer, [data-view-name="footer"], #global-nav, .global-nav, .msg-overlay-container, #msg-overlay, .artdeco-dropdown, .search-reusables__filter-list, .search-reusables__filter-dropdown, .jobs-search-box, .scaffold-layout__header, .jobs-search-results-list, .scaffold-layout__list, .artdeco-pill',
             )
           ) {
+            continue;
+          }
+          const text = (c.innerText || c.textContent || '').trim().toLowerCase();
+          if (text.includes('select language') && (text.includes('privacy') || text.includes('help center'))) {
             continue;
           }
           const style = window.getComputedStyle(c);
