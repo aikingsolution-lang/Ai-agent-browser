@@ -6609,7 +6609,11 @@ export default class Page {
             parent = input.closest(
               'div.fb-dash-form-element, div.jobs-easy-apply-form-element, div[data-test-form-element]',
             );
-            const lbl = parent?.querySelector('label');
+            // Newer Easy Apply markup renders the visible label in a div/span rather than
+            // a <label>, so query the known label classes before giving up.
+            const lbl = parent?.querySelector(
+              'label, .fb-dash-form-element__label, [data-test-form-element-label], .artdeco-text-input--label, .jobs-easy-apply-form-element__label',
+            );
             if (lbl) label = cleanElementText(lbl);
           }
           if (!label) label = cleanDuplicateString(input.getAttribute('aria-label') || '');

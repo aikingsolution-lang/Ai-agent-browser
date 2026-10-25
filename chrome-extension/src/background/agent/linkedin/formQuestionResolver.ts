@@ -285,13 +285,241 @@ export function isFreeTextNarrativeQuestion(field: FormFieldDescriptor): boolean
     /\btell\s*us\s*about\b/i,
     /\bwhat\s*(makes\s*you|interests\s*you|are\s*your\s*strengths)\b/i,
     /\bcover\s*letter\b/i,
-    /\bsummary\s*of\b/i,
+    /\b(headline|tagline)\b/i,
+    /\bsummary\b/i,
     /\bbriefly\s*(explain|describe)\b/i,
     /\bproject\s*(highlight|description|details)\b/i,
     /\badditional\s*information\b/i,
   ];
 
   return field.isTextArea === true || narrativeTriggers.some(pattern => pattern.test(labelLower));
+}
+
+const MAX_PROFILE_HEADLINE_CHARS = 127;
+const MAX_PROFILE_SUMMARY_CHARS = 2600;
+
+/** Strips LinkedIn decorations from a profile field label ("Headline*", "Summary (required)"). */
+function normalizeProfileFieldLabel(raw: string): string {
+  return cleanLinkedInText(raw || '')
+    .toLowerCase()
+    .replace(/[*✱]+/g, ' ')
+    .replace(/\(?\b(?:required|optional)\b\)?/gi, ' ')
+    .replace(/\bmax\.?\s*\d+\s*(?:characters?|chars?)\b/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/^[\s:*-]+|[\s:*-]+$/g, '')
+    .trim();
+}
+
+/** Detects the LinkedIn "Headline" profile field (short professional tagline, not a screening question). */
+export function isProfileHeadlineField(field: FormFieldDescriptor): boolean {
+  if (field.fieldType !== 'text' || field.isTextArea) return false;
+  const label = normalizeProfileFieldLabel(field.label);
+  if (!label || label.length > 60) return false;
+  return (
+    /^(?:your\s+)?(?:linkedin\s+|profile\s+|professional\s+)?headline(?:\s*\/\s*tagline)?$/.test(label) ||
+    /^(?:professional\s+|profile\s+)?tagline$/.test(label)
+  );
+}
+
+/** Detects a "Summary" / "Professional Summary" / "About you" free-text profile section. */
+export function isProfileSummaryField(field: FormFieldDescriptor): boolean {
+  if (field.fieldType !== 'text') return false;
+  const label = normalizeProfileFieldLabel(field.label);
+  if (!label) return false;
+  if (/^(?:about|about\s+you|about\s+me|about\s+yourself)$/.test(label)) return true;
+  if (
+    /^(?:(?:professional|profile|career|executive|short|brief)\s+)?summary(?:\s+of\s+(?:your\s+)?(?:experience|qualifications|background|profile))?$/.test(
+      label,
+    )
+  ) {
+    return true;
+  }
+  return (
+    Boolean(field.isTextArea) &&
+    /\bsummary\b/i.test(label) &&
+    !/\b(?:project|ticket|invoice|call|case|incident)\b/i.test(label)
+  );
+}
+
+const normalizeSkillToken = (s: string): string => s.toLowerCase().replace(/[^a-z0-9+#.]/g, '');
+
+/**
+ * Deterministic fallback headline built only from verified profile data:
+ * "<Job Title> | <top core skills>", capped to LinkedIn's 127-char limit.
+ */
+export function buildProfessionalHeadline(careerBrain: ICareerBrain): string {
+  const workExperience = careerBrain.workExperience || [];
+  const title =
+    (careerBrain.currentTitle || '').trim() ||
+    (workExperience.find(w => w.isCurrent)?.title || '').trim() ||
+    (workExperience[0]?.title || '').trim() ||
+    '';
+
+  const picked: string[] = [];
+  for (const rawSkill of careerBrain.skills || []) {
+    if (picked.length >= 3) break;
+    const skill = (rawSkill || '').trim();
+    if (!skill || skill.length > 28) continue;
+    const token = normalizeSkillToken(skill);
+    if (!token) continue;
+    if (title && normalizeSkillToken(title).includes(token)) continue;
+    if (picked.some(s => normalizeSkillToken(s) === token)) continue;
+    picked.push(skill);
+  }
+
+  const compose = (skills: string[]): string =>
+    [title, skills.length > 0 ? skills.join(', ') : ''].filter(Boolean).join(' | ').trim();
+
+  let headline = compose(picked);
+  while (headline.length > MAX_PROFILE_HEADLINE_CHARS && picked.length > 0) {
+    picked.pop();
+    headline = compose(picked);
+  }
+  if (!headline) headline = title || 'Software Professional';
+  return headline.slice(0, MAX_PROFILE_HEADLINE_CHARS).trim();
+}
+
+/** Cleans common LLM chatter/quotes/markdown from a generated free-text answer. */
+function sanitizeGeneratedProfileText(raw: string): string {
+  let out = String(raw || '')
+    .replace(/```(?:json|text|markdown)?/gi, ' ')
+    .trim();
+  out = out.replace(
+    /^(?:here(?:'s| is)[^:\n]*|sure[,:]?|answer|headline|professional summary|profile summary|summary)\s*[:\-]\s*/i,
+    '',
+  );
+  out = out.replace(/^["'“”]+|["'“”]+$/g, '').trim();
+  return out;
+}
+
+const isPlaceholderProfileAnswer = (text: string): boolean =>
+  /^(?:n\/?a|none|null|nil|not applicable|unknown|-+)$/i.test(text.trim());
+
+/**
+ * LLM-authored LinkedIn-style headline (~120 chars, single line) grounded in the profile.
+ * Throws on network/model failure so the caller can record the circuit-breaker failure
+ * and fall back to buildProfessionalHeadline().
+ */
+export async function generateProfileHeadline(careerBrain: ICareerBrain, llm: BaseChatModel): Promise<string> {
+  const title = careerBrain.currentTitle || careerBrain.workExperience?.[0]?.title || '';
+  const skills = (careerBrain.skills || []).slice(0, 12).join(', ');
+  const prompt = `Write ONE LinkedIn-style professional headline for this candidate.
+
+STRICT RULES:
+1. Maximum 120 characters, ONE single line.
+2. No first-person pronouns ("I", "my"), no emojis, no quotes, no hashtags, no labels like "Headline:".
+3. Use ONLY the verified facts below — never invent employers, metrics, certifications, or years.
+4. Format: "<Job Title> | <2-3 core skills or specialisations>".
+
+CANDIDATE:
+Job Title: ${title || 'Software Professional'}
+Total Experience: ${careerBrain.yearsOfExperience || 0} years
+Core Skills: ${skills || 'Software Engineering'}
+Background: ${(careerBrain.backgroundNarrative || '').slice(0, 600)}
+
+Write the headline now (plain text only):`;
+
+  const res = await llm.invoke([
+    new SystemMessage('You write concise professional headlines. Output plain text only, no preamble.'),
+    new HumanMessage(prompt),
+  ]);
+  const content = typeof res.content === 'string' ? res.content : String(res.content);
+  const firstLine = sanitizeGeneratedProfileText(content)
+    .split(/\r?\n/)
+    .map(l => l.replace(/^["'“”]+|["'“”]+$/g, '').trim())
+    .find(Boolean);
+  if (!firstLine || isPlaceholderProfileAnswer(firstLine)) return '';
+  const cleaned = firstLine
+    .replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/gu, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (cleaned.length < 3) return '';
+  return cleaned.slice(0, MAX_PROFILE_HEADLINE_CHARS).trim();
+}
+
+/**
+ * Deterministic summary fallback built from verified profile data (never invents facts).
+ */
+export function buildProfileSummaryFallback(careerBrain: ICareerBrain): string {
+  const narrative = (careerBrain.backgroundNarrative || '').trim();
+  if (narrative.length >= 40) return narrative.slice(0, MAX_PROFILE_SUMMARY_CHARS).trim();
+
+  const title =
+    (careerBrain.currentTitle || '').trim() ||
+    (careerBrain.workExperience?.[0]?.title || '').trim() ||
+    'Software Professional';
+  const years = Number(careerBrain.yearsOfExperience) || 0;
+  const skills = (careerBrain.skills || [])
+    .map(s => (s || '').trim())
+    .filter(Boolean)
+    .slice(0, 5);
+
+  let summary =
+    `I am a ${title}` +
+    (years > 0 ? ` with ${years}+ years of professional experience` : '') +
+    (skills.length > 0 ? `, specialising in ${skills.join(', ')}` : '') +
+    '.';
+  const recent = careerBrain.workExperience?.[0];
+  if (recent?.description && recent.description.trim().length > 20) {
+    const desc = recent.description.trim().replace(/\s+/g, ' ');
+    summary += ` ${desc}${/[.!?]$/.test(desc) ? '' : '.'}`;
+  }
+  summary +=
+    ' I focus on delivering reliable, high-quality work and collaborating closely with cross-functional teams.';
+  return summary.slice(0, MAX_PROFILE_SUMMARY_CHARS).trim();
+}
+
+/**
+ * LLM-authored professional summary (3-5 first-person sentences) grounded in profile + resume.
+ * Throws on network/model failure so the caller records the circuit breaker and uses the fallback.
+ */
+export async function generateProfileSummaryAnswer(careerBrain: ICareerBrain, llm: BaseChatModel): Promise<string> {
+  const workFormatted = (careerBrain.workExperience || [])
+    .slice(0, 3)
+    .map(w => {
+      const period = [w.startMonth, w.startYear].filter(Boolean).join(' ');
+      const end = w.isCurrent ? 'Present' : [w.endMonth, w.endYear].filter(Boolean).join(' ') || '';
+      return `- ${w.title || 'Role'} at ${w.company || 'Company'}${period ? ` (${period} - ${end || 'Present'})` : ''}${
+        w.description ? `: ${w.description.slice(0, 400)}` : ''
+      }`;
+    })
+    .join('\n');
+
+  const prompt = `Write a professional summary for a job application profile, in the first person.
+
+STRICT RULES:
+1. 3 to 5 sentences (about 60-120 words), plain text, no bullet points, no headings, no quotes.
+2. Use ONLY verified facts from the candidate data below. NEVER invent employers, dates, metrics, percentages, certifications, or client names.
+3. Describe role, core skills, domains, and working style. No "I am an AI".
+4. Do not start with "Summary:" or repeat the question.
+
+CANDIDATE:
+Name: ${careerBrain.fullName || 'Candidate'}
+Current Title: ${careerBrain.currentTitle || 'Software Professional'}
+Experience: ${careerBrain.yearsOfExperience || 0} years
+Location: ${careerBrain.currentLocation || ''}
+Education: ${careerBrain.education || ''}
+Core Skills: ${(careerBrain.skills || []).slice(0, 20).join(', ') || 'Software Engineering'}
+Background Narrative: ${careerBrain.backgroundNarrative || 'Not provided'}
+Work History:
+${workFormatted || 'Not provided'}
+
+RESUME EXCERPT:
+${(careerBrain.resumeText || '').slice(0, 6000) || 'Not provided'}
+
+Write the professional summary now:`;
+
+  const res = await llm.invoke([
+    new SystemMessage('You are a professional job applicant writing your own profile summary. Output plain text only.'),
+    new HumanMessage(prompt),
+  ]);
+  const content = typeof res.content === 'string' ? res.content : String(res.content);
+  const cleaned = sanitizeGeneratedProfileText(content)
+    .replace(/\s*\n+\s*/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (cleaned.length < 40 || isPlaceholderProfileAnswer(cleaned)) return '';
+  return cleaned.slice(0, MAX_PROFILE_SUMMARY_CHARS).trim();
 }
 
 /**
@@ -1402,11 +1630,10 @@ export function matchRuleBased(
       };
     }
 
-    // Role description / summary
-    if (
-      primaryWork?.description &&
-      /^(?:role\s*)?description$|^summary$|^(?:work|job)\s*description$/i.test(workLabel)
-    ) {
+    // Role description (work-experience sub-form). A plain "Summary" is NOT handled here:
+    // LinkedIn's profile step also labels its profile summary "Summary", and that must be
+    // generated from the full profile/resume by the dedicated profile-summary step.
+    if (primaryWork?.description && /^(?:role\s*)?description$|^(?:work|job)\s*description$/i.test(workLabel)) {
       return {
         matched: true,
         answer: primaryWork.description,
@@ -2287,7 +2514,7 @@ Title: ${careerBrain.currentTitle}
 Experience: ${careerBrain.yearsOfExperience} years
 Skills: ${(careerBrain.skills || []).join(', ')}
 Narrative: ${careerBrain.backgroundNarrative || 'Experienced professional with a strong track record of delivery.'}
-Resume Excerpt: ${(careerBrain.resumeText || '').slice(0, 800)}
+Resume Excerpt: ${(careerBrain.resumeText || '').slice(0, 4000)}
 
 === TARGET QUESTION ===
 "${field.label}"
@@ -2829,6 +3056,10 @@ DECISION RULES:
    - A year dropdown ("From Year", "To Year", "Start Year", "End Year", "Year") MUST receive a 4-digit YEAR that exists in OPTIONS (e.g. "2023"). NEVER a month name.
    - "From" is the role's START date; "To" is the role's END date. For the candidate's primary role: start = ${primaryStartDate}, end = ${primaryEndDate}. Use the Detailed Work History above for other roles.
    - Inside a work-experience sub-form: Position = "${primaryWork?.title || careerBrain.currentTitle || 'Software Engineer'}", Company = "${primaryWork?.company || 'Company'}", City = candidate's current city, Description = a concise 1-2 sentence summary grounded in the resume (no invented metrics).
+16. HEADLINE / PROFILE SUMMARY (free text):
+   - A "Headline" field is a LinkedIn-style tagline: ONE line, max ~120 characters, NO first person, NO emojis, format "<Job Title> | <2-3 core skills>" using only the verified title and skills above.
+   - A "Summary" / "Professional Summary" / "About you" field: 3-5 first-person sentences (about 60-120 words) grounded in the resume, core skills, and work history. NEVER invent employers, dates, metrics, percentages, or certifications.
+   - NEVER answer these with "N/A", "Yes", or a single word.
 
 OUTPUT STRICTLY VALID JSON ONLY:
 {
@@ -3246,6 +3477,86 @@ export async function resolveModalFieldWithAudit(
         answer: semanticIntent.matchedAnswer,
         sourceDetail: semanticIntent.reason,
       };
+    }
+  }
+
+  // Step 1c: Profile Headline -> [GENERATED] (LLM from profile, deterministic fallback)
+  // LinkedIn's Easy Apply profile step asks for a short tagline. It is not a screening
+  // question and has no stored golden answer, so generate it instead of asking the user.
+  if (isProfileHeadlineField(field)) {
+    let headline = '';
+    let headlineSource = '';
+    if (llm && isLlmTierAvailable()) {
+      logger.info(`[FormQuestionResolver] Profile headline "${label}" — generating with LLM...`);
+      try {
+        headline = await generateProfileHeadline(careerBrain, llm);
+        if (headline) headlineSource = 'LLM-authored headline from profile + resume';
+      } catch (err) {
+        if (isNetworkError(err)) {
+          recordLlmNetworkFailure(err);
+        } else {
+          logger.warning(`[FormQuestionResolver] Headline generation failed for "${label}":`, err);
+        }
+      }
+    }
+    if (!headline) {
+      headline = buildProfessionalHeadline(careerBrain);
+      headlineSource = 'profile-derived headline (title + core skills)';
+    }
+    if (headline) {
+      logger.info(`[FormQuestionResolver] [GENERATED] "${label}": "${headline}"`);
+      const fillSuccess = await fillWithOptionFallback(headline);
+      if (fillSuccess) {
+        if (onAuditLog) {
+          onAuditLog('GENERATED', label, headline, `${headlineSource} | DOM fill: SUCCESS`);
+        }
+        return {
+          success: true,
+          category: 'GENERATED',
+          answer: headline,
+          sourceDetail: headlineSource,
+        };
+      }
+      logger.warning(`[FormQuestionResolver] DOM fill failed for headline on "${label}". Falling through...`);
+    }
+  }
+
+  // Step 1d: Professional / Profile Summary -> [GENERATED] (LLM from resume, deterministic fallback)
+  if (isProfileSummaryField(field)) {
+    let summary = '';
+    let summarySource = '';
+    if (llm && isLlmTierAvailable()) {
+      logger.info(`[FormQuestionResolver] Profile summary "${label}" — generating with LLM...`);
+      try {
+        summary = await generateProfileSummaryAnswer(careerBrain, llm);
+        if (summary) summarySource = 'LLM-authored professional summary from resume';
+      } catch (err) {
+        if (isNetworkError(err)) {
+          recordLlmNetworkFailure(err);
+        } else {
+          logger.warning(`[FormQuestionResolver] Summary generation failed for "${label}":`, err);
+        }
+      }
+    }
+    if (!summary) {
+      summary = buildProfileSummaryFallback(careerBrain);
+      summarySource = 'profile-derived summary (title + skills + narrative)';
+    }
+    if (summary) {
+      logger.info(`[FormQuestionResolver] [GENERATED] "${label}": "${summary.slice(0, 160)}..."`);
+      const fillSuccess = await fillWithOptionFallback(summary);
+      if (fillSuccess) {
+        if (onAuditLog) {
+          onAuditLog('GENERATED', label, summary, `${summarySource} | DOM fill: SUCCESS`);
+        }
+        return {
+          success: true,
+          category: 'GENERATED',
+          answer: summary,
+          sourceDetail: summarySource,
+        };
+      }
+      logger.warning(`[FormQuestionResolver] DOM fill failed for summary on "${label}". Falling through...`);
     }
   }
 
