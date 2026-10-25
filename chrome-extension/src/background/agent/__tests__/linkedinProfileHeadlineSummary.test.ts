@@ -10,6 +10,7 @@ import {
   generateProfileSummaryAnswer,
   isFreeTextNarrativeQuestion,
   matchRuleBased,
+  adaptAnswerToFieldFormat,
   type FormFieldDescriptor,
 } from '../linkedin/formQuestionResolver';
 
@@ -155,5 +156,60 @@ describe('LLM headline / summary generation', () => {
 
   it('rejects too-short summary output so the caller can fall back', async () => {
     expect(await generateProfileSummaryAnswer(makeBrain(), fakeLlm('N/A'))).toBe('');
+  });
+});
+
+describe('Website and Portfolio URL equivalence', () => {
+  const brainWithPortfolio = makeBrain({
+    portfolioUrl: 'https://mubasshir.dev',
+    githubUrl: 'https://github.com/mubasshir',
+    linkedinUrl: 'https://linkedin.com/in/mubasshir',
+  });
+
+  it('resolves both "Website" and "Portfolio" variants to portfolioUrl', () => {
+    const variants = [
+      'Website',
+      'Website link',
+      'Website URL',
+      'Personal website',
+      'Personal website link',
+      'Portfolio',
+      'Portfolio link',
+      'Portfolio URL',
+      'Online portfolio',
+      'Link to your portfolio / website',
+      'Website / Portfolio',
+      'Portfolio / Website',
+    ];
+
+    for (const v of variants) {
+      const res = matchRuleBased({ label: v, fieldType: 'text' }, brainWithPortfolio);
+      expect(res.matched).toBe(true);
+      expect(res.answer).toBe('https://mubasshir.dev');
+    }
+  });
+
+  it('does not conflate GitHub or LinkedIn with website/portfolio', () => {
+    expect(matchRuleBased({ label: 'GitHub Profile', fieldType: 'text' }, brainWithPortfolio).answer).toBe(
+      'https://github.com/mubasshir',
+    );
+    expect(matchRuleBased({ label: 'LinkedIn Profile URL', fieldType: 'text' }, brainWithPortfolio).answer).toBe(
+      'https://linkedin.com/in/mubasshir',
+    );
+  });
+
+  it('answers binary portfolio/website questions favorably when portfolioUrl exists', () => {
+    const res = matchRuleBased(
+      { label: 'Do you have a personal website or portfolio?', fieldType: 'radio', options: ['Yes', 'No'] },
+      brainWithPortfolio,
+    );
+    expect(res.matched).toBe(true);
+    expect(res.answer).toBe('Yes');
+  });
+
+  it('adaptAnswerToFieldFormat prepends https:// to bare domain names for url fields', () => {
+    const adapted = adaptAnswerToFieldFormat('mubasshir.dev', { label: 'Website', fieldType: 'text' });
+    expect(adapted.valid).toBe(true);
+    expect(adapted.value).toBe('https://mubasshir.dev');
   });
 });

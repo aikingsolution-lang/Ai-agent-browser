@@ -49,10 +49,10 @@ export function isSocialMediaOrUrlQuestion(question: string): boolean {
   if (!question || typeof question !== 'string') return false;
   const q = question.trim().toLowerCase();
   return (
-    /^(?:facebook|x\s*\(formerly\s*twitter\)|twitter|instagram|tiktok|social\s*media|social\s*profile|linkedin\s*profile|github\s*profile|portfolio\s*url)$/i.test(
+    /^(?:facebook|x\s*\(formerly\s*twitter\)|twitter|instagram|tiktok|social\s*media|social\s*profile|linkedin\s*profile|github\s*profile|portfolio\s*url|website\s*url|portfolio\s*link|website\s*link|portfolio|website|personal\s*website)$/i.test(
       q,
     ) ||
-    /^(?:enter|your|provide|link\s*to)?\s*(?:facebook|twitter|instagram|tiktok)\s*(?:profile|url|link|handle)?$/i.test(
+    /^(?:enter|your|provide|link\s*to)?\s*(?:facebook|twitter|instagram|tiktok|linkedin|github|portfolio|website)\s*(?:profile|url|link|handle)?$/i.test(
       q,
     ) ||
     q === 'x' ||

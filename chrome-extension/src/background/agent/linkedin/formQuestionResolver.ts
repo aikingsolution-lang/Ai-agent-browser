@@ -1405,6 +1405,26 @@ export function adaptAnswerToFieldFormat(
     return { valid: true, value: cleanDigits, wasConverted: cleanDigits !== answer };
   }
 
+  // 5. URL Fields: Ensure valid URL scheme (https://) if field asks for link/url/website/portfolio
+  const isUrlField =
+    /\b(?:website|portfolio|github|linkedin|profile\s*link|url)\b/i.test(labelLower) && !isNumericField;
+  if (isUrlField && answer) {
+    let cleanUrl = answer.trim();
+    if (
+      !/^https?:\/\//i.test(cleanUrl) &&
+      /^[a-zA-Z0-9][-a-zA-Z0-9+&@#/%?=~_|!:,.;]*\.[a-zA-Z]{2,}(?:[-a-zA-Z0-9+&@#/%=~_|]*)?$/i.test(cleanUrl)
+    ) {
+      cleanUrl = `https://${cleanUrl}`;
+      return {
+        valid: true,
+        value: cleanUrl,
+        wasConverted: true,
+        sourceNote: `[MATCHED] Added https:// to URL '${answer}'`,
+      };
+    }
+    return { valid: true, value: cleanUrl, wasConverted: cleanUrl !== answer };
+  }
+
   return { valid: true, value: answer, wasConverted: false };
 }
 
@@ -2223,6 +2243,40 @@ export function matchRuleBased(
     if (/linkedin/i.test(labelLower) && careerBrain.linkedinUrl) {
       return { matched: true, answer: careerBrain.linkedinUrl, sourceDetail: 'profile: linkedinUrl' };
     }
+
+    // Portfolio / Website URL:
+    // Website link and Portfolio link are treated as identical; both fill with careerBrain.portfolioUrl
+    const portfolioOrWebsite = (careerBrain.portfolioUrl || careerBrain.githubUrl || '').trim();
+    const isPortfolioOrWebsiteQuestion =
+      /\b(?:portfolio|website|web\s*site|personal\s*site|personal\s*link|online\s*portfolio|project\s*link)\b/i.test(
+        labelLower,
+      ) && !/github|linkedin|facebook|twitter|instagram|tiktok/i.test(labelLower);
+
+    if (isPortfolioOrWebsiteQuestion && portfolioOrWebsite) {
+      return {
+        matched: true,
+        answer: portfolioOrWebsite,
+        sourceDetail: 'profile: portfolioUrl (website / portfolio link)',
+      };
+    }
+  }
+
+  // Binary/select questions asking whether candidate has a portfolio or personal website
+  // e.g. "Do you have a portfolio?", "Do you have a personal website?"
+  if (
+    isBinaryOrSelect &&
+    /\b(?:portfolio|website|web\s*site|personal\s*site)\b/i.test(labelLower) &&
+    /do you have|have you|got a|do you maintain/i.test(labelLower) &&
+    !/github|linkedin|facebook|twitter|instagram|tiktok/i.test(labelLower)
+  ) {
+    const hasPortfolio = Boolean((careerBrain.portfolioUrl || careerBrain.githubUrl || '').trim());
+    const ans = hasPortfolio ? 'Yes' : 'No';
+    const chosen = field.options?.find(o => new RegExp(`^${ans}$`, 'i').test(o.trim())) || ans;
+    return {
+      matched: true,
+      answer: chosen,
+      sourceDetail: `profile: portfolioUrl (${hasPortfolio ? 'Portfolio/Website link available' : 'No portfolio URL'})`,
+    };
   }
 
   // 5. Education & Degree Questions
@@ -3039,6 +3093,9 @@ CANDIDATE BACKGROUND (VERIFIED FROM RESUME & PROFILE):
 - Valid Driver's License: ${careerBrain.driverLicense || 'Yes'}
 - Veteran Status: ${careerBrain.veteranStatus || 'I am not a protected veteran'}
 - Disability Status: ${careerBrain.disabilityStatus || 'No, I do not have a disability'}
+- Portfolio / Personal Website URL: ${careerBrain.portfolioUrl || careerBrain.githubUrl || 'N/A'}
+- GitHub Profile URL: ${careerBrain.githubUrl || 'N/A'}
+- LinkedIn Profile URL: ${careerBrain.linkedinUrl || 'N/A'}
 - Core Skills List: ${skillsList || 'Software Engineering / Full Stack'}
 - Skill-Specific Calibrated Experience:
 ${skillExpFormatted}
@@ -3125,6 +3182,9 @@ DECISION RULES:
    - A "Headline" field is a LinkedIn-style tagline: ONE line, max ~120 characters, NO first person, NO emojis, format "<Job Title> | <2-3 core skills>" using only the verified title and skills above.
    - A "Summary" / "Professional Summary" / "About you" field: 3-5 first-person sentences (about 60-120 words) grounded in the resume, core skills, and work history. NEVER invent employers, dates, metrics, percentages, or certifications.
    - NEVER answer these with "N/A", "Yes", or a single word.
+17. WEBSITE / PORTFOLIO LINK:
+   - "Website", "Portfolio", "Personal website", "Portfolio link", "Website link", "Website / Portfolio", "Online portfolio", or any personal link question are THE SAME:
+     ALWAYS output "${careerBrain.portfolioUrl || careerBrain.githubUrl || ''}".
 
 OUTPUT STRICTLY VALID JSON ONLY:
 {
