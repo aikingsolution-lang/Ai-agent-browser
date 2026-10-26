@@ -160,7 +160,7 @@ export function isGenericPlaceholderText(rawText: string | null | undefined): bo
     .replace(/\s+/g, ' ')
     .trim();
   if (clean.length <= 2) return true;
-  return /^(?:form\s*field|form|field|fields|question|questions|answer|answers|input|text(?:\s*field)?|textbox|select|selection|dropdown|checkbox|radio(?:\s*button)?|option|options|value|photo|photograph|n\/?a|none|null|undefined|-+|_+|\d{1,3})$/i.test(
+  return /^(?:form[\s_-]*field|form|field|fields|question|questions|answer|answers|input|text(?:[\s_-]*field)?|textbox|select|selection|dropdown|checkbox|radio(?:[\s_-]*button)?|option|options|value|photo|photograph|n\/?a|none|null|undefined|-+|_+|\d{1,3})$/i.test(
     clean,
   );
 }
@@ -176,9 +176,20 @@ export function isGenericPlaceholderText(rawText: string | null | undefined): bo
  * Never returns a generic placeholder such as "Form Field". Returns "" if no real question text exists.
  */
 export function extractStructuralFieldLabel(
-  root: Document | HTMLElement | null | undefined,
-  element: HTMLElement | null | undefined,
+  rootOrElement: Document | HTMLElement | null | undefined,
+  elementOrNull?: HTMLElement | null | undefined,
 ): string {
+  let root: Document | HTMLElement | null | undefined;
+  let element: HTMLElement | null | undefined;
+
+  if (elementOrNull !== undefined) {
+    root = rootOrElement;
+    element = elementOrNull;
+  } else {
+    element = rootOrElement as HTMLElement;
+    root = null;
+  }
+
   if (!element) return '';
   const scope: Document | HTMLElement = root || (typeof document !== 'undefined' ? document : (null as any));
 
