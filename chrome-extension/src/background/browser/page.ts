@@ -6029,47 +6029,38 @@ export default class Page {
 
   /**
    * Reads job cards from the LinkedIn left-hand search results pane.
-   * Scrolls the list container to trigger lazy loading of cards.
+   * Scrolls the list container to trigger lazy loading of virtualized cards.
    */
   async readJobListFromSearchPane(scrollAttempts = 4): Promise<SearchJobCard[]> {
     const extractCardsInPage = async (scrolls: number) => {
-      for (let s = 0; s < scrolls; s++) {
-        const containers = [
-          document.querySelector('.jobs-search-results-list'),
+      // 1. Identify the scrollable list container for two-column vs single-column layout
+      const listScrollContainer = (() => {
+        const candidates = [
           document.querySelector('.scaffold-layout__list'),
+          document.querySelector('.jobs-search-results-list'),
+          document.querySelector('ul.scaffold-layout__list-container')?.parentElement,
           document.querySelector('.scaffold-layout__list-container'),
-          document.querySelector('.jobs-search-results-list__list'),
-          document.querySelector('div[data-view-name="job-card"]')?.parentElement,
-          document.querySelector('div[data-view-name*="job-card"]')?.parentElement,
-          document.querySelector('ul.scaffold-layout__list-container'),
         ].filter(Boolean) as HTMLElement[];
+        return candidates.find(c => c.scrollHeight > c.clientHeight) || null;
+      })();
 
-        let scrolled = false;
-        for (const c of containers) {
-          if (c.scrollHeight > c.clientHeight) {
-            c.scrollBy(0, 500);
-            scrolled = true;
-          }
-        }
-        if (!scrolled) {
+      // 2. Progressive paced scrolling to hydrate virtualized (occluded) cards
+      for (let s = 0; s < scrolls; s++) {
+        if (listScrollContainer) {
+          listScrollContainer.scrollBy(0, 500);
+        } else {
           window.scrollBy(0, 500);
         }
-        await new Promise(r => setTimeout(r, 400));
+        await new Promise(r => setTimeout(r, 350));
       }
 
-      // Restore scroll to top of search list so upper cards are in view and clickable
-      const scrollContainers = [
-        document.querySelector('.jobs-search-results-list'),
-        document.querySelector('.scaffold-layout__list'),
-        document.querySelector('.scaffold-layout__list-container'),
-        document.querySelector('.jobs-search-results-list__list'),
-        document.querySelector('ul.scaffold-layout__list-container'),
-      ].filter(Boolean) as HTMLElement[];
-      for (const sc of scrollContainers) {
-        if (typeof sc.scrollTo === 'function') sc.scrollTo(0, 0);
+      // 3. Restore scroll to top so upper cards remain in view and clickable
+      if (listScrollContainer && typeof listScrollContainer.scrollTo === 'function') {
+        listScrollContainer.scrollTo({ top: 0, behavior: 'instant' });
       }
-      window.scrollTo(0, 0);
+      window.scrollTo({ top: 0, behavior: 'instant' });
       await new Promise(r => setTimeout(r, 200));
+
       function cleanLinkedInJobTitle(raw: string): string {
         if (!raw) return '';
         let txt = raw
@@ -6111,11 +6102,11 @@ export default class Page {
 
       /**
        * Rejects menu / badge / fallback strings that surface when LinkedIn's
-       * selectors miss the real title ("More", "Easy Apply", "LinkedIn Job", …).
+       * selectors miss the real title ("More", "Easy Apply", "Share feedback", …).
        */
       function isJunkJobTitle(raw: string): boolean {
         const t = (raw || '').replace(/\s+/g, ' ').trim().toLowerCase();
-        if (!t || t.length < 3 || t.length > 120) return true;
+        if (!t || t.length < 2 || t.length > 120) return true;
         if (
           /\b(?:feedback|negative\s*feedback|share\s*feedback|report\s*this|report\s*job|save\s*job|follow|unfollow|hide\s*job|not\s*interested|send\s*feedback)\b/i.test(
             t,
@@ -6123,7 +6114,7 @@ export default class Page {
         ) {
           return true;
         }
-        return /^(?:more|less|see more|show more|view more|easy apply|promoted|verified|save|saved|dismiss|close|apply|applied|apply now|apply on company site|view job|job|job details|linkedin job|linkedin|unknown|share|n\/?a|none|null|undefined)$/.test(
+        return /^(?:more|less|see more|show more|view more|easy apply|promoted|verified|save|saved|dismiss|close|apply|applied|apply now|apply on company site|view job|job|job details|linkedin job|linkedin|unknown|unknown company|company|share|n\/?a|none|null|undefined)$/.test(
           t,
         );
       }
@@ -6164,61 +6155,49 @@ export default class Page {
         return txt;
       }
 
-      const candidateContainers = [
-        document.querySelector('.jobs-search-results-list'),
-        document.querySelector('.scaffold-layout__list'),
-        document.querySelector('.scaffold-layout__list-container'),
-        document.querySelector('.jobs-search-results-list__list'),
-        document.querySelector('ul.scaffold-layout__list-container'),
-        document,
-      ].filter(Boolean) as (Element | Document)[];
-
-      const cardSelectors = [
-        'li.jobs-search-results__list-item',
-        'li.scaffold-layout__list-item',
-        'li[data-occludable-job-id]',
-        'div.job-card-container',
-        'div[data-job-id]',
-        'div[data-occludable-job-id]',
-        '[data-view-name="job-card"]',
-        '[data-view-name*="job-card"]',
-        '[data-view-name="search-entity-result-universal-template"]',
-        '.job-card-list__entity-lockup',
-        'div.base-card',
-      ].join(', ');
-
+      // 4. Discover cards with structural selectors (not legacy classes)
+      const listRoot = document.querySelector(
+        'ul.scaffold-layout__list-container, .scaffold-layout__list-container, .jobs-search-results-list__list',
+      );
       let cards: HTMLElement[] = [];
-      for (const container of candidateContainers) {
-        const found = Array.from(container.querySelectorAll(cardSelectors)) as HTMLElement[];
-        if (found.length > cards.length) {
-          cards = found;
-        }
+
+      if (listRoot) {
+        const directChildren = Array.from(listRoot.children) as HTMLElement[];
+        cards = directChildren.filter(c => {
+          return (
+            c.hasAttribute('data-occludable-job-id') ||
+            c.hasAttribute('data-job-id') ||
+            c.querySelector(
+              '[data-occludable-job-id], [data-job-id], a[href*="/jobs/view/"], a[href*="currentJobId="]',
+            ) !== null
+          );
+        });
       }
 
-      // Global fallback across entire document
       if (cards.length === 0) {
-        cards = Array.from(document.querySelectorAll(cardSelectors)) as HTMLElement[];
-      }
-
-      // Fallback: search for any anchor tag with /jobs/view/ or currentJobId=
-      if (cards.length === 0) {
-        const links = Array.from(
-          document.querySelectorAll('a[href*="/jobs/view/"], a[href*="currentJobId="]'),
-        ) as HTMLElement[];
-        const linkParents = new Set<HTMLElement>();
-        for (const l of links) {
-          const parent = (l.closest('li, div[data-job-id], .job-card-container, [data-view-name="job-card"]') ||
-            l.parentElement) as HTMLElement;
-          if (parent) linkParents.add(parent);
-        }
-        cards = Array.from(linkParents);
+        const structuralSelectors = [
+          'li[data-occludable-job-id]',
+          'div[data-job-id]',
+          'li[data-job-id]',
+          '[data-view-name="job-card"]',
+          '[data-view-name*="job-card"]',
+          'li.scaffold-layout__list-item',
+          'div.job-card-container',
+          'div.base-card',
+        ].join(', ');
+        const found = Array.from(document.querySelectorAll(structuralSelectors)) as HTMLElement[];
+        // Filter out any elements positioned inside the details pane
+        cards = found.filter(el => !el.closest('.scaffold-layout__detail, [data-view-name="job-details"]'));
       }
 
       const results: SearchJobCard[] = [];
       const seenJobIds = new Set<string>();
 
       for (const card of cards) {
-        // 1. Try finding job ID from data attributes on card or child elements
+        // Exclude elements inside the details pane
+        if (card.closest('.scaffold-layout__detail, [data-view-name="job-details"]')) continue;
+
+        // 1. Try finding job ID from data attributes or primary link
         let jobId =
           card.getAttribute('data-job-id') ||
           card.getAttribute('data-occludable-job-id') ||
@@ -6235,44 +6214,17 @@ export default class Page {
           }
         }
 
-        // 2. Try finding job link
-        const link =
+        // Primary job title anchor
+        const titleAnchor =
           card.querySelector<HTMLAnchorElement>(
-            'a.job-card-container__link, a.job-card-list__title, a.job-card-container__link--cursor-pointer, a[href*="/jobs/view/"], a[href*="currentJobId="], a[data-control-name="job_card_title"], a[href*="/jobs/"]',
+            'a[href*="/jobs/view/"], a[href*="currentJobId="], [data-view-name*="job-card-title"], a.job-card-list__title, a.job-card-container__link',
           ) || (card.tagName.toLowerCase() === 'a' ? (card as HTMLAnchorElement) : null);
 
-        if (!jobId && link) {
-          const href = link.href || '';
-          const match = href.match(/(?:\/jobs\/view\/|currentJobId=|\/jobs\/)(\d+)/);
+        if (!jobId && titleAnchor) {
+          const href = titleAnchor.href || '';
+          const match = href.match(/(?:\/jobs\/view\/|currentJobId=)(\d{7,12})/);
           if (match && match[1]) {
             jobId = match[1];
-          }
-        }
-
-        // 3. Check any anchor tag inside card
-        if (!jobId) {
-          const anyLink = card.querySelector<HTMLAnchorElement>('a[href*="/jobs/"], a[href*="currentJobId="]');
-          if (anyLink) {
-            const href = anyLink.href || '';
-            const match = href.match(/(?:\/jobs\/view\/|currentJobId=)(\d+)/) || href.match(/(\d{7,12})/);
-            if (match && match[1]) {
-              jobId = match[1];
-            }
-          }
-        }
-
-        // 4. Try finding urn anywhere in card or its children
-        if (!jobId) {
-          const urnEl = card.querySelector('[data-entity-urn], [data-job-urn]');
-          const urn =
-            card.getAttribute('data-entity-urn') ||
-            card.getAttribute('data-job-urn') ||
-            urnEl?.getAttribute('data-entity-urn') ||
-            urnEl?.getAttribute('data-job-urn') ||
-            '';
-          const urnMatch = urn.match(/urn:li:jobPosting:(\d+)/) || urn.match(/(\d{7,12})/);
-          if (urnMatch && urnMatch[1]) {
-            jobId = urnMatch[1];
           }
         }
 
@@ -6281,43 +6233,53 @@ export default class Page {
         }
         seenJobIds.add(jobId);
 
-        // Extract title. Newer LinkedIn cards sometimes expose a menu/badge ("More")
-        // through generic strong/h3 selectors, so every source is validated.
-        const titleEl = card.querySelector(
-          'a.job-card-list__title, a.job-card-container__link, .job-card-container__link, .artdeco-entity-lockup__title a, .artdeco-entity-lockup__title, [data-control-name="job_card_title"], a[href*="/jobs/view/"], a[href*="currentJobId="], h3 a, strong a',
-        );
-        let rawTitle = cleanElementText(titleEl);
-        if (isJunkJobTitle(rawTitle)) rawTitle = cleanElementText(link);
+        // 2. Title Extraction
+        let rawTitle = cleanElementText(titleAnchor);
         if (isJunkJobTitle(rawTitle)) {
-          // When the anchor wraps the whole card, textContent collapses everything
-          // into one long string; the first rendered line is the job title.
-          const firstLine = ((link as HTMLElement | null)?.innerText || '')
-            .split(/\n+/)
-            .map(line => line.trim())
-            .find(line => !isJunkJobTitle(line));
-          if (firstLine) rawTitle = firstLine;
+          const heading = card.querySelector('strong, h3, h4');
+          if (heading && !heading.closest('button, [role="button"]')) {
+            rawTitle = cleanElementText(heading);
+          }
         }
         if (isJunkJobTitle(rawTitle)) {
-          rawTitle =
-            link?.getAttribute('aria-label') || link?.getAttribute('title') || card.getAttribute('aria-label') || '';
+          const aria = titleAnchor?.getAttribute('aria-label') || card.getAttribute('aria-label') || '';
+          if (!isJunkJobTitle(aria)) rawTitle = aria;
         }
         const cleanedCardTitle = cleanLinkedInJobTitle(rawTitle);
         const title = isJunkJobTitle(cleanedCardTitle) ? '' : cleanedCardTitle;
 
-        // Extract company
-        const companyEl = card.querySelector(
-          '.job-card-container__company-name, .artdeco-entity-lockup__subtitle, .job-card-container__primary-description, span.t-14, [data-control-name="job_card_company"]',
-        );
-        const company = cleanElementText(companyEl) || 'Unknown Company';
+        // 3. Company Extraction
+        const companyAnchor = card.querySelector<HTMLAnchorElement>('a[href*="/company/"]');
+        let company = cleanElementText(companyAnchor);
+        if (!company || isJunkJobTitle(company)) {
+          const subEl = card.querySelector(
+            '.artdeco-entity-lockup__subtitle, [data-view-name*="job-card"] .artdeco-entity-lockup__subtitle, .job-card-container__primary-description, .base-search-card__subtitle, span.t-14',
+          );
+          if (subEl && !subEl.closest('button, [role="button"]')) {
+            const subTxt = cleanElementText(subEl);
+            if (!isJunkJobTitle(subTxt)) company = subTxt;
+          }
+        }
+        if (isJunkJobTitle(company)) company = '';
+
+        // Exclude menu buttons or empty card containers
+        if (!title && !company) continue;
 
         const url = `https://www.linkedin.com/jobs/view/${jobId}/`;
 
         results.push({
           jobId,
-          title: title || 'LinkedIn Job',
-          company: company,
+          title: title || `Job #${jobId}`,
+          company: company || 'Company',
           url,
         });
+      }
+
+      // Single-anchor fallback is explicitly rejected: never treat solitary details-pane anchor as a search card
+      if (results.length === 0) {
+        console.warn(
+          '[readJobListFromSearchPane] Discovered 0 job cards from search list. Details-pane anchor excluded.',
+        );
       }
 
       return results;

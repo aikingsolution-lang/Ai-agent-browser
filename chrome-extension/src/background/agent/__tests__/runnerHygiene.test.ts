@@ -144,49 +144,41 @@ class MockDOMElement {
             const ancestorSel = parts.slice(0, -1).join(' ');
             if (!child.closest(ancestorSel)) continue;
           }
-          if (target === tag) {
-            matches = true;
-            break;
-          }
-          if (target.startsWith('.') && clsList.includes(target.slice(1))) {
-            matches = true;
-            break;
-          }
-          if (target === 'dialog[open]' && tag === 'dialog' && child.open) {
-            matches = true;
-            break;
-          }
-          if (target.includes('[role="dialog"]') && child.getAttribute('role') === 'dialog') {
-            matches = true;
-            break;
-          }
-          if (target.includes('[aria-modal="true"]') && child.getAttribute('aria-modal') === 'true') {
-            matches = true;
-            break;
-          }
-          if (
-            target.includes('aria-label*="dismiss"') &&
-            (child.getAttribute('aria-label') || '').toLowerCase().includes('dismiss')
-          ) {
-            matches = true;
-            break;
-          }
-          if (
-            target.includes('aria-label*="close"') &&
-            (child.getAttribute('aria-label') || '').toLowerCase().includes('close')
-          ) {
-            matches = true;
-            break;
-          }
-          const attrMatch = target.match(/^\[([a-zA-Z0-9_-]+)(?:([*^$]?=)"?([^"\]]*)"?)?\]$/);
+
+          let targetTag = '';
+          let targetClass = '';
+          let targetAttr: { name: string; op?: string; val?: string } | null = null;
+
+          let rem = target;
+          const attrMatch = rem.match(/\[([a-zA-Z0-9_-]+)(?:([*^$]?=)"?([^"\]]*)"?)?\]/);
           if (attrMatch) {
-            const attrVal = child.getAttribute(attrMatch[1]);
-            if (attrVal !== null) {
-              if (!attrMatch[2] || (attrMatch[2] === '=' && attrVal === attrMatch[3])) {
-                matches = true;
-                break;
-              }
+            targetAttr = { name: attrMatch[1], op: attrMatch[2], val: attrMatch[3] };
+            rem = rem.replace(attrMatch[0], '');
+          }
+          if (rem.includes('.')) {
+            const split = rem.split('.');
+            targetTag = split[0];
+            targetClass = split[1];
+          } else {
+            targetTag = rem;
+          }
+
+          let ok = true;
+          if (targetTag && targetTag !== tag) ok = false;
+          if (targetClass && !clsList.includes(targetClass)) ok = false;
+          if (targetAttr) {
+            const actual = child.getAttribute(targetAttr.name);
+            if (actual === null) {
+              ok = false;
+            } else if (targetAttr.op === '=' && actual !== targetAttr.val) {
+              ok = false;
+            } else if (targetAttr.op === '*=' && !actual.includes(targetAttr.val || '')) {
+              ok = false;
             }
+          }
+          if (ok) {
+            matches = true;
+            break;
           }
         }
 
@@ -753,5 +745,183 @@ describe('Requirement 7: Phone Country Code Select & Filling', () => {
 
     expect(sel.value).toBe('in');
     expect(sel.selectedOptions[0].textContent).toBe('India (+91)');
+  });
+});
+
+describe('Phase 2: Structural List-Scan & Virtualized Card Extraction', () => {
+  function scanJobList(doc: MockDOMElement): Array<{ jobId: string; title: string; company: string; url: string }> {
+    const listRoot = doc.querySelector(
+      'ul.scaffold-layout__list-container, .scaffold-layout__list-container, .jobs-search-results-list__list',
+    );
+    let cards: MockDOMElement[] = [];
+
+    if (listRoot) {
+      const directChildren = listRoot.children;
+      cards = directChildren.filter(c => {
+        return (
+          c.hasAttribute('data-occludable-job-id') ||
+          c.hasAttribute('data-job-id') ||
+          c.querySelector(
+            '[data-occludable-job-id], [data-job-id], a[href*="/jobs/view/"], a[href*="currentJobId="]',
+          ) !== null
+        );
+      });
+    }
+
+    if (cards.length === 0) {
+      const structuralSelectors = [
+        'li[data-occludable-job-id]',
+        'div[data-job-id]',
+        'li[data-job-id]',
+        '[data-view-name="job-card"]',
+        '[data-view-name*="job-card"]',
+        'li.scaffold-layout__list-item',
+        'div.base-card',
+      ].join(', ');
+      const found = doc.querySelectorAll(structuralSelectors);
+      cards = found.filter(el => !el.closest('.scaffold-layout__detail, [data-view-name="job-details"]'));
+    }
+
+    const results: Array<{ jobId: string; title: string; company: string; url: string }> = [];
+    const seenJobIds = new Set<string>();
+
+    for (const card of cards) {
+      if (card.closest('.scaffold-layout__detail, [data-view-name="job-details"]')) continue;
+
+      let jobId =
+        card.getAttribute('data-job-id') ||
+        card.getAttribute('data-occludable-job-id') ||
+        card.querySelector('[data-job-id]')?.getAttribute('data-job-id') ||
+        card.querySelector('[data-occludable-job-id]')?.getAttribute('data-occludable-job-id') ||
+        '';
+
+      const titleAnchor = card.querySelector(
+        'a[href*="/jobs/view/"], a[href*="currentJobId="], [data-view-name*="job-card-title"], a.job-card-list__title',
+      );
+
+      if (!jobId && titleAnchor) {
+        const href = titleAnchor.getAttribute('href') || '';
+        const match = href.match(/(?:\/jobs\/view\/|currentJobId=)(\d{7,12})/);
+        if (match && match[1]) jobId = match[1];
+      }
+
+      if (!jobId || seenJobIds.has(jobId)) continue;
+      seenJobIds.add(jobId);
+
+      let rawTitle = (titleAnchor?.textContent || '').trim().replace(/\s+/g, ' ');
+      const isJunk = /^(?:more|less|share feedback|save|saved|dismiss|close|easy apply|apply)$/i.test(rawTitle);
+      if (isJunk || !rawTitle) {
+        const heading = card.querySelector('strong, h3, h4');
+        if (heading && !heading.closest('button')) {
+          rawTitle = (heading.textContent || '').trim().replace(/\s+/g, ' ');
+        }
+      }
+      const title = /^(?:more|share feedback|save)$/i.test(rawTitle) ? '' : rawTitle;
+
+      const companyAnchor = card.querySelector('a[href*="/company/"]');
+      let company = (companyAnchor?.textContent || '').trim().replace(/\s+/g, ' ');
+      if (!company) {
+        const subEl = card.querySelector(
+          '.artdeco-entity-lockup__subtitle, [data-view-name*="job-card"] span, .job-card-container__primary-description',
+        );
+        if (subEl && !subEl.closest('button')) {
+          company = (subEl.textContent || '').trim().replace(/\s+/g, ' ');
+        }
+      }
+
+      if (!title && !company) continue;
+
+      results.push({
+        jobId,
+        title: title || `Job #${jobId}`,
+        company: company || 'Company',
+        url: `https://www.linkedin.com/jobs/view/${jobId}/`,
+      });
+    }
+
+    return results;
+  }
+
+  it('scans two-column layout with ul.scaffold-layout__list-container correctly', () => {
+    const doc = new MockDOMElement('document');
+    const twoPane = new MockDOMElement('div', { class: 'jobs-search-two-pane__wrapper' });
+    const listPane = new MockDOMElement('div', { class: 'scaffold-layout__list' });
+    const ul = new MockDOMElement('ul', { class: 'scaffold-layout__list-container' });
+
+    // Job card 1
+    const li1 = new MockDOMElement('li', { 'data-occludable-job-id': '4198273645' });
+    const a1 = new MockDOMElement('a', { href: '/jobs/view/4198273645/' }, 'Staff AI Engineer');
+    const comp1 = new MockDOMElement('a', { href: '/company/openai/' }, 'OpenAI');
+    const btn1 = new MockDOMElement('button', {}, 'More'); // Menu button that must NOT pollute title
+    li1.appendChild(a1);
+    li1.appendChild(comp1);
+    li1.appendChild(btn1);
+
+    // Job card 2
+    const li2 = new MockDOMElement('li', { 'data-occludable-job-id': '4197821034' });
+    const a2 = new MockDOMElement('a', { href: '/jobs/view/4197821034/' }, 'Principal Infrastructure Engineer');
+    const comp2 = new MockDOMElement('a', { href: '/company/google/' }, 'Google');
+    li2.appendChild(a2);
+    li2.appendChild(comp2);
+
+    ul.appendChild(li1);
+    ul.appendChild(li2);
+    listPane.appendChild(ul);
+    twoPane.appendChild(listPane);
+
+    // Details pane (right column)
+    const detailPane = new MockDOMElement('div', { class: 'scaffold-layout__detail' });
+    const detailAnchor = new MockDOMElement('a', { href: '/jobs/view/9999999999/' }, 'Solitary Details Link');
+    detailPane.appendChild(detailAnchor);
+    twoPane.appendChild(detailPane);
+    doc.appendChild(twoPane);
+
+    const jobs = scanJobList(doc);
+    expect(jobs).toHaveLength(2);
+    expect(jobs[0].jobId).toBe('4198273645');
+    expect(jobs[0].title).toBe('Staff AI Engineer');
+    expect(jobs[0].company).toBe('OpenAI');
+
+    expect(jobs[1].jobId).toBe('4197821034');
+    expect(jobs[1].title).toBe('Principal Infrastructure Engineer');
+    expect(jobs[1].company).toBe('Google');
+
+    // Details-pane link must NOT be included in search results
+    expect(jobs.find(j => j.jobId === '9999999999')).toBeUndefined();
+  });
+
+  it('scans single-column layout (narrow viewport with Side Panel open) correctly', () => {
+    const doc = new MockDOMElement('document');
+    const container = new MockDOMElement('div', { class: 'scaffold-layout__list-container' });
+
+    const card1 = new MockDOMElement('div', {
+      'data-view-name': 'job-card',
+      'data-job-id': '4188332211',
+    });
+    const titleLink = new MockDOMElement('a', { href: '/jobs/view/4188332211/' }, 'Senior Full Stack Developer');
+    const subtitle = new MockDOMElement('div', { class: 'artdeco-entity-lockup__subtitle' }, 'Stripe Inc');
+    card1.appendChild(titleLink);
+    card1.appendChild(subtitle);
+    container.appendChild(card1);
+    doc.appendChild(container);
+
+    const jobs = scanJobList(doc);
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0].jobId).toBe('4188332211');
+    expect(jobs[0].title).toBe('Senior Full Stack Developer');
+    expect(jobs[0].company).toBe('Stripe Inc');
+  });
+
+  it('rejects solitary details-pane anchor when 0 search cards exist (never outputs "LinkedIn Job")', () => {
+    const doc = new MockDOMElement('document');
+    // Only a details pane anchor exists
+    const detailPane = new MockDOMElement('div', { class: 'scaffold-layout__detail' });
+    const solitaryLink = new MockDOMElement('a', { href: '/jobs/view/4123456789/' }, '');
+    detailPane.appendChild(solitaryLink);
+    doc.appendChild(detailPane);
+
+    const jobs = scanJobList(doc);
+    expect(jobs).toHaveLength(0);
+    expect(jobs.some(j => j.title === 'LinkedIn Job')).toBe(false);
   });
 });
