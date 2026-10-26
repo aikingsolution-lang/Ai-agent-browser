@@ -2733,7 +2733,7 @@ export default class Page {
           }
         }
 
-        // Pass 2: Check for known intermediate dialogs (Continue, Safety, Discard)
+        // Pass 2: Check for known intermediate dialogs (Continue, Safety, Discard / Save)
         for (const dialog of dialogs) {
           const text = (dialog.innerText || dialog.textContent || '').trim();
           const titleEl = dialog.querySelector('h1, h2, h3, [id*="header"], [class*="header"]');
@@ -2777,23 +2777,34 @@ export default class Page {
             }
           }
 
-          // Known intermediate dialog 3: "Save this application?" leftover from an unsubmitted draft.
-          // Preserve the candidate's draft (click "Save" or the dialog's dismiss X). Never click
-          // "Discard" — the draft may contain freshly filled application data.
+          // Known intermediate dialog 3: "Save this application?" / "Save draft?" / "Discard draft?"
+          // leftover from an unsubmitted draft or aborted application.
+          // Preserve the candidate's draft (click "Save" or the dialog's dismiss X).
+          // If Save is not present, fall back to dismiss/close or Discard so the dialog is NEVER left open.
+          const isSaveOrDiscardPrompt =
+            ((/save/i.test(title) || /save/i.test(text) || /discard/i.test(title) || /discard/i.test(text)) &&
+              (/application|draft|changes/i.test(title) || /application|draft|changes/i.test(text))) ||
+            /save\s+(?:this\s+|your\s+|incomplete\s+)?application|save\s+draft|discard\s+(?:this\s+|your\s+|draft|application|changes)|save\s+changes/i.test(
+              title + ' ' + text,
+            );
+
           if (
-            (/save this application/i.test(title) || /save application/i.test(title) || /discard draft/i.test(title)) &&
-            !/easy apply/i.test(title)
+            isSaveOrDiscardPrompt &&
+            !/contact info|home address|review your application|work experience/i.test(text)
           ) {
             const buttons = Array.from(dialog.querySelectorAll('button'));
             const saveBtn = buttons.find(b => {
               const t = (b.textContent || '').trim();
-              return /save/i.test(t) && !/discard/i.test(t);
+              return /^save$/i.test(t) || (/save/i.test(t) && !/discard|saved|save to/i.test(t));
             });
             const closeBtn = dialog.querySelector<HTMLButtonElement>(
-              'button[aria-label*="Dismiss" i], button[aria-label*="Close" i], .artdeco-modal__dismiss',
+              'button[aria-label*="Dismiss" i], button[aria-label*="Close" i], button[data-test-modal-close-btn], .artdeco-modal__dismiss',
             );
-            if (saveBtn || closeBtn) {
-              const btnToClick = (saveBtn as HTMLElement | null) || (closeBtn as HTMLElement);
+            const discardBtn = buttons.find(b => /discard/i.test((b.textContent || '').trim()));
+
+            const btnToClick =
+              (saveBtn as HTMLElement | null) || (closeBtn as HTMLElement | null) || (discardBtn as HTMLElement | null);
+            if (btnToClick) {
               btnToClick.click();
               return {
                 modalFound: false,
@@ -6467,8 +6478,9 @@ export default class Page {
   }
 
   /**
-   * Resolves a leftover LinkedIn "Save this application?" dialog.
-   * Clicks "Save" (never "Discard") so the candidate's filled draft is preserved.
+   * Resolves a leftover LinkedIn "Save this application?" / "Discard" dialog.
+   * Clicks "Save" (never "Discard" on first pass) so the candidate's filled draft is preserved.
+   * If Save is not present or unresponsive, uses dismiss X or Discard so no dialog remains.
    * Returns whether such a dialog was found and whether it is gone afterwards.
    */
   async resolveDraftSaveDialog(maxWaitMs = 4000): Promise<{ found: boolean; resolved: boolean }> {
@@ -6483,13 +6495,30 @@ export default class Page {
       function findDraftSaveDialog(): HTMLElement | null {
         const dialogs = document.querySelectorAll
           ? (Array.from(
-              document.querySelectorAll('div[role="dialog"], div.artdeco-modal, dialog[open], [aria-modal="true"]'),
+              document.querySelectorAll(
+                'div[role="dialog"], div.artdeco-modal, dialog[open], dialog, [aria-modal="true"]',
+              ),
             ) as HTMLElement[])
           : [];
         for (const d of dialogs) {
           if (!isVisible(d)) continue;
+          if (
+            d.closest(
+              'nav, header, footer, #footer, .artdeco-footer, [data-view-name="footer"], #global-nav, .global-nav, .msg-overlay-container, #msg-overlay, .artdeco-dropdown, [role="tooltip"], .notifications-badge',
+            )
+          ) {
+            continue;
+          }
           const text = (d.innerText || d.textContent || '').trim();
-          if (!/save this application|save application|discard draft/i.test(text)) continue;
+          const titleEl = d.querySelector('h1, h2, h3, [id*="header"], [class*="header"]');
+          const title = (titleEl?.textContent || text.slice(0, 100)).trim();
+          const isSaveOrDiscard =
+            ((/save/i.test(title) || /save/i.test(text) || /discard/i.test(title) || /discard/i.test(text)) &&
+              (/application|draft|changes/i.test(title) || /application|draft|changes/i.test(text))) ||
+            /save\s+(?:this\s+|your\s+|incomplete\s+)?application|save\s+draft|discard\s+(?:this\s+|your\s+|draft|application|changes)|save\s+changes/i.test(
+              title + ' ' + text,
+            );
+          if (!isSaveOrDiscard) continue;
           // The application form itself is never the confirmation sheet.
           if (/contact info|home address|review your application|work experience/i.test(text)) continue;
           return d;
@@ -6502,19 +6531,25 @@ export default class Page {
 
       const buttons = Array.from(dialog.querySelectorAll('button')) as HTMLElement[];
       const saveBtn = buttons.find(b => {
-        const t = (b.textContent || '').trim();
+        const t = (b.textContent || b.innerText || '').trim();
         return /^save$/i.test(t) || (/save/i.test(t) && !/discard|saved|save to/i.test(t));
       });
       if (saveBtn) {
         saveBtn.click();
         return { found: true, handled: true };
       }
-      // Fall back to the dialog's own dismiss X — still never "Discard".
+      // Fall back to the dialog's own dismiss X
       const closeBtn = dialog.querySelector<HTMLButtonElement>(
         'button[aria-label*="Dismiss" i], button[aria-label*="Close" i], button[data-test-modal-close-btn], .artdeco-modal__dismiss',
       );
       if (closeBtn) {
         closeBtn.click();
+        return { found: true, handled: true };
+      }
+      // If Save or Close absent, fall back to Discard so dialog does not block the runner
+      const discardBtn = buttons.find(b => /discard/i.test((b.textContent || b.innerText || '').trim()));
+      if (discardBtn) {
+        discardBtn.click();
         return { found: true, handled: true };
       }
       return { found: true, handled: false };
@@ -6554,30 +6589,181 @@ export default class Page {
   }
 
   /**
+   * Inspects all currently open/visible modal dialogs on the page.
+   * Returns details (tag, text, button labels) to diagnose unrecognized dialogs.
+   */
+  async inspectOpenDialogs(): Promise<
+    Array<{
+      tag: string;
+      id?: string;
+      className?: string;
+      ariaLabel?: string;
+      title?: string;
+      visibleText: string;
+      buttonLabels: string[];
+    }>
+  > {
+    const inspectInPage = () => {
+      function isVisible(el: HTMLElement): boolean {
+        if (!el || !el.isConnected) return false;
+        try {
+          const style = window.getComputedStyle(el);
+          if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity || '1') <= 0.05) {
+            return false;
+          }
+          const rect = el.getBoundingClientRect();
+          if ((rect.width > 0 || rect.height > 0) && (rect.width < 100 || rect.height < 50)) {
+            return false;
+          }
+        } catch {}
+        return true;
+      }
+
+      const candidates = Array.from(
+        document.querySelectorAll(
+          'dialog[open], dialog, div[role="dialog"], div.artdeco-modal, [data-test-modal], [aria-modal="true"]',
+        ),
+      ) as HTMLElement[];
+
+      const results: Array<{
+        tag: string;
+        id?: string;
+        className?: string;
+        ariaLabel?: string;
+        title?: string;
+        visibleText: string;
+        buttonLabels: string[];
+      }> = [];
+
+      for (const d of candidates) {
+        if (!isVisible(d)) continue;
+        if (
+          d.closest(
+            'nav, header, footer, #footer, .artdeco-footer, [data-view-name="footer"], #global-nav, .global-nav, .msg-overlay-container, #msg-overlay, .artdeco-dropdown, [role="tooltip"], .notifications-badge',
+          )
+        ) {
+          continue;
+        }
+        const aria = (d.getAttribute('aria-label') || '').toLowerCase();
+        const id = (d.id || '').toLowerCase();
+        if (
+          d.classList.contains('msg-overlay-container') ||
+          id.includes('msg-overlay') ||
+          /messaging|chat/i.test(aria)
+        ) {
+          continue;
+        }
+        if (/notification/i.test(aria) || id.includes('notification') || d.classList.contains('notification-badge')) {
+          continue;
+        }
+
+        const titleEl = d.querySelector('h1, h2, h3, [id*="header"], [class*="header"]');
+        const text = (d.innerText || d.textContent || '').trim();
+        const buttons = Array.from(
+          d.querySelectorAll('button, [role="button"], input[type="button"], input[type="submit"]'),
+        ) as HTMLElement[];
+        const buttonLabels = buttons
+          .map(b => (b.innerText || b.textContent || b.getAttribute('aria-label') || '').trim())
+          .filter(Boolean);
+
+        results.push({
+          tag: d.tagName.toLowerCase(),
+          id: d.id || undefined,
+          className: d.className ? String(d.className).slice(0, 100) : undefined,
+          ariaLabel: d.getAttribute('aria-label') || undefined,
+          title: (titleEl?.textContent || '').trim().slice(0, 100) || undefined,
+          visibleText: text.slice(0, 400),
+          buttonLabels,
+        });
+      }
+
+      return results;
+    };
+
+    if (!this._puppeteerPage) {
+      await this.attachPuppeteer().catch(() => false);
+    }
+    if (this._puppeteerPage) {
+      try {
+        return (await this._puppeteerPage.evaluate(inspectInPage)) || [];
+      } catch {}
+    } else if (this._tabId && typeof chrome !== 'undefined' && chrome.scripting?.executeScript) {
+      try {
+        const res = await chrome.scripting.executeScript({
+          target: { tabId: this._tabId },
+          func: inspectInPage,
+        });
+        return res?.[0]?.result || [];
+      } catch {}
+    }
+    return [];
+  }
+
+  /**
+   * Checks whether ANY genuine visible modal or dialog remains open in the DOM.
+   */
+  async hasAnyOpenModalOrDialog(): Promise<boolean> {
+    const dialogs = await this.inspectOpenDialogs().catch(() => []);
+    return dialogs.length > 0;
+  }
+
+  /**
    * Dismisses the active Easy Apply modal cleanly.
    * Preserves any in-progress draft: if LinkedIn shows a "Save this application?"
    * dialog after closing, this clicks "Save" (or the dialog X) — never "Discard",
    * so the candidate's filled application data is never destroyed.
    */
   async dismissEasyApplyModal(maxWaitMs = 5000): Promise<boolean> {
+    return this.ensureNoModalOrDialogRemains(maxWaitMs);
+  }
+
+  /**
+   * Deterministically handles and closes the Easy Apply modal, leftover Save/Discard
+   * confirmation dialogs, or any other visible modal overlay.
+   * - First preserves draft if "Save" is available.
+   * - Falls back to Close/Dismiss or Discard if dialog remains stubborn.
+   * - Verifies that NO dialog remains before returning.
+   */
+  async ensureNoModalOrDialogRemains(maxWaitMs = 5000): Promise<boolean> {
     const dismissInPage = () => {
       function isVisible(el: HTMLElement): boolean {
         if (!el || !el.isConnected) return false;
-        const style = window.getComputedStyle(el);
-        if (style.display === 'none' || style.visibility === 'hidden') return false;
-        return parseFloat(style.opacity || '1') > 0.05;
+        try {
+          const style = window.getComputedStyle(el);
+          if (style.display === 'none' || style.visibility === 'hidden') return false;
+          return parseFloat(style.opacity || '1') > 0.05;
+        } catch {
+          return false;
+        }
       }
 
       function findDraftSaveDialog(): HTMLElement | null {
         const dialogs = document.querySelectorAll
           ? (Array.from(
-              document.querySelectorAll('div[role="dialog"], div.artdeco-modal, dialog[open], [aria-modal="true"]'),
+              document.querySelectorAll(
+                'div[role="dialog"], div.artdeco-modal, dialog[open], dialog, [aria-modal="true"]',
+              ),
             ) as HTMLElement[])
           : [];
         for (const d of dialogs) {
           if (!isVisible(d)) continue;
+          if (
+            d.closest(
+              'nav, header, footer, #footer, .artdeco-footer, [data-view-name="footer"], #global-nav, .global-nav, .msg-overlay-container, #msg-overlay, .artdeco-dropdown, [role="tooltip"], .notifications-badge',
+            )
+          ) {
+            continue;
+          }
           const text = (d.innerText || d.textContent || '').trim();
-          if (!/save this application|save application|discard draft/i.test(text)) continue;
+          const titleEl = d.querySelector('h1, h2, h3, [id*="header"], [class*="header"]');
+          const title = (titleEl?.textContent || text.slice(0, 100)).trim();
+          const isSaveOrDiscard =
+            ((/save/i.test(title) || /save/i.test(text) || /discard/i.test(title) || /discard/i.test(text)) &&
+              (/application|draft|changes/i.test(title) || /application|draft|changes/i.test(text))) ||
+            /save\s+(?:this\s+|your\s+|incomplete\s+)?application|save\s+draft|discard\s+(?:this\s+|your\s+|draft|application|changes)|save\s+changes/i.test(
+              title + ' ' + text,
+            );
+          if (!isSaveOrDiscard) continue;
           if (/contact info|home address|review your application|work experience/i.test(text)) continue;
           return d;
         }
@@ -6585,13 +6771,12 @@ export default class Page {
       }
 
       // 1. A leftover "Save this application?" prompt sits on top of everything.
-      //    Resolve it FIRST by clicking "Save" (never "Discard"): the filled draft
-      //    survives and the dialog stops shadowing the real form.
+      //    Resolve it FIRST by clicking "Save": the filled draft survives.
       const saveDialog = findDraftSaveDialog();
       if (saveDialog) {
         const buttons = Array.from(saveDialog.querySelectorAll('button')) as HTMLElement[];
         const saveBtn = buttons.find(b => {
-          const t = (b.textContent || '').trim();
+          const t = (b.textContent || b.innerText || '').trim();
           return /^save$/i.test(t) || (/save/i.test(t) && !/discard|saved|save to/i.test(t));
         });
         if (saveBtn) {
@@ -6605,12 +6790,15 @@ export default class Page {
           dialogClose.click();
           return { clickedClose: true };
         }
+        const discardBtn = buttons.find(b => /discard/i.test((b.textContent || b.innerText || '').trim()));
+        if (discardBtn) {
+          discardBtn.click();
+          return { clickedDiscard: true };
+        }
         return { notClosed: true };
       }
 
-      // 2. Easy Apply modal itself still open -> close it ONLY via its own dismiss button.
-      //    Never click "Discard" while the form is open: LinkedIn's save-dialog Discard
-      //    destroys the candidate's filled draft.
+      // 2. Easy Apply modal itself still open -> close it via its own dismiss button.
       const modalCandidates = Array.from(
         document.querySelectorAll(
           'div.jobs-easy-apply-modal, [data-test-modal-id="easy-apply-modal"], [data-easy-apply-modal], dialog[open], [aria-modal="true"]',
@@ -6620,6 +6808,9 @@ export default class Page {
         modalCandidates.find(
           m =>
             isVisible(m) &&
+            !m.closest(
+              'nav, header, footer, #footer, .artdeco-footer, [data-view-name="footer"], #global-nav, .global-nav, .msg-overlay-container, #msg-overlay',
+            ) &&
             (m.classList.contains('jobs-easy-apply-modal') ||
               m.hasAttribute('data-easy-apply-modal') ||
               m.getAttribute('data-test-modal-id') === 'easy-apply-modal' ||
@@ -6627,7 +6818,7 @@ export default class Page {
         ) || null;
       if (eaModal) {
         const closeBtn = eaModal.querySelector<HTMLButtonElement>(
-          'button[aria-label*="Dismiss" i], button[aria-label*="Close" i], button[data-test-modal-close-btn]',
+          'button[aria-label*="Dismiss" i], button[aria-label*="Close" i], button[data-test-modal-close-btn], .artdeco-modal__dismiss',
         );
         if (closeBtn) {
           closeBtn.click();
@@ -6636,7 +6827,42 @@ export default class Page {
         return { notClosed: true };
       }
 
-      // 3. Nothing left to close.
+      // 3. Fallback: Any stubborn open dialog left
+      const otherDialogs = Array.from(
+        document.querySelectorAll('dialog[open], div[role="dialog"], div.artdeco-modal, [data-test-modal]'),
+      ) as HTMLElement[];
+      for (const od of otherDialogs) {
+        if (!isVisible(od)) continue;
+        if (
+          od.closest(
+            'nav, header, footer, #footer, .artdeco-footer, [data-view-name="footer"], #global-nav, .global-nav, .msg-overlay-container, #msg-overlay',
+          )
+        ) {
+          continue;
+        }
+        const dismissBtn = od.querySelector<HTMLButtonElement>(
+          'button[aria-label*="Dismiss" i], button[aria-label*="Close" i], button[data-test-modal-close-btn], .artdeco-modal__dismiss',
+        );
+        if (dismissBtn) {
+          dismissBtn.click();
+          return { clickedClose: true };
+        }
+        const anySaveOrDiscard = Array.from(od.querySelectorAll('button')).find(b =>
+          /save|discard|close|dismiss|ok|got it/i.test((b.textContent || '').trim()),
+        );
+        if (anySaveOrDiscard) {
+          anySaveOrDiscard.click();
+          return { clickedClose: true };
+        }
+        if (od.tagName.toLowerCase() === 'dialog' && typeof (od as any).close === 'function') {
+          try {
+            (od as any).close();
+            return { clickedClose: true };
+          } catch {}
+        }
+      }
+
+      // 4. Nothing left to close.
       return { isClosed: true };
     };
 
@@ -6646,6 +6872,7 @@ export default class Page {
         isClosed?: boolean;
         clickedSave?: boolean;
         clickedClose?: boolean;
+        clickedDiscard?: boolean;
         notClosed?: boolean;
       } = { isClosed: true };
 
@@ -6674,14 +6901,23 @@ export default class Page {
         // here instead of leaving it floating over the job page.
         const draftSave = await this.resolveDraftSaveDialog(1500);
         if (draftSave.found && !draftSave.resolved) continue;
-        return true;
+
+        // Double check no other dialog remains
+        const stillOpen = await this.hasAnyOpenModalOrDialog();
+        if (!stillOpen) return true;
       }
       await new Promise(r => setTimeout(r, 400));
     }
 
-    const isOpen = await this.isEasyApplyModalOpen();
-    const draftSave = await this.resolveDraftSaveDialog(1200);
-    return !isOpen && draftSave.resolved;
+    const openDialogs = await this.inspectOpenDialogs().catch(() => []);
+    if (openDialogs.length > 0) {
+      logger.warning(
+        `[ensureNoModalOrDialogRemains] One or more dialogs stubbornly remain open after ${maxWaitMs}ms:`,
+        openDialogs,
+      );
+      return false;
+    }
+    return true;
   }
 
   /**

@@ -2136,15 +2136,26 @@ export class DedicatedJobRunner {
 
           // Inter-job pacing & anti-bot safety jitter after every completed attempt.
           if (this.isRunning && stats.applied < BATCH_CAP) {
-            // Strict sequential completion: ensure the previous application modal is fully
+            // Strict sequential completion: ensure the previous application modal or leftover dialog is fully
             // closed before picking the next job (prevents overlap between jobs).
-            const isModalStillOpen = await currentPage.isEasyApplyModalOpen();
-            if (isModalStillOpen) {
+            const dialogRemains =
+              typeof currentPage.hasAnyOpenModalOrDialog === 'function'
+                ? await currentPage.hasAnyOpenModalOrDialog().catch(() => false)
+                : await currentPage.isEasyApplyModalOpen().catch(() => false);
+            if (dialogRemains) {
               logger.info(
-                '[DedicatedJobRunner] Waiting for previous job application to fully conclude before next candidate...',
+                '[DedicatedJobRunner] Leftover modal or dialog detected between jobs. Deterministically resolving before next candidate...',
               );
-              await currentPage.dismissEasyApplyModal(5000).catch(() => {});
-              await new Promise(r => setTimeout(r, 1000));
+              if (typeof currentPage.ensureNoModalOrDialogRemains === 'function') {
+                await currentPage.ensureNoModalOrDialogRemains(6000).catch(() => {});
+              } else {
+                if (typeof currentPage.ensureNoModalOrDialogRemains === 'function') {
+                  await currentPage.ensureNoModalOrDialogRemains(5000).catch(() => {});
+                } else {
+                  await currentPage.dismissEasyApplyModal(5000).catch(() => {});
+                }
+              }
+              await new Promise(r => setTimeout(r, 800));
             }
 
             const jitterMs = 1500 + Math.floor(Math.random() * 1000); // 1.5s - 2.5s natural human cadence
@@ -4452,7 +4463,11 @@ export class DedicatedJobRunner {
           }
         });
 
-        await currentPage.dismissEasyApplyModal(5000).catch(() => {});
+        if (typeof currentPage.ensureNoModalOrDialogRemains === 'function') {
+          await currentPage.ensureNoModalOrDialogRemains(5000).catch(() => {});
+        } else {
+          await currentPage.dismissEasyApplyModal(5000).catch(() => {});
+        }
 
         await processedJobsStore.recordJob({
           jobId: job.jobId,
@@ -4516,7 +4531,11 @@ export class DedicatedJobRunner {
       );
 
       await backendApiClient.refundCredits(jobRunId).catch(() => {});
-      await currentPage.dismissEasyApplyModal(3000).catch(() => {});
+      if (typeof currentPage.ensureNoModalOrDialogRemains === 'function') {
+        await currentPage.ensureNoModalOrDialogRemains(4000).catch(() => {});
+      } else {
+        await currentPage.dismissEasyApplyModal(3000).catch(() => {});
+      }
 
       const isTransientModalTimeout = /modal failed to open within timeout/i.test(failReason);
       await processedJobsStore.recordJob({
@@ -5294,14 +5313,15 @@ export class DedicatedJobRunner {
           ].join(' | ');
           this.notifyStatus(portToSend, `🧐 Step ${step}: zero form fields found. ${compact}`, 'info');
         } else if (fieldsZeroStreak === 1) {
-          // The modal was reported open by waitForEasyApplyModal but every helper
-          // (discovery/snapshot/action buttons) failed to locate its container.
+          // The modal was reported open by waitForEasyApplyModal but findActiveEasyApplyContainer returned null ("Modal inventory: null")
+          const openDialogs =
+            typeof page.inspectOpenDialogs === 'function' ? await page.inspectOpenDialogs().catch(() => []) : [];
           logger.error(
-            `[DedicatedJobRunner] Step ${step}: Easy Apply modal is open but its container was not found in the DOM.`,
+            `[DedicatedJobRunner] Step ${step}: Easy Apply modal was reported open by waitForEasyApplyModal but findActiveEasyApplyContainer returned null ("Modal inventory: null"). Open dialogs detected: ${JSON.stringify(openDialogs)}`,
           );
           this.notifyStatus(
             portToSend,
-            `⚠️ Step ${step}: Easy Apply modal is open but its form container was not found in the DOM. Retrying...`,
+            `⚠️ Step ${step}: Easy Apply modal is open but its form container was not found in the DOM. Open dialogs: ${openDialogs.map((d: any) => `[${d.tag}: "${d.title || d.visibleText.slice(0, 40)}" buttons=[${d.buttonLabels.join(', ')}]]`).join('; ') || 'none'}. Retrying...`,
             'info',
           );
         }
@@ -5638,6 +5658,11 @@ export class DedicatedJobRunner {
             logger.error(
               '[DedicatedJobRunner] Forward button rejected twice by LinkedIn (Next/Review disabled). Aborting this application cleanly; the draft is preserved on LinkedIn for manual review.',
             );
+            if (typeof page.ensureNoModalOrDialogRemains === 'function') {
+              await page.ensureNoModalOrDialogRemains(5000).catch(() => {});
+            } else if (typeof page.dismissEasyApplyModal === 'function') {
+              await page.dismissEasyApplyModal(5000).catch(() => {});
+            }
             return {
               success: false,
               reason:
