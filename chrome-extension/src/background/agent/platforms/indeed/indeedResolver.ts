@@ -1,5 +1,5 @@
 // chrome-extension/src/background/agent/platforms/indeed/indeedResolver.ts
-import { type ICareerBrain, parseLocationParts } from '@extension/storage';
+import { type ICareerBrain, parseLocationParts, isGenericPlaceholderFieldLabel } from '@extension/storage';
 import { alignValueToOptions, matchQuestionSemantically } from '../../intelligence';
 
 export interface IIndeedAnswerResult {
@@ -955,9 +955,10 @@ export function resolveIndeedQuestion(
 ): IIndeedAnswerResult {
   if (
     !questionText ||
+    isGenericPlaceholderFieldLabel(questionText) ||
     /answer these questions|questions from the employer|fields marked with|report the job/i.test(questionText)
   ) {
-    return { value: '', confidence: 0.1, source: 'default' };
+    return { value: '', confidence: 0, source: 'default' };
   }
 
   // 1. Compute profile rule-based answer first for deterministic profile fields

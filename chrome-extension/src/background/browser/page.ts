@@ -70,7 +70,11 @@ export class CachedStateClickableElementsHashes {
   }
 }
 
-export { findActiveEasyApplyContainer } from './easyApplyContainer';
+export {
+  findActiveEasyApplyContainer,
+  isGenericPlaceholderText,
+  extractStructuralFieldLabel,
+} from './easyApplyContainer';
 
 export default class Page {
   private _tabId: number;
@@ -3366,29 +3370,126 @@ export default class Page {
         }
       }
 
+      function isGenericPlaceholderText(rawText: string | null | undefined): boolean {
+        if (!rawText) return true;
+        const clean = rawText
+          .replace(/[\u200B-\u200D\uFEFF]/g, '')
+          .replace(/[*?:.]+/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim();
+        if (clean.length <= 2) return true;
+        return /^(?:form\s*field|form|field|fields|question|questions|answer|answers|input|text(?:\s*field)?|textbox|select|selection|dropdown|checkbox|radio(?:\s*button)?|option|options|value|photo|photograph|n\/?a|none|null|undefined|-+|_+|\d{1,3})$/i.test(
+          clean,
+        );
+      }
+
+      function extractStructuralFieldLabel(root: HTMLElement, element: HTMLElement | null): string {
+        if (!element) return '';
+        // 1. Fieldset <legend>
+        if (element.tagName === 'FIELDSET') {
+          const leg = element.querySelector('legend');
+          const txt = cleanElementText(leg);
+          if (txt && !isGenericPlaceholderText(txt)) return txt;
+        }
+        const parentFieldset = element.closest ? element.closest('fieldset') : null;
+        if (parentFieldset) {
+          const leg = parentFieldset.querySelector('legend');
+          const txt = cleanElementText(leg);
+          if (txt && !isGenericPlaceholderText(txt)) return txt;
+        }
+
+        // 2. aria-labelledby
+        const labelledBy = element.getAttribute ? element.getAttribute('aria-labelledby') : null;
+        if (labelledBy && root) {
+          const parts: string[] = [];
+          for (const id of labelledBy.split(/\s+/)) {
+            if (!id) continue;
+            try {
+              const ref = root.querySelector ? root.querySelector(`[id="${CSS.escape(id)}"]`) : null;
+              const t = cleanElementText(ref);
+              if (t) parts.push(t);
+            } catch {}
+          }
+          const joined = cleanDuplicateText(parts.join(' '));
+          if (joined && !isGenericPlaceholderText(joined)) return joined;
+        }
+
+        // 3. aria-label
+        const ariaLabel = element.getAttribute ? element.getAttribute('aria-label') : null;
+        if (ariaLabel && !isGenericPlaceholderText(ariaLabel)) {
+          return cleanDuplicateText(ariaLabel.trim());
+        }
+
+        // 4. Associated <label for="...">
+        if (element.id && root && root.querySelector) {
+          try {
+            const lbl = root.querySelector(`label[for="${CSS.escape(element.id)}"]`);
+            const txt = cleanElementText(lbl);
+            if (txt && !isGenericPlaceholderText(txt)) return txt;
+          } catch {}
+        }
+
+        // 5. Container heading / label
+        const container = element.closest
+          ? (element.closest(
+              '.fb-dash-form-element, .jobs-easy-apply-form-element, div[data-test-form-element], .jobs-easy-apply-form-section__grouping, [class*="form-element" i]',
+            ) as HTMLElement | null)
+          : null;
+        const targetContainer = container || element;
+        if (targetContainer) {
+          const headings = Array.from(
+            targetContainer.querySelectorAll(
+              'legend, [role="heading"], h1, h2, h3, h4, h5, h6, .fb-dash-form-element__label, .artdeco-form__label, span[class*="label" i]',
+            ),
+          );
+          for (const h of headings) {
+            if (h === element || (element.contains(h) && (h.tagName === 'LABEL' || h.querySelector('input')))) {
+              continue;
+            }
+            const ht = cleanElementText(h);
+            if (ht && !isGenericPlaceholderText(ht)) return ht;
+          }
+        }
+
+        // 6. Nearest preceding visible label or heading text
+        let prev = element.previousElementSibling as HTMLElement | null;
+        while (prev) {
+          try {
+            const prevText = cleanElementText(prev);
+            if (prevText && prevText.length > 2 && prevText.length < 300 && !isGenericPlaceholderText(prevText)) {
+              return prevText;
+            }
+          } catch {}
+          prev = prev.previousElementSibling as HTMLElement | null;
+        }
+
+        if (container && container.previousElementSibling) {
+          try {
+            const parentPrevText = cleanElementText(container.previousElementSibling as HTMLElement);
+            if (
+              parentPrevText &&
+              parentPrevText.length > 2 &&
+              parentPrevText.length < 300 &&
+              !isGenericPlaceholderText(parentPrevText)
+            ) {
+              return parentPrevText;
+            }
+          } catch {}
+        }
+
+        return '';
+      }
+
       const labelForControl = (el: Element | null): string => {
         if (!el) return '';
-        let label = '';
-        const id = el.getAttribute('id');
-        if (id) {
-          const lbl = modal.querySelector(`label[for="${CSS.escape(id)}"]`);
-          if (lbl) label = cleanElementText(lbl);
-        }
-        if (!label) {
-          const container = el.closest(
-            '.fb-dash-form-element, .jobs-easy-apply-form-element, [data-test-form-element], .jobs-easy-apply-form-section__grouping, fieldset',
-          );
-          const lbl = container?.querySelector('label, legend');
-          if (lbl) label = cleanElementText(lbl);
-        }
-        if (!label) label = cleanDuplicateString(el.getAttribute('aria-label') || '');
+        let label = extractStructuralFieldLabel(modal, el as HTMLElement);
         if (el instanceof HTMLSelectElement) {
           // Discovery tags date selects with their From/To role; trust that over geometry.
           const marker = /^(from|to)-(month|year)$/i.exec(el.getAttribute('data-qoder-date-field') || '');
           if (marker) {
             const role = marker[1].toLowerCase() === 'to' ? 'To' : 'From';
             const typeLabel = marker[2].toLowerCase() === 'month' ? 'Month' : 'Year';
-            if (!label || /^(?:month|year|form field)$/i.test(label)) {
+            if (!label || isGenericPlaceholderText(label)) {
               label = `${role} ${typeLabel}`;
             } else if (!/\b(?:from|to|start|end)\b/i.test(label)) {
               label = `${role} ${label}`;
@@ -3399,14 +3500,14 @@ export default class Page {
           if (kind) {
             const role = dateRoleBySelect.get(el);
             const typeLabel = kind === 'month' ? 'Month' : 'Year';
-            if (!label || /^(?:month|year|form field)$/i.test(label)) {
+            if (!label || isGenericPlaceholderText(label)) {
               label = `${role ? `${role} ` : ''}${typeLabel}`;
             } else if (role && !/\b(?:from|to|start|end)\b/i.test(label)) {
               label = `${role} ${label}`;
             }
           }
         }
-        return label;
+        return isGenericPlaceholderText(label) ? '' : label;
       };
 
       // Error messages sit under one specific control. A shared container (e.g. a From row
@@ -3502,7 +3603,7 @@ export default class Page {
           );
           if (feedback) errorMsg = cleanElementText(feedback);
         }
-        errors.push({ fieldLabel: label || 'Form Field', errorText: errorMsg || 'Field is invalid' });
+        errors.push({ fieldLabel: label || '', errorText: errorMsg || 'Field is invalid' });
 
         // Include invalid element in emptyRequiredFields and invalidFieldsWithErrors so runner re-resolves it
         if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement) {
@@ -3537,7 +3638,7 @@ export default class Page {
 
           const invalidDesc = {
             id: el.id || undefined,
-            label: label || 'Form Field',
+            label: label || '',
             currentValue: curVal,
             errorText: errorMsg || 'Invalid field',
             fieldType,
@@ -3650,7 +3751,7 @@ export default class Page {
 
           const errDesc = {
             id: inputEl.id || undefined,
-            label: label || 'Form Field',
+            label: label || '',
             currentValue: curVal,
             errorText: txt,
             fieldType,
@@ -3683,8 +3784,7 @@ export default class Page {
         const checkboxes = Array.from(fs.querySelectorAll('input[type="checkbox"]')) as HTMLInputElement[];
 
         if (radios.length > 0) {
-          const legend = fs.querySelector('legend, [role="heading"], label');
-          const legendText = cleanElementText(legend);
+          const legendText = extractStructuralFieldLabel(modal, fs);
           const anyChecked = radios.some(r => r.checked);
           // A visible validation error means LinkedIn's form state is still empty even if
           // a radio LOOKS checked in the DOM (synthetic fills desync DOM vs React state).
@@ -3701,7 +3801,12 @@ export default class Page {
             );
 
           // In LinkedIn Easy Apply modals, radio groups are required screening questions unless explicitly marked optional
-          if ((!anyChecked || groupHasError) && !isExplicitlyOptional) {
+          if (
+            (!anyChecked || groupHasError) &&
+            !isExplicitlyOptional &&
+            legendText &&
+            !isGenericPlaceholderText(legendText)
+          ) {
             const options = radios
               .map(r => {
                 const rId = r.getAttribute('id');
@@ -3730,8 +3835,7 @@ export default class Page {
             }
           }
         } else if (checkboxes.length > 0) {
-          const legend = fs.querySelector('legend, [role="heading"], label');
-          const legendText = cleanElementText(legend);
+          const legendText = extractStructuralFieldLabel(modal, fs);
           const anyChecked = checkboxes.some(c => c.checked);
           const groupHasError = hasVisibleGenuineError(fs);
 
@@ -3743,7 +3847,12 @@ export default class Page {
               ) || fs.closest('.fb-dash-form-element--optional, [data-test-form-element-optional]'),
             );
 
-          if ((!anyChecked || groupHasError) && !isExplicitlyOptional) {
+          if (
+            (!anyChecked || groupHasError) &&
+            !isExplicitlyOptional &&
+            legendText &&
+            !isGenericPlaceholderText(legendText)
+          ) {
             const options = checkboxes
               .map(c => {
                 const cId = c.getAttribute('id');
@@ -4043,7 +4152,7 @@ export default class Page {
 
           const fieldDesc = {
             id: input.id || undefined,
-            label: label || 'Form Field',
+            label: label || '',
             fieldType,
             options,
             min: parsedMin !== undefined ? parsedMin : fieldType === 'number' ? 0 : undefined,
@@ -6775,6 +6884,110 @@ export default class Page {
         return parts.join(' ');
       }
 
+      function isGenericPlaceholderText(rawText: string | null | undefined): boolean {
+        if (!rawText) return true;
+        const clean = rawText
+          .replace(/[\u200B-\u200D\uFEFF]/g, '')
+          .replace(/[*?:.]+/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim();
+        if (clean.length <= 2) return true;
+        return /^(?:form\s*field|form|field|fields|question|questions|answer|answers|input|text(?:\s*field)?|textbox|select|selection|dropdown|checkbox|radio(?:\s*button)?|option|options|value|photo|photograph|n\/?a|none|null|undefined|-+|_+|\d{1,3})$/i.test(
+          clean,
+        );
+      }
+
+      function extractStructuralFieldLabel(root: HTMLElement, element: HTMLElement | null): string {
+        if (!element) return '';
+        if (element.tagName === 'FIELDSET') {
+          const leg = element.querySelector('legend');
+          const txt = cleanElementText(leg);
+          if (txt && !isGenericPlaceholderText(txt)) return txt;
+        }
+        const parentFieldset = element.closest ? element.closest('fieldset') : null;
+        if (parentFieldset) {
+          const leg = parentFieldset.querySelector('legend');
+          const txt = cleanElementText(leg);
+          if (txt && !isGenericPlaceholderText(txt)) return txt;
+        }
+
+        const labelledBy = element.getAttribute ? element.getAttribute('aria-labelledby') : null;
+        if (labelledBy && root) {
+          const parts: string[] = [];
+          for (const id of labelledBy.split(/\s+/)) {
+            if (!id) continue;
+            try {
+              const ref = root.querySelector ? root.querySelector(`[id="${CSS.escape(id)}"]`) : null;
+              const t = cleanElementText(ref);
+              if (t) parts.push(t);
+            } catch {}
+          }
+          const joined = cleanDuplicateText(parts.join(' '));
+          if (joined && !isGenericPlaceholderText(joined)) return joined;
+        }
+
+        const ariaLabel = element.getAttribute ? element.getAttribute('aria-label') : null;
+        if (ariaLabel && !isGenericPlaceholderText(ariaLabel)) {
+          return cleanDuplicateText(ariaLabel.trim());
+        }
+
+        if (element.id && root && root.querySelector) {
+          try {
+            const lbl = root.querySelector(`label[for="${CSS.escape(element.id)}"]`);
+            const txt = cleanElementText(lbl);
+            if (txt && !isGenericPlaceholderText(txt)) return txt;
+          } catch {}
+        }
+
+        const container = element.closest
+          ? (element.closest(
+              '.fb-dash-form-element, .jobs-easy-apply-form-element, div[data-test-form-element], .jobs-easy-apply-form-section__grouping, [class*="form-element" i]',
+            ) as HTMLElement | null)
+          : null;
+        const targetContainer = container || element;
+        if (targetContainer) {
+          const headings = Array.from(
+            targetContainer.querySelectorAll(
+              'legend, [role="heading"], h1, h2, h3, h4, h5, h6, .fb-dash-form-element__label, .artdeco-form__label, span[class*="label" i]',
+            ),
+          );
+          for (const h of headings) {
+            if (h === element || (element.contains(h) && (h.tagName === 'LABEL' || h.querySelector('input')))) {
+              continue;
+            }
+            const ht = cleanElementText(h);
+            if (ht && !isGenericPlaceholderText(ht)) return ht;
+          }
+        }
+
+        let prev = element.previousElementSibling as HTMLElement | null;
+        while (prev) {
+          try {
+            const prevText = cleanElementText(prev);
+            if (prevText && prevText.length > 2 && prevText.length < 300 && !isGenericPlaceholderText(prevText)) {
+              return prevText;
+            }
+          } catch {}
+          prev = prev.previousElementSibling as HTMLElement | null;
+        }
+
+        if (container && container.previousElementSibling) {
+          try {
+            const parentPrevText = cleanElementText(container.previousElementSibling as HTMLElement);
+            if (
+              parentPrevText &&
+              parentPrevText.length > 2 &&
+              parentPrevText.length < 300 &&
+              !isGenericPlaceholderText(parentPrevText)
+            ) {
+              return parentPrevText;
+            }
+          } catch {}
+        }
+
+        return '';
+      }
+
       const modal = findActiveModal(document);
       if (!modal) return [];
       const descriptors: FormFieldDescriptor[] = [];
@@ -6788,9 +7001,8 @@ export default class Page {
         const checkboxes = Array.from(fs.querySelectorAll('input[type="checkbox"]')) as HTMLInputElement[];
 
         if (radios.length > 0) {
-          const legend = fs.querySelector('legend, [role="heading"], label');
-          const legendText = cleanElementText(legend);
-          if (!legendText) continue;
+          const legendText = extractStructuralFieldLabel(modal, fs);
+          if (!legendText || isGenericPlaceholderText(legendText)) continue;
 
           const anyChecked = radios.some(r => r.checked);
           if (!anyChecked) {
@@ -6825,9 +7037,8 @@ export default class Page {
             });
           }
         } else if (checkboxes.length > 0) {
-          const legend = fs.querySelector('legend, [role="heading"], label');
-          const legendText = cleanElementText(legend);
-          if (!legendText) continue;
+          const legendText = extractStructuralFieldLabel(modal, fs);
+          if (!legendText || isGenericPlaceholderText(legendText)) continue;
 
           const anyChecked = checkboxes.some(c => c.checked);
           if (!anyChecked) {

@@ -147,3 +147,163 @@ export function findActiveEasyApplyContainer(
 
   return search(root);
 }
+
+/**
+ * Checks whether a field label is missing or is a meaningless generic placeholder
+ * like "Form Field", "Field", "Photo", etc.
+ */
+export function isGenericPlaceholderText(rawText: string | null | undefined): boolean {
+  if (!rawText) return true;
+  const clean = rawText
+    .replace(/[\u200B-\u200D\uFEFF]/g, '')
+    .replace(/[*?:.]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (clean.length <= 2) return true;
+  return /^(?:form\s*field|form|field|fields|question|questions|answer|answers|input|text(?:\s*field)?|textbox|select|selection|dropdown|checkbox|radio(?:\s*button)?|option|options|value|photo|photograph|n\/?a|none|null|undefined|-+|_+|\d{1,3})$/i.test(
+    clean,
+  );
+}
+
+/**
+ * Structurally extracts the real question text for an active form control or group:
+ * 1. Fieldset <legend>
+ * 2. aria-labelledby ID references (resolved against the active modal or document)
+ * 3. aria-label on the element or group
+ * 4. Associated <label for="id">
+ * 5. Nearest preceding visible label or heading text ([role="heading"], h1-h6, preceding sibling)
+ *
+ * Never returns a generic placeholder such as "Form Field". Returns "" if no real question text exists.
+ */
+export function extractStructuralFieldLabel(
+  root: Document | HTMLElement | null | undefined,
+  element: HTMLElement | null | undefined,
+): string {
+  if (!element) return '';
+  const scope: Document | HTMLElement = root || (typeof document !== 'undefined' ? document : (null as any));
+
+  function cleanText(el: Element | null | undefined): string {
+    if (!el) return '';
+    try {
+      const clone = el.cloneNode(true) as HTMLElement;
+      if (typeof clone.querySelectorAll === 'function') {
+        const hidden = clone.querySelectorAll(
+          '.visually-hidden, [aria-hidden="true"], .sr-only, .u-screen-reader-only',
+        );
+        hidden.forEach(h => h.remove());
+      }
+      let txt = (clone.textContent || '')
+        .replace(/[\n\r\t]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (!txt) {
+        txt = (el.textContent || '')
+          .replace(/[\n\r\t]+/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim();
+      }
+      return txt;
+    } catch {
+      return (el.textContent || '')
+        .replace(/[\n\r\t]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+    }
+  }
+
+  // 1. Fieldset <legend>
+  if (element.tagName === 'FIELDSET') {
+    const leg = element.querySelector('legend');
+    const txt = cleanText(leg);
+    if (txt && !isGenericPlaceholderText(txt)) return txt;
+  }
+  const parentFieldset = element.closest ? element.closest('fieldset') : null;
+  if (parentFieldset) {
+    const leg = parentFieldset.querySelector('legend');
+    const txt = cleanText(leg);
+    if (txt && !isGenericPlaceholderText(txt)) return txt;
+  }
+
+  // 2. aria-labelledby ID references
+  const labelledBy = element.getAttribute ? element.getAttribute('aria-labelledby') : null;
+  if (labelledBy && scope) {
+    const parts: string[] = [];
+    for (const id of labelledBy.split(/\s+/)) {
+      if (!id) continue;
+      try {
+        const ref = scope.querySelector ? scope.querySelector(`[id="${CSS.escape(id)}"]`) : null;
+        const t = cleanText(ref);
+        if (t) parts.push(t);
+      } catch {}
+    }
+    const joined = parts.join(' ').trim();
+    if (joined && !isGenericPlaceholderText(joined)) return joined;
+  }
+
+  // 3. aria-label
+  const ariaLabel = element.getAttribute ? element.getAttribute('aria-label') : null;
+  if (ariaLabel && !isGenericPlaceholderText(ariaLabel)) {
+    return ariaLabel.trim();
+  }
+
+  // 4. Associated <label for="...">
+  if (element.id && scope && scope.querySelector) {
+    try {
+      const lbl = scope.querySelector(`label[for="${CSS.escape(element.id)}"]`);
+      const txt = cleanText(lbl);
+      if (txt && !isGenericPlaceholderText(txt)) return txt;
+    } catch {}
+  }
+
+  // 5. Internal or parent container heading / label (for custom div-based radio groups / form-element wrappers)
+  const container = element.closest
+    ? (element.closest(
+        '.fb-dash-form-element, .jobs-easy-apply-form-element, div[data-test-form-element], .jobs-easy-apply-form-section__grouping, [class*="form-element" i]',
+      ) as HTMLElement | null)
+    : null;
+
+  const targetContainer = container || element;
+  if (targetContainer) {
+    const headings = Array.from(
+      targetContainer.querySelectorAll(
+        'legend, [role="heading"], h1, h2, h3, h4, h5, h6, .fb-dash-form-element__label, .artdeco-form__label, span[class*="label" i]',
+      ),
+    );
+    for (const h of headings) {
+      if (h === element || (element.contains(h) && (h.tagName === 'LABEL' || h.querySelector('input')))) {
+        continue;
+      }
+      const ht = cleanText(h);
+      if (ht && !isGenericPlaceholderText(ht)) return ht;
+    }
+  }
+
+  // 6. Nearest preceding visible label or heading text
+  let prev = element.previousElementSibling as HTMLElement | null;
+  while (prev) {
+    try {
+      const prevText = cleanText(prev);
+      if (prevText && prevText.length > 2 && prevText.length < 300 && !isGenericPlaceholderText(prevText)) {
+        return prevText;
+      }
+    } catch {}
+    prev = prev.previousElementSibling as HTMLElement | null;
+  }
+
+  // Check parent container's previous sibling if nested
+  if (container && container.previousElementSibling) {
+    try {
+      const parentPrevText = cleanText(container.previousElementSibling);
+      if (
+        parentPrevText &&
+        parentPrevText.length > 2 &&
+        parentPrevText.length < 300 &&
+        !isGenericPlaceholderText(parentPrevText)
+      ) {
+        return parentPrevText;
+      }
+    } catch {}
+  }
+
+  return '';
+}

@@ -102,7 +102,8 @@ export async function inspectAndHealFormErrors(page: any, containerSelector?: st
 
         const labelEl = parentContainer ? parentContainer.querySelector('label, [class*="label" i]') : null;
 
-        const fieldLabel = (labelEl?.textContent || '').trim() || 'Form Field';
+        const rawLabel = (labelEl?.textContent || '').trim();
+        const fieldLabel = /^(?:form\s*field|field|input)$/i.test(rawLabel) ? '' : rawLabel;
         const fieldType = inputEl ? inputEl.tagName.toLowerCase() : 'unknown';
 
         errors.push({

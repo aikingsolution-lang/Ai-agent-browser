@@ -1,4 +1,4 @@
-import { type ICareerBrain, parseLocationParts } from '@extension/storage';
+import { type ICareerBrain, parseLocationParts, isGenericPlaceholderFieldLabel } from '@extension/storage';
 import { alignValueToOptions, matchQuestionSemantically } from '../../intelligence';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { HumanMessage, SystemMessage } from '@langchain/core/messages';
@@ -90,6 +90,9 @@ export function resolveNaukriQuestion(
   careerBrain: ICareerBrain,
   placeholder: string = '',
 ): INaukriAnswerResult {
+  if (!questionText || isGenericPlaceholderFieldLabel(questionText)) {
+    return { value: '', confidence: 0, source: 'default' };
+  }
   const q = questionText.toLowerCase().trim();
   const p = placeholder.toLowerCase().trim();
   const combined = `${q} ${p}`.trim();
@@ -655,6 +658,9 @@ export async function resolveNaukriWithLLM(
   errorHint: string = '',
   previousValue: string = '',
 ): Promise<{ success: boolean; answer: string }> {
+  if (!questionText || isGenericPlaceholderFieldLabel(questionText)) {
+    return { success: false, answer: '' };
+  }
   try {
     const qLower = questionText.toLowerCase();
     const isLakhsPrompt =

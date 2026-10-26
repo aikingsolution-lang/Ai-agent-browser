@@ -1466,6 +1466,9 @@ export function matchRuleBased(
   careerBrain: ICareerBrain,
 ): { matched: boolean; answer?: string; sourceDetail?: string } {
   const label = field.label || '';
+  if (!label || isGenericFieldLabel(label)) {
+    return { matched: false };
+  }
   const labelLower = label.toLowerCase().trim();
 
   // 1. Skill Experience (single-skill and multi-skill stack matching)
@@ -2211,9 +2214,7 @@ export function matchRuleBased(
   }
   // Current CTC / Salary / Compensation (handles "current total annual compensation (CTC)", etc.)
   const isCurrentCTCLabel =
-    (/\b(?:current|present|existing)\b[\s\S]*?\b(?:ctc|salary|compensation|package|remuneration)\b/i.test(
-      labelLower,
-    ) ||
+    (/\b(?:current|present|existing)\b[\s\S]*?\b(?:ctc|salary|compensation|package|remuneration)\b/i.test(labelLower) ||
       /\b(?:ctc\s*in\s*inr|fixed\s*ctc|annual\s*ctc|gross\s*ctc)\b/i.test(labelLower)) &&
     !/\b(?:expected|target|desired|seeking)\b/i.test(labelLower);
 
@@ -2545,6 +2546,9 @@ export async function matchWithLLM(
   careerBrain: ICareerBrain,
   llm: BaseChatModel,
 ): Promise<{ matched: boolean; answer?: string; sourceDetail?: string }> {
+  if (!field.label || isGenericFieldLabel(field.label)) {
+    return { matched: false };
+  }
   try {
     const skillList = Object.entries(careerBrain.skillExperience || {})
       .map(([s, y]) => `"${s}": ${y} years`)
@@ -3010,7 +3014,9 @@ export async function solveQuestionAutonomousWithLLM(
   llm?: BaseChatModel,
 ): Promise<{ success: boolean; answer?: string; reason?: string }> {
   const cleanLabel = cleanLinkedInText(field.label || '');
-  if (!cleanLabel) return { success: false, reason: 'Empty field label' };
+  if (!cleanLabel || isGenericFieldLabel(cleanLabel)) {
+    return { success: false, reason: 'Field has no real question text (unresolvable generic or empty label)' };
+  }
 
   let activeLLM = llm;
   if (!activeLLM) {
@@ -3459,7 +3465,10 @@ export async function solveValidationErrorWithLLM(
     return { success: false, reason: 'No active LLM available' };
   }
 
-  const cleanLabel = cleanLinkedInText(field.label || 'Form Field');
+  const cleanLabel = cleanLinkedInText(field.label || '');
+  if (!cleanLabel || isGenericFieldLabel(cleanLabel)) {
+    return { success: false, reason: 'Field has no real question text (unresolvable generic or empty label)' };
+  }
   const errorMsg = (field.errorText || 'Enter a valid value').trim();
   const currentVal = (field.currentValue || '').trim();
   const yoe = careerBrain.yearsOfExperience ?? 1;
@@ -3626,8 +3635,20 @@ export async function resolveModalFieldWithAudit(
   _options?: { skipAskUser?: boolean },
 ): Promise<QuestionResolutionResult> {
   // Apply cleanLinkedInText to strip duplicate question text
-  field.label = cleanLinkedInText(field.label || 'Form Field');
+  field.label = cleanLinkedInText(field.label || '');
   const label = field.label;
+
+  if (!label || isGenericFieldLabel(label)) {
+    logger.warning(
+      `[FormQuestionResolver] Field has no real question text (label="${field.label}", fieldType=${field.fieldType}). Marking UNRESOLVED: do not send to matcher/LLM and do not fill.`,
+    );
+    return {
+      success: false,
+      error: 'Field has no real question text (unresolvable generic or empty label)',
+      category: 'ASKED',
+      needsUserAnswer: true,
+    };
+  }
 
   logger.info(`[FormQuestionResolver] 🎯 Attempting field resolution:`, {
     fieldType: field.fieldType,
