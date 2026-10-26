@@ -234,18 +234,15 @@ export const ResumeEnrichmentFlashcards: React.FC<ResumeEnrichmentFlashcardsProp
                 </span>
               </div>
 
-              <div
-                className={`p-3.5 rounded-xl border text-left text-xs space-y-2.5 ${
-                  isDarkMode ? 'bg-slate-900/80 border-slate-800' : 'bg-slate-50 border-slate-200'
-                }`}>
+              <div className="p-3.5 rounded-xl border border-slate-800 bg-slate-900/90 text-left text-xs space-y-2.5 shadow-inner">
                 <div className="flex items-center justify-between text-[11px] text-slate-400 font-semibold border-b border-slate-800 pb-1.5">
-                  <span>DETECTED RESUME PROFILE</span>
+                  <span className="tracking-wider uppercase text-[10px] text-slate-400">DETECTED RESUME PROFILE</span>
                   <span className="text-emerald-400 font-medium">Ready</span>
                 </div>
                 <div className="grid grid-cols-2 gap-2.5 text-[11px]">
                   <div>
                     <span className="text-slate-400 block text-[10px]">Candidate Name</span>
-                    <span className="font-semibold text-white">{profile.fullName || 'Not specified'}</span>
+                    <span className="font-semibold text-slate-100">{profile.fullName || 'Not specified'}</span>
                   </div>
                   <div>
                     <span className="text-slate-400 block text-[10px]">Total Work Tenure</span>
@@ -257,7 +254,7 @@ export const ResumeEnrichmentFlashcards: React.FC<ResumeEnrichmentFlashcardsProp
                   </div>
                   <div>
                     <span className="text-slate-400 block text-[10px]">Work Positions</span>
-                    <span className="font-semibold text-white">{profile.workExperience?.length || 0} Roles</span>
+                    <span className="font-semibold text-slate-100">{profile.workExperience?.length || 0} Roles</span>
                   </div>
                 </div>
               </div>
