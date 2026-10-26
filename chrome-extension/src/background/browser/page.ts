@@ -5709,6 +5709,9 @@ export default class Page {
       function cleanLinkedInJobTitle(raw: string): string {
         if (!raw) return '';
         let txt = raw
+          .replace(/^\s*(?:🤖\s*)?(?:\[Runner\]\s*)+/i, '')
+          .replace(/^\s*🤖\s*/, '')
+          .replace(/(?:🤖\s*)?\[Runner\]/gi, '')
           .replace(/\bwith verification\b/gi, '')
           .replace(/\bactively recruiting\b/gi, '')
           .replace(/\bpromoted\b/gi, '')
@@ -5818,12 +5821,26 @@ export default class Page {
         return text;
       }
 
-      // 2. Extract Title (broadened selectors for search pane, collections & standalone view)
+      // 2. Extract Title strictly from job details headings in the page. NEVER from document.title!
       const titleEl = document.querySelector(
-        '[data-view-name="job-details"] h1, [data-view-name="job-details"] h2, .scaffold-layout__detail h1, .scaffold-layout__detail h2, [data-view-name="job-details-top-card"] h1, h1.job-details-jobs-unified-top-card__job-title, h2.job-details-jobs-unified-top-card__job-title, .job-details-jobs-unified-top-card__job-title a, .jobs-unified-top-card__job-title, .jobs-search__job-details--container h1, .jobs-search__job-details--container h2, .jobs-details__main-content h1, .jobs-details__main-content h2, h1.t-24, h1.top-card-layout__title, .job-view-layout h1, .job-view-layout h2, [data-job-id].jobs-search-results-list__list-item--active .job-card-list__title, [data-job-id].jobs-search-results-list__list-item--active a[href*="/jobs/view/"]',
+        '[data-view-name="job-details"] h1, [data-view-name="job-details"] h2, .scaffold-layout__detail h1, .scaffold-layout__detail h2, [data-view-name="job-details-top-card"] h1, [data-view-name="job-details-top-card"] h2, h1.job-details-jobs-unified-top-card__job-title, h2.job-details-jobs-unified-top-card__job-title, .job-details-jobs-unified-top-card__job-title a, .jobs-unified-top-card__job-title, .jobs-search__job-details--container h1, .jobs-search__job-details--container h2, .jobs-details__main-content h1, .jobs-details__main-content h2, h1.t-24, h1.top-card-layout__title, .job-view-layout h1, .job-view-layout h2, .job-details-jobs-unified-top-card h1, .job-details-jobs-unified-top-card h2, [data-job-id].jobs-search-results-list__list-item--active .job-card-list__title, [data-job-id].jobs-search-results-list__list-item--active a[href*="/jobs/view/"], main h1, [role="main"] h1',
       );
       let title = cleanLinkedInJobTitle(cleanElementText(titleEl));
       if (isJunkJobTitle(title)) title = '';
+
+      // Secondary in-page DOM fallback if titleEl missed it: inspect details container directly
+      if (!title) {
+        const detailsContainer = document.querySelector(
+          '.scaffold-layout__detail, [data-view-name="job-details"], .jobs-search__job-details--container, .jobs-details__main-content, .job-view-layout',
+        );
+        if (detailsContainer) {
+          const heading = detailsContainer.querySelector('h1, h2, h3, [class*="job-title"]');
+          const candidate = cleanLinkedInJobTitle(cleanElementText(heading));
+          if (!isJunkJobTitle(candidate)) {
+            title = candidate;
+          }
+        }
+      }
 
       // 3. Extract Company (broadened selectors for search pane, collections & standalone view)
       const companyEl = document.querySelector(
@@ -5831,42 +5848,13 @@ export default class Page {
       );
       let company = cleanElementText(companyEl);
       if (!company) {
-        const compLink = document.querySelector('.jobs-unified-top-card a[href*="/company/"]');
+        const compLink = document.querySelector(
+          '.jobs-unified-top-card a[href*="/company/"], .scaffold-layout__detail a[href*="/company/"], [data-view-name="job-details"] a[href*="/company/"]',
+        );
         company = cleanElementText(compLink);
       }
       if (!company) {
         company = 'Unknown Company';
-      }
-
-      // Fallback: If title or company missing from DOM selectors, extract from document.title
-      // LinkedIn document.title pattern: "Full Stack Developer | AutoRABIT | LinkedIn" or "Job Title - Company - Location"
-      if (!title || company === 'Unknown Company') {
-        const rawDocTitle = (document.title || '')
-          .replace(/\s*\|\s*LinkedIn$/i, '')
-          .replace(/\s*-\s*LinkedIn$/i, '')
-          .trim();
-        if (rawDocTitle && !rawDocTitle.toLowerCase().includes('feed') && !/^jobs\b/i.test(rawDocTitle)) {
-          let parsedTitle = '';
-          let parsedCompany = '';
-          if (rawDocTitle.includes(' | ')) {
-            const parts = rawDocTitle.split(' | ');
-            parsedTitle = parts[0]?.trim();
-            parsedCompany = parts[1]?.trim();
-          } else if (rawDocTitle.includes(' at ')) {
-            const parts = rawDocTitle.split(' at ');
-            parsedTitle = parts[0]?.trim();
-            parsedCompany = parts[1]?.trim();
-          } else if (rawDocTitle.includes(' - ')) {
-            const parts = rawDocTitle.split(' - ');
-            parsedTitle = parts[0]?.trim();
-            parsedCompany = parts[1]?.trim();
-          }
-          if (!title && parsedTitle) {
-            const cleanedParsedTitle = cleanLinkedInJobTitle(cleanDuplicateString(parsedTitle));
-            title = isJunkJobTitle(cleanedParsedTitle) ? '' : cleanedParsedTitle;
-          }
-          if (company === 'Unknown Company' && parsedCompany) company = cleanDuplicateString(parsedCompany);
-        }
       }
 
       // 4. Extract Location
@@ -6062,6 +6050,9 @@ export default class Page {
       function cleanLinkedInJobTitle(raw: string): string {
         if (!raw) return '';
         let txt = raw
+          .replace(/^\s*(?:🤖\s*)?(?:\[Runner\]\s*)+/i, '')
+          .replace(/^\s*🤖\s*/, '')
+          .replace(/(?:🤖\s*)?\[Runner\]/gi, '')
           .replace(/\bwith verification\b/gi, '')
           .replace(/\bactively recruiting\b/gi, '')
           .replace(/\bpromoted\b/gi, '')

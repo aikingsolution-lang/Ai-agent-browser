@@ -706,6 +706,9 @@ export function getCandidateEducationLevels(careerBrain: ICareerBrain): {
 export function cleanLinkedInJobTitle(raw: string): string {
   if (!raw) return '';
   let txt = raw
+    .replace(/^\s*(?:🤖\s*)?(?:\[Runner\]\s*)+/i, '')
+    .replace(/^\s*🤖\s*/, '')
+    .replace(/(?:🤖\s*)?\[Runner\]/gi, '')
     .replace(/\bwith verification\b/gi, '')
     .replace(/\bactively recruiting\b/gi, '')
     .replace(/\bpromoted\b/gi, '')

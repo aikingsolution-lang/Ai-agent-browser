@@ -4017,7 +4017,7 @@ export class DedicatedJobRunner {
       topCard = await currentPage.extractJobTopCardContext(4500);
     }
 
-    const displayTitle = topCard.title || job.title;
+    const displayTitle = cleanLinkedInJobTitle(topCard.title || job.title);
     const displayCompany = topCard.company || job.company;
 
     // Check if details extraction completely failed

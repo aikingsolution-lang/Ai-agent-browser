@@ -79,7 +79,12 @@ export function generateJobsCsv(records: ExportableJobRecord[]): string {
 
   const rows = appliedRecords.map(rec => {
     const platformStr = rec.platform || detectPlatformFromUrl(rec.url);
-    const titleStr = rec.title || 'Untitled Role';
+    const rawTitle = rec.title || 'Untitled Role';
+    const titleStr =
+      rawTitle
+        .replace(/^\s*(?:🤖\s*)?(?:\[Runner\]\s*)+/i, '')
+        .replace(/^\s*🤖\s*/, '')
+        .trim() || 'Untitled Role';
     const companyStr = rec.company || 'Unknown Company';
     const statusLabel = 'Applied';
     const fitScoreStr = typeof rec.fitScore === 'number' ? `${rec.fitScore}%` : 'N/A';

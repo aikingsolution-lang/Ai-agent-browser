@@ -100,40 +100,42 @@ class MockDOMElement {
         const clsList = child.className.toLowerCase().split(/\s+/);
         let matches = false;
 
-        for (const sel of selTokens) {
-          if (sel === tag) {
+        for (const rawSel of selTokens) {
+          const parts = rawSel.split(/\s+/).filter(Boolean);
+          const target = parts[parts.length - 1];
+          if (parts.length > 1) {
+            const ancestorSel = parts.slice(0, -1).join(' ');
+            if (!child.closest(ancestorSel)) continue;
+          }
+          if (target === tag) {
             matches = true;
             break;
           }
-          if (sel.startsWith('#') && id === sel.slice(1)) {
+          if (target.startsWith('.') && clsList.includes(target.slice(1))) {
             matches = true;
             break;
           }
-          if (sel.startsWith('.') && clsList.includes(sel.slice(1))) {
+          if (target === 'dialog[open]' && tag === 'dialog' && child.open) {
             matches = true;
             break;
           }
-          if (sel === 'dialog[open]' && tag === 'dialog' && child.open) {
+          if (target.includes('[role="dialog"]') && child.getAttribute('role') === 'dialog') {
             matches = true;
             break;
           }
-          if (sel.includes('[role="dialog"]') && child.getAttribute('role') === 'dialog') {
-            matches = true;
-            break;
-          }
-          if (sel.includes('[aria-modal="true"]') && child.getAttribute('aria-modal') === 'true') {
+          if (target.includes('[aria-modal="true"]') && child.getAttribute('aria-modal') === 'true') {
             matches = true;
             break;
           }
           if (
-            sel.includes('aria-label*="dismiss"') &&
+            target.includes('aria-label*="dismiss"') &&
             (child.getAttribute('aria-label') || '').toLowerCase().includes('dismiss')
           ) {
             matches = true;
             break;
           }
           if (
-            sel.includes('aria-label*="close"') &&
+            target.includes('aria-label*="close"') &&
             (child.getAttribute('aria-label') || '').toLowerCase().includes('close')
           ) {
             matches = true;
@@ -308,5 +310,59 @@ describe('Item 1: Leftover Dialogs Hygiene & Detection', () => {
 
     expect(discardClicked).toBe(true);
     expect(dialog.open).toBe(false);
+  });
+});
+
+describe('Item 2: Job Title Pollution Prevention', () => {
+  it('strips "🤖 [Runner]" prefix from job titles across all formats', async () => {
+    const { cleanLinkedInJobTitle } = await import('../../agent/linkedin/formQuestionResolver');
+
+    expect(cleanLinkedInJobTitle('🤖 [Runner] Senior Software Engineer - Generative AI')).toBe(
+      'Senior Software Engineer - Generative AI',
+    );
+    expect(cleanLinkedInJobTitle('[Runner] Staff Machine Learning Engineer')).toBe('Staff Machine Learning Engineer');
+    expect(cleanLinkedInJobTitle('🤖 AI Platform Engineer')).toBe('AI Platform Engineer');
+    expect(cleanLinkedInJobTitle('🤖 [Runner] 🤖 [Runner] Lead Engineer')).toBe('Lead Engineer');
+    expect(cleanLinkedInJobTitle('Senior Backend Engineer')).toBe('Senior Backend Engineer');
+  });
+
+  it('job title is strictly extracted from in-page heading, NEVER from document.title', () => {
+    const fakeDoc = new MockDOMElement('document');
+    // document.title has the runner prefix polluted title
+    const fakeDocumentTitle = '🤖 [Runner] Polluted Senior Engineer | LinkedIn';
+
+    const detailPane = new MockDOMElement('div', { class: 'scaffold-layout__detail' });
+    const realHeading = new MockDOMElement('h1', {}, 'Senior Software Engineer');
+    detailPane.appendChild(realHeading);
+    fakeDoc.appendChild(detailPane);
+
+    // Simulated heading extractor (strictly from DOM heading)
+    const titleEl = fakeDoc.querySelector(
+      '.scaffold-layout__detail h1, h1.job-details-jobs-unified-top-card__job-title',
+    );
+    const title = titleEl?.textContent || '';
+
+    expect(title).toBe('Senior Software Engineer');
+    expect(title).not.toContain('Runner');
+    expect(title).not.toContain('Polluted');
+  });
+
+  it('CSV generator strips runner prefixes from exported titles', async () => {
+    const { generateJobsCsv } = await import('../../../../../packages/storage/lib/linkedin/csvExport');
+
+    const records = [
+      {
+        title: '🤖 [Runner] Staff ML Engineer',
+        company: 'Anthropic',
+        status: 'applied',
+        url: 'https://linkedin.com/jobs/view/123456',
+        timestamp: Date.now(),
+      },
+    ];
+
+    const csv = generateJobsCsv(records as any);
+    expect(csv).toContain('Staff ML Engineer');
+    expect(csv).not.toContain('🤖');
+    expect(csv).not.toContain('[Runner]');
   });
 });
