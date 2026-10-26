@@ -70,6 +70,8 @@ export class CachedStateClickableElementsHashes {
   }
 }
 
+export { findActiveEasyApplyContainer } from './easyApplyContainer';
+
 export default class Page {
   private _tabId: number;
   private _browser: Browser | null = null;
@@ -2101,86 +2103,11 @@ export default class Page {
 
   /**
    * Fast check to see if the Easy Apply modal is currently open.
+   * Delegates directly to captureModalSnapshot to guarantee consistent container detection.
    */
   async isEasyApplyModalOpen(): Promise<boolean> {
-    const checkInPage = () => {
-      function check(root: any): boolean {
-        const dialogs = root.querySelectorAll
-          ? (Array.from(
-              root.querySelectorAll(
-                'dialog, dialog[open], .jobs-easy-apply-modal, [data-test-modal-id="easy-apply-modal"], [data-easy-apply-modal], div.artdeco-modal, .artdeco-modal, div[role="dialog"], [role="dialog"], [aria-modal="true"], [data-test-modal]',
-              ),
-            ) as HTMLElement[])
-          : [];
-        for (const d of dialogs) {
-          if (!d || !d.isConnected) continue;
-          if (
-            d.closest(
-              'nav, header, footer, #footer, .artdeco-footer, [data-view-name="footer"], #global-nav, .global-nav, .msg-overlay-container, #msg-overlay, .artdeco-dropdown',
-            )
-          ) {
-            continue;
-          }
-          const aria = (d.getAttribute('aria-label') || '').toLowerCase();
-          if (aria.includes('messaging') || aria.includes('chat') || aria.includes('notification')) continue;
-          const txt = (d.innerText || d.textContent || '').trim().toLowerCase();
-          if (/^\d+\s*notifications?$/i.test(txt) || d.closest('.notifications-badge')) continue;
-          if (txt.includes('select language') && (txt.includes('privacy') || txt.includes('help center'))) continue;
-          // A native "Save this application?" / "Discard draft?" confirmation is not the
-          // Easy Apply form. Counting it as "modal open" made the runner believe the form
-          // was still alive while the real step was gone.
-          if (/save this application|save application|discard draft/i.test(txt)) continue;
-          const style = window.getComputedStyle(d);
-          if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity || '1') <= 0.05) continue;
-          const rect = d.getBoundingClientRect();
-          if (rect.width < 120 || rect.height < 60) continue;
-          return true;
-        }
-        // A visible inline application step (no dialog wrapper) is an open form too.
-        const inlineForms = root.querySelectorAll
-          ? (Array.from(
-              root.querySelectorAll('.jobs-easy-apply-content, form.jobs-easy-apply-form, [data-easy-apply-modal]'),
-            ) as HTMLElement[])
-          : [];
-        for (const form of inlineForms) {
-          if (!form || !form.isConnected) continue;
-          if (form.closest('footer, #footer, .artdeco-footer, [data-view-name="footer"]')) continue;
-          const style = window.getComputedStyle(form);
-          if (style.display === 'none' || style.visibility === 'hidden') continue;
-          const rect = form.getBoundingClientRect();
-          if (rect.width >= 120 && rect.height >= 60) return true;
-        }
-        const all = root.querySelectorAll ? root.querySelectorAll('*') : [];
-        for (let i = 0; i < all.length; i++) {
-          const el = all[i];
-          if (el.shadowRoot && check(el.shadowRoot)) return true;
-        }
-        return false;
-      }
-      return check(document);
-    };
-
-    if (!this._puppeteerPage) {
-      await this.attachPuppeteer().catch(() => false);
-    }
-
-    if (this._puppeteerPage) {
-      try {
-        return await this._puppeteerPage.evaluate(checkInPage);
-      } catch {}
-    }
-
-    if (this._tabId && typeof chrome !== 'undefined' && chrome.scripting?.executeScript) {
-      try {
-        const results = await chrome.scripting.executeScript({
-          target: { tabId: this._tabId },
-          func: checkInPage,
-        });
-        return Boolean(results?.[0]?.result);
-      } catch {}
-    }
-
-    return false;
+    const snap = await this.captureModalSnapshot();
+    return snap !== null;
   }
 
   /**
@@ -3186,7 +3113,8 @@ export default class Page {
           // A native "Save this application?" / "Discard draft?" sheet is not the form.
           if (/save this application|save application|discard draft/i.test(text)) continue;
           const style = window.getComputedStyle(c);
-          if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity || '1') <= 0.05) continue;
+          if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity || '1') <= 0.05)
+            continue;
           const rect = c.getBoundingClientRect();
           if (rect.width < 120 || rect.height < 60) continue;
 
@@ -3201,41 +3129,28 @@ export default class Page {
             return c;
           }
 
-          const isNativeDialog = c.tagName.toLowerCase() === 'dialog';
-          const titleEl = c.querySelector('h1, h2, h3, [id*="header"], [class*="header"]');
-          const titleText = (titleEl?.textContent || text.slice(0, 100)).toLowerCase();
-          const hasApplyTitle = /apply|application|job|contact info|home address|resume|work experience|education|screening|additional questions/i.test(titleText);
+          // Structural detection: contains at least one form control
           const hasFormControls =
-            c.querySelector('input:not([type="hidden"]), textarea, select, [contenteditable="true"]') !== null;
-          const buttons = Array.from(c.querySelectorAll('button, [role="button"]')) as HTMLElement[];
-          const hasNavButton = buttons.some(b => {
-            const bt = (b.textContent || '').trim().toLowerCase();
-            const bAria = (b.getAttribute('aria-label') || '').toLowerCase();
+            c.querySelector(
+              'input:not([type="hidden"]), select, textarea, fieldset, [role="radiogroup"], [role="group"], [contenteditable="true"], .jobs-document-upload, [type="file"]',
+            ) !== null;
+
+          // Structural detection: contains at least one forward or submit button identified by VISIBLE TEXT
+          const buttons = Array.from(
+            c.querySelectorAll('button, [role="button"], input[type="button"], input[type="submit"]'),
+          ) as HTMLElement[];
+          const hasForwardOrSubmitButton = buttons.some(b => {
+            const bt = (b.innerText || b.textContent || '').trim().toLowerCase();
             return (
               bt.includes('next') ||
               bt.includes('review') ||
+              bt.includes('submit application') ||
               bt.includes('submit') ||
-              bt.includes('continue') ||
-              bAria.includes('next') ||
-              bAria.includes('review') ||
-              bAria.includes('submit') ||
-              bAria.includes('continue')
+              bt.includes('continue')
             );
           });
-          const hasPrimaryBtn =
-            c.querySelector(
-              'button.artdeco-button--primary, button[data-easy-apply-next-button], button[aria-label*="next" i], button[aria-label*="submit" i], button[aria-label*="review" i], button[aria-label*="continue" i]',
-            ) !== null;
-          const hasApplyFlowText =
-            /easy apply|apply to |apply for |contact info|home address|resume|review your application|work experience|education/i.test(text);
 
-          if (
-            hasApplyTitle ||
-            hasPrimaryBtn ||
-            hasNavButton ||
-            (isNativeDialog && (hasApplyFlowText || hasFormControls || hasNavButton)) ||
-            (hasFormControls && (hasNavButton || hasApplyFlowText))
-          ) {
+          if (hasFormControls || hasForwardOrSubmitButton) {
             return c;
           }
         }
@@ -4439,7 +4354,8 @@ export default class Page {
           // A native "Save this application?" / "Discard draft?" sheet is not the form.
           if (/save this application|save application|discard draft/i.test(text)) continue;
           const style = window.getComputedStyle(c);
-          if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity || '1') <= 0.05) continue;
+          if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity || '1') <= 0.05)
+            continue;
           const rect = c.getBoundingClientRect();
           if (rect.width < 120 || rect.height < 60) continue;
 
@@ -4454,41 +4370,28 @@ export default class Page {
             return c;
           }
 
-          const isNativeDialog = c.tagName.toLowerCase() === 'dialog';
-          const titleEl = c.querySelector('h1, h2, h3, [id*="header"], [class*="header"]');
-          const titleText = (titleEl?.textContent || text.slice(0, 100)).toLowerCase();
-          const hasApplyTitle = /apply|application|job|contact info|home address|resume|work experience|education|screening|additional questions/i.test(titleText);
+          // Structural detection: contains at least one form control
           const hasFormControls =
-            c.querySelector('input:not([type="hidden"]), textarea, select, [contenteditable="true"]') !== null;
-          const buttons = Array.from(c.querySelectorAll('button, [role="button"]')) as HTMLElement[];
-          const hasNavButton = buttons.some(b => {
-            const bt = (b.textContent || '').trim().toLowerCase();
-            const bAria = (b.getAttribute('aria-label') || '').toLowerCase();
+            c.querySelector(
+              'input:not([type="hidden"]), select, textarea, fieldset, [role="radiogroup"], [role="group"], [contenteditable="true"], .jobs-document-upload, [type="file"]',
+            ) !== null;
+
+          // Structural detection: contains at least one forward or submit button identified by VISIBLE TEXT
+          const buttons = Array.from(
+            c.querySelectorAll('button, [role="button"], input[type="button"], input[type="submit"]'),
+          ) as HTMLElement[];
+          const hasForwardOrSubmitButton = buttons.some(b => {
+            const bt = (b.innerText || b.textContent || '').trim().toLowerCase();
             return (
               bt.includes('next') ||
               bt.includes('review') ||
+              bt.includes('submit application') ||
               bt.includes('submit') ||
-              bt.includes('continue') ||
-              bAria.includes('next') ||
-              bAria.includes('review') ||
-              bAria.includes('submit') ||
-              bAria.includes('continue')
+              bt.includes('continue')
             );
           });
-          const hasPrimaryBtn =
-            c.querySelector(
-              'button.artdeco-button--primary, button[data-easy-apply-next-button], button[aria-label*="next" i], button[aria-label*="submit" i], button[aria-label*="review" i], button[aria-label*="continue" i]',
-            ) !== null;
-          const hasApplyFlowText =
-            /easy apply|apply to |apply for |contact info|home address|resume|review your application|work experience|education/i.test(text);
 
-          if (
-            hasApplyTitle ||
-            hasPrimaryBtn ||
-            hasNavButton ||
-            (isNativeDialog && (hasApplyFlowText || hasFormControls || hasNavButton)) ||
-            (hasFormControls && (hasNavButton || hasApplyFlowText))
-          ) {
+          if (hasFormControls || hasForwardOrSubmitButton) {
             return c;
           }
         }
@@ -6703,7 +6606,8 @@ export default class Page {
           // A native "Save this application?" / "Discard draft?" sheet is not the form.
           if (/save this application|save application|discard draft/i.test(text)) continue;
           const style = window.getComputedStyle(c);
-          if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity || '1') <= 0.05) continue;
+          if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity || '1') <= 0.05)
+            continue;
           const rect = c.getBoundingClientRect();
           if (rect.width < 120 || rect.height < 60) continue;
 
@@ -6718,41 +6622,28 @@ export default class Page {
             return c;
           }
 
-          const isNativeDialog = c.tagName.toLowerCase() === 'dialog';
-          const titleEl = c.querySelector('h1, h2, h3, [id*="header"], [class*="header"]');
-          const titleText = (titleEl?.textContent || text.slice(0, 100)).toLowerCase();
-          const hasApplyTitle = /apply|application|job|contact info|home address|resume|work experience|education|screening|additional questions/i.test(titleText);
+          // Structural detection: contains at least one form control
           const hasFormControls =
-            c.querySelector('input:not([type="hidden"]), textarea, select, [contenteditable="true"]') !== null;
-          const buttons = Array.from(c.querySelectorAll('button, [role="button"]')) as HTMLElement[];
-          const hasNavButton = buttons.some(b => {
-            const bt = (b.textContent || '').trim().toLowerCase();
-            const bAria = (b.getAttribute('aria-label') || '').toLowerCase();
+            c.querySelector(
+              'input:not([type="hidden"]), select, textarea, fieldset, [role="radiogroup"], [role="group"], [contenteditable="true"], .jobs-document-upload, [type="file"]',
+            ) !== null;
+
+          // Structural detection: contains at least one forward or submit button identified by VISIBLE TEXT
+          const buttons = Array.from(
+            c.querySelectorAll('button, [role="button"], input[type="button"], input[type="submit"]'),
+          ) as HTMLElement[];
+          const hasForwardOrSubmitButton = buttons.some(b => {
+            const bt = (b.innerText || b.textContent || '').trim().toLowerCase();
             return (
               bt.includes('next') ||
               bt.includes('review') ||
+              bt.includes('submit application') ||
               bt.includes('submit') ||
-              bt.includes('continue') ||
-              bAria.includes('next') ||
-              bAria.includes('review') ||
-              bAria.includes('submit') ||
-              bAria.includes('continue')
+              bt.includes('continue')
             );
           });
-          const hasPrimaryBtn =
-            c.querySelector(
-              'button.artdeco-button--primary, button[data-easy-apply-next-button], button[aria-label*="next" i], button[aria-label*="submit" i], button[aria-label*="review" i], button[aria-label*="continue" i]',
-            ) !== null;
-          const hasApplyFlowText =
-            /easy apply|apply to |apply for |contact info|home address|resume|review your application|work experience|education/i.test(text);
 
-          if (
-            hasApplyTitle ||
-            hasPrimaryBtn ||
-            hasNavButton ||
-            (isNativeDialog && (hasApplyFlowText || hasFormControls || hasNavButton)) ||
-            (hasFormControls && (hasNavButton || hasApplyFlowText))
-          ) {
+          if (hasFormControls || hasForwardOrSubmitButton) {
             return c;
           }
         }
@@ -7436,280 +7327,59 @@ export default class Page {
 
   /**
    * Inspects which forward or submission buttons are available on the active modal.
+   * Delegates directly to captureModalSnapshot and inspects button texts by visible text.
    */
   async getModalActionButtons(): Promise<{
     hasNext: boolean;
     hasReview: boolean;
     hasSubmit: boolean;
   }> {
-    const checkInPage = () => {
-      function findActiveModal(root: any): HTMLElement | null {
-        const candidates = root.querySelectorAll
-          ? (Array.from(
-              root.querySelectorAll(
-                'dialog, dialog[open], .jobs-easy-apply-modal, [data-test-modal-id="easy-apply-modal"], [data-easy-apply-modal], div.artdeco-modal[role="dialog"], div.artdeco-modal, .artdeco-modal, div[role="dialog"][aria-modal="true"], div[role="dialog"], [role="dialog"], [data-test-modal], [aria-modal="true"]',
-              ),
-            ) as HTMLElement[])
-          : [];
-
-        for (const c of candidates) {
-          if (!c || !c.isConnected) continue;
-          if (
-            c.closest(
-              'nav, header, footer, #footer, .artdeco-footer, [data-view-name="footer"], #global-nav, .global-nav, .msg-overlay-container, #msg-overlay, .artdeco-dropdown',
-            )
-          ) {
-            continue;
-          }
-          const aria = (c.getAttribute('aria-label') || '').toLowerCase();
-          if (aria.includes('messaging') || aria.includes('chat') || aria.includes('notification')) continue;
-          const text = (c.innerText || c.textContent || '').trim().toLowerCase();
-          if (/^\d+\s*notifications?$/i.test(text) || c.closest('.notifications-badge')) continue;
-          if (text.includes('select language') && (text.includes('privacy') || text.includes('help center'))) continue;
-          // A native "Save this application?" / "Discard draft?" sheet is not the form.
-          if (/save this application|save application|discard draft/i.test(text)) continue;
-          const style = window.getComputedStyle(c);
-          if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity || '1') <= 0.05) continue;
-          const rect = c.getBoundingClientRect();
-          if (rect.width < 120 || rect.height < 60) continue;
-
-          if (
-            c.classList.contains('jobs-easy-apply-modal') ||
-            c.hasAttribute('data-easy-apply-modal') ||
-            c.getAttribute('data-test-modal-id') === 'easy-apply-modal' ||
-            c.querySelector(
-              '.jobs-easy-apply-modal, .jobs-easy-apply-modal__content, .jobs-easy-apply-modal__header, .jobs-easy-apply-modal__footer, .jobs-easy-apply-content, .jobs-easy-apply-form-section, .jobs-easy-apply-form-element, form.jobs-easy-apply-form, [data-easy-apply-modal], [data-test-modal-id="easy-apply-modal"], h2.jobs-easy-apply-modal__title',
-            ) !== null
-          ) {
-            return c;
-          }
-
-          const isNativeDialog = c.tagName.toLowerCase() === 'dialog';
-          const titleEl = c.querySelector('h1, h2, h3, [id*="header"], [class*="header"]');
-          const titleText = (titleEl?.textContent || text.slice(0, 100)).toLowerCase();
-          const hasApplyTitle = /apply|application|job|contact info|home address|resume|work experience|education|screening|additional questions/i.test(titleText);
-          const hasFormControls =
-            c.querySelector('input:not([type="hidden"]), textarea, select, [contenteditable="true"]') !== null;
-          const buttons = Array.from(c.querySelectorAll('button, [role="button"]')) as HTMLElement[];
-          const hasNavButton = buttons.some(b => {
-            const bt = (b.textContent || '').trim().toLowerCase();
-            const bAria = (b.getAttribute('aria-label') || '').toLowerCase();
-            return (
-              bt.includes('next') ||
-              bt.includes('review') ||
-              bt.includes('submit') ||
-              bt.includes('continue') ||
-              bAria.includes('next') ||
-              bAria.includes('review') ||
-              bAria.includes('submit') ||
-              bAria.includes('continue')
-            );
-          });
-          const hasPrimaryBtn =
-            c.querySelector(
-              'button.artdeco-button--primary, button[data-easy-apply-next-button], button[aria-label*="next" i], button[aria-label*="submit" i], button[aria-label*="review" i], button[aria-label*="continue" i]',
-            ) !== null;
-          const hasApplyFlowText =
-            /easy apply|apply to |apply for |contact info|home address|resume|review your application|work experience|education/i.test(text);
-
-          if (
-            hasApplyTitle ||
-            hasPrimaryBtn ||
-            hasNavButton ||
-            (isNativeDialog && (hasApplyFlowText || hasFormControls || hasNavButton)) ||
-            (hasFormControls && (hasNavButton || hasApplyFlowText))
-          ) {
-            return c;
-          }
-        }
-
-        const all = root.querySelectorAll ? root.querySelectorAll('*') : [];
-        for (let i = 0; i < all.length; i++) {
-          if (all[i].shadowRoot) {
-            const found = findActiveModal(all[i].shadowRoot);
-            if (found) return found;
-          }
-        }
-
-        // Inline application step (no dialog wrapper): some LinkedIn builds render the
-        // apply form directly inside the details pane. Treat its container as the form
-        // so discovery, filling, validation and navigation all keep working.
-        const inlineForms = (
-          Array.from(
-            root.querySelectorAll('.jobs-easy-apply-content, form.jobs-easy-apply-form, [data-easy-apply-modal]'),
-          ) as HTMLElement[]
-        ).filter(el => {
-          if (!el || !el.isConnected) return false;
-          if (el.closest('nav, header, footer, #footer, .artdeco-footer, [data-view-name="footer"]')) return false;
-          const st = window.getComputedStyle(el);
-          if (st.display === 'none' || st.visibility === 'hidden') return false;
-          const r = el.getBoundingClientRect();
-          return r.width >= 120 && r.height >= 60;
-        });
-        if (inlineForms.length > 0) return inlineForms[0];
-
-        return null;
-      }
-
-      // Never fall back to document.body here: when no Easy Apply modal is present
-      // this would scan/click unrelated page controls (e.g. job-search pagination).
-      const modal = (findActiveModal(document) ||
-        (Array.from(
-          document.querySelectorAll(
-            '.jobs-easy-apply-modal, [data-easy-apply-modal], [data-test-modal-id="easy-apply-modal"], div.artdeco-modal, div[role="dialog"], dialog[open], [aria-modal="true"]',
-          ),
-        ).find(el => {
-          const elHTMLElement = el as HTMLElement;
-          if (elHTMLElement.closest('footer, #footer, .artdeco-footer, [data-view-name="footer"]')) return false;
-          return !/save this application|save application|discard draft/i.test(
-            (elHTMLElement.innerText || elHTMLElement.textContent || '').slice(0, 400),
-          );
-        }) as HTMLElement | null)) as HTMLElement | null;
-      if (!modal) return { hasNext: false, hasReview: false, hasSubmit: false };
-
-      // Auto-scroll modal content to bottom so bottom questions & action buttons are in view
-      const contentEl = (modal || document).querySelector(
-        '.jobs-easy-apply-modal__content, .artdeco-modal__content, form.jobs-easy-apply-form, div[role="dialog"] .overflow-y-auto',
-      ) as HTMLElement | null;
-      if (contentEl) {
-        contentEl.scrollTop = contentEl.scrollHeight;
-        contentEl.dispatchEvent(new Event('scroll', { bubbles: true }));
-      }
-
-      const buttons = Array.from(modal.querySelectorAll('button, [role="button"]')) as HTMLElement[];
-      const primaryBtns = Array.from(
-        document.querySelectorAll(
-          '.jobs-easy-apply-modal__footer button, .artdeco-modal__actionbar button, button[data-easy-apply-next-button]',
-        ),
-      ) as HTMLElement[];
-      for (const pb of primaryBtns) {
-        if (pb.closest('footer, #footer, .artdeco-footer, [data-view-name="footer"]')) continue;
-        const pbDialog = pb.closest(
-          'div[role="dialog"], div.artdeco-modal, dialog[open], [aria-modal="true"]',
-        ) as HTMLElement | null;
-        if (
-          pbDialog &&
-          /save this application|save application|discard draft/i.test(pbDialog.innerText || pbDialog.textContent || '')
-        ) {
-          continue;
-        }
-        if (!buttons.includes(pb)) buttons.push(pb);
-      }
-
-      let hasNext = false;
-      let hasReview = false;
-      let hasSubmit = false;
-
-      for (const btn of buttons) {
-        const text = (btn.textContent || '').trim().toLowerCase();
-        const aria = (btn.getAttribute('aria-label') || '').trim().toLowerCase();
-        const dataControl = (btn.getAttribute('data-control-name') || '').trim().toLowerCase();
-
-        // Skip dismiss / cancel / close / back buttons
-        if (
-          text === 'dismiss' ||
-          text === 'cancel' ||
-          text === 'back' ||
-          aria.includes('dismiss') ||
-          aria.includes('cancel') ||
-          aria.includes('close') ||
-          btn.classList.contains('artdeco-modal__dismiss')
-        ) {
-          continue;
-        }
-
-        if (
-          /submit application|submit/i.test(aria) ||
-          /^\s*submit(\s*application)?\s*$/i.test(text) ||
-          text.includes('submit application') ||
-          text.includes('submit') ||
-          dataControl.includes('submit')
-        ) {
-          hasSubmit = true;
-        } else if (
-          /review/i.test(aria) ||
-          /^\s*review\s*$/i.test(text) ||
-          text.includes('review your application') ||
-          text.includes('review application') ||
-          text.includes('review') ||
-          dataControl.includes('review')
-        ) {
-          hasReview = true;
-        } else if (
-          /next|continue/i.test(aria) ||
-          /^\s*(next|continue)\s*$/i.test(text) ||
-          text.includes('next') ||
-          text.includes('continue to next step') ||
-          text.includes('continue') ||
-          btn.hasAttribute('data-easy-apply-next-button') ||
-          dataControl.includes('continue')
-        ) {
-          hasNext = true;
-        }
-      }
-
-      // Robust fallback: Check primary button across modal and document
-      if (!hasNext && !hasReview && !hasSubmit) {
-        for (const btn of buttons) {
-          if (btn.classList.contains('artdeco-button--primary')) {
-            const text = (btn.textContent || '').trim().toLowerCase();
-            const aria = (btn.getAttribute('aria-label') || '').trim().toLowerCase();
-            if (
-              !text.includes('dismiss') &&
-              !text.includes('cancel') &&
-              !text.includes('close') &&
-              !text.includes('back') &&
-              !aria.includes('dismiss') &&
-              !aria.includes('cancel') &&
-              !aria.includes('close')
-            ) {
-              if (text.includes('submit') || aria.includes('submit')) {
-                hasSubmit = true;
-              } else if (text.includes('review') || aria.includes('review')) {
-                hasReview = true;
-              } else {
-                hasNext = true;
-              }
-              break;
-            }
-          }
-        }
-      }
-
-      return { hasNext, hasReview, hasSubmit };
-    };
-
-    if (!this._puppeteerPage) {
-      await this.attachPuppeteer().catch(() => false);
+    const snap = await this.captureModalSnapshot();
+    if (!snap) {
+      return { hasNext: false, hasReview: false, hasSubmit: false };
     }
 
-    if (this._puppeteerPage) {
-      try {
-        return await this._puppeteerPage.evaluate(checkInPage);
-      } catch {}
+    let hasNext = false;
+    let hasReview = false;
+    let hasSubmit = false;
+
+    for (const rawText of snap.buttonTexts) {
+      const text = (rawText || '').trim().toLowerCase();
+      if (
+        text === 'dismiss' ||
+        text === 'cancel' ||
+        text === 'back' ||
+        text.includes('dismiss') ||
+        text.includes('cancel') ||
+        text.includes('close')
+      ) {
+        continue;
+      }
+
+      if (/submit application|submit/i.test(text) || text.includes('submit application') || text.includes('submit')) {
+        hasSubmit = true;
+      } else if (
+        /review/i.test(text) ||
+        text.includes('review your application') ||
+        text.includes('review application') ||
+        text.includes('review')
+      ) {
+        hasReview = true;
+      } else if (
+        /next|continue/i.test(text) ||
+        text.includes('next') ||
+        text.includes('continue to next step') ||
+        text.includes('continue')
+      ) {
+        hasNext = true;
+      }
     }
 
-    if (this._tabId && typeof chrome !== 'undefined' && chrome.scripting?.executeScript) {
-      try {
-        const results = await chrome.scripting.executeScript({
-          target: { tabId: this._tabId },
-          func: checkInPage,
-        });
-        const res = results?.[0]?.result;
-        if (res) return res;
-      } catch {}
-    }
-
-    return { hasNext: false, hasReview: false, hasSubmit: false };
+    return { hasNext, hasReview, hasSubmit };
   }
 
   /**
-   * Captures a stable content signature of the current Easy Apply modal step
-   * (modal title + field labels/tags + footer button texts). Used to verify that
-   * a Next/Review/Submit click actually advanced the modal — LinkedIn may silently
-   * swallow clicks on React-state-disabled buttons, so a "clicked" result alone is
-   * not proof that the step changed.
-   * Returns null when no modal is currently open.
+   * Captures a stable content signature of the current Easy Apply modal step.
    */
   async getModalStepSignature(): Promise<string | null> {
     const sigInPage = () => {
@@ -7739,7 +7409,8 @@ export default class Page {
           // A native "Save this application?" / "Discard draft?" sheet is not the form.
           if (/save this application|save application|discard draft/i.test(text)) continue;
           const style = window.getComputedStyle(c);
-          if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity || '1') <= 0.05) continue;
+          if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity || '1') <= 0.05)
+            continue;
           const rect = c.getBoundingClientRect();
           if (rect.width < 120 || rect.height < 60) continue;
 
@@ -7754,41 +7425,28 @@ export default class Page {
             return c;
           }
 
-          const isNativeDialog = c.tagName.toLowerCase() === 'dialog';
-          const titleEl = c.querySelector('h1, h2, h3, [id*="header"], [class*="header"]');
-          const titleText = (titleEl?.textContent || text.slice(0, 100)).toLowerCase();
-          const hasApplyTitle = /apply|application|job|contact info|home address|resume|work experience|education|screening|additional questions/i.test(titleText);
+          // Structural detection: contains at least one form control
           const hasFormControls =
-            c.querySelector('input:not([type="hidden"]), textarea, select, [contenteditable="true"]') !== null;
-          const buttons = Array.from(c.querySelectorAll('button, [role="button"]')) as HTMLElement[];
-          const hasNavButton = buttons.some(b => {
-            const bt = (b.textContent || '').trim().toLowerCase();
-            const bAria = (b.getAttribute('aria-label') || '').toLowerCase();
+            c.querySelector(
+              'input:not([type="hidden"]), select, textarea, fieldset, [role="radiogroup"], [role="group"], [contenteditable="true"], .jobs-document-upload, [type="file"]',
+            ) !== null;
+
+          // Structural detection: contains at least one forward or submit button identified by VISIBLE TEXT
+          const buttons = Array.from(
+            c.querySelectorAll('button, [role="button"], input[type="button"], input[type="submit"]'),
+          ) as HTMLElement[];
+          const hasForwardOrSubmitButton = buttons.some(b => {
+            const bt = (b.innerText || b.textContent || '').trim().toLowerCase();
             return (
               bt.includes('next') ||
               bt.includes('review') ||
+              bt.includes('submit application') ||
               bt.includes('submit') ||
-              bt.includes('continue') ||
-              bAria.includes('next') ||
-              bAria.includes('review') ||
-              bAria.includes('submit') ||
-              bAria.includes('continue')
+              bt.includes('continue')
             );
           });
-          const hasPrimaryBtn =
-            c.querySelector(
-              'button.artdeco-button--primary, button[data-easy-apply-next-button], button[aria-label*="next" i], button[aria-label*="submit" i], button[aria-label*="review" i], button[aria-label*="continue" i]',
-            ) !== null;
-          const hasApplyFlowText =
-            /easy apply|apply to |apply for |contact info|home address|resume|review your application|work experience|education/i.test(text);
 
-          if (
-            hasApplyTitle ||
-            hasPrimaryBtn ||
-            hasNavButton ||
-            (isNativeDialog && (hasApplyFlowText || hasFormControls || hasNavButton)) ||
-            (hasFormControls && (hasNavButton || hasApplyFlowText))
-          ) {
+          if (hasFormControls || hasForwardOrSubmitButton) {
             return c;
           }
         }
@@ -7930,7 +7588,8 @@ export default class Page {
           // A native "Save this application?" / "Discard draft?" sheet is not the form.
           if (/save this application|save application|discard draft/i.test(text)) continue;
           const style = window.getComputedStyle(c);
-          if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity || '1') <= 0.05) continue;
+          if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity || '1') <= 0.05)
+            continue;
           const rect = c.getBoundingClientRect();
           if (rect.width < 120 || rect.height < 60) continue;
 
@@ -7945,41 +7604,28 @@ export default class Page {
             return c;
           }
 
-          const isNativeDialog = c.tagName.toLowerCase() === 'dialog';
-          const titleEl = c.querySelector('h1, h2, h3, [id*="header"], [class*="header"]');
-          const titleText = (titleEl?.textContent || text.slice(0, 100)).toLowerCase();
-          const hasApplyTitle = /apply|application|job|contact info|home address|resume|work experience|education|screening|additional questions/i.test(titleText);
+          // Structural detection: contains at least one form control
           const hasFormControls =
-            c.querySelector('input:not([type="hidden"]), textarea, select, [contenteditable="true"]') !== null;
-          const buttons = Array.from(c.querySelectorAll('button, [role="button"]')) as HTMLElement[];
-          const hasNavButton = buttons.some(b => {
-            const bt = (b.textContent || '').trim().toLowerCase();
-            const bAria = (b.getAttribute('aria-label') || '').toLowerCase();
+            c.querySelector(
+              'input:not([type="hidden"]), select, textarea, fieldset, [role="radiogroup"], [role="group"], [contenteditable="true"], .jobs-document-upload, [type="file"]',
+            ) !== null;
+
+          // Structural detection: contains at least one forward or submit button identified by VISIBLE TEXT
+          const buttons = Array.from(
+            c.querySelectorAll('button, [role="button"], input[type="button"], input[type="submit"]'),
+          ) as HTMLElement[];
+          const hasForwardOrSubmitButton = buttons.some(b => {
+            const bt = (b.innerText || b.textContent || '').trim().toLowerCase();
             return (
               bt.includes('next') ||
               bt.includes('review') ||
+              bt.includes('submit application') ||
               bt.includes('submit') ||
-              bt.includes('continue') ||
-              bAria.includes('next') ||
-              bAria.includes('review') ||
-              bAria.includes('submit') ||
-              bAria.includes('continue')
+              bt.includes('continue')
             );
           });
-          const hasPrimaryBtn =
-            c.querySelector(
-              'button.artdeco-button--primary, button[data-easy-apply-next-button], button[aria-label*="next" i], button[aria-label*="submit" i], button[aria-label*="review" i], button[aria-label*="continue" i]',
-            ) !== null;
-          const hasApplyFlowText =
-            /easy apply|apply to |apply for |contact info|home address|resume|review your application|work experience|education/i.test(text);
 
-          if (
-            hasApplyTitle ||
-            hasPrimaryBtn ||
-            hasNavButton ||
-            (isNativeDialog && (hasApplyFlowText || hasFormControls || hasNavButton)) ||
-            (hasFormControls && (hasNavButton || hasApplyFlowText))
-          ) {
+          if (hasFormControls || hasForwardOrSubmitButton) {
             return c;
           }
         }
@@ -8280,7 +7926,8 @@ export default class Page {
           // A native "Save this application?" / "Discard draft?" sheet is not the form.
           if (/save this application|save application|discard draft/i.test(text)) continue;
           const style = window.getComputedStyle(c);
-          if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity || '1') <= 0.05) continue;
+          if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity || '1') <= 0.05)
+            continue;
           const rect = c.getBoundingClientRect();
           if (rect.width < 120 || rect.height < 60) continue;
 
@@ -8295,41 +7942,28 @@ export default class Page {
             return c;
           }
 
-          const isNativeDialog = c.tagName.toLowerCase() === 'dialog';
-          const titleEl = c.querySelector('h1, h2, h3, [id*="header"], [class*="header"]');
-          const titleText = (titleEl?.textContent || text.slice(0, 100)).toLowerCase();
-          const hasApplyTitle = /apply|application|job|contact info|home address|resume|work experience|education|screening|additional questions/i.test(titleText);
+          // Structural detection: contains at least one form control
           const hasFormControls =
-            c.querySelector('input:not([type="hidden"]), textarea, select, [contenteditable="true"]') !== null;
-          const buttons = Array.from(c.querySelectorAll('button, [role="button"]')) as HTMLElement[];
-          const hasNavButton = buttons.some(b => {
-            const bt = (b.textContent || '').trim().toLowerCase();
-            const bAria = (b.getAttribute('aria-label') || '').toLowerCase();
+            c.querySelector(
+              'input:not([type="hidden"]), select, textarea, fieldset, [role="radiogroup"], [role="group"], [contenteditable="true"], .jobs-document-upload, [type="file"]',
+            ) !== null;
+
+          // Structural detection: contains at least one forward or submit button identified by VISIBLE TEXT
+          const buttons = Array.from(
+            c.querySelectorAll('button, [role="button"], input[type="button"], input[type="submit"]'),
+          ) as HTMLElement[];
+          const hasForwardOrSubmitButton = buttons.some(b => {
+            const bt = (b.innerText || b.textContent || '').trim().toLowerCase();
             return (
               bt.includes('next') ||
               bt.includes('review') ||
+              bt.includes('submit application') ||
               bt.includes('submit') ||
-              bt.includes('continue') ||
-              bAria.includes('next') ||
-              bAria.includes('review') ||
-              bAria.includes('submit') ||
-              bAria.includes('continue')
+              bt.includes('continue')
             );
           });
-          const hasPrimaryBtn =
-            c.querySelector(
-              'button.artdeco-button--primary, button[data-easy-apply-next-button], button[aria-label*="next" i], button[aria-label*="submit" i], button[aria-label*="review" i], button[aria-label*="continue" i]',
-            ) !== null;
-          const hasApplyFlowText =
-            /easy apply|apply to |apply for |contact info|home address|resume|review your application|work experience|education/i.test(text);
 
-          if (
-            hasApplyTitle ||
-            hasPrimaryBtn ||
-            hasNavButton ||
-            (isNativeDialog && (hasApplyFlowText || hasFormControls || hasNavButton)) ||
-            (hasFormControls && (hasNavButton || hasApplyFlowText))
-          ) {
+          if (hasFormControls || hasForwardOrSubmitButton) {
             return c;
           }
         }
@@ -8591,7 +8225,8 @@ export default class Page {
           // A native "Save this application?" / "Discard draft?" sheet is not the form.
           if (/save this application|save application|discard draft/i.test(text)) continue;
           const style = window.getComputedStyle(c);
-          if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity || '1') <= 0.05) continue;
+          if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity || '1') <= 0.05)
+            continue;
           const rect = c.getBoundingClientRect();
           if (rect.width < 120 || rect.height < 60) continue;
 
@@ -8606,41 +8241,28 @@ export default class Page {
             return c;
           }
 
-          const isNativeDialog = c.tagName.toLowerCase() === 'dialog';
-          const titleEl = c.querySelector('h1, h2, h3, [id*="header"], [class*="header"]');
-          const titleText = (titleEl?.textContent || text.slice(0, 100)).toLowerCase();
-          const hasApplyTitle = /apply|application|job|contact info|home address|resume|work experience|education|screening|additional questions/i.test(titleText);
+          // Structural detection: contains at least one form control
           const hasFormControls =
-            c.querySelector('input:not([type="hidden"]), textarea, select, [contenteditable="true"]') !== null;
-          const buttons = Array.from(c.querySelectorAll('button, [role="button"]')) as HTMLElement[];
-          const hasNavButton = buttons.some(b => {
-            const bt = (b.textContent || '').trim().toLowerCase();
-            const bAria = (b.getAttribute('aria-label') || '').toLowerCase();
+            c.querySelector(
+              'input:not([type="hidden"]), select, textarea, fieldset, [role="radiogroup"], [role="group"], [contenteditable="true"], .jobs-document-upload, [type="file"]',
+            ) !== null;
+
+          // Structural detection: contains at least one forward or submit button identified by VISIBLE TEXT
+          const buttons = Array.from(
+            c.querySelectorAll('button, [role="button"], input[type="button"], input[type="submit"]'),
+          ) as HTMLElement[];
+          const hasForwardOrSubmitButton = buttons.some(b => {
+            const bt = (b.innerText || b.textContent || '').trim().toLowerCase();
             return (
               bt.includes('next') ||
               bt.includes('review') ||
+              bt.includes('submit application') ||
               bt.includes('submit') ||
-              bt.includes('continue') ||
-              bAria.includes('next') ||
-              bAria.includes('review') ||
-              bAria.includes('submit') ||
-              bAria.includes('continue')
+              bt.includes('continue')
             );
           });
-          const hasPrimaryBtn =
-            c.querySelector(
-              'button.artdeco-button--primary, button[data-easy-apply-next-button], button[aria-label*="next" i], button[aria-label*="submit" i], button[aria-label*="review" i], button[aria-label*="continue" i]',
-            ) !== null;
-          const hasApplyFlowText =
-            /easy apply|apply to |apply for |contact info|home address|resume|review your application|work experience|education/i.test(text);
 
-          if (
-            hasApplyTitle ||
-            hasPrimaryBtn ||
-            hasNavButton ||
-            (isNativeDialog && (hasApplyFlowText || hasFormControls || hasNavButton)) ||
-            (hasFormControls && (hasNavButton || hasApplyFlowText))
-          ) {
+          if (hasFormControls || hasForwardOrSubmitButton) {
             return c;
           }
         }
@@ -9139,43 +8761,28 @@ export default class Page {
             return c;
           }
 
-          const isNativeDialog = c.tagName.toLowerCase() === 'dialog';
-          const titleEl = c.querySelector('h1, h2, h3, [id*="header"], [class*="header"]');
-          const titleText = (titleEl?.textContent || (c.innerText || c.textContent || '').slice(0, 100)).toLowerCase();
-          const hasApplyTitle = /apply|application|job|contact info|home address|resume|work experience|education|screening|additional questions/i.test(titleText);
+          // Structural detection: contains at least one form control
           const hasFormControls =
-            c.querySelector('input:not([type="hidden"]), textarea, select, [contenteditable="true"]') !== null;
-          const buttons = Array.from(c.querySelectorAll('button, [role="button"]')) as HTMLElement[];
-          const hasNavButton = buttons.some(b => {
-            const bt = (b.textContent || '').trim().toLowerCase();
-            const bAria = (b.getAttribute('aria-label') || '').toLowerCase();
+            c.querySelector(
+              'input:not([type="hidden"]), select, textarea, fieldset, [role="radiogroup"], [role="group"], [contenteditable="true"], .jobs-document-upload, [type="file"]',
+            ) !== null;
+
+          // Structural detection: contains at least one forward or submit button identified by VISIBLE TEXT
+          const buttons = Array.from(
+            c.querySelectorAll('button, [role="button"], input[type="button"], input[type="submit"]'),
+          ) as HTMLElement[];
+          const hasForwardOrSubmitButton = buttons.some(b => {
+            const bt = (b.innerText || b.textContent || '').trim().toLowerCase();
             return (
               bt.includes('next') ||
               bt.includes('review') ||
+              bt.includes('submit application') ||
               bt.includes('submit') ||
-              bt.includes('continue') ||
-              bAria.includes('next') ||
-              bAria.includes('review') ||
-              bAria.includes('submit') ||
-              bAria.includes('continue')
+              bt.includes('continue')
             );
           });
-          const hasPrimaryBtn =
-            c.querySelector(
-              'button.artdeco-button--primary, button[data-easy-apply-next-button], button[aria-label*="next" i], button[aria-label*="submit" i], button[aria-label*="review" i], button[aria-label*="continue" i]',
-            ) !== null;
-          const hasApplyFlowText =
-            /easy apply|apply to |apply for |contact info|home address|resume|review your application|work experience|education/i.test(
-              (c.innerText || c.textContent || '').toLowerCase(),
-            );
 
-          if (
-            hasApplyTitle ||
-            hasPrimaryBtn ||
-            hasNavButton ||
-            (isNativeDialog && (hasApplyFlowText || hasFormControls || hasNavButton)) ||
-            (hasFormControls && (hasNavButton || hasApplyFlowText))
-          ) {
+          if (hasFormControls || hasForwardOrSubmitButton) {
             return c;
           }
         }

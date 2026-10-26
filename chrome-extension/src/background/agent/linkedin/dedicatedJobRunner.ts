@@ -4791,7 +4791,9 @@ export class DedicatedJobRunner {
           await new Promise(r => setTimeout(r, 600));
           fields = await page.discoverModalFormFields();
           if (fields.length > 0) {
-            logger.info(`[DedicatedJobRunner] Step 1: form fields mounted after initial wait (${fields.length} found).`);
+            logger.info(
+              `[DedicatedJobRunner] Step 1: form fields mounted after initial wait (${fields.length} found).`,
+            );
             break;
           }
         }
@@ -4888,12 +4890,7 @@ export class DedicatedJobRunner {
                 if (!fillSuccess && typeof page.fillModalFieldDirect === 'function') {
                   fillSuccess = await page.fillModalFieldDirect(f, answer).catch(() => false);
                 }
-                onAuditLog(
-                  'GENERATED',
-                  f.label,
-                  answer,
-                  `${reason} | DOM fill: ${fillSuccess ? 'SUCCESS' : 'FAILED'}`,
-                );
+                onAuditLog('GENERATED', f.label, answer, `${reason} | DOM fill: ${fillSuccess ? 'SUCCESS' : 'FAILED'}`);
                 if (fillSuccess) {
                   await rememberResolvedAnswer(f.label, answer);
                   careerBrain = await careerBrainStore.getCareerBrain();
@@ -5053,8 +5050,7 @@ export class DedicatedJobRunner {
           if (unresolvedReqFields.length > 0 && this.isRunning) {
             // Zero-interaction rule: required leftovers are answered from the profile via
             // the autonomous solver — no side-panel prompt, no timeout, no user action.
-            const activeReqLLM =
-              scopedLLM || (await getJobScopedLLM(jobRunId)) || (await getActiveChatModel(jobRunId));
+            const activeReqLLM = scopedLLM || (await getJobScopedLLM(jobRunId)) || (await getActiveChatModel(jobRunId));
             for (const req of unresolvedReqFields) {
               if (!this.isRunning) break;
               try {
@@ -5777,15 +5773,28 @@ export class DedicatedJobRunner {
           }
         }
 
+        // Grace period: Re-check modal presence at least twice (~1000ms apart) before declaring closed.
+        // Never declare modal closed on a single negative check.
         let modalOpen = await page.isEasyApplyModalOpen();
         if (!modalOpen) {
-          // Double check after a short wait (in case of re-render or transition)
-          await new Promise(r => setTimeout(r, 600));
-          modalOpen = await page.isEasyApplyModalOpen();
+          for (let attempt = 1; attempt <= 2; attempt++) {
+            await new Promise(r => setTimeout(r, 1000));
+            modalOpen = await page.isEasyApplyModalOpen();
+            if (modalOpen) {
+              logger.info(`[DedicatedJobRunner] Modal detected open again on grace-period retry #${attempt}.`);
+              break;
+            }
+          }
         }
         if (!modalOpen) {
+          // Check whether a confirmation or post-apply state exists
           const postCheck = await page.verifyApplicationConfirmation();
           if (postCheck.confirmed) {
+            submitted = true;
+            break;
+          }
+          const subConfirm = await page.verifySubmissionConfirmation(1500).catch(() => ({ confirmed: false }));
+          if (subConfirm.confirmed) {
             submitted = true;
             break;
           }
