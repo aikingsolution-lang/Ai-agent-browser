@@ -1,6 +1,6 @@
 // chrome-extension/src/background/agent/platforms/indeed/indeedResolver.ts
 import { type ICareerBrain, parseLocationParts, isGenericPlaceholderFieldLabel } from '@extension/storage';
-import { isSkillMentionedInText } from '../../linkedin/formQuestionResolver';
+import { isSkillMentionedInText, derivePhoneCountryCode } from '../../linkedin/formQuestionResolver';
 import { alignValueToOptions, matchQuestionSemantically } from '../../intelligence';
 
 export interface IIndeedAnswerResult {
@@ -552,15 +552,13 @@ function computeInitialAnswer(
       q.includes('country of residence') ||
       q.includes('what country')
     ) {
+      const derivedCountry = derivePhoneCountryCode(careerBrain);
       const candidateCountry =
         (careerBrain as any).country ||
+        derivedCountry.countryName ||
         (parts.country && !/karnataka|maharashtra|tamil nadu|delhi|telangana|kerala|uttar pradesh/i.test(parts.country)
           ? parts.country
           : '') ||
-        (rawLoc.toLowerCase().includes('india') ? 'India' : '') ||
-        (careerBrain.phoneNumber?.startsWith('+91') ? 'India' : '') ||
-        (careerBrain.currentLocation?.toLowerCase().includes('india') ? 'India' : '') ||
-        (careerBrain.preferredLocations?.some(l => l.toLowerCase().includes('india')) ? 'India' : '') ||
         'India';
 
       if (options.length > 0) {

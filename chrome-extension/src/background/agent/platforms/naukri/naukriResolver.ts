@@ -3,6 +3,7 @@ import { isSkillMentionedInText } from '../../linkedin/formQuestionResolver';
 import { alignValueToOptions, matchQuestionSemantically } from '../../intelligence';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { HumanMessage, SystemMessage } from '@langchain/core/messages';
+import { isLlmAvailable, tripLlmCircuitBreaker, isCircuitBreakerError } from '../../llmCircuitBreaker';
 
 export interface INaukriAnswerResult {
   value: string;
@@ -790,6 +791,10 @@ CANDIDATE PROFILE (Use ONLY these facts):
 
 FINAL ANSWER ${isDescriptiveQuestion ? '(strictly 1-2 sentences, 150-200 characters max)' : isCheckbox ? '(comma-separated matching options)' : '(strictly one word, one number, or exact option)'}:`;
 
+    if (!isLlmAvailable()) {
+      return { success: false, answer: '' };
+    }
+
     const response = await llm.invoke([new SystemMessage(systemPrompt), new HumanMessage(userPrompt)]);
 
     let raw = response.content.toString().trim();
@@ -876,7 +881,10 @@ FINAL ANSWER ${isDescriptiveQuestion ? '(strictly 1-2 sentences, 150-200 charact
     }
 
     return { success: true, answer: raw };
-  } catch {
+  } catch (err) {
+    if (isCircuitBreakerError(err)) {
+      tripLlmCircuitBreaker(err);
+    }
     return { success: false, answer: '' };
   }
 }

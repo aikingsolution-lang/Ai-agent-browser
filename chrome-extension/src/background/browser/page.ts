@@ -5402,6 +5402,21 @@ export default class Page {
             ) {
               return true;
             }
+            const countryMatch = val
+              .replace(/[^a-zA-Z\s]/g, '')
+              .trim()
+              .toLowerCase();
+            if (countryMatch && countryMatch.length >= 2) {
+              if (
+                optText.includes(countryMatch) ||
+                optVal === countryMatch ||
+                optVal.endsWith(`:${countryMatch}`) ||
+                (countryMatch === 'united states' && /\b(us|usa)\b/i.test(optText)) ||
+                (countryMatch === 'united kingdom' && /\b(uk)\b/i.test(optText))
+              ) {
+                return true;
+              }
+            }
             if (/india/i.test(val) && (optText.includes('india') || optVal === 'in' || optVal.endsWith(':in'))) {
               return true;
             }
@@ -7047,8 +7062,14 @@ export default class Page {
   /**
    * Discovers all interactive form fields within the active Easy Apply modal.
    */
-  async discoverModalFormFields(): Promise<FormFieldDescriptor[]> {
-    const discoverInPage = () => {
+  async discoverModalFormFields(options?: {
+    targetDialingCode?: string;
+    targetCountryName?: string;
+  }): Promise<FormFieldDescriptor[]> {
+    const targetDialingCode = options?.targetDialingCode || '';
+    const targetCountryName = options?.targetCountryName || '';
+
+    const discoverInPage = (dialingCode: string, countryName: string) => {
       function findActiveModal(root: any): HTMLElement | null {
         const candidates = root.querySelectorAll
           ? (Array.from(
@@ -7567,10 +7588,20 @@ export default class Page {
             sel.name + ' ' + sel.id + ' ' + (sel.getAttribute('aria-label') || ''),
           ) || Array.from(sel.options).some(o => /\+\d{1,4}/.test(o.text || ''));
 
-        // If it's a country-code select sitting on Andorra (+376) or similar default, it MUST be discovered
-        // so the candidate's actual dialing code (+91 / India) gets selected!
+        // If it's a country-code select sitting on a default / non-target option, it MUST be discovered
+        // so the candidate's actual dialing code / country gets selected!
+        const targetDigits = (dialingCode || '').replace(/\D/g, '');
+        const targetCountryLo = (countryName || '').toLowerCase().trim();
+        const matchesTarget =
+          Boolean(targetDigits && selectedText.includes(`+${targetDigits}`)) ||
+          Boolean(targetCountryLo && selectedText.toLowerCase().includes(targetCountryLo));
         const isDefaultCountryCode =
-          isCountryCodeSelect && !selectedText.includes('+91') && !selectedText.toLowerCase().includes('india');
+          isCountryCodeSelect &&
+          (!matchesTarget ||
+            (!targetDigits &&
+              !targetCountryLo &&
+              !selectedText.includes('+91') &&
+              !selectedText.toLowerCase().includes('india')));
 
         if (
           !val ||
@@ -7905,7 +7936,7 @@ export default class Page {
 
     if (this._puppeteerPage) {
       try {
-        return await this._puppeteerPage.evaluate(discoverInPage);
+        return await this._puppeteerPage.evaluate(discoverInPage, targetDialingCode, targetCountryName);
       } catch {}
     }
 
@@ -7914,6 +7945,7 @@ export default class Page {
         const results = await chrome.scripting.executeScript({
           target: { tabId: this._tabId },
           func: discoverInPage,
+          args: [targetDialingCode, targetCountryName],
         });
         const res = results?.[0]?.result;
         if (Array.isArray(res)) return res;

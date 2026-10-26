@@ -34,6 +34,12 @@ import type { SupportedPlatform, IJobQueueItem } from '../platforms/types';
 import { Actors, ExecutionState } from '../event/types';
 import { createChatModel } from '../helper';
 import { getActiveChatModel } from '../activeModelHelper';
+import {
+  resetLlmCircuitBreaker,
+  isLlmAvailable,
+  tripLlmCircuitBreaker,
+  isCircuitBreakerError,
+} from '../llmCircuitBreaker';
 import { ChatOpenAI } from '@langchain/openai';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import {
@@ -1240,6 +1246,18 @@ export class DedicatedJobRunner {
     this.activePort = portToSend || null;
     this.activeLiveActivity = onLiveActivity;
 
+    resetLlmCircuitBreaker((msg, type) => {
+      this.notifyStatus(portToSend, `⚠️ ${msg}`, type === 'warn' ? 'info' : 'fail');
+      this.notifyActivity(portToSend, onLiveActivity, {
+        jobId: runId,
+        url: '',
+        title: 'Auto Apply',
+        company: 'Indeed',
+        status: 'running',
+        reason: msg,
+      });
+    });
+
     try {
       this.startKeepAlive();
       this.notify(portToSend, `🌐 Opening dedicated runner tab in current window for Job ID ${jobId}...`);
@@ -1753,6 +1771,18 @@ export class DedicatedJobRunner {
     this.activeRunId = runId;
     this.activePort = portToSend || null;
     this.activeLiveActivity = onLiveActivity;
+
+    resetLlmCircuitBreaker((msg, type) => {
+      this.notifyStatus(portToSend, `⚠️ ${msg}`, type === 'warn' ? 'info' : 'fail');
+      this.notifyActivity(portToSend, onLiveActivity, {
+        jobId: runId,
+        url: '',
+        title: 'Auto Apply',
+        company: 'Indeed',
+        status: 'running',
+        reason: msg,
+      });
+    });
 
     try {
       this.startKeepAlive();
@@ -2370,6 +2400,18 @@ export class DedicatedJobRunner {
     const { portToSend, onLiveActivity } = options;
     const BATCH_CAP = Math.min(options.maxJobs || 40, 40);
 
+    resetLlmCircuitBreaker((msg, type) => {
+      this.notifyStatus(portToSend, `⚠️ ${msg}`, type === 'warn' ? 'info' : 'fail');
+      this.notifyActivity(portToSend, onLiveActivity, {
+        jobId: runId,
+        url: '',
+        title: 'Auto Apply',
+        company: 'Indeed',
+        status: 'running',
+        reason: msg,
+      });
+    });
+
     const targetLocations: string[] = (Array.isArray(location) ? location : [location])
       .map(l => (l || '').trim())
       .filter(Boolean);
@@ -2814,6 +2856,18 @@ export class DedicatedJobRunner {
   }> {
     const { portToSend, onLiveActivity } = options;
     const BATCH_CAP = Math.min(options.maxJobs || 20, 25);
+
+    resetLlmCircuitBreaker((msg, type) => {
+      this.notifyStatus(portToSend, `⚠️ ${msg}`, type === 'warn' ? 'info' : 'fail');
+      this.notifyActivity(portToSend, onLiveActivity, {
+        jobId: runId,
+        url: '',
+        title: 'Auto Apply',
+        company: 'Indeed',
+        status: 'running',
+        reason: msg,
+      });
+    });
 
     // 0. Safety Pause Check: Check if Indeed is already paused for the day
     const pauseCheck = await queueSafetyStore.getPlatformPause('indeed');
@@ -4941,7 +4995,7 @@ export class DedicatedJobRunner {
             try {
               let answer = '';
               let reason = '';
-              if (activeSolverLLM) {
+              if (activeSolverLLM && isLlmAvailable()) {
                 const autoSol = await solveQuestionAutonomousWithLLM(f, careerBrain, activeSolverLLM);
                 if (autoSol.success && autoSol.answer) {
                   answer = autoSol.answer;
@@ -5120,7 +5174,7 @@ export class DedicatedJobRunner {
               try {
                 let answer = '';
                 let reason = '';
-                if (activeReqLLM) {
+                if (activeReqLLM && isLlmAvailable()) {
                   const autoSol = await solveQuestionAutonomousWithLLM(req, careerBrain, activeReqLLM);
                   if (autoSol.success && autoSol.answer) {
                     answer = autoSol.answer;

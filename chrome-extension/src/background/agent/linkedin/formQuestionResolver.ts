@@ -32,10 +32,17 @@ import { createLogger } from '../../log';
 import { userQuestionManager } from './userQuestionManager';
 import { alignValueToOptions, matchQuestionSemantically, validateAnswerForField } from '../intelligence';
 import { getActiveChatModel } from '../activeModelHelper';
+import {
+  isLlmAvailable,
+  tripLlmCircuitBreaker,
+  resetLlmCircuitBreaker,
+  isCircuitBreakerError,
+  LLM_UNAVAILABLE_LIVE_MESSAGE,
+} from '../llmCircuitBreaker';
 
 const logger = createLogger('FormQuestionResolver');
 
-// Circuit breaker for LLM tier: after 3 consecutive network failures, disable LLM tier for the rest of run / backoff
+// Circuit breaker for LLM tier: after 3 consecutive network failures, disable LLM tier
 let consecutiveLlmNetworkFailures = 0;
 let llmDisabledUntilTimestamp = 0;
 
@@ -57,9 +64,13 @@ export function recordLlmNetworkFailure(err?: unknown): void {
 export function recordLlmSuccess(): void {
   consecutiveLlmNetworkFailures = 0;
   llmDisabledUntilTimestamp = 0;
+  resetLlmCircuitBreaker();
 }
 
 export function isLlmTierAvailable(): boolean {
+  if (!isLlmAvailable()) {
+    return false;
+  }
   if (llmDisabledUntilTimestamp > 0 && Date.now() < llmDisabledUntilTimestamp) {
     return false;
   }
@@ -67,15 +78,7 @@ export function isLlmTierAvailable(): boolean {
 }
 
 export function isNetworkError(err: unknown): boolean {
-  const msg = ((err as any)?.message || String(err || '')).toLowerCase();
-  return (
-    msg.includes('connection error') ||
-    msg.includes('failed to fetch') ||
-    msg.includes('network') ||
-    msg.includes('econnrefused') ||
-    msg.includes('etimedout') ||
-    msg.includes('timeout')
-  );
+  return isCircuitBreakerError(err);
 }
 
 export type QuestionResolutionCategory = 'MATCHED' | 'GENERATED' | 'ASKED';
@@ -1485,6 +1488,168 @@ Best regards,
 ${name}`;
 }
 
+export interface DerivedPhoneCountry {
+  dialingCode: string;
+  countryName: string;
+  isoCode: string;
+}
+
+export const COUNTRY_DIALING_DATA: Array<{ prefix: string; country: string; iso: string }> = [
+  // Longer prefixes first so +971 matches before +9
+  { prefix: '+971', country: 'United Arab Emirates', iso: 'AE' },
+  { prefix: '+972', country: 'Israel', iso: 'IL' },
+  { prefix: '+973', country: 'Bahrain', iso: 'BH' },
+  { prefix: '+974', country: 'Qatar', iso: 'QA' },
+  { prefix: '+965', country: 'Kuwait', iso: 'KW' },
+  { prefix: '+966', country: 'Saudi Arabia', iso: 'SA' },
+  { prefix: '+968', country: 'Oman', iso: 'OM' },
+  { prefix: '+977', country: 'Nepal', iso: 'NP' },
+  { prefix: '+880', country: 'Bangladesh', iso: 'BD' },
+  { prefix: '+380', country: 'Ukraine', iso: 'UA' },
+  { prefix: '+420', country: 'Czech Republic', iso: 'CZ' },
+  { prefix: '+353', country: 'Ireland', iso: 'IE' },
+  { prefix: '+351', country: 'Portugal', iso: 'PT' },
+  { prefix: '+358', country: 'Finland', iso: 'FI' },
+  { prefix: '+49', country: 'Germany', iso: 'DE' },
+  { prefix: '+44', country: 'United Kingdom', iso: 'GB' },
+  { prefix: '+91', country: 'India', iso: 'IN' },
+  { prefix: '+61', country: 'Australia', iso: 'AU' },
+  { prefix: '+33', country: 'France', iso: 'FR' },
+  { prefix: '+81', country: 'Japan', iso: 'JP' },
+  { prefix: '+65', country: 'Singapore', iso: 'SG' },
+  { prefix: '+31', country: 'Netherlands', iso: 'NL' },
+  { prefix: '+41', country: 'Switzerland', iso: 'CH' },
+  { prefix: '+46', country: 'Sweden', iso: 'SE' },
+  { prefix: '+34', country: 'Spain', iso: 'ES' },
+  { prefix: '+39', country: 'Italy', iso: 'IT' },
+  { prefix: '+55', country: 'Brazil', iso: 'BR' },
+  { prefix: '+86', country: 'China', iso: 'CN' },
+  { prefix: '+82', country: 'South Korea', iso: 'KR' },
+  { prefix: '+64', country: 'New Zealand', iso: 'NZ' },
+  { prefix: '+27', country: 'South Africa', iso: 'ZA' },
+  { prefix: '+52', country: 'Mexico', iso: 'MX' },
+  { prefix: '+60', country: 'Malaysia', iso: 'MY' },
+  { prefix: '+62', country: 'Indonesia', iso: 'ID' },
+  { prefix: '+63', country: 'Philippines', iso: 'PH' },
+  { prefix: '+84', country: 'Vietnam', iso: 'VN' },
+  { prefix: '+20', country: 'Egypt', iso: 'EG' },
+  { prefix: '+48', country: 'Poland', iso: 'PL' },
+  { prefix: '+47', country: 'Norway', iso: 'NO' },
+  { prefix: '+45', country: 'Denmark', iso: 'DK' },
+  { prefix: '+32', country: 'Belgium', iso: 'BE' },
+  { prefix: '+43', country: 'Austria', iso: 'AT' },
+  { prefix: '+30', country: 'Greece', iso: 'GR' },
+  { prefix: '+36', country: 'Hungary', iso: 'HU' },
+  { prefix: '+40', country: 'Romania', iso: 'RO' },
+  { prefix: '+90', country: 'Turkey', iso: 'TR' },
+  { prefix: '+92', country: 'Pakistan', iso: 'PK' },
+  { prefix: '+94', country: 'Sri Lanka', iso: 'LK' },
+  { prefix: '+1', country: 'United States', iso: 'US' },
+  { prefix: '+7', country: 'Kazakhstan', iso: 'KZ' },
+];
+
+/**
+ * Derives the phone country code and country details strictly following the resolution order:
+ * 1. Candidate's profile (phone number prefix / country)
+ * 2. If undetermined, default to profile's current location country
+ * 3. Only then, default to India (+91)
+ */
+export function derivePhoneCountryCode(careerBrain?: Partial<ICareerBrain>): DerivedPhoneCountry {
+  const phone = (careerBrain?.phoneNumber || '').trim();
+  const profileCountry = (careerBrain as any)?.country || '';
+
+  // 1a. Candidate's phone number prefix (e.g. "+1 ...", "+44 ...", "+91 ...")
+  if (phone.startsWith('+')) {
+    for (const item of COUNTRY_DIALING_DATA) {
+      if (phone.startsWith(item.prefix)) {
+        if (item.prefix === '+1' && /canada/i.test(profileCountry || careerBrain?.currentLocation || '')) {
+          return { dialingCode: '+1', countryName: 'Canada', isoCode: 'CA' };
+        }
+        return { dialingCode: item.prefix, countryName: item.country, isoCode: item.iso };
+      }
+    }
+  }
+
+  // 1b. Candidate's profile country (e.g. careerBrain.country)
+  if (profileCountry) {
+    const pcLower = profileCountry.toLowerCase().trim();
+    const found = COUNTRY_DIALING_DATA.find(
+      c =>
+        c.country.toLowerCase() === pcLower ||
+        c.iso.toLowerCase() === pcLower ||
+        pcLower.includes(c.country.toLowerCase()),
+    );
+    if (found) {
+      return { dialingCode: found.prefix, countryName: found.country, isoCode: found.iso };
+    }
+    if (/usa|united\s*states|u\.s\./i.test(pcLower)) {
+      return { dialingCode: '+1', countryName: 'United States', isoCode: 'US' };
+    }
+    if (/uk|united\s*kingdom|great\s*britain|england|scotland/i.test(pcLower)) {
+      return { dialingCode: '+44', countryName: 'United Kingdom', isoCode: 'GB' };
+    }
+    if (/canada/i.test(pcLower)) {
+      return { dialingCode: '+1', countryName: 'Canada', isoCode: 'CA' };
+    }
+  }
+
+  // 2. Default to profile's current location country
+  const locationStr = (careerBrain?.currentLocation || careerBrain?.preferredLocation || '').trim();
+  if (locationStr) {
+    const locLower = locationStr.toLowerCase();
+    if (
+      /\b(?:usa|us|united states|america|california|new york|texas|washington|seattle|sf|san francisco|austin|chicago|boston)\b/i.test(
+        locLower,
+      )
+    ) {
+      return { dialingCode: '+1', countryName: 'United States', isoCode: 'US' };
+    }
+    if (/\b(?:canada|ontario|toronto|vancouver|montreal|ottawa|alberta)\b/i.test(locLower)) {
+      return { dialingCode: '+1', countryName: 'Canada', isoCode: 'CA' };
+    }
+    if (/\b(?:uk|united kingdom|britain|england|london|scotland|wales|manchester)\b/i.test(locLower)) {
+      return { dialingCode: '+44', countryName: 'United Kingdom', isoCode: 'GB' };
+    }
+    if (/\b(?:germany|deutschland|berlin|munich|münchen|frankfurt|hamburg)\b/i.test(locLower)) {
+      return { dialingCode: '+49', countryName: 'Germany', isoCode: 'DE' };
+    }
+    if (/\b(?:france|paris|lyon)\b/i.test(locLower)) {
+      return { dialingCode: '+33', countryName: 'France', isoCode: 'FR' };
+    }
+    if (/\b(?:australia|sydney|melbourne|brisbane)\b/i.test(locLower)) {
+      return { dialingCode: '+61', countryName: 'Australia', isoCode: 'AU' };
+    }
+    if (/\b(?:singapore)\b/i.test(locLower)) {
+      return { dialingCode: '+65', countryName: 'Singapore', isoCode: 'SG' };
+    }
+    if (/\b(?:uae|united arab emirates|dubai|abu dhabi)\b/i.test(locLower)) {
+      return { dialingCode: '+971', countryName: 'United Arab Emirates', isoCode: 'AE' };
+    }
+    if (/\b(?:ireland|dublin)\b/i.test(locLower)) {
+      return { dialingCode: '+353', countryName: 'Ireland', isoCode: 'IE' };
+    }
+    if (/\b(?:netherlands|amsterdam)\b/i.test(locLower)) {
+      return { dialingCode: '+31', countryName: 'Netherlands', isoCode: 'NL' };
+    }
+    if (
+      /\b(?:india|bengaluru|bangalore|mumbai|delhi|hyderabad|pune|chennai|kolkata|noida|gurgaon|gurugram)\b/i.test(
+        locLower,
+      )
+    ) {
+      return { dialingCode: '+91', countryName: 'India', isoCode: 'IN' };
+    }
+
+    for (const item of COUNTRY_DIALING_DATA) {
+      if (locLower.includes(item.country.toLowerCase())) {
+        return { dialingCode: item.prefix, countryName: item.country, isoCode: item.iso };
+      }
+    }
+  }
+
+  // 3. Only then, default to India (+91)
+  return { dialingCode: '+91', countryName: 'India', isoCode: 'IN' };
+}
+
 /**
  * Fast Rule-Based Matcher across profile, goldenAnswers, customAnswers, and skillExperience.
  * Uses loose question matching to prevent trivial re-asking.
@@ -2003,51 +2168,28 @@ export function matchRuleBased(
     /countrycode/i.test(field.id || '');
 
   if (isPhoneCountryCodeQuestion) {
-    const phone = careerBrain.phoneNumber || '';
-    let dialingCode = '+91';
-    let countryName = 'India';
-
-    if (phone.startsWith('+1')) {
-      dialingCode = '+1';
-      countryName = 'United States';
-    } else if (phone.startsWith('+44')) {
-      dialingCode = '+44';
-      countryName = 'United Kingdom';
-    } else if (phone.startsWith('+61')) {
-      dialingCode = '+61';
-      countryName = 'Australia';
-    } else if (phone.startsWith('+49')) {
-      dialingCode = '+49';
-      countryName = 'Germany';
-    } else if (phone.startsWith('+971')) {
-      dialingCode = '+971';
-      countryName = 'United Arab Emirates';
-    } else if (phone.startsWith('+65')) {
-      dialingCode = '+65';
-      countryName = 'Singapore';
-    } else if (careerBrain.currentLocation || careerBrain.preferredLocation) {
-      const parts = parseLocationParts(careerBrain.currentLocation || careerBrain.preferredLocation);
-      if (/united states|usa|us/i.test(parts.country)) {
-        dialingCode = '+1';
-        countryName = 'United States';
-      } else if (/united kingdom|uk/i.test(parts.country)) {
-        dialingCode = '+44';
-        countryName = 'United Kingdom';
-      }
-    }
+    const derived = derivePhoneCountryCode(careerBrain);
+    const dialingCode = derived.dialingCode;
+    const countryName = derived.countryName;
+    const dialingDigits = dialingCode.replace(/^\+/, '');
 
     if (field.options && field.options.length > 0) {
-      const matchedOpt = field.options.find(
-        o =>
-          o.toLowerCase().includes(dialingCode.toLowerCase()) ||
-          o.toLowerCase().includes(countryName.toLowerCase()) ||
-          (countryName === 'United States' && /\b(us|usa)\b/i.test(o)),
-      );
+      const matchedOpt = field.options.find(o => {
+        const lo = o.toLowerCase();
+        if (/select\s*an?\s*option|choose|^--/i.test(lo)) return false;
+        return (
+          lo.includes(`(+${dialingDigits})`) ||
+          lo.includes(`+${dialingDigits}`) ||
+          lo.includes(countryName.toLowerCase()) ||
+          (countryName === 'United States' && /\b(us|usa)\b/i.test(lo)) ||
+          (countryName === 'United Kingdom' && /\b(uk)\b/i.test(lo))
+        );
+      });
       if (matchedOpt) {
         return {
           matched: true,
           answer: matchedOpt,
-          sourceDetail: `phone country code: matched "${matchedOpt}" from ${dialingCode}`,
+          sourceDetail: `phone country code: matched "${matchedOpt}" from ${dialingCode} (${countryName})`,
         };
       }
     }
@@ -3135,6 +3277,10 @@ export async function solveQuestionAutonomousWithLLM(
     return { success: false, reason: 'Field has no real question text (unresolvable generic or empty label)' };
   }
 
+  if (!isLlmAvailable() || !isLlmTierAvailable()) {
+    return { success: false, reason: 'AI service is unavailable (circuit breaker active for this run)' };
+  }
+
   let activeLLM = llm;
   if (!activeLLM) {
     try {
@@ -3143,7 +3289,7 @@ export async function solveQuestionAutonomousWithLLM(
       logger.warning('[FormQuestionResolver] Failed to get active chat model:', err);
     }
   }
-  if (!activeLLM) {
+  if (!activeLLM || !isLlmAvailable()) {
     return { success: false, reason: 'No active LLM available' };
   }
 
@@ -3423,6 +3569,9 @@ OUTPUT STRICTLY VALID JSON ONLY:
       }
     }
   } catch (err) {
+    if (isCircuitBreakerError(err)) {
+      tripLlmCircuitBreaker(err);
+    }
     if (isNetworkError(err)) {
       recordLlmNetworkFailure(err);
     } else {
@@ -3862,6 +4011,9 @@ export async function resolveModalFieldWithAudit(
         headline = await generateProfileHeadline(careerBrain, llm);
         if (headline) headlineSource = 'LLM-authored headline from profile + resume';
       } catch (err) {
+        if (isCircuitBreakerError(err)) {
+          tripLlmCircuitBreaker(err);
+        }
         if (isNetworkError(err)) {
           recordLlmNetworkFailure(err);
         } else {
@@ -3901,6 +4053,9 @@ export async function resolveModalFieldWithAudit(
         summary = await generateProfileSummaryAnswer(careerBrain, llm);
         if (summary) summarySource = 'LLM-authored professional summary from resume';
       } catch (err) {
+        if (isCircuitBreakerError(err)) {
+          tripLlmCircuitBreaker(err);
+        }
         if (isNetworkError(err)) {
           recordLlmNetworkFailure(err);
         } else {

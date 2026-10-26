@@ -41,6 +41,7 @@ import { stepDetector } from './stepDetector';
 import type { LinkedInStepNavigator } from './stepNavigator';
 import { stepNavigator } from './stepNavigator';
 import { evaluateJobFit, sanitizeJobDescription, MIN_FIT_SCORE_THRESHOLD } from './fitScorer';
+import { derivePhoneCountryCode } from './formQuestionResolver';
 import type { LinkedInFormFiller } from './formFiller';
 import { formFiller } from './formFiller';
 import type { LinkedInVisionFallback } from './visionFallback';
@@ -847,8 +848,9 @@ export class ApplicationEngine {
 
         // Phone country code
         if (selText.includes('country') || selText.includes('code') || sel.name.includes('country')) {
-          setReactSelect(sel, 'India');
-          if (sel.selectedIndex <= 0) setReactSelect(sel, '+91');
+          const derived = derivePhoneCountryCode(candidateData as any);
+          setReactSelect(sel, derived.countryName);
+          if (sel.selectedIndex <= 0) setReactSelect(sel, derived.dialingCode);
         } else if (selText.includes('authorized') || selText.includes('permit')) {
           setReactSelect(sel, 'Yes');
         } else if (selText.includes('sponsorship') || selText.includes('visa')) {

@@ -14,6 +14,12 @@ import { resolveIndeedQuestion, type IIndeedAnswerResult } from './indeedResolve
 import { solveQuestionAutonomousWithLLM } from '../../linkedin/formQuestionResolver';
 import { getActiveChatModel } from '../../activeModelHelper';
 import { validateAnswerForField } from '../../intelligence';
+import {
+  isLlmAvailable,
+  tripLlmCircuitBreaker,
+  isCircuitBreakerError,
+  resetLlmCircuitBreaker,
+} from '../../llmCircuitBreaker';
 
 const logger = createLogger('IndeedAdapter');
 
@@ -1351,6 +1357,18 @@ export class IndeedAdapter implements IPlatformAdapter {
     if (context.signal?.aborted) {
       return { status: 'skipped', reason: 'Stopped by user' };
     }
+
+    // Reset circuit breaker at start of job run
+    resetLlmCircuitBreaker((msg, type) => {
+      context.onLiveActivity?.({
+        jobId: job.jobId,
+        url: job.url || '',
+        title: job.title || '',
+        company: job.company || '',
+        status: 'running',
+        reason: msg,
+      });
+    });
 
     const page = context.page;
     const puppeteerPage = page?.puppeteerPage;
@@ -2832,27 +2850,45 @@ export class IndeedAdapter implements IPlatformAdapter {
         !isDirectConsentField;
 
       if (shouldUseLLM) {
-        try {
+        if (!isLlmAvailable()) {
           logger.info(
-            `[IndeedAdapter] 🧠 Asking LLM to resolve field: "${f.labelText}" (${f.fieldType}, ${f.options.length} options)`,
+            `[IndeedAdapter] LLM unavailable due to circuit breaker. Skipping LLM resolution for "${f.labelText}"`,
           );
-          const llmFieldType =
-            f.fieldType === 'select'
-              ? 'dropdown'
-              : ['text', 'number', 'radio', 'checkbox'].includes(f.fieldType)
-                ? (f.fieldType as 'text' | 'number' | 'radio' | 'checkbox')
-                : 'text';
-          const llmRes = await solveQuestionAutonomousWithLLM(
-            { label: f.labelText, fieldType: llmFieldType, options: f.options },
-            context.careerBrain,
-            context.scopedLLM,
-          );
-          if (llmRes.success && llmRes.answer) {
-            answer = { value: llmRes.answer, confidence: 0.99, source: 'profile' };
-            logger.info(`[IndeedAdapter] ✅ LLM resolved "${f.labelText}" -> "${answer.value}"`);
+        } else {
+          try {
+            logger.info(
+              `[IndeedAdapter] 🧠 Asking LLM to resolve field: "${f.labelText}" (${f.fieldType}, ${f.options.length} options)`,
+            );
+            const llmFieldType =
+              f.fieldType === 'select'
+                ? 'dropdown'
+                : ['text', 'number', 'radio', 'checkbox'].includes(f.fieldType)
+                  ? (f.fieldType as 'text' | 'number' | 'radio' | 'checkbox')
+                  : 'text';
+            const llmRes = await solveQuestionAutonomousWithLLM(
+              { label: f.labelText, fieldType: llmFieldType, options: f.options },
+              context.careerBrain,
+              context.scopedLLM,
+            );
+            if (llmRes.success && llmRes.answer) {
+              answer = { value: llmRes.answer, confidence: 0.99, source: 'profile' };
+              logger.info(`[IndeedAdapter] ✅ LLM resolved "${f.labelText}" -> "${answer.value}"`);
+            }
+          } catch (err) {
+            if (isCircuitBreakerError(err)) {
+              tripLlmCircuitBreaker(err, (msg, type) => {
+                context.onLiveActivity?.({
+                  jobId: 'indeed_llm',
+                  url: '',
+                  title: 'AI Service',
+                  company: '',
+                  status: 'running',
+                  reason: msg,
+                });
+              });
+            }
+            logger.warning(`[IndeedAdapter] LLM field resolution fallback error, using rule answer:`, err);
           }
-        } catch (err) {
-          logger.warning(`[IndeedAdapter] LLM field resolution fallback error, using rule answer:`, err);
         }
       }
 
