@@ -4795,7 +4795,7 @@ export class DedicatedJobRunner {
             const res = await resolveModalFieldWithAudit(page, field, careerBrain, scopedLLM, onAuditLog, {
               skipAskUser: true,
             });
-            if (res.needsUserAnswer) {
+            if (res.needsUserAnswer || !res.success) {
               const isOptionalField =
                 field.required === false ||
                 /\boptional\b/i.test(field.label) ||
@@ -4807,8 +4807,6 @@ export class DedicatedJobRunner {
               } else {
                 logger.info(`[DedicatedJobRunner] Leaving optional field "${field.label}" unanswered (no prompt).`);
               }
-            } else if (!res.success) {
-              logger.warning(`[DedicatedJobRunner] Field "${field.label}" was not filled successfully in DOM.`);
             }
           } catch (err: any) {
             const errStr = String(err?.message || err);
@@ -5005,12 +5003,8 @@ export class DedicatedJobRunner {
               const res = await resolveModalFieldWithAudit(page, reqField, careerBrain, scopedLLM, onAuditLog, {
                 skipAskUser: true,
               });
-              if (res.needsUserAnswer) {
+              if (res.needsUserAnswer || !res.success) {
                 unresolvedReqFields.push(reqField);
-              } else if (!res.success) {
-                logger.warning(
-                  `[DedicatedJobRunner] Required field "${reqField.label}" was not filled successfully in DOM.`,
-                );
               }
             } catch (err: any) {
               unresolvedReqFields.push(reqField);
@@ -5511,13 +5505,38 @@ export class DedicatedJobRunner {
                 }
               }
             }
-            if (blockedValidation.hasErrors && scopedLLM) {
+            const activeHealLLM =
+              scopedLLM || (await getJobScopedLLM(jobRunId)) || (await getActiveChatModel(jobRunId));
+            if (blockedValidation.hasErrors) {
+              if (portToSend) {
+                const errMsgs = [
+                  ...blockedValidation.errors.map((e: any) => `${e.fieldLabel}: ${e.errorText}`),
+                  ...blockedValidation.emptyRequiredFields.map((f: any) => `${f.label} (unanswered)`),
+                ];
+                if (errMsgs.length > 0) {
+                  portToSend.postMessage({
+                    type: 'LOG',
+                    payload: {
+                      text: `⚠️ Step blocked by LinkedIn validation: ${errMsgs.join('; ').slice(0, 160)}... Auto-healing...`,
+                    },
+                  });
+                }
+              }
               for (const invF of blockedValidation.invalidFieldsWithErrors) {
                 try {
-                  const healed = await solveValidationErrorWithLLM(invF, careerBrain, scopedLLM);
-                  if (healed.success && healed.answer !== undefined) {
-                    const adapted = adaptAnswerToFieldFormat(healed.answer, invF as any);
-                    const fillVal = adapted.valid ? adapted.value : healed.answer;
+                  let answer: string | undefined;
+                  if (activeHealLLM) {
+                    const healed = await solveValidationErrorWithLLM(invF, careerBrain, activeHealLLM);
+                    if (healed.success && healed.answer !== undefined) {
+                      answer = healed.answer;
+                    }
+                  }
+                  if (!answer) {
+                    answer = generateAutonomousFallbackAnswer(invF, careerBrain);
+                  }
+                  if (answer !== undefined) {
+                    const adapted = adaptAnswerToFieldFormat(answer, invF as any);
+                    const fillVal = adapted.valid ? adapted.value : answer;
                     const fillSuccess = await page.fillModalFieldDirect(invF, fillVal);
                     onAuditLog(
                       'GENERATED',
@@ -5532,10 +5551,21 @@ export class DedicatedJobRunner {
               }
               for (const reqF of blockedValidation.emptyRequiredFields) {
                 try {
-                  const autoSol = await solveQuestionAutonomousWithLLM(reqF, careerBrain, scopedLLM);
-                  if (autoSol.success && autoSol.answer) {
-                    const adapted = adaptAnswerToFieldFormat(autoSol.answer, reqF);
-                    const fillVal = adapted.valid ? adapted.value : autoSol.answer;
+                  let answer: string | undefined;
+                  if (reqF.fieldType === 'checkbox') {
+                    answer = 'Yes';
+                  } else if (activeHealLLM) {
+                    const autoSol = await solveQuestionAutonomousWithLLM(reqF, careerBrain, activeHealLLM);
+                    if (autoSol.success && autoSol.answer) {
+                      answer = autoSol.answer;
+                    }
+                  }
+                  if (!answer) {
+                    answer = generateAutonomousFallbackAnswer(reqF, careerBrain);
+                  }
+                  if (answer !== undefined) {
+                    const adapted = adaptAnswerToFieldFormat(answer, reqF);
+                    const fillVal = adapted.valid ? adapted.value : answer;
                     const fillSuccess = await page.fillModalFieldDirect(reqF, fillVal);
                     onAuditLog(
                       'GENERATED',

@@ -2179,10 +2179,18 @@ export default class Page {
         ) {
           return true;
         }
-        // Exclude left-pane search results list items
-        if (el.closest('.jobs-search-results-list, .scaffold-layout__list, ul.scaffold-layout__list-container')) {
+        // Exclude left-pane search results list items and job cards
+        if (
+          el.closest(
+            '.jobs-search-results-list, .scaffold-layout__list, ul.scaffold-layout__list-container, [data-view-name*="job-card"], [componentkey*="job-card"], .job-card-container, .jobs-search-results__list-item',
+          )
+        ) {
           return true;
         }
+        const compKey = el.getAttribute('componentkey') || '';
+        if (compKey.includes('job-card')) return true;
+        const viewName = el.getAttribute('data-view-name') || '';
+        if (viewName.includes('job-card')) return true;
         if (el.classList.contains('artdeco-pill')) return true;
         const text = (el.innerText || el.textContent || '').trim().toLowerCase();
         const aria = (el.getAttribute('aria-label') || '').trim().toLowerCase();
@@ -2197,6 +2205,10 @@ export default class Page {
         if (!isVisible(btn)) return { ok: false, why: 'not visible' };
         const text = (btn.innerText || btn.textContent || '').trim().toLowerCase();
         const aria = (btn.getAttribute('aria-label') || '').trim().toLowerCase();
+        // A true Easy Apply action button has concise text. Large text indicates a card or container.
+        if (text.length > 50 && !btn.classList.contains('jobs-apply-button')) {
+          return { ok: false, why: 'text too long for button (job card or container)' };
+        }
         if (
           btn.classList.contains('jobs-apply-button') ||
           /\beasy\s*apply\b/i.test(text) ||
@@ -2319,8 +2331,8 @@ export default class Page {
         }
       }
 
-      // 2. Global fallback across document
-      if (!easyApplyBtn) {
+      // 2. Global fallback across document ONLY when no details pane exists (e.g. standalone /jobs/view/ page)
+      if (!easyApplyBtn && !detailsContainer) {
         for (const sel of candidateSelectors) {
           const matches = Array.from(document.querySelectorAll(sel)) as HTMLElement[];
           let found: HTMLElement | null = null;
@@ -2338,24 +2350,24 @@ export default class Page {
           }
           pushScan('global', sel, matches);
         }
-      }
 
-      // 3. Generic button/a search globally
-      if (!easyApplyBtn) {
-        const allBtns = Array.from(document.querySelectorAll('button, [role="button"], a')) as HTMLElement[];
-        let found: HTMLElement | null = null;
-        for (const btn of allBtns) {
-          if (easyApplyVerdict(btn).ok) {
-            found = btn;
-            break;
+        // 3. Generic button/a search globally (standalone only)
+        if (!easyApplyBtn) {
+          const allBtns = Array.from(document.querySelectorAll('button, [role="button"], a')) as HTMLElement[];
+          let found: HTMLElement | null = null;
+          for (const btn of allBtns) {
+            if (easyApplyVerdict(btn).ok) {
+              found = btn;
+              break;
+            }
           }
-        }
-        if (found) {
-          easyApplyBtn = found;
-          matchedSelector = 'generic (button,[role="button"],a)';
-          matchedPhase = 'global';
-        } else {
-          pushScan('global', 'generic (button,[role="button"],a)', allBtns);
+          if (found) {
+            easyApplyBtn = found;
+            matchedSelector = 'generic (button,[role="button"],a)';
+            matchedPhase = 'global';
+          } else {
+            pushScan('global', 'generic (button,[role="button"],a)', allBtns);
+          }
         }
       }
 
@@ -2960,7 +2972,7 @@ export default class Page {
           const style = window.getComputedStyle(c);
           if (style.display === 'none' || style.visibility === 'hidden') continue;
           const rect = c.getBoundingClientRect();
-          if (rect.width < 200 || rect.height < 100) continue;
+          if (rect.width < 120 || rect.height < 60) continue;
 
           if (
             c.classList.contains('jobs-easy-apply-modal') ||
@@ -4177,7 +4189,7 @@ export default class Page {
           const style = window.getComputedStyle(c);
           if (style.display === 'none' || style.visibility === 'hidden') continue;
           const rect = c.getBoundingClientRect();
-          if (rect.width < 200 || rect.height < 100) continue;
+          if (rect.width < 120 || rect.height < 60) continue;
 
           if (
             c.classList.contains('jobs-easy-apply-modal') ||
@@ -5492,7 +5504,7 @@ export default class Page {
 
       // 2. Extract Title (broadened selectors for search pane, collections & standalone view)
       const titleEl = document.querySelector(
-        'h1.job-details-jobs-unified-top-card__job-title, h2.job-details-jobs-unified-top-card__job-title, .job-details-jobs-unified-top-card__job-title a, .jobs-unified-top-card__job-title, .jobs-search__job-details--container h1, .jobs-search__job-details--container h2, .jobs-details__main-content h1, .jobs-details__main-content h2, h1.t-24, h1.top-card-layout__title, .job-view-layout h1, .job-view-layout h2, [data-job-id].jobs-search-results-list__list-item--active .job-card-list__title, [data-job-id].jobs-search-results-list__list-item--active a[href*="/jobs/view/"]',
+        '[data-view-name="job-details"] h1, [data-view-name="job-details"] h2, .scaffold-layout__detail h1, .scaffold-layout__detail h2, [data-view-name="job-details-top-card"] h1, h1.job-details-jobs-unified-top-card__job-title, h2.job-details-jobs-unified-top-card__job-title, .job-details-jobs-unified-top-card__job-title a, .jobs-unified-top-card__job-title, .jobs-search__job-details--container h1, .jobs-search__job-details--container h2, .jobs-details__main-content h1, .jobs-details__main-content h2, h1.t-24, h1.top-card-layout__title, .job-view-layout h1, .job-view-layout h2, [data-job-id].jobs-search-results-list__list-item--active .job-card-list__title, [data-job-id].jobs-search-results-list__list-item--active a[href*="/jobs/view/"]',
       );
       let title = cleanLinkedInJobTitle(cleanElementText(titleEl));
       if (isJunkJobTitle(title)) title = '';
@@ -6405,7 +6417,7 @@ export default class Page {
           const style = window.getComputedStyle(c);
           if (style.display === 'none' || style.visibility === 'hidden') continue;
           const rect = c.getBoundingClientRect();
-          if (rect.width < 200 || rect.height < 100) continue;
+          if (rect.width < 120 || rect.height < 60) continue;
 
           if (
             c.classList.contains('jobs-easy-apply-modal') ||
@@ -7615,7 +7627,7 @@ export default class Page {
           const style = window.getComputedStyle(c);
           if (style.display === 'none' || style.visibility === 'hidden') continue;
           const rect = c.getBoundingClientRect();
-          if (rect.width < 200 || rect.height < 100) continue;
+          if (rect.width < 120 || rect.height < 60) continue;
           return c;
         }
 
@@ -8453,7 +8465,7 @@ export default class Page {
           const style = window.getComputedStyle(c);
           if (style.display === 'none' || style.visibility === 'hidden') continue;
           const rect = c.getBoundingClientRect();
-          if (rect.width < 200 || rect.height < 100) continue;
+          if (rect.width < 120 || rect.height < 60) continue;
 
           if (
             c.classList.contains('jobs-easy-apply-modal') ||
