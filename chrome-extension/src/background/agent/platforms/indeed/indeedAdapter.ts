@@ -13,6 +13,7 @@ import { indeedPacing, INDEED_PACING_CONFIG, type IndeedPacing } from './indeedP
 import { resolveIndeedQuestion, type IIndeedAnswerResult } from './indeedResolver';
 import { solveQuestionAutonomousWithLLM } from '../../linkedin/formQuestionResolver';
 import { getActiveChatModel } from '../../activeModelHelper';
+import { validateAnswerForField } from '../../intelligence';
 
 const logger = createLogger('IndeedAdapter');
 
@@ -2943,11 +2944,26 @@ export class IndeedAdapter implements IPlatformAdapter {
             if (partial) {
               answer.value = partial;
             } else {
-              answer.value = validOpts[0];
+              answer.value = '';
             }
           }
         }
       }
+
+      // Answer Guard: Validate answer format before injecting into DOM
+      const guardResult = validateAnswerForField(answer.value, {
+        label: f.labelText,
+        fieldType: f.fieldType as any,
+        options: f.options,
+      });
+
+      if (!guardResult.valid || !guardResult.value) {
+        logger.warning(
+          `[IndeedAdapter] Answer guard rejected "${answer.value}" for field "${f.labelText}": ${guardResult.reason}. Leaving unfilled.`,
+        );
+        continue;
+      }
+      answer.value = guardResult.value;
 
       // Log Live Activity update
       context.onLiveActivity?.({

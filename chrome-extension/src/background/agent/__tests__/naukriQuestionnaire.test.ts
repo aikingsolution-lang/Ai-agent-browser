@@ -13,6 +13,7 @@ describe('Naukri Questionnaire & Drawer Resolvers', () => {
     expectedCTC: '1200000',
     noticePeriod: '15 Days',
     yearsOfExperience: 3,
+    skills: ['AWS Devops', 'React', 'Node.js'],
     currentLocation: 'Bengaluru, Karnataka, India',
     preferredLocations: ['Bengaluru, Karnataka, India', 'Remote'],
   };

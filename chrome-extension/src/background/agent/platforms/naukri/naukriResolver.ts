@@ -676,22 +676,8 @@ export function resolveNaukriQuestion(
     }
   }
 
-  // 14. Default fallback
-  const fallbackVal =
-    fieldType === 'number'
-      ? '0'
-      : fieldType === 'text_long'
-        ? 'Experienced professional dedicated to delivering quality results and continuous learning.'
-        : 'Yes';
-  if (options.length > 0) {
-    const aligned = alignValueToOptions(fallbackVal, options, questionText);
-    return {
-      value: aligned ? aligned.matchedOption : options[0],
-      confidence: 0.5,
-      source: 'default',
-    };
-  }
-  return { value: fallbackVal, confidence: 0.5, source: 'default' };
+  // 14. Unresolved fallback: Never invent defaults without profile evidence
+  return { value: '', confidence: 0, source: 'default' };
 }
 
 /**

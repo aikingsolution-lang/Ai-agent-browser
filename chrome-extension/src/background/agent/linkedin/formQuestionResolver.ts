@@ -30,7 +30,7 @@ import {
 import { isValidSkillName } from '@extension/shared';
 import { createLogger } from '../../log';
 import { userQuestionManager } from './userQuestionManager';
-import { alignValueToOptions, matchQuestionSemantically } from '../intelligence';
+import { alignValueToOptions, matchQuestionSemantically, validateAnswerForField } from '../intelligence';
 import { getActiveChatModel } from '../activeModelHelper';
 
 const logger = createLogger('FormQuestionResolver');
@@ -1036,6 +1036,11 @@ export function adaptAnswerToFieldFormat(
     return { valid: false, value: '', wasConverted: false };
   }
 
+  const guarded = validateAnswerForField(rawAnswer, field);
+  if (!guarded.valid) {
+    return { valid: false, value: '', wasConverted: false };
+  }
+
   const labelLower = (field.label || '').toLowerCase();
   const hintLower = `${field.hintText || ''} ${field.placeholder || ''}`.toLowerCase();
   const combinedContext = `${labelLower} ${hintLower}`;
@@ -1056,7 +1061,7 @@ export function adaptAnswerToFieldFormat(
     if (matched) {
       return { valid: true, value: matched, wasConverted: matched !== answer };
     }
-    return { valid: false, value: answer, wasConverted: false };
+    return { valid: false, value: '', wasConverted: false };
   }
 
   if (isYearField) {
@@ -1064,7 +1069,7 @@ export function adaptAnswerToFieldFormat(
     if (matched) {
       return { valid: true, value: matched, wasConverted: matched !== answer };
     }
-    return { valid: false, value: answer, wasConverted: false };
+    return { valid: false, value: '', wasConverted: false };
   }
 
   // 0b. General Dropdown: Must match one of the available options
@@ -1082,7 +1087,7 @@ export function adaptAnswerToFieldFormat(
       if (partialMatch) {
         return { valid: true, value: partialMatch, wasConverted: true };
       }
-      return { valid: false, value: answer, wasConverted: false };
+      return { valid: false, value: '', wasConverted: false };
     }
     return { valid: true, value: answer, wasConverted: false };
   }
@@ -1099,7 +1104,7 @@ export function adaptAnswerToFieldFormat(
         const noOpt = field.options.find(o => /^no$/i.test(o.trim())) || 'No';
         return { valid: true, value: noOpt, wasConverted: noOpt !== answer };
       }
-      return { valid: false, value: answer, wasConverted: false };
+      return { valid: false, value: '', wasConverted: false };
     }
     return { valid: true, value: answer, wasConverted: false };
   }
@@ -1360,7 +1365,7 @@ export function adaptAnswerToFieldFormat(
 
     // If numeric field but could not parse number (e.g. "Confidential", "Market standard")
     if (isNumericField && !/^\d+$/.test(answer)) {
-      return { valid: false, value: answer, wasConverted: false };
+      return { valid: false, value: '', wasConverted: false };
     }
   }
 
@@ -1401,7 +1406,7 @@ export function adaptAnswerToFieldFormat(
     }
     // If not convertible to numeric
     if (!/^\d+(?:\.\d+)?$/.test(answer)) {
-      return { valid: false, value: answer, wasConverted: false };
+      return { valid: false, value: '', wasConverted: false };
     }
   }
 
@@ -1418,7 +1423,7 @@ export function adaptAnswerToFieldFormat(
       logger.warning(
         `[FormQuestionResolver] Answer "${answer}" contains non-numeric characters for numeric field "${field.label}". Rejecting to prevent DOM validation error.`,
       );
-      return { valid: false, value: answer, wasConverted: false };
+      return { valid: false, value: '', wasConverted: false };
     }
     return { valid: true, value: cleanDigits, wasConverted: cleanDigits !== answer };
   }
@@ -1443,7 +1448,11 @@ export function adaptAnswerToFieldFormat(
     return { valid: true, value: cleanUrl, wasConverted: cleanUrl !== answer };
   }
 
-  return { valid: true, value: answer, wasConverted: false };
+  return {
+    valid: true,
+    value: guarded.value || answer,
+    wasConverted: (guarded.value || answer) !== answer || Boolean(guarded.wasConverted),
+  };
 }
 
 /**
@@ -1603,9 +1612,12 @@ export function matchRuleBased(
 
     // Zero-default rule when candidate has no LLM/ML in profile or resume
     const adapted = adaptAnswerToFieldFormat('0', field);
+    if (!adapted.valid) {
+      return { matched: false };
+    }
     return {
       matched: true,
-      answer: adapted.valid ? adapted.value : '0',
+      answer: adapted.value,
       sourceDetail: 'profile: no evidence for LLM/ML skills in profile (0 yrs default)',
     };
   }
@@ -1864,9 +1876,12 @@ export function matchRuleBased(
     const isCurrent = dates.isCurrentRole ?? true;
     const ans = isCurrent ? 'Yes' : 'No';
     const adapted = adaptAnswerToFieldFormat(ans, field);
+    if (!adapted.valid) {
+      return { matched: false };
+    }
     return {
       matched: true,
-      answer: adapted.valid ? adapted.value : ans,
+      answer: adapted.value,
       sourceDetail: `work history: ${isCurrent ? 'currently working here' : 'past role'}`,
     };
   }
@@ -1967,9 +1982,12 @@ export function matchRuleBased(
         const wantsYes = asksFresher ? !hasWork : hasWork;
         const ans = wantsYes ? 'Yes' : 'No';
         const adapted = adaptAnswerToFieldFormat(ans, field);
+        if (!adapted.valid) {
+          return { matched: false };
+        }
         return {
           matched: true,
-          answer: adapted.valid ? adapted.value : ans,
+          answer: adapted.value,
           sourceDetail: `profile: ${hasWork ? 'has' : 'no'} work experience (${roles.length} role(s), ${yoe} yrs)`,
         };
       }
@@ -2609,9 +2627,12 @@ export function matchRuleBased(
         careerBrain.hasWorkExperience === false ? false : roles.length > 0 ? roles.some(r => r.isCurrent) : yoe > 0;
       const ans = isEmployed ? 'Yes' : 'No';
       const adapted = adaptAnswerToFieldFormat(ans, field);
+      if (!adapted.valid) {
+        return { matched: false };
+      }
       return {
         matched: true,
-        answer: adapted.valid ? adapted.value : ans,
+        answer: adapted.value,
         sourceDetail: `profile: ${isEmployed ? 'currently employed' : 'not currently employed'} (${roles.length} role(s), ${yoe} yrs)`,
       };
     }
@@ -3673,9 +3694,11 @@ export function generateAutonomousFallbackAnswer(field: FormFieldDescriptor, car
   if (field.fieldType === 'number' || /scale\s*of\s*1[–-]5|rate.*1.*5/i.test(labelLower)) {
     if (/scale\s*of\s*1[–-]5|rate.*1.*5/i.test(labelLower)) return '5';
     if (/scale\s*of\s*1[–-]10|rate.*1.*10/i.test(labelLower)) return '10';
-    if (/notice|start/i.test(labelLower)) return '15';
-    if (/experience|years/i.test(labelLower)) return String(careerBrain.yearsOfExperience ?? 1);
-    return '1';
+    if (/notice|start/i.test(labelLower) && careerBrain.noticePeriod) return '15';
+    if (/experience|years/i.test(labelLower) && careerBrain.yearsOfExperience !== undefined) {
+      return String(careerBrain.yearsOfExperience);
+    }
+    return '';
   }
   if (/official\s*last\s*working\s*day|notice.*last\s*day|last\s*working\s*day/i.test(labelLower)) {
     const futureDate = new Date(Date.now() + 15 * 86400000);
@@ -3753,17 +3776,22 @@ export async function resolveModalFieldWithAudit(
 
   // Helper to fill field with intelligent option alignment for dropdown/radio
   async function fillWithOptionFallback(val: string): Promise<boolean> {
-    let success = await page.fillModalFieldDirect(field, val);
+    const guarded = validateAnswerForField(val, field);
+    if (!guarded.valid || !guarded.value) {
+      logger.warning(`[FormQuestionResolver] Answer guard rejected "${val}" for "${field.label}": ${guarded.reason}`);
+      return false;
+    }
+    let success = await page.fillModalFieldDirect(field, guarded.value);
     if (
       !success &&
       (field.fieldType === 'dropdown' || field.fieldType === 'radio') &&
       field.options &&
       field.options.length > 0
     ) {
-      const aligned = alignValueToOptions(val, field.options, field.label);
-      if (aligned && aligned.matchedOption !== val) {
+      const aligned = alignValueToOptions(guarded.value, field.options, field.label);
+      if (aligned && aligned.matchedOption !== guarded.value) {
         logger.info(
-          `[FormQuestionResolver] Smart-aligning option for "${field.label}": "${val}" -> "${aligned.matchedOption}" (${aligned.reason}, conf: ${aligned.confidence})`,
+          `[FormQuestionResolver] Smart-aligning option for "${field.label}": "${guarded.value}" -> "${aligned.matchedOption}" (${aligned.reason}, conf: ${aligned.confidence})`,
         );
         success = await page.fillModalFieldDirect(field, aligned.matchedOption);
       }
@@ -4235,7 +4263,7 @@ export async function resolveModalFieldWithAudit(
   return {
     success: false,
     category: 'GENERATED',
-    needsUserAnswer: false,
+    needsUserAnswer: true,
   };
 }
 

@@ -448,7 +448,7 @@ function computeInitialAnswer(
       }
       const fallbackZero =
         options.length > 0 ? options.find(o => /\b0\b|none|never|less than/i.test(o)) || options[0] : '0';
-      return { value: fallbackZero, confidence: 0.95, source: 'profile' };
+      return { value: fallbackZero, confidence: 0.2, source: 'default' };
     }
 
     if (careerBrain.skillExperience) {
@@ -477,10 +477,11 @@ function computeInitialAnswer(
     }
 
     // Skill not found in skillExperience or skills:
-    // Do NOT invent experience! Return 0 with high confidence so zero-default is preserved.
+    // Do NOT invent experience! Return 0 with low confidence (0.2) so zero-default is preserved
+    // and semantic golden answer matching can still resolve if present.
     const fallbackZero =
       options.length > 0 ? options.find(o => /\b0\b|none|never|less than/i.test(o)) || options[0] : '0';
-    return { value: fallbackZero, confidence: 0.9, source: 'profile' };
+    return { value: fallbackZero, confidence: 0.2, source: 'default' };
   }
 
   // 7. Names

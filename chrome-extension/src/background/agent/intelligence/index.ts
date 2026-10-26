@@ -5,3 +5,4 @@ export * from './semanticQuestionMatcher';
 export * from './batchQuestionSolver';
 export * from './formErrorInspector';
 export * from './deepRelevanceMatcher';
+export * from './answerGuard';

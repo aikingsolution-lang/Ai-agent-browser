@@ -9,7 +9,7 @@ import type {
 } from '../types';
 import { NAUKRI_SELECTORS } from './selectors';
 import { resolveNaukriQuestion, resolveNaukriWithLLM } from './naukriResolver';
-import { inspectAndHealFormErrors } from '../../intelligence';
+import { inspectAndHealFormErrors, validateAnswerForField } from '../../intelligence';
 import { sanitizeRoleSearchQuery } from '@extension/storage';
 import { createLogger } from '@src/background/log';
 import { solveQuestionAutonomousWithLLM } from '../../linkedin/formQuestionResolver';
@@ -1348,24 +1348,26 @@ export class NaukriAdapter implements IPlatformAdapter {
                 if (num >= 1000) num = Number((num / 100000).toFixed(2));
                 answer.value = String(num).replace(/\.00$/, '');
               } else {
-                answer.value = '7';
+                answer.value = '';
               }
             }
 
-            // Ensure fallback value if not resolved
-            if (!answer.value) {
-              if (isLakhsQ) {
-                const yoe = careerBrain.yearsOfExperience ?? 3;
-                answer = { value: String(Math.max(3, Math.round(yoe * 2.5))), confidence: 0.8, source: 'default' };
-              } else if (f.fieldType === 'number') {
-                const yoe = careerBrain.yearsOfExperience ?? 3;
-                answer = { value: String(Math.max(1, yoe)), confidence: 0.7, source: 'default' };
-              } else if (f.fieldType === 'select' && f.options.length > 0) {
-                answer = { value: f.options[0], confidence: 0.6, source: 'default' };
-              } else {
-                answer = { value: 'Yes', confidence: 0.5, source: 'default' };
-              }
+            // Answer Guard: Validate answer format before injecting into DOM
+            const guardResult = validateAnswerForField(answer.value, {
+              label: qText,
+              fieldType: f.fieldType as any,
+              options: f.options,
+              placeholder: f.placeholder,
+            });
+
+            if (!guardResult.valid || !guardResult.value) {
+              logger.warning(
+                `[NaukriAdapter] Answer guard rejected "${answer.value}" for field "${qText}": ${guardResult.reason}. Leaving unfilled.`,
+              );
+              continue;
             }
+
+            answer.value = guardResult.value;
 
             logger.info(`[NaukriAdapter] Field "${qText}" -> Answering: "${answer.value}"`);
 

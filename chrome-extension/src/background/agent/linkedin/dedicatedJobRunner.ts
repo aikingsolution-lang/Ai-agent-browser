@@ -52,6 +52,7 @@ import {
   inspectAndHealFormErrors,
   checkBlacklistAndNegativeKeywords,
   extractRequiredExperienceYears,
+  validateAnswerForField,
 } from '../intelligence';
 import { buildDraftResumePdf, buildDraftResumeFileName, bytesToBase64 } from './resumeDraft';
 import type { FormFieldDescriptor } from '../../browser/page';
@@ -4559,8 +4560,14 @@ export class DedicatedJobRunner {
     // expected format (digits for numeric/salary questions, exact options for radios)
     // before they reach the DOM — LinkedIn rejects formatted strings with "Invalid input".
     const fillAnswerWithFormat = async (field: FormFieldDescriptor, answer: string): Promise<boolean> => {
-      const adapted = adaptAnswerToFieldFormat(answer, field);
-      return page.fillModalFieldDirect(field, adapted.valid ? adapted.value : answer);
+      const adapted = validateAnswerForField(answer, field);
+      if (!adapted.valid || !adapted.value) {
+        logger.warning(
+          `[DedicatedJobRunner] fillAnswerWithFormat rejected invalid answer "${answer}" for field "${field.label}": ${adapted.reason}`,
+        );
+        return false;
+      }
+      return page.fillModalFieldDirect(field, adapted.value);
     };
 
     const onAuditLog = (
@@ -4886,10 +4893,7 @@ export class DedicatedJobRunner {
                 reason = 'Profile-derived autonomous fallback';
               }
               if (answer) {
-                let fillSuccess = await fillAnswerWithFormat(f, answer);
-                if (!fillSuccess && typeof page.fillModalFieldDirect === 'function') {
-                  fillSuccess = await page.fillModalFieldDirect(f, answer).catch(() => false);
-                }
+                const fillSuccess = await fillAnswerWithFormat(f, answer);
                 onAuditLog('GENERATED', f.label, answer, `${reason} | DOM fill: ${fillSuccess ? 'SUCCESS' : 'FAILED'}`);
                 if (fillSuccess) {
                   await rememberResolvedAnswer(f.label, answer);
@@ -5068,10 +5072,7 @@ export class DedicatedJobRunner {
                   reason = 'Profile-derived autonomous fallback';
                 }
                 if (answer) {
-                  let fillSuccess = await fillAnswerWithFormat(req, answer);
-                  if (!fillSuccess && typeof page.fillModalFieldDirect === 'function') {
-                    fillSuccess = await page.fillModalFieldDirect(req, answer).catch(() => false);
-                  }
+                  const fillSuccess = await fillAnswerWithFormat(req, answer);
                   onAuditLog(
                     'GENERATED',
                     req.label,
@@ -5115,15 +5116,16 @@ export class DedicatedJobRunner {
                 );
                 const healed = await solveValidationErrorWithLLM(invF, careerBrain, scopedLLM);
                 if (healed.success && healed.answer !== undefined) {
-                  const adapted = adaptAnswerToFieldFormat(healed.answer, invF as any);
-                  const fillVal = adapted.valid ? adapted.value : healed.answer;
-                  const fillSuccess = await page.fillModalFieldDirect(invF, fillVal);
-                  onAuditLog(
-                    'GENERATED',
-                    invF.label,
-                    fillVal,
-                    `Red alert validation heal | Prev: "${invF.currentValue}" | Error: "${invF.errorText}" | Fill: ${fillSuccess ? 'SUCCESS' : 'FAILED'}`,
-                  );
+                  const adapted = validateAnswerForField(healed.answer, invF as any);
+                  if (adapted.valid && adapted.value) {
+                    const fillSuccess = await page.fillModalFieldDirect(invF, adapted.value);
+                    onAuditLog(
+                      'GENERATED',
+                      invF.label,
+                      adapted.value,
+                      `Red alert validation heal | Prev: "${invF.currentValue}" | Error: "${invF.errorText}" | Fill: ${fillSuccess ? 'SUCCESS' : 'FAILED'}`,
+                    );
+                  }
                 }
               } catch (healErr) {
                 logger.warning(`[DedicatedJobRunner] Failed to heal field "${invF.label}":`, healErr);
@@ -5147,16 +5149,17 @@ export class DedicatedJobRunner {
                 if (reqF.errorText) {
                   const healed = await solveValidationErrorWithLLM(reqF, careerBrain, scopedLLM);
                   if (healed.success && healed.answer !== undefined) {
-                    const adapted = adaptAnswerToFieldFormat(healed.answer, reqF);
-                    const fillVal = adapted.valid ? adapted.value : healed.answer;
-                    const fillSuccess = await page.fillModalFieldDirect(reqF, fillVal);
-                    onAuditLog(
-                      'GENERATED',
-                      reqF.label,
-                      fillVal,
-                      `Red alert validation heal | Fill: ${fillSuccess ? 'SUCCESS' : 'FAILED'}`,
-                    );
-                    continue;
+                    const adapted = validateAnswerForField(healed.answer, reqF);
+                    if (adapted.valid && adapted.value) {
+                      const fillSuccess = await page.fillModalFieldDirect(reqF, adapted.value);
+                      onAuditLog(
+                        'GENERATED',
+                        reqF.label,
+                        adapted.value,
+                        `Red alert validation heal | Fill: ${fillSuccess ? 'SUCCESS' : 'FAILED'}`,
+                      );
+                      continue;
+                    }
                   }
                 }
 
@@ -5241,9 +5244,10 @@ export class DedicatedJobRunner {
                 for (const invF of postAdvanceCheck.invalidFieldsWithErrors) {
                   const healed = await solveValidationErrorWithLLM(invF, careerBrain, scopedLLM);
                   if (healed.success && healed.answer) {
-                    const adapted = adaptAnswerToFieldFormat(healed.answer, invF as any);
-                    const fillVal = adapted.valid ? adapted.value : healed.answer;
-                    await page.fillModalFieldDirect(invF, fillVal);
+                    const adapted = validateAnswerForField(healed.answer, invF as any);
+                    if (adapted.valid && adapted.value) {
+                      await page.fillModalFieldDirect(invF, adapted.value);
+                    }
                   }
                 }
                 await page.clickModalForwardButton();
@@ -5492,9 +5496,10 @@ export class DedicatedJobRunner {
             for (const reqF of preRetryValidation.emptyRequiredFields) {
               const autoSol = await solveQuestionAutonomousWithLLM(reqF, careerBrain, scopedLLM);
               if (autoSol.success && autoSol.answer) {
-                const adapted = adaptAnswerToFieldFormat(autoSol.answer, reqF);
-                const fillVal = adapted.valid ? adapted.value : autoSol.answer;
-                await page.fillModalFieldDirect(reqF, fillVal);
+                const adapted = validateAnswerForField(autoSol.answer, reqF);
+                if (adapted.valid && adapted.value) {
+                  await page.fillModalFieldDirect(reqF, adapted.value);
+                }
               }
             }
             if (typeof page.scrollModalContent === 'function') {
@@ -5568,16 +5573,17 @@ export class DedicatedJobRunner {
                   if (!answer) {
                     answer = generateAutonomousFallbackAnswer(invF, careerBrain);
                   }
-                  if (answer !== undefined) {
-                    const adapted = adaptAnswerToFieldFormat(answer, invF as any);
-                    const fillVal = adapted.valid ? adapted.value : answer;
-                    const fillSuccess = await page.fillModalFieldDirect(invF, fillVal);
-                    onAuditLog(
-                      'GENERATED',
-                      invF.label,
-                      fillVal,
-                      `Blocked-forward validation heal | Prev: "${invF.currentValue}" | Error: "${invF.errorText}" | Fill: ${fillSuccess ? 'SUCCESS' : 'FAILED'}`,
-                    );
+                  if (answer !== undefined && String(answer).trim() !== '') {
+                    const adapted = validateAnswerForField(answer, invF as any);
+                    if (adapted.valid && adapted.value) {
+                      const fillSuccess = await page.fillModalFieldDirect(invF, adapted.value);
+                      onAuditLog(
+                        'GENERATED',
+                        invF.label,
+                        adapted.value,
+                        `Blocked-forward validation heal | Prev: "${invF.currentValue}" | Error: "${invF.errorText}" | Fill: ${fillSuccess ? 'SUCCESS' : 'FAILED'}`,
+                      );
+                    }
                   }
                 } catch (healErr) {
                   logger.warning(`[DedicatedJobRunner] Failed to heal blocked field "${invF.label}":`, healErr);
@@ -5586,9 +5592,7 @@ export class DedicatedJobRunner {
               for (const reqF of blockedValidation.emptyRequiredFields) {
                 try {
                   let answer: string | undefined;
-                  if (reqF.fieldType === 'checkbox') {
-                    answer = 'Yes';
-                  } else if (activeHealLLM) {
+                  if (activeHealLLM) {
                     const autoSol = await solveQuestionAutonomousWithLLM(reqF, careerBrain, activeHealLLM);
                     if (autoSol.success && autoSol.answer) {
                       answer = autoSol.answer;
@@ -5597,16 +5601,17 @@ export class DedicatedJobRunner {
                   if (!answer) {
                     answer = generateAutonomousFallbackAnswer(reqF, careerBrain);
                   }
-                  if (answer !== undefined) {
-                    const adapted = adaptAnswerToFieldFormat(answer, reqF);
-                    const fillVal = adapted.valid ? adapted.value : answer;
-                    const fillSuccess = await page.fillModalFieldDirect(reqF, fillVal);
-                    onAuditLog(
-                      'GENERATED',
-                      reqF.label,
-                      fillVal,
-                      `Blocked-forward empty-field fill | DOM fill: ${fillSuccess ? 'SUCCESS' : 'FAILED'}`,
-                    );
+                  if (answer !== undefined && String(answer).trim() !== '') {
+                    const adapted = validateAnswerForField(answer, reqF);
+                    if (adapted.valid && adapted.value) {
+                      const fillSuccess = await page.fillModalFieldDirect(reqF, adapted.value);
+                      onAuditLog(
+                        'GENERATED',
+                        reqF.label,
+                        adapted.value,
+                        `Blocked-forward empty-field fill | DOM fill: ${fillSuccess ? 'SUCCESS' : 'FAILED'}`,
+                      );
+                    }
                   }
                 } catch (healErr) {
                   logger.warning(`[DedicatedJobRunner] Failed to fill blocked field "${reqF.label}":`, healErr);
@@ -5651,15 +5656,16 @@ export class DedicatedJobRunner {
             for (const invF of postFwdValidation.invalidFieldsWithErrors) {
               const healed = await solveValidationErrorWithLLM(invF, careerBrain, scopedLLM);
               if (healed.success && healed.answer) {
-                const adapted = adaptAnswerToFieldFormat(healed.answer, invF as any);
-                const fillVal = adapted.valid ? adapted.value : healed.answer;
-                const fillSuccess = await page.fillModalFieldDirect(invF, fillVal);
-                onAuditLog(
-                  'GENERATED',
-                  invF.label,
-                  fillVal,
-                  `Post-forward validation heal | Prev: "${invF.currentValue}" | Error: "${invF.errorText}" | Fill: ${fillSuccess ? 'SUCCESS' : 'FAILED'}`,
-                );
+                const adapted = validateAnswerForField(healed.answer, invF as any);
+                if (adapted.valid && adapted.value) {
+                  const fillSuccess = await page.fillModalFieldDirect(invF, adapted.value);
+                  onAuditLog(
+                    'GENERATED',
+                    invF.label,
+                    adapted.value,
+                    `Post-forward validation heal | Prev: "${invF.currentValue}" | Error: "${invF.errorText}" | Fill: ${fillSuccess ? 'SUCCESS' : 'FAILED'}`,
+                  );
+                }
               }
             }
           }
@@ -5667,9 +5673,10 @@ export class DedicatedJobRunner {
             for (const reqF of postFwdValidation.emptyRequiredFields) {
               const autoSol = await solveQuestionAutonomousWithLLM(reqF, careerBrain, scopedLLM);
               if (autoSol.success && autoSol.answer) {
-                const adapted = adaptAnswerToFieldFormat(autoSol.answer, reqF);
-                const fillVal = adapted.valid ? adapted.value : autoSol.answer;
-                await page.fillModalFieldDirect(reqF, fillVal);
+                const adapted = validateAnswerForField(autoSol.answer, reqF);
+                if (adapted.valid && adapted.value) {
+                  await page.fillModalFieldDirect(reqF, adapted.value);
+                }
               }
             }
           }
@@ -5703,17 +5710,19 @@ export class DedicatedJobRunner {
             for (const invF of validationCheck.invalidFieldsWithErrors || []) {
               const healed = await solveValidationErrorWithLLM(invF, careerBrain, scopedLLM);
               if (healed.success && healed.answer) {
-                const adapted = adaptAnswerToFieldFormat(healed.answer, invF as any);
-                const fillVal = adapted.valid ? adapted.value : healed.answer;
-                await page.fillModalFieldDirect(invF, fillVal);
+                const adapted = validateAnswerForField(healed.answer, invF as any);
+                if (adapted.valid && adapted.value) {
+                  await page.fillModalFieldDirect(invF, adapted.value);
+                }
               }
             }
             for (const reqF of validationCheck.emptyRequiredFields || []) {
               const autoSol = await solveQuestionAutonomousWithLLM(reqF, careerBrain, scopedLLM);
               if (autoSol.success && autoSol.answer) {
-                const adapted = adaptAnswerToFieldFormat(autoSol.answer, reqF);
-                const fillVal = adapted.valid ? adapted.value : autoSol.answer;
-                await page.fillModalFieldDirect(reqF, fillVal);
+                const adapted = validateAnswerForField(autoSol.answer, reqF);
+                if (adapted.valid && adapted.value) {
+                  await page.fillModalFieldDirect(reqF, adapted.value);
+                }
               }
             }
           }

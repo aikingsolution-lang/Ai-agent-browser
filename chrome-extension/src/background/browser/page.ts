@@ -4349,6 +4349,12 @@ export default class Page {
    * Sets value for a form element directly inside the active modal
    */
   async fillModalFieldDirect(identifier: { id?: string; label?: string }, value: string): Promise<boolean> {
+    if (value === undefined || value === null || (typeof value === 'string' && value.trim() === '')) {
+      logger.warning(
+        `[Page] fillModalFieldDirect called with empty or invalid value for field "${identifier?.label || identifier?.id}". Rejecting fill.`,
+      );
+      return false;
+    }
     const fillInPage = async (ident: { id?: string; label?: string }, val: string) => {
       function cleanDuplicateText(rawText: string): string {
         if (!rawText) return '';
