@@ -5386,6 +5386,29 @@ export default class Page {
           }
         }
 
+        // 4. Phone country code / dialing prefix match (e.g. "+91", "91", "India", "India (+91)")
+        if (!opt) {
+          const dialingMatch = val.match(/(?:\+|00)?(\d{1,4})/);
+          const dialingDigits = dialingMatch ? dialingMatch[1] : '';
+          opt = options.find(o => {
+            const optText = cleanDuplicateString(o.text).toLowerCase();
+            const optVal = o.value.toLowerCase();
+            if (
+              dialingDigits &&
+              (optText.includes(`(+${dialingDigits})`) ||
+                optText.includes(`+${dialingDigits}`) ||
+                optVal === dialingDigits ||
+                optVal.endsWith(`:${dialingDigits}`))
+            ) {
+              return true;
+            }
+            if (/india/i.test(val) && (optText.includes('india') || optVal === 'in' || optVal.endsWith(':in'))) {
+              return true;
+            }
+            return false;
+          });
+        }
+
         if (opt) {
           targetEl.focus();
           const proto = HTMLSelectElement.prototype;
@@ -6500,18 +6523,43 @@ export default class Page {
           ) {
             continue;
           }
+
+          // Rule 1: A save/discard sheet has NO form controls (inputs, selects, textareas, fieldsets, file uploads)
+          const hasFormControls =
+            d.querySelector(
+              'input:not([type="hidden"]), select, textarea, fieldset, [role="radiogroup"], [role="group"], [contenteditable="true"], .jobs-document-upload, [type="file"], [data-test-document-upload], .jobs-easy-apply-form-element',
+            ) !== null;
+          if (hasFormControls) continue;
+
+          // Rule 2: Its buttons must be short (<= 20 chars) and include Save/Discard
+          const buttons = Array.from(
+            d.querySelectorAll('button, [role="button"], input[type="button"], input[type="submit"]'),
+          ) as HTMLElement[];
+          if (buttons.length === 0) continue;
+
+          const buttonTexts = buttons
+            .map(b => (b.innerText || b.textContent || b.getAttribute('aria-label') || '').trim())
+            .filter(Boolean);
+
+          const hasFormNavButton = buttonTexts.some(t =>
+            /^(?:next|review|submit|submit application|continue|back|previous)$/i.test(t),
+          );
+          if (hasFormNavButton) continue;
+
+          const hasSaveOrDiscardButton = buttonTexts.some(
+            t => t.length <= 20 && /^(?:save|save draft|discard|discard draft)$/i.test(t),
+          );
+          if (!hasSaveOrDiscardButton) continue;
+
           const text = (d.innerText || d.textContent || '').trim();
           const titleEl = d.querySelector('h1, h2, h3, [id*="header"], [class*="header"]');
           const title = (titleEl?.textContent || text.slice(0, 100)).trim();
           const isSaveOrDiscard =
-            ((/save/i.test(title) || /save/i.test(text) || /discard/i.test(title) || /discard/i.test(text)) &&
-              (/application|draft|changes/i.test(title) || /application|draft|changes/i.test(text))) ||
             /save\s+(?:this\s+|your\s+|incomplete\s+)?application|save\s+draft|discard\s+(?:this\s+|your\s+|draft|application|changes)|save\s+changes/i.test(
               title + ' ' + text,
-            );
+            ) ||
+            ((/save/i.test(title) || /discard/i.test(title)) && /application|draft|changes/i.test(title + ' ' + text));
           if (!isSaveOrDiscard) continue;
-          // The application form itself is never the confirmation sheet.
-          if (/contact info|home address|review your application|work experience/i.test(text)) continue;
           return d;
         }
         return null;
@@ -6691,11 +6739,108 @@ export default class Page {
   }
 
   /**
-   * Checks whether ANY genuine visible modal or dialog remains open in the DOM.
+   * Checks whether an active Easy Apply modal or a Save/Discard sheet remains open in the DOM.
+   * Explicitly ignores messaging overlays, notification flyouts, tooltips, and general site chrome.
    */
   async hasAnyOpenModalOrDialog(): Promise<boolean> {
-    const dialogs = await this.inspectOpenDialogs().catch(() => []);
-    return dialogs.length > 0;
+    const checkInPage = () => {
+      function isVisible(el: HTMLElement): boolean {
+        if (!el || !el.isConnected) return false;
+        try {
+          const style = window.getComputedStyle(el);
+          if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity || '1') <= 0.05) {
+            return false;
+          }
+          const rect = el.getBoundingClientRect();
+          if ((rect.width > 0 || rect.height > 0) && (rect.width < 100 || rect.height < 50)) {
+            return false;
+          }
+        } catch {
+          return false;
+        }
+        return true;
+      }
+
+      const candidates = Array.from(
+        document.querySelectorAll(
+          'dialog[open], dialog, div[role="dialog"], div.artdeco-modal, [data-test-modal], [aria-modal="true"]',
+        ),
+      ) as HTMLElement[];
+
+      for (const d of candidates) {
+        if (!isVisible(d)) continue;
+        if (
+          d.closest(
+            'nav, header, footer, #footer, .artdeco-footer, [data-view-name="footer"], #global-nav, .global-nav, .msg-overlay-container, #msg-overlay, .artdeco-dropdown, [role="tooltip"], .notifications-badge',
+          )
+        ) {
+          continue;
+        }
+        const aria = (d.getAttribute('aria-label') || '').toLowerCase();
+        const id = (d.id || '').toLowerCase();
+        if (
+          d.classList.contains('msg-overlay-container') ||
+          id.includes('msg-overlay') ||
+          /messaging|chat/i.test(aria)
+        ) {
+          continue;
+        }
+        if (/notification/i.test(aria) || id.includes('notification') || d.classList.contains('notification-badge')) {
+          continue;
+        }
+
+        // 1. Is it an active Easy Apply modal?
+        const isEasyApply =
+          d.classList.contains('jobs-easy-apply-modal') ||
+          d.hasAttribute('data-easy-apply-modal') ||
+          d.getAttribute('data-test-modal-id') === 'easy-apply-modal' ||
+          d.querySelector(
+            '.jobs-easy-apply-modal, [data-easy-apply-modal], [data-test-modal-id="easy-apply-modal"]',
+          ) !== null ||
+          /easy apply|submit application/i.test((d.textContent || '').slice(0, 300));
+
+        if (isEasyApply) return true;
+
+        // 2. Is it a Save/Discard sheet?
+        const buttons = Array.from(
+          d.querySelectorAll('button, [role="button"], input[type="button"], input[type="submit"]'),
+        ) as HTMLElement[];
+        const buttonTexts = buttons
+          .map(b => (b.innerText || b.textContent || b.getAttribute('aria-label') || '').trim())
+          .filter(Boolean);
+        const hasFormControls =
+          d.querySelector(
+            'input:not([type="hidden"]), select, textarea, fieldset, [role="radiogroup"], [role="group"], [contenteditable="true"], .jobs-document-upload, [type="file"], [data-test-document-upload]',
+          ) !== null;
+        const hasSaveOrDiscard = buttonTexts.some(
+          t => t.length <= 20 && /^(?:save|save draft|discard|discard draft)$/i.test(t),
+        );
+        const text = (d.innerText || d.textContent || '').toLowerCase();
+        if (!hasFormControls && hasSaveOrDiscard && /save|discard/i.test(text) && /application|draft/i.test(text)) {
+          return true;
+        }
+      }
+
+      return false;
+    };
+
+    if (!this._puppeteerPage) {
+      await this.attachPuppeteer().catch(() => false);
+    }
+    if (this._puppeteerPage) {
+      try {
+        return (await this._puppeteerPage.evaluate(checkInPage)) || false;
+      } catch {}
+    } else if (this._tabId && typeof chrome !== 'undefined' && chrome.scripting?.executeScript) {
+      try {
+        const res = await chrome.scripting.executeScript({
+          target: { tabId: this._tabId },
+          func: checkInPage,
+        });
+        return res?.[0]?.result || false;
+      } catch {}
+    }
+    return false;
   }
 
   /**
@@ -6745,17 +6890,43 @@ export default class Page {
           ) {
             continue;
           }
+
+          // Rule 1: A save/discard sheet has NO form controls (inputs, selects, textareas, fieldsets, file uploads)
+          const hasFormControls =
+            d.querySelector(
+              'input:not([type="hidden"]), select, textarea, fieldset, [role="radiogroup"], [role="group"], [contenteditable="true"], .jobs-document-upload, [type="file"], [data-test-document-upload], .jobs-easy-apply-form-element',
+            ) !== null;
+          if (hasFormControls) continue;
+
+          // Rule 2: Its buttons must be short (<= 20 chars) and include Save/Discard
+          const buttons = Array.from(
+            d.querySelectorAll('button, [role="button"], input[type="button"], input[type="submit"]'),
+          ) as HTMLElement[];
+          if (buttons.length === 0) continue;
+
+          const buttonTexts = buttons
+            .map(b => (b.innerText || b.textContent || b.getAttribute('aria-label') || '').trim())
+            .filter(Boolean);
+
+          const hasFormNavButton = buttonTexts.some(t =>
+            /^(?:next|review|submit|submit application|continue|back|previous)$/i.test(t),
+          );
+          if (hasFormNavButton) continue;
+
+          const hasSaveOrDiscardButton = buttonTexts.some(
+            t => t.length <= 20 && /^(?:save|save draft|discard|discard draft)$/i.test(t),
+          );
+          if (!hasSaveOrDiscardButton) continue;
+
           const text = (d.innerText || d.textContent || '').trim();
           const titleEl = d.querySelector('h1, h2, h3, [id*="header"], [class*="header"]');
           const title = (titleEl?.textContent || text.slice(0, 100)).trim();
           const isSaveOrDiscard =
-            ((/save/i.test(title) || /save/i.test(text) || /discard/i.test(title) || /discard/i.test(text)) &&
-              (/application|draft|changes/i.test(title) || /application|draft|changes/i.test(text))) ||
             /save\s+(?:this\s+|your\s+|incomplete\s+)?application|save\s+draft|discard\s+(?:this\s+|your\s+|draft|application|changes)|save\s+changes/i.test(
               title + ' ' + text,
-            );
+            ) ||
+            ((/save/i.test(title) || /discard/i.test(title)) && /application|draft|changes/i.test(title + ' ' + text));
           if (!isSaveOrDiscard) continue;
-          if (/contact info|home address|review your application|work experience/i.test(text)) continue;
           return d;
         }
         return null;
@@ -7427,7 +7598,24 @@ export default class Page {
         // A date select sitting on its "Month"/"Year" placeholder is still unanswered even
         // when the placeholder option carries a non-empty value.
         const isDatePlaceholder = Boolean(dateKind) && /^(?:month|year)$/i.test(selectedText.trim());
-        if (!val || isDatePlaceholder || /select an option|please select|^--/i.test(selectedText)) {
+
+        // Check if this is a phone country code select
+        const isCountryCodeSelect =
+          /country\s*code|phone\s*country|dialing\s*code/i.test(
+            sel.name + ' ' + sel.id + ' ' + (sel.getAttribute('aria-label') || ''),
+          ) || Array.from(sel.options).some(o => /\+\d{1,4}/.test(o.text || ''));
+
+        // If it's a country-code select sitting on Andorra (+376) or similar default, it MUST be discovered
+        // so the candidate's actual dialing code (+91 / India) gets selected!
+        const isDefaultCountryCode =
+          isCountryCodeSelect && !selectedText.includes('+91') && !selectedText.toLowerCase().includes('india');
+
+        if (
+          !val ||
+          isDatePlaceholder ||
+          isDefaultCountryCode ||
+          /select an option|please select|^--/i.test(selectedText)
+        ) {
           let label = '';
           const id = sel.getAttribute('id');
           if (id) {
@@ -7444,6 +7632,10 @@ export default class Page {
             if (lbl) label = cleanElementText(lbl);
           }
           if (!label) label = cleanDuplicateString(sel.getAttribute('aria-label') || '');
+
+          if (isCountryCodeSelect && (!label || /^(?:form field|select)$/i.test(label))) {
+            label = 'Phone country code';
+          }
 
           if (dateKind) {
             const dateRole = dateSelectRoles.get(sel);

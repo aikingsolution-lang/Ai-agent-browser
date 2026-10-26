@@ -264,6 +264,112 @@ describe('Resolver Guards & Regression Test Suite', () => {
       expect(resINR.valid).toBe(true);
       expect(resINR.value).toBe('1200000');
     });
+
+    it('does NOT reject URLs, emails, postal address, city, company, and single-line answers up to ~120 chars', () => {
+      // 1. LinkedIn profile URL (46 chars)
+      const fieldLinkedIn: FormFieldDescriptor = {
+        label: 'LinkedIn profile URL',
+        fieldType: 'text',
+      };
+      const linkedInUrl = 'https://www.linkedin.com/in/alex-smith-engineer'; // 48 chars
+      const resLinkedIn = validateAnswerForField(linkedInUrl, fieldLinkedIn);
+      expect(resLinkedIn.valid).toBe(true);
+      expect(resLinkedIn.value).toBe(linkedInUrl);
+
+      // 2. Portfolio URL
+      const fieldPortfolio: FormFieldDescriptor = {
+        label: 'Portfolio or website link',
+        fieldType: 'text',
+      };
+      const portfolioUrl = 'https://alex-smith-portfolio.dev/projects';
+      const resPortfolio = validateAnswerForField(portfolioUrl, fieldPortfolio);
+      expect(resPortfolio.valid).toBe(true);
+      expect(resPortfolio.value).toBe(portfolioUrl);
+
+      // 3. GitHub URL
+      const fieldGithub: FormFieldDescriptor = {
+        label: 'GitHub profile URL',
+        fieldType: 'text',
+      };
+      const githubUrl = 'https://github.com/alexsmith-systems-eng';
+      const resGithub = validateAnswerForField(githubUrl, fieldGithub);
+      expect(resGithub.valid).toBe(true);
+      expect(resGithub.value).toBe(githubUrl);
+
+      // 4. Email address
+      const fieldEmail: FormFieldDescriptor = {
+        label: 'Alternative email address',
+        fieldType: 'text',
+      };
+      const email = 'alex.smith.engineering.work.contact@techventures.co.in';
+      const resEmail = validateAnswerForField(email, fieldEmail);
+      expect(resEmail.valid).toBe(true);
+      expect(resEmail.value).toBe(email);
+
+      // 5. Postal address
+      const fieldAddress: FormFieldDescriptor = {
+        label: 'Street Address',
+        fieldType: 'text',
+      };
+      const address = 'Flat 402, Sunshine Apartments, 5th Main Road, Indiranagar, Bengaluru, KA 560038';
+      const resAddress = validateAnswerForField(address, fieldAddress);
+      expect(resAddress.valid).toBe(true);
+      expect(resAddress.value).toBe(address);
+
+      // 6. City
+      const fieldCity: FormFieldDescriptor = {
+        label: 'Current City',
+        fieldType: 'text',
+      };
+      const city = 'Bengaluru, Karnataka, India';
+      const resCity = validateAnswerForField(city, fieldCity);
+      expect(resCity.valid).toBe(true);
+      expect(resCity.value).toBe(city);
+
+      // 7. Company name
+      const fieldCompany: FormFieldDescriptor = {
+        label: 'Current Employer / Company Name',
+        fieldType: 'text',
+      };
+      const company = 'International Business Machines Global Services Pvt Ltd';
+      const resCompany = validateAnswerForField(company, fieldCompany);
+      expect(resCompany.valid).toBe(true);
+      expect(resCompany.value).toBe(company);
+
+      // 8. Single-line free-text answer of up to ~120 chars
+      const fieldFreeText: FormFieldDescriptor = {
+        label: 'Brief summary of key technical achievements',
+        fieldType: 'text',
+      };
+      const freeText115Chars =
+        'Led migration of monolith to microservices on AWS EKS reducing latency by 45 percent across all backend routes';
+      expect(freeText115Chars.length).toBeLessThanOrEqual(120);
+      const resFreeText = validateAnswerForField(freeText115Chars, fieldFreeText);
+      expect(resFreeText.valid).toBe(true);
+      expect(resFreeText.value).toBe(freeText115Chars);
+    });
+
+    it('strictly applies the 40-character rule to salary/CTC/number/date/notice period/years-of-experience', () => {
+      const fieldNotice: FormFieldDescriptor = {
+        label: 'Notice period in days or weeks',
+        fieldType: 'text',
+      };
+      const noticeOver40 = 'I can join within 30 days after serving my mandatory notice period with my current firm';
+      expect(noticeOver40.length).toBeGreaterThan(40);
+      const resNotice = validateAnswerForField(noticeOver40, fieldNotice);
+      expect(resNotice.valid).toBe(false);
+      expect(resNotice.reason).toContain('Rejected long prose');
+
+      const fieldExp: FormFieldDescriptor = {
+        label: 'Total years of experience in distributed systems',
+        fieldType: 'text',
+      };
+      const expOver40 = 'I have been developing software and backend systems for approximately 5 full years now';
+      expect(expOver40.length).toBeGreaterThan(40);
+      const resExp = validateAnswerForField(expOver40, fieldExp);
+      expect(resExp.valid).toBe(false);
+      expect(resExp.reason).toContain('Rejected long prose');
+    });
   });
 
   // 7. Dropdown Option Validation

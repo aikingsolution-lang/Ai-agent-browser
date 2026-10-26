@@ -78,28 +78,41 @@ export function validateAnswerForField(
   const combinedContext = `${labelLower} ${hintLower}`;
   const isTextArea = Boolean(field.isTextArea || field.fieldType === 'textarea');
 
-  // Check for multi-sentence or prose structure
-  const hasMultipleSentences =
-    /[\r\n]/.test(answer) || /[.!?]\s+[A-Za-z0-9]/.test(answer) || answer.split(/[.!?]+\s+/).filter(Boolean).length > 1;
+  // Check for multi-line or multi-sentence paragraph prose structure
+  const hasLineBreaks = /[\r\n]/.test(answer);
+  const hasMultipleSentences = hasLineBreaks || /[.!?]\s+[A-Za-z0-9]/.test(answer);
+
+  // Common identity and web identifiers (URLs, handles, emails) are never prose
+  const isUrlOrEmail =
+    /^(?:https?:\/\/|www\.)[^\s]+$/i.test(answer) ||
+    /^(?:[a-z0-9-]+\.)+[a-z]{2,}(?:\/[^\s]*)?$/i.test(answer) ||
+    /^[^\s@]+@[^\s@]+\.[^\s@]+$/i.test(answer);
 
   // 2. Prose Guard: Non-textarea fields must reject long prose answers
-  const isShortOrRestrictedField =
+  // The 40-character rule applies ONLY to salary / CTC / number / date / notice period / years-of-experience fields.
+  const isRestricted40CharProseField =
     field.fieldType === 'number' ||
-    field.fieldType === 'radio' ||
-    field.fieldType === 'checkbox' ||
-    field.fieldType === 'select' ||
-    field.fieldType === 'dropdown' ||
     field.fieldType === 'date' ||
     /\b(?:salary|ctc|compensation|pay|package|lakhs?|lpa|inr|stipend)\b/i.test(labelLower) ||
-    /\b(?:how\s*many|years\s*of|experience|yoe)\b/i.test(labelLower) ||
-    /\b(?:notice\s*period|joining\s*time|availability)\b/i.test(labelLower) ||
-    /\b(?:first\s*name|last\s*name|full\s*name|name)\b/i.test(labelLower) ||
-    /\b(?:phone|mobile|cell|contact\s*number)\b/i.test(labelLower) ||
-    /\b(?:skill|skills|tool|tools|technology)\b/i.test(labelLower) ||
-    /\b(?:location|city|country|postal|zip|state|pincode)\b/i.test(labelLower);
+    /\b(?:how\s*many\s*(?:years|months)?|years\s*of|experience\s*in|yoe|total\s*experience|work\s*experience)\b/i.test(
+      labelLower,
+    ) ||
+    /\b(?:notice\s*period|joining\s*time|days\s*of\s*notice|availability)\b/i.test(labelLower) ||
+    (/\b(?:start\s*date|end\s*date|graduation\s*year|birth\s*date)\b/i.test(labelLower) &&
+      !/url|link|profile/i.test(labelLower));
 
   if (!isTextArea) {
-    if (isShortOrRestrictedField) {
+    if (isUrlOrEmail) {
+      // Valid URLs (LinkedIn, Portfolio, GitHub) and emails are accepted up to 300 characters
+      if (hasLineBreaks || answer.length > 300) {
+        return {
+          valid: false,
+          value: '',
+          reason: `Rejected invalid or excessively long URL/email identifier (${answer.length} chars) for field "${field.label}"`,
+        };
+      }
+    } else if (isRestricted40CharProseField) {
+      // 40-character limit applied strictly to salary, CTC, number, date, notice period, years of experience
       if (answer.length > 40 || hasMultipleSentences) {
         return {
           valid: false,
@@ -108,12 +121,13 @@ export function validateAnswerForField(
         };
       }
     } else {
-      // General single-line input field
-      if (hasMultipleSentences || answer.length > 120) {
+      // General single-line input fields (postal address, city, company name, single-line free-text answers)
+      // Accept up to ~120 characters without multi-line paragraph breaks
+      if (hasLineBreaks || answer.length > 120) {
         return {
           valid: false,
           value: '',
-          reason: `Rejected multi-sentence prose for single-line input field "${field.label}"`,
+          reason: `Rejected multi-line or long prose (>120 chars) for single-line input field "${field.label}"`,
         };
       }
     }

@@ -1396,7 +1396,11 @@ export class DedicatedJobRunner {
       }
 
       // Update state with extracted title & company
-      const jobTitle = topCard.title || 'LinkedIn Job';
+      let jobTitle = cleanLinkedInJobTitle(topCard.title);
+      if (!jobTitle) {
+        logger.warning(`[DedicatedRunner] Missing job title heading for job ${jobId}. Using job ID in messages.`);
+        jobTitle = `Job #${jobId}`;
+      }
       const companyName = topCard.company || 'Company';
       const location = topCard.location || '';
 
@@ -2155,24 +2159,39 @@ export class DedicatedJobRunner {
           if (this.isRunning && stats.applied < BATCH_CAP) {
             // Strict sequential completion: ensure the previous application modal or leftover dialog is fully
             // closed before picking the next job (prevents overlap between jobs).
-            const dialogRemains =
-              typeof currentPage.hasAnyOpenModalOrDialog === 'function'
-                ? await currentPage.hasAnyOpenModalOrDialog().catch(() => false)
-                : await currentPage.isEasyApplyModalOpen().catch(() => false);
-            if (dialogRemains) {
+            const interJobStart = Date.now();
+            const MAX_INTER_JOB_CLEANUP_MS = 8000;
+
+            while (Date.now() - interJobStart < MAX_INTER_JOB_CLEANUP_MS) {
+              const dialogRemains =
+                typeof currentPage.hasAnyOpenModalOrDialog === 'function'
+                  ? await currentPage.hasAnyOpenModalOrDialog().catch(() => false)
+                  : await currentPage.isEasyApplyModalOpen().catch(() => false);
+              if (!dialogRemains) break;
+
               logger.info(
-                '[DedicatedJobRunner] Leftover modal or dialog detected between jobs. Deterministically resolving before next candidate...',
+                '[DedicatedJobRunner] Leftover modal or save/discard dialog detected between jobs. Deterministically resolving...',
               );
               if (typeof currentPage.ensureNoModalOrDialogRemains === 'function') {
-                await currentPage.ensureNoModalOrDialogRemains(6000).catch(() => {});
+                await currentPage.ensureNoModalOrDialogRemains(3000).catch(() => {});
               } else {
-                if (typeof currentPage.ensureNoModalOrDialogRemains === 'function') {
-                  await currentPage.ensureNoModalOrDialogRemains(5000).catch(() => {});
-                } else {
-                  await currentPage.dismissEasyApplyModal(5000).catch(() => {});
-                }
+                await currentPage.dismissEasyApplyModal(3000).catch(() => {});
               }
-              await new Promise(r => setTimeout(r, 800));
+              await new Promise(r => setTimeout(r, 600));
+            }
+
+            if (typeof currentPage.hasAnyOpenModalOrDialog === 'function') {
+              const stillOpen = await currentPage.hasAnyOpenModalOrDialog().catch(() => false);
+              if (stillOpen) {
+                const inventory =
+                  typeof currentPage.inspectOpenDialogs === 'function'
+                    ? await currentPage.inspectOpenDialogs().catch(() => [])
+                    : [];
+                logger.warning(
+                  `[DedicatedJobRunner] Inter-job cleanup timed out after ${MAX_INTER_JOB_CLEANUP_MS}ms. Dialog inventory:`,
+                  inventory,
+                );
+              }
             }
 
             const jitterMs = 1500 + Math.floor(Math.random() * 1000); // 1.5s - 2.5s natural human cadence
@@ -4034,7 +4053,12 @@ export class DedicatedJobRunner {
       topCard = await currentPage.extractJobTopCardContext(4500);
     }
 
-    const displayTitle = cleanLinkedInJobTitle(topCard.title || job.title);
+    const rawTitle = topCard.title || job.title;
+    let displayTitle = cleanLinkedInJobTitle(rawTitle);
+    if (!displayTitle) {
+      logger.warning(`[DedicatedRunner] Missing job title heading for job ${job.jobId}. Using job ID in messages.`);
+      displayTitle = `Job #${job.jobId}`;
+    }
     const displayCompany = topCard.company || job.company;
 
     // Check if details extraction completely failed
