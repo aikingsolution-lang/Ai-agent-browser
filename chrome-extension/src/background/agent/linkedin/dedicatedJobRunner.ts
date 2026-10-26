@@ -2036,7 +2036,6 @@ export class DedicatedJobRunner {
         while (readAttempts < 3 && jobCards.length === 0) {
           readAttempts++;
           if (!this.isRunning) break;
-          await currentPage.dismissFeedbackModal().catch(() => false);
           this.notifyStatus(
             portToSend,
             `🔍 Scanning LinkedIn job search results ${searchLabel} (attempt ${readAttempts}/3)...`,
@@ -3956,7 +3955,6 @@ export class DedicatedJobRunner {
 
     // 4a. Click Job in Left Pane to Load Details in Right Pane (Split-View)
     let usedDirectFallback = false;
-    await currentPage.dismissFeedbackModal().catch(() => false);
     let clicked = await currentPage.clickJobInSearchList(job.jobId);
     if (!clicked) {
       logger.info(
@@ -4293,7 +4291,6 @@ export class DedicatedJobRunner {
     }
 
     // 4d. Click Easy Apply & Verify Modal Opens
-    await currentPage.dismissFeedbackModal().catch(() => false);
     this.notifyStatus(portToSend, `🚀 Opening Easy Apply for "${displayTitle}"...`, 'info');
     let clickRes = await currentPage.clickEasyApplyButton();
     logger.info(`[DedicatedJobRunner] clickEasyApplyButton attempt 1:`, clickRes);
@@ -4357,13 +4354,32 @@ export class DedicatedJobRunner {
         }
       }
 
-      // Retry click once
-      logger.warning(`[DedicatedJobRunner] Modal did not open on first attempt. Retrying click...`);
-      const modalSleepAborted = await this.interruptibleSleep(1200);
-      if (modalSleepAborted || !this.isRunning) return { status: 'halt' };
-      retryClickRes = await currentPage.clickEasyApplyButton();
-      logger.info(`[DedicatedJobRunner] clickEasyApplyButton retry (after modal miss):`, retryClickRes);
-      modalRes = await currentPage.waitForEasyApplyModal(15000, 300);
+      // Escalation 1: some LinkedIn builds ignore synthetic pointer events on the apply
+      // button (click reports success, nothing opens). Drive a real trusted CDP click on
+      // the marked button before spending another full wait on a synthetic retry.
+      if (typeof currentPage.trustedClickEasyApplyButton === 'function') {
+        const trustedClicked = await currentPage.trustedClickEasyApplyButton().catch(() => false);
+        if (trustedClicked) {
+          this.notifyStatus(portToSend, `🖱️ Form did not open — retrying with a real mouse click...`, 'info');
+          logger.info(
+            `[DedicatedJobRunner] Trusted CDP click dispatched for "${displayTitle}". Re-waiting for form...`,
+          );
+          const trustedSleep = await this.interruptibleSleep(800);
+          if (trustedSleep || !this.isRunning) return { status: 'halt' };
+          modalRes = await currentPage.waitForEasyApplyModal(10000, 300);
+          logger.info(`[DedicatedJobRunner] waitForEasyApplyModal after trusted click:`, modalRes);
+        }
+      }
+
+      // Retry click once (synthetic) if the trusted escalation was unavailable or failed
+      if (!modalRes.opened) {
+        logger.warning(`[DedicatedJobRunner] Modal did not open on first attempt. Retrying click...`);
+        const modalSleepAborted = await this.interruptibleSleep(1200);
+        if (modalSleepAborted || !this.isRunning) return { status: 'halt' };
+        retryClickRes = await currentPage.clickEasyApplyButton();
+        logger.info(`[DedicatedJobRunner] clickEasyApplyButton retry (after modal miss):`, retryClickRes);
+        modalRes = await currentPage.waitForEasyApplyModal(10000, 300);
+      }
     }
 
     // 4d. Handle Modal Form-Filling & Verified Submission
@@ -4473,11 +4489,19 @@ export class DedicatedJobRunner {
             .slice(0, 4)
             .join('/')}`
         : 'dom=unavailable';
+      const failCtx =
+        typeof currentPage.captureEasyApplyFailureContext === 'function'
+          ? await currentPage.captureEasyApplyFailureContext().catch(() => '')
+          : '';
       logger.warning(`[DedicatedJobRunner] Modal-open diagnostics for "${displayTitle}": ${failDom}`);
+      if (failCtx) {
+        logger.warning(`[DedicatedJobRunner] Modal-open page context for "${displayTitle}": ${failCtx}`);
+      }
       const failReason = [
         modalRes.error || clickRes.error || 'Easy Apply modal failed to open within timeout',
         lastClickDiag,
         failDom,
+        failCtx,
       ]
         .filter(Boolean)
         .join(' | ');
@@ -4759,6 +4783,17 @@ export class DedicatedJobRunner {
         fields = await page.discoverModalFormFields();
         if (fields.length > 0) {
           logger.info(`[DedicatedJobRunner] Step ${step}: form fields appeared on re-scan (${fields.length} found).`);
+        }
+      }
+      if (fields.length === 0 && step === 1) {
+        // Step 1 may take an extra moment to mount its React inputs in modern UI
+        for (let initRetry = 0; initRetry < 3; initRetry++) {
+          await new Promise(r => setTimeout(r, 600));
+          fields = await page.discoverModalFormFields();
+          if (fields.length > 0) {
+            logger.info(`[DedicatedJobRunner] Step 1: form fields mounted after initial wait (${fields.length} found).`);
+            break;
+          }
         }
       }
       if (fields.length > 0) {
@@ -5742,7 +5777,12 @@ export class DedicatedJobRunner {
           }
         }
 
-        const modalOpen = await page.isEasyApplyModalOpen();
+        let modalOpen = await page.isEasyApplyModalOpen();
+        if (!modalOpen) {
+          // Double check after a short wait (in case of re-render or transition)
+          await new Promise(r => setTimeout(r, 600));
+          modalOpen = await page.isEasyApplyModalOpen();
+        }
         if (!modalOpen) {
           const postCheck = await page.verifyApplicationConfirmation();
           if (postCheck.confirmed) {

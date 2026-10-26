@@ -2108,19 +2108,47 @@ export default class Page {
         const dialogs = root.querySelectorAll
           ? (Array.from(
               root.querySelectorAll(
-                '.jobs-easy-apply-modal, [data-test-modal-id="easy-apply-modal"], [data-easy-apply-modal], div.artdeco-modal, .artdeco-modal, [role="dialog"], [aria-modal="true"], dialog[open], [data-test-modal]',
+                'dialog, dialog[open], .jobs-easy-apply-modal, [data-test-modal-id="easy-apply-modal"], [data-easy-apply-modal], div.artdeco-modal, .artdeco-modal, div[role="dialog"], [role="dialog"], [aria-modal="true"], [data-test-modal]',
               ),
             ) as HTMLElement[])
           : [];
         for (const d of dialogs) {
-          if (d.closest('footer, #footer, .artdeco-footer, [data-view-name="footer"]')) continue;
+          if (!d || !d.isConnected) continue;
+          if (
+            d.closest(
+              'nav, header, footer, #footer, .artdeco-footer, [data-view-name="footer"], #global-nav, .global-nav, .msg-overlay-container, #msg-overlay, .artdeco-dropdown',
+            )
+          ) {
+            continue;
+          }
+          const aria = (d.getAttribute('aria-label') || '').toLowerCase();
+          if (aria.includes('messaging') || aria.includes('chat') || aria.includes('notification')) continue;
           const txt = (d.innerText || d.textContent || '').trim().toLowerCase();
+          if (/^\d+\s*notifications?$/i.test(txt) || d.closest('.notifications-badge')) continue;
           if (txt.includes('select language') && (txt.includes('privacy') || txt.includes('help center'))) continue;
           // A native "Save this application?" / "Discard draft?" confirmation is not the
           // Easy Apply form. Counting it as "modal open" made the runner believe the form
           // was still alive while the real step was gone.
           if (/save this application|save application|discard draft/i.test(txt)) continue;
+          const style = window.getComputedStyle(d);
+          if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity || '1') <= 0.05) continue;
+          const rect = d.getBoundingClientRect();
+          if (rect.width < 120 || rect.height < 60) continue;
           return true;
+        }
+        // A visible inline application step (no dialog wrapper) is an open form too.
+        const inlineForms = root.querySelectorAll
+          ? (Array.from(
+              root.querySelectorAll('.jobs-easy-apply-content, form.jobs-easy-apply-form, [data-easy-apply-modal]'),
+            ) as HTMLElement[])
+          : [];
+        for (const form of inlineForms) {
+          if (!form || !form.isConnected) continue;
+          if (form.closest('footer, #footer, .artdeco-footer, [data-view-name="footer"]')) continue;
+          const style = window.getComputedStyle(form);
+          if (style.display === 'none' || style.visibility === 'hidden') continue;
+          const rect = form.getBoundingClientRect();
+          if (rect.width >= 120 && rect.height >= 60) return true;
         }
         const all = root.querySelectorAll ? root.querySelectorAll('*') : [];
         for (let i = 0; i < all.length; i++) {
@@ -2331,13 +2359,25 @@ export default class Page {
         }
       }
 
-      // 2. Global fallback across document ONLY when no details pane exists (e.g. standalone /jobs/view/ page)
-      if (!easyApplyBtn && !detailsContainer) {
+      // 2. Document-wide fallback.
+      //    - Standalone /jobs/view/ page (no details pane): full document search.
+      //    - Split view: the details pane was detected but the apply button lives outside
+      //      the matched container (newer LinkedIn layouts) → geometry-guarded search of
+      //      the right half only, so left-pane job cards can never be clicked.
+      if (!easyApplyBtn) {
+        const vw = window.innerWidth || document.documentElement.clientWidth || 1200;
+        const inRightPane = (el: HTMLElement) => {
+          if (!detailsContainer) return true;
+          const r = el.getBoundingClientRect();
+          return r.left >= vw * 0.35;
+        };
+        const fallbackPhase = detailsContainer ? 'global-right-pane' : 'global';
+
         for (const sel of candidateSelectors) {
           const matches = Array.from(document.querySelectorAll(sel)) as HTMLElement[];
           let found: HTMLElement | null = null;
           for (const btn of matches) {
-            if (easyApplyVerdict(btn).ok) {
+            if (easyApplyVerdict(btn).ok && inRightPane(btn)) {
               found = btn;
               break;
             }
@@ -2345,18 +2385,18 @@ export default class Page {
           if (found) {
             easyApplyBtn = found;
             matchedSelector = sel;
-            matchedPhase = 'global';
+            matchedPhase = fallbackPhase;
             break;
           }
-          pushScan('global', sel, matches);
+          pushScan(fallbackPhase, sel, matches);
         }
 
-        // 3. Generic button/a search globally (standalone only)
+        // 3. Generic button/a search across the document (right pane when split view)
         if (!easyApplyBtn) {
           const allBtns = Array.from(document.querySelectorAll('button, [role="button"], a')) as HTMLElement[];
           let found: HTMLElement | null = null;
           for (const btn of allBtns) {
-            if (easyApplyVerdict(btn).ok) {
+            if (easyApplyVerdict(btn).ok && inRightPane(btn)) {
               found = btn;
               break;
             }
@@ -2364,9 +2404,9 @@ export default class Page {
           if (found) {
             easyApplyBtn = found;
             matchedSelector = 'generic (button,[role="button"],a)';
-            matchedPhase = 'global';
+            matchedPhase = fallbackPhase;
           } else {
-            pushScan('global', 'generic (button,[role="button"],a)', allBtns);
+            pushScan(fallbackPhase, 'generic (button,[role="button"],a)', allBtns);
           }
         }
       }
@@ -2375,6 +2415,14 @@ export default class Page {
         const target = (easyApplyBtn.closest('button, [role="button"], a') || easyApplyBtn) as HTMLElement;
         target.scrollIntoView({ behavior: 'instant', block: 'center' });
         target.focus();
+        // Mark the exact target so the runner can escalate to a REAL trusted mouse
+        // click (CDP) when LinkedIn ignores the synthetic event and no form opens.
+        try {
+          document
+            .querySelectorAll('[data-qoder-easy-apply-target]')
+            .forEach(el => el.removeAttribute('data-qoder-easy-apply-target'));
+          target.setAttribute('data-qoder-easy-apply-target', '1');
+        } catch {}
         const opts = { bubbles: true, cancelable: true, view: window };
         target.dispatchEvent(new PointerEvent('pointerdown', opts));
         target.dispatchEvent(new MouseEvent('mousedown', opts));
@@ -2424,6 +2472,137 @@ export default class Page {
     }
 
     return { success: false, error: 'Could not click Easy Apply button (page context unavailable)' };
+  }
+
+  /**
+   * Escalation for the Easy Apply button: drives a REAL trusted mouse click (CDP) on the
+   * element marked by `clickEasyApplyButton` (`data-qoder-easy-apply-target`).
+   *
+   * Some LinkedIn builds ignore fully synthetic pointer events on the apply button — the
+   * synthetic click returns `clicked: true` but no form ever opens. A trusted input event
+   * cannot be discarded by the page, so this is the reliable retry.
+   */
+  async trustedClickEasyApplyButton(): Promise<boolean> {
+    if (!this._puppeteerPage) {
+      await this.attachPuppeteer().catch(() => false);
+    }
+    if (!this._puppeteerPage) return false;
+
+    const markerSel = '[data-qoder-easy-apply-target]';
+    try {
+      const present = await this._puppeteerPage.evaluate((sel: string) => {
+        const el = document.querySelector(sel) as HTMLElement | null;
+        if (!el) return false;
+        el.scrollIntoView({ behavior: 'instant', block: 'center' });
+        return el.isConnected;
+      }, markerSel);
+      if (!present) {
+        logger.debug('[trustedClickEasyApplyButton] No marked Easy Apply target found.');
+        return false;
+      }
+      await this._puppeteerPage.click(markerSel);
+      logger.info('[trustedClickEasyApplyButton] Trusted CDP click dispatched on Easy Apply button.');
+      return true;
+    } catch (err) {
+      logger.debug('[trustedClickEasyApplyButton] Trusted click failed:', err);
+      return false;
+    } finally {
+      try {
+        await this._puppeteerPage.evaluate((sel: string) => {
+          document.querySelectorAll(sel).forEach(el => el.removeAttribute('data-qoder-easy-apply-target'));
+        }, markerSel);
+      } catch {}
+    }
+  }
+
+  /**
+   * Compact failure context for "Easy Apply form did not open": lists the visible
+   * dialogs (with their titles/input counts) and the details-pane buttons, so the next
+   * report shows whether the form actually opened but was not recognised, or whether a
+   * foreign overlay intercepted it.
+   */
+  async captureEasyApplyFailureContext(): Promise<string> {
+    const snapInPage = () => {
+      const isVisible = (el: HTMLElement) => {
+        if (!el || !el.isConnected) return false;
+        const style = window.getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden') return false;
+        if (parseFloat(style.opacity || '1') <= 0.05) return false;
+        const rect = el.getBoundingClientRect();
+        return rect.width >= 40 && rect.height >= 20;
+      };
+      const clean = (s: string) => (s || '').replace(/\s+/g, ' ').trim();
+
+      const dialogSel =
+        'div.jobs-easy-apply-modal, [data-easy-apply-modal], [data-test-modal-id="easy-apply-modal"], div[data-test-modal], div.artdeco-modal, div[role="dialog"], dialog[open], [aria-modal="true"]';
+      const dialogs = (Array.from(document.querySelectorAll(dialogSel)) as HTMLElement[])
+        .filter(isVisible)
+        .filter(d => !d.closest('footer, #footer, .artdeco-footer, [data-view-name="footer"]'))
+        .slice(0, 4)
+        .map(d => {
+          const titleEl = d.querySelector('h1, h2, h3, [data-test-modal-title]');
+          const title = clean(
+            titleEl?.textContent || d.getAttribute('aria-label') || d.innerText || d.textContent || '',
+          ).slice(0, 60);
+          const inputs = d.querySelectorAll(
+            'input:not([type="hidden"]), textarea, select, [contenteditable="true"]',
+          ).length;
+          const tag = d.tagName.toLowerCase();
+          const firstCls =
+            typeof d.className === 'string' && d.className.trim() ? '.' + d.className.trim().split(/\s+/)[0] : '';
+          return `${tag}${firstCls} "${title}" inputs=${inputs}`;
+        });
+
+      const pane =
+        document.querySelector('.scaffold-layout__detail') ||
+        document.querySelector('.jobs-search__job-details--container') ||
+        document.querySelector('.jobs-search__job-details') ||
+        document.querySelector('.jobs-details__main-content') ||
+        document.querySelector('.job-view-layout') ||
+        document.querySelector('[data-view-name="job-details-top-card"]') ||
+        document.querySelector('[data-view-name="job-details"]');
+      const paneButtons = pane
+        ? (Array.from(pane.querySelectorAll('button, [role="button"], a.jobs-apply-button')) as HTMLElement[])
+            .filter(isVisible)
+            .map(b => clean(b.textContent || b.getAttribute('aria-label') || '').slice(0, 30))
+            .filter(Boolean)
+            .slice(0, 5)
+        : [];
+
+      const inlineForm = Boolean(
+        document.querySelector('.jobs-easy-apply-content, form.jobs-easy-apply-form, [data-easy-apply-modal]'),
+      );
+
+      return [
+        `dialogs=${dialogs.length ? dialogs.join(' ; ') : 'none'}`,
+        `paneButtons=${paneButtons.length ? paneButtons.join('/') : 'none'}`,
+        `inlineForm=${inlineForm ? 'yes' : 'no'}`,
+      ].join(' | ');
+    };
+
+    if (!this._puppeteerPage) {
+      await this.attachPuppeteer().catch(() => false);
+    }
+
+    if (this._puppeteerPage) {
+      try {
+        const res = await this._puppeteerPage.evaluate(snapInPage);
+        if (res) return String(res);
+      } catch {}
+    }
+
+    if (this._tabId && typeof chrome !== 'undefined' && chrome.scripting?.executeScript) {
+      try {
+        const results = await chrome.scripting.executeScript({
+          target: { tabId: this._tabId },
+          func: snapInPage,
+        });
+        const res = results?.[0]?.result;
+        if (res) return String(res);
+      } catch {}
+    }
+
+    return '';
   }
 
   /**
@@ -2582,9 +2761,7 @@ export default class Page {
           // Confirmation / intermediate dialogs must never be mistaken for the form itself.
           const rawText = (dialog.innerText || dialog.textContent || '').trim().slice(0, 900);
           const isIntermediateConfirm =
-            /save this application|save application|discard draft|job search safety|continue applying|why are these results not helpful|share your feedback|select an option or share your feedback/i.test(
-              rawText,
-            );
+            /save this application|save application|discard draft|job search safety|continue applying/i.test(rawText);
 
           // LinkedIn's 2025 Easy Apply UI is a native <dialog> with atomic utility classes
           // (no artdeco/jobs markers) and often paints its fields a moment after opening.
@@ -2699,34 +2876,42 @@ export default class Page {
               };
             }
           }
+        }
 
-          // Known intermediate dialog 4: Feedback modal ("Why are these results not helpful?") -> Click cross mark (X)
-          if (
-            /why are these results not helpful|share your feedback|select an option or share your feedback|not working as expected|these filters aren['’]t helpful/i.test(
-              title + ' ' + text,
-            )
-          ) {
-            const closeBtn = dialog.querySelector<HTMLButtonElement>(
-              'button[aria-label*="Dismiss" i], button[aria-label*="Close" i], .artdeco-modal__dismiss, button[data-test-modal-close-btn]',
-            );
-            const cancelBtn = Array.from(dialog.querySelectorAll('button')).find(b =>
-              /^cancel$/i.test((b.textContent || '').trim()),
-            );
-            const btnToClick = closeBtn || cancelBtn;
-            if (btnToClick) {
-              btnToClick.click();
-              return {
-                modalFound: false,
-                inShadow: root instanceof ShadowRoot,
-                dialogTitle: title,
-                isIntermediate: true,
-                intermediateAction: 'safety',
-                inputsCount: 0,
-                buttonsCount: 0,
-                hasClosedShadow: false,
-              };
-            }
+        // Pass 3: Inline application step rendered directly in the details pane.
+        // Some LinkedIn builds replace the right pane with the apply form instead of
+        // opening a dialog. Without this check the runner times out ("modal failed to
+        // open") even though the form is already on screen and fillable.
+        const inlineForms = root.querySelectorAll
+          ? (Array.from(
+              root.querySelectorAll('.jobs-easy-apply-content, form.jobs-easy-apply-form, [data-easy-apply-modal]'),
+            ) as HTMLElement[])
+          : [];
+        for (const form of inlineForms) {
+          if (!form || !form.isConnected) continue;
+          if (form.closest('footer, #footer, .artdeco-footer, [data-view-name="footer"], nav, header')) continue;
+          const style = window.getComputedStyle(form);
+          if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity || '1') <= 0.05) {
+            continue;
           }
+          const rect = form.getBoundingClientRect();
+          if (rect.width < 120 || rect.height < 60) continue;
+          const inputs = form.querySelectorAll(
+            'input:not([type="hidden"]), textarea, select, [contenteditable="true"]',
+          );
+          const btns = Array.from(form.querySelectorAll('button, [role="button"]')) as HTMLElement[];
+          const hasForward = btns.some(b =>
+            /next|review|submit|continue/i.test((b.textContent || '') + ' ' + (b.getAttribute('aria-label') || '')),
+          );
+          if (inputs.length === 0 && !hasForward) continue;
+          return {
+            modalFound: true,
+            inShadow: root instanceof ShadowRoot,
+            dialogTitle: 'Inline Easy Apply form',
+            inputsCount: inputs.length,
+            buttonsCount: btns.length,
+            hasClosedShadow: false,
+          };
         }
 
         // Check for shadow roots (e.g. #interop-outlet)
@@ -2973,12 +3158,13 @@ export default class Page {
         const candidates = root.querySelectorAll
           ? (Array.from(
               root.querySelectorAll(
-                '.jobs-easy-apply-modal, [data-test-modal-id="easy-apply-modal"], [data-easy-apply-modal], div.artdeco-modal[role="dialog"], div.artdeco-modal, div[role="dialog"][aria-modal="true"], div[role="dialog"], [data-test-modal], dialog[open], [aria-modal="true"]',
+                'dialog, dialog[open], .jobs-easy-apply-modal, [data-test-modal-id="easy-apply-modal"], [data-easy-apply-modal], div.artdeco-modal[role="dialog"], div.artdeco-modal, .artdeco-modal, div[role="dialog"][aria-modal="true"], div[role="dialog"], [role="dialog"], [data-test-modal], [aria-modal="true"]',
               ),
             ) as HTMLElement[])
           : [];
 
         for (const c of candidates) {
+          if (!c || !c.isConnected) continue;
           if (
             c.closest(
               'nav, header, footer, #footer, .artdeco-footer, [data-view-name="footer"], #global-nav, .global-nav, .msg-overlay-container, #msg-overlay, .artdeco-dropdown',
@@ -3000,7 +3186,7 @@ export default class Page {
           // A native "Save this application?" / "Discard draft?" sheet is not the form.
           if (/save this application|save application|discard draft/i.test(text)) continue;
           const style = window.getComputedStyle(c);
-          if (style.display === 'none' || style.visibility === 'hidden') continue;
+          if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity || '1') <= 0.05) continue;
           const rect = c.getBoundingClientRect();
           if (rect.width < 120 || rect.height < 60) continue;
 
@@ -3015,24 +3201,41 @@ export default class Page {
             return c;
           }
 
+          const isNativeDialog = c.tagName.toLowerCase() === 'dialog';
           const titleEl = c.querySelector('h1, h2, h3, [id*="header"], [class*="header"]');
           const titleText = (titleEl?.textContent || text.slice(0, 100)).toLowerCase();
-          const hasApplyTitle = /apply|application|job/i.test(titleText);
+          const hasApplyTitle = /apply|application|job|contact info|home address|resume|work experience|education|screening|additional questions/i.test(titleText);
+          const hasFormControls =
+            c.querySelector('input:not([type="hidden"]), textarea, select, [contenteditable="true"]') !== null;
+          const buttons = Array.from(c.querySelectorAll('button, [role="button"]')) as HTMLElement[];
+          const hasNavButton = buttons.some(b => {
+            const bt = (b.textContent || '').trim().toLowerCase();
+            const bAria = (b.getAttribute('aria-label') || '').toLowerCase();
+            return (
+              bt.includes('next') ||
+              bt.includes('review') ||
+              bt.includes('submit') ||
+              bt.includes('continue') ||
+              bAria.includes('next') ||
+              bAria.includes('review') ||
+              bAria.includes('submit') ||
+              bAria.includes('continue')
+            );
+          });
           const hasPrimaryBtn =
             c.querySelector(
               'button.artdeco-button--primary, button[data-easy-apply-next-button], button[aria-label*="next" i], button[aria-label*="submit" i], button[aria-label*="review" i], button[aria-label*="continue" i]',
             ) !== null;
-          // Mirror waitForEasyApplyModal's acceptance rule: a visible dialog that has
-          // form controls AND a navigation button is the Easy Apply modal even when
-          // its heading text is unusual or missing.
-          const hasFormControls =
-            c.querySelector('input:not([type="hidden"]), textarea, select, [contenteditable="true"]') !== null;
-          const hasNavButton =
-            c.querySelector(
-              'button[data-easy-apply-next-button], button[aria-label*="next" i], button[aria-label*="review" i], button[aria-label*="submit" i], button[aria-label*="continue" i]',
-            ) !== null;
+          const hasApplyFlowText =
+            /easy apply|apply to |apply for |contact info|home address|resume|review your application|work experience|education/i.test(text);
 
-          if (hasApplyTitle || hasPrimaryBtn || (hasFormControls && hasNavButton)) {
+          if (
+            hasApplyTitle ||
+            hasPrimaryBtn ||
+            hasNavButton ||
+            (isNativeDialog && (hasApplyFlowText || hasFormControls || hasNavButton)) ||
+            (hasFormControls && (hasNavButton || hasApplyFlowText))
+          ) {
             return c;
           }
         }
@@ -3044,6 +3247,24 @@ export default class Page {
             if (found) return found;
           }
         }
+
+        // Inline application step (no dialog wrapper): some LinkedIn builds render the
+        // apply form directly inside the details pane. Treat its container as the form
+        // so discovery, filling, validation and navigation all keep working.
+        const inlineForms = (
+          Array.from(
+            root.querySelectorAll('.jobs-easy-apply-content, form.jobs-easy-apply-form, [data-easy-apply-modal]'),
+          ) as HTMLElement[]
+        ).filter(el => {
+          if (!el || !el.isConnected) return false;
+          if (el.closest('nav, header, footer, #footer, .artdeco-footer, [data-view-name="footer"]')) return false;
+          const st = window.getComputedStyle(el);
+          if (st.display === 'none' || st.visibility === 'hidden') return false;
+          const r = el.getBoundingClientRect();
+          return r.width >= 120 && r.height >= 60;
+        });
+        if (inlineForms.length > 0) return inlineForms[0];
+
         return null;
       }
 
@@ -4190,12 +4411,13 @@ export default class Page {
         const candidates = root.querySelectorAll
           ? (Array.from(
               root.querySelectorAll(
-                '.jobs-easy-apply-modal, [data-test-modal-id="easy-apply-modal"], [data-easy-apply-modal], div.artdeco-modal[role="dialog"], div.artdeco-modal, div[role="dialog"][aria-modal="true"], div[role="dialog"], [data-test-modal], dialog[open], [aria-modal="true"]',
+                'dialog, dialog[open], .jobs-easy-apply-modal, [data-test-modal-id="easy-apply-modal"], [data-easy-apply-modal], div.artdeco-modal[role="dialog"], div.artdeco-modal, .artdeco-modal, div[role="dialog"][aria-modal="true"], div[role="dialog"], [role="dialog"], [data-test-modal], [aria-modal="true"]',
               ),
             ) as HTMLElement[])
           : [];
 
         for (const c of candidates) {
+          if (!c || !c.isConnected) continue;
           if (
             c.closest(
               'nav, header, footer, #footer, .artdeco-footer, [data-view-name="footer"], #global-nav, .global-nav, .msg-overlay-container, #msg-overlay, .artdeco-dropdown',
@@ -4217,7 +4439,7 @@ export default class Page {
           // A native "Save this application?" / "Discard draft?" sheet is not the form.
           if (/save this application|save application|discard draft/i.test(text)) continue;
           const style = window.getComputedStyle(c);
-          if (style.display === 'none' || style.visibility === 'hidden') continue;
+          if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity || '1') <= 0.05) continue;
           const rect = c.getBoundingClientRect();
           if (rect.width < 120 || rect.height < 60) continue;
 
@@ -4232,24 +4454,41 @@ export default class Page {
             return c;
           }
 
+          const isNativeDialog = c.tagName.toLowerCase() === 'dialog';
           const titleEl = c.querySelector('h1, h2, h3, [id*="header"], [class*="header"]');
           const titleText = (titleEl?.textContent || text.slice(0, 100)).toLowerCase();
-          const hasApplyTitle = /apply|application|job/i.test(titleText);
+          const hasApplyTitle = /apply|application|job|contact info|home address|resume|work experience|education|screening|additional questions/i.test(titleText);
+          const hasFormControls =
+            c.querySelector('input:not([type="hidden"]), textarea, select, [contenteditable="true"]') !== null;
+          const buttons = Array.from(c.querySelectorAll('button, [role="button"]')) as HTMLElement[];
+          const hasNavButton = buttons.some(b => {
+            const bt = (b.textContent || '').trim().toLowerCase();
+            const bAria = (b.getAttribute('aria-label') || '').toLowerCase();
+            return (
+              bt.includes('next') ||
+              bt.includes('review') ||
+              bt.includes('submit') ||
+              bt.includes('continue') ||
+              bAria.includes('next') ||
+              bAria.includes('review') ||
+              bAria.includes('submit') ||
+              bAria.includes('continue')
+            );
+          });
           const hasPrimaryBtn =
             c.querySelector(
               'button.artdeco-button--primary, button[data-easy-apply-next-button], button[aria-label*="next" i], button[aria-label*="submit" i], button[aria-label*="review" i], button[aria-label*="continue" i]',
             ) !== null;
-          // Mirror waitForEasyApplyModal's acceptance rule: a visible dialog that has
-          // form controls AND a navigation button is the Easy Apply modal even when
-          // its heading text is unusual or missing.
-          const hasFormControls =
-            c.querySelector('input:not([type="hidden"]), textarea, select, [contenteditable="true"]') !== null;
-          const hasNavButton =
-            c.querySelector(
-              'button[data-easy-apply-next-button], button[aria-label*="next" i], button[aria-label*="review" i], button[aria-label*="submit" i], button[aria-label*="continue" i]',
-            ) !== null;
+          const hasApplyFlowText =
+            /easy apply|apply to |apply for |contact info|home address|resume|review your application|work experience|education/i.test(text);
 
-          if (hasApplyTitle || hasPrimaryBtn || (hasFormControls && hasNavButton)) {
+          if (
+            hasApplyTitle ||
+            hasPrimaryBtn ||
+            hasNavButton ||
+            (isNativeDialog && (hasApplyFlowText || hasFormControls || hasNavButton)) ||
+            (hasFormControls && (hasNavButton || hasApplyFlowText))
+          ) {
             return c;
           }
         }
@@ -4261,6 +4500,24 @@ export default class Page {
             if (found) return found;
           }
         }
+
+        // Inline application step (no dialog wrapper): some LinkedIn builds render the
+        // apply form directly inside the details pane. Treat its container as the form
+        // so discovery, filling, validation and navigation all keep working.
+        const inlineForms = (
+          Array.from(
+            root.querySelectorAll('.jobs-easy-apply-content, form.jobs-easy-apply-form, [data-easy-apply-modal]'),
+          ) as HTMLElement[]
+        ).filter(el => {
+          if (!el || !el.isConnected) return false;
+          if (el.closest('nav, header, footer, #footer, .artdeco-footer, [data-view-name="footer"]')) return false;
+          const st = window.getComputedStyle(el);
+          if (st.display === 'none' || st.visibility === 'hidden') return false;
+          const r = el.getBoundingClientRect();
+          return r.width >= 120 && r.height >= 60;
+        });
+        if (inlineForms.length > 0) return inlineForms[0];
+
         return null;
       }
 
@@ -5918,17 +6175,6 @@ export default class Page {
       const seenJobIds = new Set<string>();
 
       for (const card of cards) {
-        const cardText = (card.textContent || '').trim();
-        // Skip feedback prompts, e.g. "Was this helpful? Share negative feedback"
-        if (
-          /\b(?:why are these results not helpful|share negative feedback|share positive feedback|was this helpful|select an option or share your feedback)\b/i.test(
-            cardText,
-          ) &&
-          !card.querySelector('a[href*="/jobs/view/"], a[href*="currentJobId="]')
-        ) {
-          continue;
-        }
-
         // 1. Try finding job ID from data attributes on card or child elements
         let jobId =
           card.getAttribute('data-job-id') ||
@@ -6013,9 +6259,6 @@ export default class Page {
             link?.getAttribute('aria-label') || link?.getAttribute('title') || card.getAttribute('aria-label') || '';
         }
         const cleanedCardTitle = cleanLinkedInJobTitle(rawTitle);
-        if (/\b(?:negative feedback|share feedback|was this helpful|results not helpful)\b/i.test(cleanedCardTitle)) {
-          continue;
-        }
         const title = isJunkJobTitle(cleanedCardTitle) ? '' : cleanedCardTitle;
 
         // Extract company
@@ -6432,12 +6675,13 @@ export default class Page {
         const candidates = root.querySelectorAll
           ? (Array.from(
               root.querySelectorAll(
-                '.jobs-easy-apply-modal, [data-test-modal-id="easy-apply-modal"], [data-easy-apply-modal], div.artdeco-modal[role="dialog"], div.artdeco-modal, div[role="dialog"][aria-modal="true"], div[role="dialog"], [data-test-modal], dialog[open], [aria-modal="true"]',
+                'dialog, dialog[open], .jobs-easy-apply-modal, [data-test-modal-id="easy-apply-modal"], [data-easy-apply-modal], div.artdeco-modal[role="dialog"], div.artdeco-modal, .artdeco-modal, div[role="dialog"][aria-modal="true"], div[role="dialog"], [role="dialog"], [data-test-modal], [aria-modal="true"]',
               ),
             ) as HTMLElement[])
           : [];
 
         for (const c of candidates) {
+          if (!c || !c.isConnected) continue;
           if (
             c.closest(
               'nav, header, footer, #footer, .artdeco-footer, [data-view-name="footer"], #global-nav, .global-nav, .msg-overlay-container, #msg-overlay, .artdeco-dropdown',
@@ -6459,7 +6703,7 @@ export default class Page {
           // A native "Save this application?" / "Discard draft?" sheet is not the form.
           if (/save this application|save application|discard draft/i.test(text)) continue;
           const style = window.getComputedStyle(c);
-          if (style.display === 'none' || style.visibility === 'hidden') continue;
+          if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity || '1') <= 0.05) continue;
           const rect = c.getBoundingClientRect();
           if (rect.width < 120 || rect.height < 60) continue;
 
@@ -6474,24 +6718,41 @@ export default class Page {
             return c;
           }
 
+          const isNativeDialog = c.tagName.toLowerCase() === 'dialog';
           const titleEl = c.querySelector('h1, h2, h3, [id*="header"], [class*="header"]');
           const titleText = (titleEl?.textContent || text.slice(0, 100)).toLowerCase();
-          const hasApplyTitle = /apply|application|job/i.test(titleText);
+          const hasApplyTitle = /apply|application|job|contact info|home address|resume|work experience|education|screening|additional questions/i.test(titleText);
+          const hasFormControls =
+            c.querySelector('input:not([type="hidden"]), textarea, select, [contenteditable="true"]') !== null;
+          const buttons = Array.from(c.querySelectorAll('button, [role="button"]')) as HTMLElement[];
+          const hasNavButton = buttons.some(b => {
+            const bt = (b.textContent || '').trim().toLowerCase();
+            const bAria = (b.getAttribute('aria-label') || '').toLowerCase();
+            return (
+              bt.includes('next') ||
+              bt.includes('review') ||
+              bt.includes('submit') ||
+              bt.includes('continue') ||
+              bAria.includes('next') ||
+              bAria.includes('review') ||
+              bAria.includes('submit') ||
+              bAria.includes('continue')
+            );
+          });
           const hasPrimaryBtn =
             c.querySelector(
               'button.artdeco-button--primary, button[data-easy-apply-next-button], button[aria-label*="next" i], button[aria-label*="submit" i], button[aria-label*="review" i], button[aria-label*="continue" i]',
             ) !== null;
-          // Mirror waitForEasyApplyModal's acceptance rule: a visible dialog that has
-          // form controls AND a navigation button is the Easy Apply modal even when
-          // its heading text is unusual or missing.
-          const hasFormControls =
-            c.querySelector('input:not([type="hidden"]), textarea, select, [contenteditable="true"]') !== null;
-          const hasNavButton =
-            c.querySelector(
-              'button[data-easy-apply-next-button], button[aria-label*="next" i], button[aria-label*="review" i], button[aria-label*="submit" i], button[aria-label*="continue" i]',
-            ) !== null;
+          const hasApplyFlowText =
+            /easy apply|apply to |apply for |contact info|home address|resume|review your application|work experience|education/i.test(text);
 
-          if (hasApplyTitle || hasPrimaryBtn || (hasFormControls && hasNavButton)) {
+          if (
+            hasApplyTitle ||
+            hasPrimaryBtn ||
+            hasNavButton ||
+            (isNativeDialog && (hasApplyFlowText || hasFormControls || hasNavButton)) ||
+            (hasFormControls && (hasNavButton || hasApplyFlowText))
+          ) {
             return c;
           }
         }
@@ -6503,6 +6764,24 @@ export default class Page {
             if (found) return found;
           }
         }
+
+        // Inline application step (no dialog wrapper): some LinkedIn builds render the
+        // apply form directly inside the details pane. Treat its container as the form
+        // so discovery, filling, validation and navigation all keep working.
+        const inlineForms = (
+          Array.from(
+            root.querySelectorAll('.jobs-easy-apply-content, form.jobs-easy-apply-form, [data-easy-apply-modal]'),
+          ) as HTMLElement[]
+        ).filter(el => {
+          if (!el || !el.isConnected) return false;
+          if (el.closest('nav, header, footer, #footer, .artdeco-footer, [data-view-name="footer"]')) return false;
+          const st = window.getComputedStyle(el);
+          if (st.display === 'none' || st.visibility === 'hidden') return false;
+          const r = el.getBoundingClientRect();
+          return r.width >= 120 && r.height >= 60;
+        });
+        if (inlineForms.length > 0) return inlineForms[0];
+
         return null;
       }
 
@@ -7168,12 +7447,13 @@ export default class Page {
         const candidates = root.querySelectorAll
           ? (Array.from(
               root.querySelectorAll(
-                'div.jobs-easy-apply-modal, [data-easy-apply-modal], [data-test-modal-id="easy-apply-modal"], div[data-test-modal], div.artdeco-modal, div[role="dialog"], dialog[open], [aria-modal="true"]',
+                'dialog, dialog[open], .jobs-easy-apply-modal, [data-test-modal-id="easy-apply-modal"], [data-easy-apply-modal], div.artdeco-modal[role="dialog"], div.artdeco-modal, .artdeco-modal, div[role="dialog"][aria-modal="true"], div[role="dialog"], [role="dialog"], [data-test-modal], [aria-modal="true"]',
               ),
             ) as HTMLElement[])
           : [];
 
         for (const c of candidates) {
+          if (!c || !c.isConnected) continue;
           if (
             c.closest(
               'nav, header, footer, #footer, .artdeco-footer, [data-view-name="footer"], #global-nav, .global-nav, .msg-overlay-container, #msg-overlay, .artdeco-dropdown',
@@ -7181,18 +7461,63 @@ export default class Page {
           ) {
             continue;
           }
+          const aria = (c.getAttribute('aria-label') || '').toLowerCase();
+          if (aria.includes('messaging') || aria.includes('chat') || aria.includes('notification')) continue;
           const text = (c.innerText || c.textContent || '').trim().toLowerCase();
           if (/^\d+\s*notifications?$/i.test(text) || c.closest('.notifications-badge')) continue;
           if (text.includes('select language') && (text.includes('privacy') || text.includes('help center'))) continue;
           // A native "Save this application?" / "Discard draft?" sheet is not the form.
           if (/save this application|save application|discard draft/i.test(text)) continue;
           const style = window.getComputedStyle(c);
-          if (style.display === 'none' || style.visibility === 'hidden') continue;
+          if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity || '1') <= 0.05) continue;
           const rect = c.getBoundingClientRect();
-          if (rect.width >= 150 && rect.height >= 80) return c;
+          if (rect.width < 120 || rect.height < 60) continue;
+
           if (
             c.classList.contains('jobs-easy-apply-modal') ||
-            c.querySelector('.jobs-easy-apply-modal, .jobs-easy-apply-content, form.jobs-easy-apply-form')
+            c.hasAttribute('data-easy-apply-modal') ||
+            c.getAttribute('data-test-modal-id') === 'easy-apply-modal' ||
+            c.querySelector(
+              '.jobs-easy-apply-modal, .jobs-easy-apply-modal__content, .jobs-easy-apply-modal__header, .jobs-easy-apply-modal__footer, .jobs-easy-apply-content, .jobs-easy-apply-form-section, .jobs-easy-apply-form-element, form.jobs-easy-apply-form, [data-easy-apply-modal], [data-test-modal-id="easy-apply-modal"], h2.jobs-easy-apply-modal__title',
+            ) !== null
+          ) {
+            return c;
+          }
+
+          const isNativeDialog = c.tagName.toLowerCase() === 'dialog';
+          const titleEl = c.querySelector('h1, h2, h3, [id*="header"], [class*="header"]');
+          const titleText = (titleEl?.textContent || text.slice(0, 100)).toLowerCase();
+          const hasApplyTitle = /apply|application|job|contact info|home address|resume|work experience|education|screening|additional questions/i.test(titleText);
+          const hasFormControls =
+            c.querySelector('input:not([type="hidden"]), textarea, select, [contenteditable="true"]') !== null;
+          const buttons = Array.from(c.querySelectorAll('button, [role="button"]')) as HTMLElement[];
+          const hasNavButton = buttons.some(b => {
+            const bt = (b.textContent || '').trim().toLowerCase();
+            const bAria = (b.getAttribute('aria-label') || '').toLowerCase();
+            return (
+              bt.includes('next') ||
+              bt.includes('review') ||
+              bt.includes('submit') ||
+              bt.includes('continue') ||
+              bAria.includes('next') ||
+              bAria.includes('review') ||
+              bAria.includes('submit') ||
+              bAria.includes('continue')
+            );
+          });
+          const hasPrimaryBtn =
+            c.querySelector(
+              'button.artdeco-button--primary, button[data-easy-apply-next-button], button[aria-label*="next" i], button[aria-label*="submit" i], button[aria-label*="review" i], button[aria-label*="continue" i]',
+            ) !== null;
+          const hasApplyFlowText =
+            /easy apply|apply to |apply for |contact info|home address|resume|review your application|work experience|education/i.test(text);
+
+          if (
+            hasApplyTitle ||
+            hasPrimaryBtn ||
+            hasNavButton ||
+            (isNativeDialog && (hasApplyFlowText || hasFormControls || hasNavButton)) ||
+            (hasFormControls && (hasNavButton || hasApplyFlowText))
           ) {
             return c;
           }
@@ -7205,6 +7530,24 @@ export default class Page {
             if (found) return found;
           }
         }
+
+        // Inline application step (no dialog wrapper): some LinkedIn builds render the
+        // apply form directly inside the details pane. Treat its container as the form
+        // so discovery, filling, validation and navigation all keep working.
+        const inlineForms = (
+          Array.from(
+            root.querySelectorAll('.jobs-easy-apply-content, form.jobs-easy-apply-form, [data-easy-apply-modal]'),
+          ) as HTMLElement[]
+        ).filter(el => {
+          if (!el || !el.isConnected) return false;
+          if (el.closest('nav, header, footer, #footer, .artdeco-footer, [data-view-name="footer"]')) return false;
+          const st = window.getComputedStyle(el);
+          if (st.display === 'none' || st.visibility === 'hidden') return false;
+          const r = el.getBoundingClientRect();
+          return r.width >= 120 && r.height >= 60;
+        });
+        if (inlineForms.length > 0) return inlineForms[0];
+
         return null;
       }
 
@@ -7374,12 +7717,13 @@ export default class Page {
         const candidates = root.querySelectorAll
           ? (Array.from(
               root.querySelectorAll(
-                'div.jobs-easy-apply-modal, [data-easy-apply-modal], [data-test-modal-id="easy-apply-modal"], div[data-test-modal], div.artdeco-modal, div[role="dialog"], dialog[open], [aria-modal="true"]',
+                'dialog, dialog[open], .jobs-easy-apply-modal, [data-test-modal-id="easy-apply-modal"], [data-easy-apply-modal], div.artdeco-modal[role="dialog"], div.artdeco-modal, .artdeco-modal, div[role="dialog"][aria-modal="true"], div[role="dialog"], [role="dialog"], [data-test-modal], [aria-modal="true"]',
               ),
             ) as HTMLElement[])
           : [];
 
         for (const c of candidates) {
+          if (!c || !c.isConnected) continue;
           if (
             c.closest(
               'nav, header, footer, #footer, .artdeco-footer, [data-view-name="footer"], #global-nav, .global-nav, .msg-overlay-container, #msg-overlay, .artdeco-dropdown',
@@ -7387,18 +7731,63 @@ export default class Page {
           ) {
             continue;
           }
+          const aria = (c.getAttribute('aria-label') || '').toLowerCase();
+          if (aria.includes('messaging') || aria.includes('chat') || aria.includes('notification')) continue;
           const text = (c.innerText || c.textContent || '').trim().toLowerCase();
           if (/^\d+\s*notifications?$/i.test(text) || c.closest('.notifications-badge')) continue;
           if (text.includes('select language') && (text.includes('privacy') || text.includes('help center'))) continue;
           // A native "Save this application?" / "Discard draft?" sheet is not the form.
           if (/save this application|save application|discard draft/i.test(text)) continue;
           const style = window.getComputedStyle(c);
-          if (style.display === 'none' || style.visibility === 'hidden') continue;
+          if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity || '1') <= 0.05) continue;
           const rect = c.getBoundingClientRect();
-          if (rect.width >= 150 && rect.height >= 80) return c;
+          if (rect.width < 120 || rect.height < 60) continue;
+
           if (
             c.classList.contains('jobs-easy-apply-modal') ||
-            c.querySelector('.jobs-easy-apply-modal, .jobs-easy-apply-content, form.jobs-easy-apply-form')
+            c.hasAttribute('data-easy-apply-modal') ||
+            c.getAttribute('data-test-modal-id') === 'easy-apply-modal' ||
+            c.querySelector(
+              '.jobs-easy-apply-modal, .jobs-easy-apply-modal__content, .jobs-easy-apply-modal__header, .jobs-easy-apply-modal__footer, .jobs-easy-apply-content, .jobs-easy-apply-form-section, .jobs-easy-apply-form-element, form.jobs-easy-apply-form, [data-easy-apply-modal], [data-test-modal-id="easy-apply-modal"], h2.jobs-easy-apply-modal__title',
+            ) !== null
+          ) {
+            return c;
+          }
+
+          const isNativeDialog = c.tagName.toLowerCase() === 'dialog';
+          const titleEl = c.querySelector('h1, h2, h3, [id*="header"], [class*="header"]');
+          const titleText = (titleEl?.textContent || text.slice(0, 100)).toLowerCase();
+          const hasApplyTitle = /apply|application|job|contact info|home address|resume|work experience|education|screening|additional questions/i.test(titleText);
+          const hasFormControls =
+            c.querySelector('input:not([type="hidden"]), textarea, select, [contenteditable="true"]') !== null;
+          const buttons = Array.from(c.querySelectorAll('button, [role="button"]')) as HTMLElement[];
+          const hasNavButton = buttons.some(b => {
+            const bt = (b.textContent || '').trim().toLowerCase();
+            const bAria = (b.getAttribute('aria-label') || '').toLowerCase();
+            return (
+              bt.includes('next') ||
+              bt.includes('review') ||
+              bt.includes('submit') ||
+              bt.includes('continue') ||
+              bAria.includes('next') ||
+              bAria.includes('review') ||
+              bAria.includes('submit') ||
+              bAria.includes('continue')
+            );
+          });
+          const hasPrimaryBtn =
+            c.querySelector(
+              'button.artdeco-button--primary, button[data-easy-apply-next-button], button[aria-label*="next" i], button[aria-label*="submit" i], button[aria-label*="review" i], button[aria-label*="continue" i]',
+            ) !== null;
+          const hasApplyFlowText =
+            /easy apply|apply to |apply for |contact info|home address|resume|review your application|work experience|education/i.test(text);
+
+          if (
+            hasApplyTitle ||
+            hasPrimaryBtn ||
+            hasNavButton ||
+            (isNativeDialog && (hasApplyFlowText || hasFormControls || hasNavButton)) ||
+            (hasFormControls && (hasNavButton || hasApplyFlowText))
           ) {
             return c;
           }
@@ -7411,6 +7800,24 @@ export default class Page {
             if (found) return found;
           }
         }
+
+        // Inline application step (no dialog wrapper): some LinkedIn builds render the
+        // apply form directly inside the details pane. Treat its container as the form
+        // so discovery, filling, validation and navigation all keep working.
+        const inlineForms = (
+          Array.from(
+            root.querySelectorAll('.jobs-easy-apply-content, form.jobs-easy-apply-form, [data-easy-apply-modal]'),
+          ) as HTMLElement[]
+        ).filter(el => {
+          if (!el || !el.isConnected) return false;
+          if (el.closest('nav, header, footer, #footer, .artdeco-footer, [data-view-name="footer"]')) return false;
+          const st = window.getComputedStyle(el);
+          if (st.display === 'none' || st.visibility === 'hidden') return false;
+          const r = el.getBoundingClientRect();
+          return r.width >= 120 && r.height >= 60;
+        });
+        if (inlineForms.length > 0) return inlineForms[0];
+
         return null;
       }
 
@@ -7501,12 +7908,13 @@ export default class Page {
         const candidates = root.querySelectorAll
           ? (Array.from(
               root.querySelectorAll(
-                'div.jobs-easy-apply-modal, [data-easy-apply-modal], [data-test-modal-id="easy-apply-modal"], div[data-test-modal], div.artdeco-modal, div[role="dialog"], dialog[open], [aria-modal="true"]',
+                'dialog, dialog[open], .jobs-easy-apply-modal, [data-test-modal-id="easy-apply-modal"], [data-easy-apply-modal], div.artdeco-modal[role="dialog"], div.artdeco-modal, .artdeco-modal, div[role="dialog"][aria-modal="true"], div[role="dialog"], [role="dialog"], [data-test-modal], [aria-modal="true"]',
               ),
             ) as HTMLElement[])
           : [];
 
         for (const c of candidates) {
+          if (!c || !c.isConnected) continue;
           if (
             c.closest(
               'nav, header, footer, #footer, .artdeco-footer, [data-view-name="footer"], #global-nav, .global-nav, .msg-overlay-container, #msg-overlay, .artdeco-dropdown',
@@ -7514,18 +7922,63 @@ export default class Page {
           ) {
             continue;
           }
+          const aria = (c.getAttribute('aria-label') || '').toLowerCase();
+          if (aria.includes('messaging') || aria.includes('chat') || aria.includes('notification')) continue;
           const text = (c.innerText || c.textContent || '').trim().toLowerCase();
           if (/^\d+\s*notifications?$/i.test(text) || c.closest('.notifications-badge')) continue;
           if (text.includes('select language') && (text.includes('privacy') || text.includes('help center'))) continue;
           // A native "Save this application?" / "Discard draft?" sheet is not the form.
           if (/save this application|save application|discard draft/i.test(text)) continue;
           const style = window.getComputedStyle(c);
-          if (style.display === 'none' || style.visibility === 'hidden') continue;
+          if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity || '1') <= 0.05) continue;
           const rect = c.getBoundingClientRect();
-          if (rect.width >= 150 && rect.height >= 80) return c;
+          if (rect.width < 120 || rect.height < 60) continue;
+
           if (
             c.classList.contains('jobs-easy-apply-modal') ||
-            c.querySelector('.jobs-easy-apply-modal, .jobs-easy-apply-content, form.jobs-easy-apply-form')
+            c.hasAttribute('data-easy-apply-modal') ||
+            c.getAttribute('data-test-modal-id') === 'easy-apply-modal' ||
+            c.querySelector(
+              '.jobs-easy-apply-modal, .jobs-easy-apply-modal__content, .jobs-easy-apply-modal__header, .jobs-easy-apply-modal__footer, .jobs-easy-apply-content, .jobs-easy-apply-form-section, .jobs-easy-apply-form-element, form.jobs-easy-apply-form, [data-easy-apply-modal], [data-test-modal-id="easy-apply-modal"], h2.jobs-easy-apply-modal__title',
+            ) !== null
+          ) {
+            return c;
+          }
+
+          const isNativeDialog = c.tagName.toLowerCase() === 'dialog';
+          const titleEl = c.querySelector('h1, h2, h3, [id*="header"], [class*="header"]');
+          const titleText = (titleEl?.textContent || text.slice(0, 100)).toLowerCase();
+          const hasApplyTitle = /apply|application|job|contact info|home address|resume|work experience|education|screening|additional questions/i.test(titleText);
+          const hasFormControls =
+            c.querySelector('input:not([type="hidden"]), textarea, select, [contenteditable="true"]') !== null;
+          const buttons = Array.from(c.querySelectorAll('button, [role="button"]')) as HTMLElement[];
+          const hasNavButton = buttons.some(b => {
+            const bt = (b.textContent || '').trim().toLowerCase();
+            const bAria = (b.getAttribute('aria-label') || '').toLowerCase();
+            return (
+              bt.includes('next') ||
+              bt.includes('review') ||
+              bt.includes('submit') ||
+              bt.includes('continue') ||
+              bAria.includes('next') ||
+              bAria.includes('review') ||
+              bAria.includes('submit') ||
+              bAria.includes('continue')
+            );
+          });
+          const hasPrimaryBtn =
+            c.querySelector(
+              'button.artdeco-button--primary, button[data-easy-apply-next-button], button[aria-label*="next" i], button[aria-label*="submit" i], button[aria-label*="review" i], button[aria-label*="continue" i]',
+            ) !== null;
+          const hasApplyFlowText =
+            /easy apply|apply to |apply for |contact info|home address|resume|review your application|work experience|education/i.test(text);
+
+          if (
+            hasApplyTitle ||
+            hasPrimaryBtn ||
+            hasNavButton ||
+            (isNativeDialog && (hasApplyFlowText || hasFormControls || hasNavButton)) ||
+            (hasFormControls && (hasNavButton || hasApplyFlowText))
           ) {
             return c;
           }
@@ -7538,6 +7991,24 @@ export default class Page {
             if (found) return found;
           }
         }
+
+        // Inline application step (no dialog wrapper): some LinkedIn builds render the
+        // apply form directly inside the details pane. Treat its container as the form
+        // so discovery, filling, validation and navigation all keep working.
+        const inlineForms = (
+          Array.from(
+            root.querySelectorAll('.jobs-easy-apply-content, form.jobs-easy-apply-form, [data-easy-apply-modal]'),
+          ) as HTMLElement[]
+        ).filter(el => {
+          if (!el || !el.isConnected) return false;
+          if (el.closest('nav, header, footer, #footer, .artdeco-footer, [data-view-name="footer"]')) return false;
+          const st = window.getComputedStyle(el);
+          if (st.display === 'none' || st.visibility === 'hidden') return false;
+          const r = el.getBoundingClientRect();
+          return r.width >= 120 && r.height >= 60;
+        });
+        if (inlineForms.length > 0) return inlineForms[0];
+
         return null;
       }
 
@@ -7648,7 +8119,7 @@ export default class Page {
         const candidates = root.querySelectorAll
           ? (Array.from(
               root.querySelectorAll(
-                '.jobs-easy-apply-modal, [data-test-modal-id="easy-apply-modal"], [data-easy-apply-modal], div.artdeco-modal[role="dialog"], div.artdeco-modal, div[role="dialog"][aria-modal="true"], div[role="dialog"], [data-test-modal], dialog[open], [aria-modal="true"]',
+                'dialog, dialog[open], .jobs-easy-apply-modal, [data-test-modal-id="easy-apply-modal"], [data-easy-apply-modal], div.artdeco-modal[role="dialog"], div.artdeco-modal, .artdeco-modal, div[role="dialog"][aria-modal="true"], div[role="dialog"], [role="dialog"], [data-test-modal], [aria-modal="true"]',
               ),
             ) as HTMLElement[])
           : [];
@@ -7682,6 +8153,24 @@ export default class Page {
             if (found) return found;
           }
         }
+
+        // Inline application step (no dialog wrapper): some LinkedIn builds render the
+        // apply form directly inside the details pane. Treat its container as the form
+        // so discovery, filling, validation and navigation all keep working.
+        const inlineForms = (
+          Array.from(
+            root.querySelectorAll('.jobs-easy-apply-content, form.jobs-easy-apply-form, [data-easy-apply-modal]'),
+          ) as HTMLElement[]
+        ).filter(el => {
+          if (!el || !el.isConnected) return false;
+          if (el.closest('nav, header, footer, #footer, .artdeco-footer, [data-view-name="footer"]')) return false;
+          const st = window.getComputedStyle(el);
+          if (st.display === 'none' || st.visibility === 'hidden') return false;
+          const r = el.getBoundingClientRect();
+          return r.width >= 120 && r.height >= 60;
+        });
+        if (inlineForms.length > 0) return inlineForms[0];
+
         return null;
       }
 
@@ -7769,12 +8258,13 @@ export default class Page {
         const candidates = root.querySelectorAll
           ? (Array.from(
               root.querySelectorAll(
-                'div.jobs-easy-apply-modal, [data-easy-apply-modal], [data-test-modal-id="easy-apply-modal"], div[data-test-modal], div.artdeco-modal, div[role="dialog"], dialog[open], [aria-modal="true"]',
+                'dialog, dialog[open], .jobs-easy-apply-modal, [data-test-modal-id="easy-apply-modal"], [data-easy-apply-modal], div.artdeco-modal[role="dialog"], div.artdeco-modal, .artdeco-modal, div[role="dialog"][aria-modal="true"], div[role="dialog"], [role="dialog"], [data-test-modal], [aria-modal="true"]',
               ),
             ) as HTMLElement[])
           : [];
 
         for (const c of candidates) {
+          if (!c || !c.isConnected) continue;
           if (
             c.closest(
               'nav, header, footer, #footer, .artdeco-footer, [data-view-name="footer"], #global-nav, .global-nav, .msg-overlay-container, #msg-overlay, .artdeco-dropdown',
@@ -7782,18 +8272,63 @@ export default class Page {
           ) {
             continue;
           }
+          const aria = (c.getAttribute('aria-label') || '').toLowerCase();
+          if (aria.includes('messaging') || aria.includes('chat') || aria.includes('notification')) continue;
           const text = (c.innerText || c.textContent || '').trim().toLowerCase();
           if (/^\d+\s*notifications?$/i.test(text) || c.closest('.notifications-badge')) continue;
           if (text.includes('select language') && (text.includes('privacy') || text.includes('help center'))) continue;
           // A native "Save this application?" / "Discard draft?" sheet is not the form.
           if (/save this application|save application|discard draft/i.test(text)) continue;
           const style = window.getComputedStyle(c);
-          if (style.display === 'none' || style.visibility === 'hidden') continue;
+          if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity || '1') <= 0.05) continue;
           const rect = c.getBoundingClientRect();
-          if (rect.width >= 150 && rect.height >= 80) return c;
+          if (rect.width < 120 || rect.height < 60) continue;
+
           if (
             c.classList.contains('jobs-easy-apply-modal') ||
-            c.querySelector('.jobs-easy-apply-modal, .jobs-easy-apply-content, form.jobs-easy-apply-form')
+            c.hasAttribute('data-easy-apply-modal') ||
+            c.getAttribute('data-test-modal-id') === 'easy-apply-modal' ||
+            c.querySelector(
+              '.jobs-easy-apply-modal, .jobs-easy-apply-modal__content, .jobs-easy-apply-modal__header, .jobs-easy-apply-modal__footer, .jobs-easy-apply-content, .jobs-easy-apply-form-section, .jobs-easy-apply-form-element, form.jobs-easy-apply-form, [data-easy-apply-modal], [data-test-modal-id="easy-apply-modal"], h2.jobs-easy-apply-modal__title',
+            ) !== null
+          ) {
+            return c;
+          }
+
+          const isNativeDialog = c.tagName.toLowerCase() === 'dialog';
+          const titleEl = c.querySelector('h1, h2, h3, [id*="header"], [class*="header"]');
+          const titleText = (titleEl?.textContent || text.slice(0, 100)).toLowerCase();
+          const hasApplyTitle = /apply|application|job|contact info|home address|resume|work experience|education|screening|additional questions/i.test(titleText);
+          const hasFormControls =
+            c.querySelector('input:not([type="hidden"]), textarea, select, [contenteditable="true"]') !== null;
+          const buttons = Array.from(c.querySelectorAll('button, [role="button"]')) as HTMLElement[];
+          const hasNavButton = buttons.some(b => {
+            const bt = (b.textContent || '').trim().toLowerCase();
+            const bAria = (b.getAttribute('aria-label') || '').toLowerCase();
+            return (
+              bt.includes('next') ||
+              bt.includes('review') ||
+              bt.includes('submit') ||
+              bt.includes('continue') ||
+              bAria.includes('next') ||
+              bAria.includes('review') ||
+              bAria.includes('submit') ||
+              bAria.includes('continue')
+            );
+          });
+          const hasPrimaryBtn =
+            c.querySelector(
+              'button.artdeco-button--primary, button[data-easy-apply-next-button], button[aria-label*="next" i], button[aria-label*="submit" i], button[aria-label*="review" i], button[aria-label*="continue" i]',
+            ) !== null;
+          const hasApplyFlowText =
+            /easy apply|apply to |apply for |contact info|home address|resume|review your application|work experience|education/i.test(text);
+
+          if (
+            hasApplyTitle ||
+            hasPrimaryBtn ||
+            hasNavButton ||
+            (isNativeDialog && (hasApplyFlowText || hasFormControls || hasNavButton)) ||
+            (hasFormControls && (hasNavButton || hasApplyFlowText))
           ) {
             return c;
           }
@@ -7806,6 +8341,24 @@ export default class Page {
             if (found) return found;
           }
         }
+
+        // Inline application step (no dialog wrapper): some LinkedIn builds render the
+        // apply form directly inside the details pane. Treat its container as the form
+        // so discovery, filling, validation and navigation all keep working.
+        const inlineForms = (
+          Array.from(
+            root.querySelectorAll('.jobs-easy-apply-content, form.jobs-easy-apply-form, [data-easy-apply-modal]'),
+          ) as HTMLElement[]
+        ).filter(el => {
+          if (!el || !el.isConnected) return false;
+          if (el.closest('nav, header, footer, #footer, .artdeco-footer, [data-view-name="footer"]')) return false;
+          const st = window.getComputedStyle(el);
+          if (st.display === 'none' || st.visibility === 'hidden') return false;
+          const r = el.getBoundingClientRect();
+          return r.width >= 120 && r.height >= 60;
+        });
+        if (inlineForms.length > 0) return inlineForms[0];
+
         return null;
       }
 
@@ -8016,12 +8569,13 @@ export default class Page {
         const candidates = root.querySelectorAll
           ? (Array.from(
               root.querySelectorAll(
-                'div.jobs-easy-apply-modal, [data-easy-apply-modal], [data-test-modal-id="easy-apply-modal"], div[data-test-modal], div.artdeco-modal, div[role="dialog"], dialog[open], [aria-modal="true"]',
+                'dialog, dialog[open], .jobs-easy-apply-modal, [data-test-modal-id="easy-apply-modal"], [data-easy-apply-modal], div.artdeco-modal[role="dialog"], div.artdeco-modal, .artdeco-modal, div[role="dialog"][aria-modal="true"], div[role="dialog"], [role="dialog"], [data-test-modal], [aria-modal="true"]',
               ),
             ) as HTMLElement[])
           : [];
 
         for (const c of candidates) {
+          if (!c || !c.isConnected) continue;
           if (
             c.closest(
               'nav, header, footer, #footer, .artdeco-footer, [data-view-name="footer"], #global-nav, .global-nav, .msg-overlay-container, #msg-overlay, .artdeco-dropdown',
@@ -8029,18 +8583,63 @@ export default class Page {
           ) {
             continue;
           }
+          const aria = (c.getAttribute('aria-label') || '').toLowerCase();
+          if (aria.includes('messaging') || aria.includes('chat') || aria.includes('notification')) continue;
           const text = (c.innerText || c.textContent || '').trim().toLowerCase();
           if (/^\d+\s*notifications?$/i.test(text) || c.closest('.notifications-badge')) continue;
           if (text.includes('select language') && (text.includes('privacy') || text.includes('help center'))) continue;
           // A native "Save this application?" / "Discard draft?" sheet is not the form.
           if (/save this application|save application|discard draft/i.test(text)) continue;
           const style = window.getComputedStyle(c);
-          if (style.display === 'none' || style.visibility === 'hidden') continue;
+          if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity || '1') <= 0.05) continue;
           const rect = c.getBoundingClientRect();
-          if (rect.width >= 150 && rect.height >= 80) return c;
+          if (rect.width < 120 || rect.height < 60) continue;
+
           if (
             c.classList.contains('jobs-easy-apply-modal') ||
-            c.querySelector('.jobs-easy-apply-modal, .jobs-easy-apply-content, form.jobs-easy-apply-form')
+            c.hasAttribute('data-easy-apply-modal') ||
+            c.getAttribute('data-test-modal-id') === 'easy-apply-modal' ||
+            c.querySelector(
+              '.jobs-easy-apply-modal, .jobs-easy-apply-modal__content, .jobs-easy-apply-modal__header, .jobs-easy-apply-modal__footer, .jobs-easy-apply-content, .jobs-easy-apply-form-section, .jobs-easy-apply-form-element, form.jobs-easy-apply-form, [data-easy-apply-modal], [data-test-modal-id="easy-apply-modal"], h2.jobs-easy-apply-modal__title',
+            ) !== null
+          ) {
+            return c;
+          }
+
+          const isNativeDialog = c.tagName.toLowerCase() === 'dialog';
+          const titleEl = c.querySelector('h1, h2, h3, [id*="header"], [class*="header"]');
+          const titleText = (titleEl?.textContent || text.slice(0, 100)).toLowerCase();
+          const hasApplyTitle = /apply|application|job|contact info|home address|resume|work experience|education|screening|additional questions/i.test(titleText);
+          const hasFormControls =
+            c.querySelector('input:not([type="hidden"]), textarea, select, [contenteditable="true"]') !== null;
+          const buttons = Array.from(c.querySelectorAll('button, [role="button"]')) as HTMLElement[];
+          const hasNavButton = buttons.some(b => {
+            const bt = (b.textContent || '').trim().toLowerCase();
+            const bAria = (b.getAttribute('aria-label') || '').toLowerCase();
+            return (
+              bt.includes('next') ||
+              bt.includes('review') ||
+              bt.includes('submit') ||
+              bt.includes('continue') ||
+              bAria.includes('next') ||
+              bAria.includes('review') ||
+              bAria.includes('submit') ||
+              bAria.includes('continue')
+            );
+          });
+          const hasPrimaryBtn =
+            c.querySelector(
+              'button.artdeco-button--primary, button[data-easy-apply-next-button], button[aria-label*="next" i], button[aria-label*="submit" i], button[aria-label*="review" i], button[aria-label*="continue" i]',
+            ) !== null;
+          const hasApplyFlowText =
+            /easy apply|apply to |apply for |contact info|home address|resume|review your application|work experience|education/i.test(text);
+
+          if (
+            hasApplyTitle ||
+            hasPrimaryBtn ||
+            hasNavButton ||
+            (isNativeDialog && (hasApplyFlowText || hasFormControls || hasNavButton)) ||
+            (hasFormControls && (hasNavButton || hasApplyFlowText))
           ) {
             return c;
           }
@@ -8053,6 +8652,24 @@ export default class Page {
             if (found) return found;
           }
         }
+
+        // Inline application step (no dialog wrapper): some LinkedIn builds render the
+        // apply form directly inside the details pane. Treat its container as the form
+        // so discovery, filling, validation and navigation all keep working.
+        const inlineForms = (
+          Array.from(
+            root.querySelectorAll('.jobs-easy-apply-content, form.jobs-easy-apply-form, [data-easy-apply-modal]'),
+          ) as HTMLElement[]
+        ).filter(el => {
+          if (!el || !el.isConnected) return false;
+          if (el.closest('nav, header, footer, #footer, .artdeco-footer, [data-view-name="footer"]')) return false;
+          const st = window.getComputedStyle(el);
+          if (st.display === 'none' || st.visibility === 'hidden') return false;
+          const r = el.getBoundingClientRect();
+          return r.width >= 120 && r.height >= 60;
+        });
+        if (inlineForms.length > 0) return inlineForms[0];
+
         return null;
       }
 
@@ -8475,90 +9092,6 @@ export default class Page {
   }
 
   /**
-   * Dismisses LinkedIn's "Why are these results not helpful?" feedback popup / modal
-   * by clicking its top-right cross mark (X / Dismiss button) or Cancel button.
-   */
-  async dismissFeedbackModal(): Promise<boolean> {
-    const dismissInPage = () => {
-      function isVisible(el: HTMLElement): boolean {
-        if (!el || !el.isConnected) return false;
-        const style = window.getComputedStyle(el);
-        if (style.display === 'none' || style.visibility === 'hidden') return false;
-        return parseFloat(style.opacity || '1') > 0.05;
-      }
-
-      const dialogCandidates = Array.from(
-        document.querySelectorAll(
-          'div.artdeco-modal, div[role="dialog"], dialog[open], [aria-modal="true"], .jobs-search-results-list__feedback-modal, [data-test-modal]',
-        ),
-      ) as HTMLElement[];
-
-      for (const d of dialogCandidates) {
-        if (!isVisible(d)) continue;
-        const text = (d.innerText || d.textContent || '').trim();
-        const isFeedbackModal =
-          /why are these results not helpful|share your feedback|select an option or share your feedback|not working as expected|jobs are not relevant to my preferences|these filters aren['’]t helpful/i.test(
-            text,
-          );
-
-        if (isFeedbackModal) {
-          // Priority 1: Top-right Cross mark (X / Dismiss button)
-          const closeBtn = d.querySelector<HTMLButtonElement>(
-            'button[aria-label*="Dismiss" i], button[aria-label*="Close" i], .artdeco-modal__dismiss, button[data-test-modal-close-btn], button[data-control-name="overlay.close_overlay"]',
-          );
-          if (closeBtn && isVisible(closeBtn)) {
-            closeBtn.click();
-            return true;
-          }
-
-          // Priority 2: Header button containing SVG / cross icon
-          const header = d.querySelector('header, .artdeco-modal__header, [class*="header"]');
-          if (header) {
-            const headerBtn = header.querySelector<HTMLButtonElement>('button');
-            if (headerBtn && isVisible(headerBtn)) {
-              headerBtn.click();
-              return true;
-            }
-          }
-
-          // Priority 3: Fallback to Cancel button
-          const buttons = Array.from(d.querySelectorAll<HTMLButtonElement>('button'));
-          const cancelBtn = buttons.find(b => /^cancel$/i.test((b.textContent || '').trim()));
-          if (cancelBtn && isVisible(cancelBtn)) {
-            cancelBtn.click();
-            return true;
-          }
-        }
-      }
-
-      return false;
-    };
-
-    if (!this._puppeteerPage) {
-      await this.attachPuppeteer().catch(() => false);
-    }
-
-    if (this._puppeteerPage) {
-      try {
-        const res = await this._puppeteerPage.evaluate(dismissInPage);
-        if (res) return true;
-      } catch {}
-    }
-
-    if (this._tabId && typeof chrome !== 'undefined' && chrome.scripting?.executeScript) {
-      try {
-        const results = await chrome.scripting.executeScript({
-          target: { tabId: this._tabId },
-          func: dismissInPage,
-        });
-        if (results?.[0]?.result) return true;
-      } catch {}
-    }
-
-    return false;
-  }
-
-  /**
    * Selects the best matching resume radio button in the Easy Apply modal.
    * Compares pre-uploaded resume cards against targetFileName and resumeTags.
    */
@@ -8572,7 +9105,7 @@ export default class Page {
         const candidates = root.querySelectorAll
           ? (Array.from(
               root.querySelectorAll(
-                '.jobs-easy-apply-modal, [data-test-modal-id="easy-apply-modal"], [data-easy-apply-modal], div.artdeco-modal[role="dialog"], div.artdeco-modal, div[role="dialog"][aria-modal="true"], div[role="dialog"], [data-test-modal], dialog[open], [aria-modal="true"]',
+                'dialog, dialog[open], .jobs-easy-apply-modal, [data-test-modal-id="easy-apply-modal"], [data-easy-apply-modal], div.artdeco-modal[role="dialog"], div.artdeco-modal, .artdeco-modal, div[role="dialog"][aria-modal="true"], div[role="dialog"], [role="dialog"], [data-test-modal], [aria-modal="true"]',
               ),
             ) as HTMLElement[])
           : [];
@@ -8606,27 +9139,63 @@ export default class Page {
             return c;
           }
 
+          const isNativeDialog = c.tagName.toLowerCase() === 'dialog';
           const titleEl = c.querySelector('h1, h2, h3, [id*="header"], [class*="header"]');
           const titleText = (titleEl?.textContent || (c.innerText || c.textContent || '').slice(0, 100)).toLowerCase();
-          const hasApplyTitle = /apply|application|job/i.test(titleText);
+          const hasApplyTitle = /apply|application|job|contact info|home address|resume|work experience|education|screening|additional questions/i.test(titleText);
+          const hasFormControls =
+            c.querySelector('input:not([type="hidden"]), textarea, select, [contenteditable="true"]') !== null;
+          const buttons = Array.from(c.querySelectorAll('button, [role="button"]')) as HTMLElement[];
+          const hasNavButton = buttons.some(b => {
+            const bt = (b.textContent || '').trim().toLowerCase();
+            const bAria = (b.getAttribute('aria-label') || '').toLowerCase();
+            return (
+              bt.includes('next') ||
+              bt.includes('review') ||
+              bt.includes('submit') ||
+              bt.includes('continue') ||
+              bAria.includes('next') ||
+              bAria.includes('review') ||
+              bAria.includes('submit') ||
+              bAria.includes('continue')
+            );
+          });
           const hasPrimaryBtn =
             c.querySelector(
               'button.artdeco-button--primary, button[data-easy-apply-next-button], button[aria-label*="next" i], button[aria-label*="submit" i], button[aria-label*="review" i], button[aria-label*="continue" i]',
             ) !== null;
-          // Mirror waitForEasyApplyModal's acceptance rule: a visible dialog that has
-          // form controls AND a navigation button is the Easy Apply modal even when
-          // its heading text is unusual or missing.
-          const hasFormControls =
-            c.querySelector('input:not([type="hidden"]), textarea, select, [contenteditable="true"]') !== null;
-          const hasNavButton =
-            c.querySelector(
-              'button[data-easy-apply-next-button], button[aria-label*="next" i], button[aria-label*="review" i], button[aria-label*="submit" i], button[aria-label*="continue" i]',
-            ) !== null;
+          const hasApplyFlowText =
+            /easy apply|apply to |apply for |contact info|home address|resume|review your application|work experience|education/i.test(
+              (c.innerText || c.textContent || '').toLowerCase(),
+            );
 
-          if (hasApplyTitle || hasPrimaryBtn || (hasFormControls && hasNavButton)) {
+          if (
+            hasApplyTitle ||
+            hasPrimaryBtn ||
+            hasNavButton ||
+            (isNativeDialog && (hasApplyFlowText || hasFormControls || hasNavButton)) ||
+            (hasFormControls && (hasNavButton || hasApplyFlowText))
+          ) {
             return c;
           }
         }
+
+        // Inline application step (no dialog wrapper) — same fallback as the other
+        // findActiveModal copies so resume selection still works on inline forms.
+        const inlineForms = (
+          Array.from(
+            root.querySelectorAll('.jobs-easy-apply-content, form.jobs-easy-apply-form, [data-easy-apply-modal]'),
+          ) as HTMLElement[]
+        ).filter(el => {
+          if (!el || !el.isConnected) return false;
+          if (el.closest('nav, header, footer, #footer, .artdeco-footer, [data-view-name="footer"]')) return false;
+          const st = window.getComputedStyle(el);
+          if (st.display === 'none' || st.visibility === 'hidden') return false;
+          const r = el.getBoundingClientRect();
+          return r.width >= 120 && r.height >= 60;
+        });
+        if (inlineForms.length > 0) return inlineForms[0];
+
         return null;
       }
 
