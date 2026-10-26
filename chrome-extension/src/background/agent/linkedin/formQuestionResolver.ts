@@ -197,6 +197,22 @@ export function normalizeQuestionForMatch(text: string): string {
 }
 
 /**
+ * Matches skill names as whole words or exact tokens in question text.
+ * Prevents short skills (C, R, Go, C++, C#, JS, AI, ML) from matching inside
+ * words like "experience", "client", "machine", "practice", etc.
+ */
+export function isSkillMentionedInText(skillName: string, text: string): boolean {
+  if (!skillName || !text) return false;
+  const cleanSkill = skillName.trim();
+  if (!cleanSkill) return false;
+
+  const escaped = cleanSkill.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // Exact token boundary: must be bordered by non-alphanumeric, non-#, non-+ characters or string start/end.
+  const pattern = new RegExp(`(?:^|[^a-zA-Z0-9#+])${escaped}(?:$|[^a-zA-Z0-9#+])`, 'i');
+  return pattern.test(text);
+}
+
+/**
  * Checks if two question strings match loosely
  */
 export function matchesQuestionLoosely(q1: string, q2: string): boolean {
@@ -204,7 +220,7 @@ export function matchesQuestionLoosely(q1: string, q2: string): boolean {
   const t1 = cleanLinkedInText(q1).toLowerCase().trim();
   const t2 = cleanLinkedInText(q2).toLowerCase().trim();
   if (t1 === t2) return true;
-  if (t1.includes(t2) || t2.includes(t1)) return true;
+  if (t1.length >= 4 && t2.length >= 4 && (t1.includes(t2) || t2.includes(t1))) return true;
 
   // 1. Semantic equivalence (normalization + curated synonym clusters + token Jaccard)
   const semantic = areQuestionsSemanticallyEquivalent(q1, q2);
@@ -216,7 +232,7 @@ export function matchesQuestionLoosely(q1: string, q2: string): boolean {
   const norm2 = normalizeQuestionForMatch(q2);
   if (norm1 && norm2) {
     if (norm1 === norm2) return true;
-    if (norm1.length >= 3 && norm2.length >= 3) {
+    if (norm1.length >= 4 && norm2.length >= 4) {
       if (norm1.includes(norm2) || norm2.includes(norm1)) return true;
     }
   }
@@ -1471,7 +1487,130 @@ export function matchRuleBased(
   }
   const labelLower = label.toLowerCase().trim();
 
-  // 1. Skill Experience (single-skill and multi-skill stack matching)
+  // 1a. Generic Total Work Experience (overall / total / IT industry / professional / work experience)
+  // Must be checked FIRST before single-skill checks so questions like "How many years of overall IT industry experience do you have?"
+  // resolve strictly from careerBrain.yearsOfExperience and never from a single skill.
+  const isGenericTotalExperience =
+    /\b(?:total|overall|all|it\s*industry|industry)\s*(?:years?|yrs?)?\s*(?:of)?\s*(?:work|professional|industry|it)?\s*experi[ea]nce\b/i.test(
+      labelLower,
+    ) ||
+    /\bhow\s*many\s*(?:years?|yrs?)\s*(?:of)?\s*(?:total|overall|all|work|professional|industry|it\s*industry)?\s*experi[ea]nce\b/i.test(
+      labelLower,
+    ) ||
+    /\b(?:total|overall)\s*experi[ea]nce\b/i.test(labelLower) ||
+    /\boverall\s*(?:it\s*)?industry\s*experience\b/i.test(labelLower) ||
+    /\bexperi[ea]nce\s*in\s*(?:the\s*)?(?:it\s*)?industry\b/i.test(labelLower) ||
+    /\bexperi[ea]nce\s*in\s*years\b/i.test(labelLower) ||
+    /^(?:total\s*)?(?:work\s*)?experi[ea]nce\s*(?:\(in\s*years?\))?[:?*]?$/i.test(labelLower) ||
+    /^(?:total\s*)?(?:years?\s*of\s*)?(?:work\s*|professional\s*)?experi[ea]nce[:?*]?$/i.test(labelLower);
+
+  const hasSpecificSkillMention =
+    /\b(?:with|using|in)\s+[a-z0-9#+.]+/i.test(labelLower) &&
+    !/\b(?:in\s+total|in\s+your\s+career|in\s+this\s+field|in\s+the\s+industry|in\s+it\s*industry|in\s+the\s+it\s*industry|with\s+work)\b/i.test(
+      labelLower,
+    );
+
+  if (isGenericTotalExperience && !hasSpecificSkillMention) {
+    const rawYoe = careerBrain.yearsOfExperience ?? 1;
+    const formattedYoe =
+      /whole\s*number/i.test(labelLower + ' ' + (field.hintText || '') + ' ' + (field.placeholder || '')) ||
+      field.fieldType === 'number' ||
+      Number.isInteger(rawYoe)
+        ? String(Math.round(rawYoe))
+        : String(rawYoe);
+    const adapted = adaptAnswerToFieldFormat(formattedYoe, field);
+    if (adapted.valid) {
+      return {
+        matched: true,
+        answer: adapted.value,
+        sourceDetail: adapted.sourceNote || `careerBrain.yearsOfExperience (${adapted.value} yrs)`,
+      };
+    }
+  }
+
+  // 1b. LLM / Machine Learning / AI Specific Experience
+  const isLlmOrMlQuestion =
+    /\b(?:llms?|large\s*language\s*models?|machine\s*learning|applied\s*machine\s*learning|\bml\b|\bai\b|artificial\s*intelligence|deep\s*learning|nlp|natural\s*language\s*processing|generative\s*ai|genai)\b/i.test(
+      labelLower,
+    );
+
+  if (
+    isLlmOrMlQuestion &&
+    (field.fieldType === 'number' || /how many years|years of|experience|hands-on/i.test(labelLower))
+  ) {
+    const llmSkillAliases = [
+      'llm',
+      'llms',
+      'large language models',
+      'machine learning',
+      'applied machine learning',
+      'ml',
+      'generative ai',
+      'genai',
+      'artificial intelligence',
+      'ai',
+      'deep learning',
+      'nlp',
+      'natural language processing',
+    ];
+
+    let matchedLlmYears: number | undefined = undefined;
+    let matchedLlmSkillName = '';
+    for (const [s, yrs] of Object.entries(careerBrain.skillExperience || {})) {
+      if (yrs === undefined) continue;
+      const sLo = s.toLowerCase().trim();
+      if (
+        llmSkillAliases.some(
+          alias => alias === sLo || isSkillMentionedInText(alias, sLo) || isSkillMentionedInText(sLo, alias),
+        )
+      ) {
+        if (matchedLlmYears === undefined || yrs > matchedLlmYears) {
+          matchedLlmYears = yrs;
+          matchedLlmSkillName = s;
+        }
+      }
+    }
+
+    if (matchedLlmYears !== undefined) {
+      const adapted = adaptAnswerToFieldFormat(String(matchedLlmYears), field);
+      if (adapted.valid) {
+        return {
+          matched: true,
+          answer: adapted.value,
+          sourceDetail: `skillExperience["${matchedLlmSkillName}"] (${matchedLlmYears} yrs)`,
+        };
+      }
+    }
+
+    // Check candidate's skills list and resume
+    const candidateSkills = (careerBrain.skills || []).map(s => s.toLowerCase().trim());
+    const resumeTextLo = (careerBrain.resumeText || '').toLowerCase();
+    const hasEvidence = llmSkillAliases.some(
+      alias => candidateSkills.includes(alias) || isSkillMentionedInText(alias, resumeTextLo),
+    );
+
+    if (hasEvidence) {
+      const yoe = Math.min(careerBrain.yearsOfExperience ?? 1, 2);
+      const adapted = adaptAnswerToFieldFormat(String(yoe), field);
+      if (adapted.valid) {
+        return {
+          matched: true,
+          answer: adapted.value,
+          sourceDetail: `profile: LLM/ML skills found in resume/skills list (${yoe} yrs)`,
+        };
+      }
+    }
+
+    // Zero-default rule when candidate has no LLM/ML in profile or resume
+    const adapted = adaptAnswerToFieldFormat('0', field);
+    return {
+      matched: true,
+      answer: adapted.valid ? adapted.value : '0',
+      sourceDetail: 'profile: no evidence for LLM/ML skills in profile (0 yrs default)',
+    };
+  }
+
+  // 1c. Specific Skill Experience (whole-word or exact token match only)
   const isSkillQuestion =
     /how many years/i.test(labelLower) ||
     /years of/i.test(labelLower) ||
@@ -1480,14 +1619,11 @@ export function matchRuleBased(
     /hands-on experience/i.test(labelLower);
 
   if (isSkillQuestion && careerBrain.skillExperience) {
-    // Find all candidate skills that match the question
+    // Find all candidate skills that match the question using exact whole-word tokens only
     const matchedSkills: { skill: string; yrs: number }[] = [];
     for (const [skill, yrs] of Object.entries(careerBrain.skillExperience)) {
       if (!skill || yrs === undefined) continue;
-      const cleanSkill = skill.toLowerCase().trim();
-      const escaped = cleanSkill.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const wordRegex = new RegExp(`(?:^|[^a-zA-Z0-9#+])${escaped}(?:$|[^a-zA-Z0-9#+])`, 'i');
-      if (wordRegex.test(labelLower) || matchesQuestionLoosely(label, skill)) {
+      if (isSkillMentionedInText(skill, labelLower)) {
         matchedSkills.push({ skill, yrs });
       }
     }
@@ -1508,7 +1644,10 @@ export function matchRuleBased(
       // DO NOT arbitrarily pick one matching skill! Let it fall through to ask_user.
       const candidateKnownSkills = Object.keys(careerBrain.skillExperience).map(s => s.toLowerCase().trim());
       const hasUnmatchedListedTool = listedTools.some(
-        tool => !candidateKnownSkills.some(cs => cs === tool || cs.includes(tool) || tool.includes(cs)),
+        tool =>
+          !candidateKnownSkills.some(
+            cs => cs === tool || isSkillMentionedInText(cs, tool) || isSkillMentionedInText(tool, cs),
+          ),
       );
 
       if (hasUnmatchedListedTool || matchedSkills.length === 0) {
@@ -1533,52 +1672,6 @@ export function matchRuleBased(
         answer: String(single.yrs),
         sourceDetail: `skillExperience["${single.skill}"] (${single.yrs} yrs)`,
       };
-    }
-  }
-
-  // 1b. Generic Total Work Experience (NOT tied to any specific skill or technology)
-  const isGenericTotalExperience =
-    /\b(?:total|overall|all)\s*(?:years?|yrs?)?\s*(?:of)?\s*(?:work|professional)?\s*experi[ea]nce\b/i.test(
-      labelLower,
-    ) ||
-    /\bhow\s*many\s*(?:years?|yrs?)\s*(?:of)?\s*(?:total|overall|work|professional)?\s*experi[ea]nce\b/i.test(
-      labelLower,
-    ) ||
-    /\btotal\s*experi[ea]nce\b/i.test(labelLower) ||
-    /\bexperi[ea]nce\s*in\s*years\b/i.test(labelLower) ||
-    /^(?:total\s*)?(?:work\s*)?experi[ea]nce\s*(?:\(in\s*years?\))?[:?*]?$/i.test(labelLower);
-
-  if (isGenericTotalExperience) {
-    // Distinguishing signal: check whether a specific technology/tool name or skill-attribution pattern appears
-    const hasSkillAttribution =
-      /\b(?:with|using|in)\s+[a-z0-9#+.]+/i.test(labelLower) &&
-      !/\b(?:in\s+total|in\s+your\s+career|in\s+this\s+field|in\s+the\s+industry|with\s+work)\b/i.test(labelLower);
-
-    const allCandidateSkills = [
-      ...(careerBrain.skills || []),
-      ...Object.keys(careerBrain.skillExperience || {}),
-    ].filter(s => s && s.trim().length > 1);
-
-    const mentionsCandidateSkill = allCandidateSkills.some(skill => {
-      const escaped = skill.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      return new RegExp(`(?:^|[^a-zA-Z0-9#+])${escaped}(?:$|[^a-zA-Z0-9#+])`, 'i').test(labelLower);
-    });
-
-    if (!hasSkillAttribution && !mentionsCandidateSkill) {
-      const rawYoe = careerBrain.yearsOfExperience ?? 1;
-      const formattedYoe =
-        /whole\s*number/i.test(labelLower + ' ' + (field.hintText || '') + ' ' + (field.placeholder || '')) ||
-        Number.isInteger(rawYoe)
-          ? String(Math.round(rawYoe))
-          : String(rawYoe);
-      const adapted = adaptAnswerToFieldFormat(formattedYoe, field);
-      if (adapted.valid) {
-        return {
-          matched: true,
-          answer: adapted.value,
-          sourceDetail: adapted.sourceNote || `careerBrain.yearsOfExperience (${adapted.value} yrs)`,
-        };
-      }
     }
   }
 

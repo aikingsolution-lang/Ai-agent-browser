@@ -1,5 +1,6 @@
 // chrome-extension/src/background/agent/platforms/indeed/indeedResolver.ts
 import { type ICareerBrain, parseLocationParts, isGenericPlaceholderFieldLabel } from '@extension/storage';
+import { isSkillMentionedInText } from '../../linkedin/formQuestionResolver';
 import { alignValueToOptions, matchQuestionSemantically } from '../../intelligence';
 
 export interface IIndeedAnswerResult {
@@ -380,9 +381,15 @@ function computeInitialAnswer(
     q.includes('total experience')
   ) {
     const isGenericTotal =
-      /\b(?:total|overall|all)\s*(?:years?|yrs?)?\s*(?:of)?\s*(?:work|professional)?\s*experi[ea]nce\b/i.test(q) ||
-      /\bhow\s*many\s*(?:years?|yrs?)\s*(?:of)?\s*(?:total|overall|work|professional)?\s*experi[ea]nce\b/i.test(q) ||
-      /\btotal\s*experi[ea]nce\b/i.test(q) ||
+      /\b(?:total|overall|all|it\s*industry|industry)\s*(?:years?|yrs?)?\s*(?:of)?\s*(?:work|professional|industry|it)?\s*experi[ea]nce\b/i.test(
+        q,
+      ) ||
+      /\bhow\s*many\s*(?:years?|yrs?)\s*(?:of)?\s*(?:total|overall|all|work|professional|industry|it\s*industry)?\s*experi[ea]nce\b/i.test(
+        q,
+      ) ||
+      /\b(?:total|overall)\s*experi[ea]nce\b/i.test(q) ||
+      /\boverall\s*(?:it\s*)?industry\s*experience\b/i.test(q) ||
+      /\bexperi[ea]nce\s*in\s*(?:the\s*)?(?:it\s*)?industry\b/i.test(q) ||
       /\bexperi[ea]nce\s*in\s*years\b/i.test(q) ||
       /^(?:total\s*)?(?:work\s*)?experi[ea]nce\s*(?:\(in\s*years?\))?[:?*]?$/i.test(q);
 
@@ -395,9 +402,58 @@ function computeInitialAnswer(
       return { value: yoe, confidence: 0.95, source: 'profile' };
     }
 
+    // LLM / Machine Learning / AI Specific Experience
+    const isLlmOrMl =
+      /\b(?:llms?|large\s*language\s*models?|machine\s*learning|applied\s*machine\s*learning|\bml\b|\bai\b|artificial\s*intelligence|deep\s*learning|nlp|natural\s*language\s*processing|generative\s*ai|genai)\b/i.test(
+        q,
+      );
+    if (isLlmOrMl) {
+      const llmSkillAliases = [
+        'llm',
+        'llms',
+        'large language models',
+        'machine learning',
+        'applied machine learning',
+        'ml',
+        'generative ai',
+        'genai',
+        'artificial intelligence',
+        'ai',
+        'deep learning',
+        'nlp',
+      ];
+      for (const [skill, yrs] of Object.entries(careerBrain.skillExperience || {})) {
+        const sLo = skill.toLowerCase().trim();
+        if (
+          llmSkillAliases.some(
+            alias => alias === sLo || isSkillMentionedInText(alias, sLo) || isSkillMentionedInText(sLo, alias),
+          )
+        ) {
+          if (options.length > 0) {
+            const opt = options.find(o => o.includes(String(yrs)));
+            return { value: opt || options[0], confidence: 0.95, source: 'profile' };
+          }
+          return { value: String(yrs), confidence: 0.95, source: 'profile' };
+        }
+      }
+      const candidateSkills = (careerBrain.skills || []).map(s => s.toLowerCase());
+      const hasLlmInSkills = candidateSkills.some(s => llmSkillAliases.includes(s));
+      if (hasLlmInSkills) {
+        const yoe = String(Math.min(careerBrain.yearsOfExperience ?? 1, 2));
+        if (options.length > 0) {
+          const opt = options.find(o => o.includes(yoe));
+          return { value: opt || options[0], confidence: 0.85, source: 'profile' };
+        }
+        return { value: yoe, confidence: 0.85, source: 'profile' };
+      }
+      const fallbackZero =
+        options.length > 0 ? options.find(o => /\b0\b|none|never|less than/i.test(o)) || options[0] : '0';
+      return { value: fallbackZero, confidence: 0.95, source: 'profile' };
+    }
+
     if (careerBrain.skillExperience) {
       for (const [skill, yrs] of Object.entries(careerBrain.skillExperience)) {
-        if (q.includes(skill.toLowerCase())) {
+        if (isSkillMentionedInText(skill, q)) {
           if (options.length > 0) {
             const opt = options.find(o => o.includes(String(yrs)));
             return { value: opt || options[0], confidence: 0.95, source: 'profile' };
@@ -409,7 +465,7 @@ function computeInitialAnswer(
 
     // Check if skill is mentioned in candidate's skills list or resume text
     const candidateSkills = (careerBrain.skills || []).map(s => s.toLowerCase());
-    const hasSkillInProfile = candidateSkills.some(s => s.length > 2 && q.includes(s));
+    const hasSkillInProfile = candidateSkills.some(s => isSkillMentionedInText(s, q));
 
     if (hasSkillInProfile) {
       const yoe = String(careerBrain.yearsOfExperience ?? 1);
@@ -421,10 +477,10 @@ function computeInitialAnswer(
     }
 
     // Skill not found in skillExperience or skills:
-    // Do NOT invent experience! Return 0 with low confidence (0.2) so LLM verifies with full resume context.
+    // Do NOT invent experience! Return 0 with high confidence so zero-default is preserved.
     const fallbackZero =
       options.length > 0 ? options.find(o => /\b0\b|none|never|less than/i.test(o)) || options[0] : '0';
-    return { value: fallbackZero, confidence: 0.2, source: 'default' };
+    return { value: fallbackZero, confidence: 0.9, source: 'profile' };
   }
 
   // 7. Names

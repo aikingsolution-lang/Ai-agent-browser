@@ -1,4 +1,5 @@
 import { type ICareerBrain, parseLocationParts, isGenericPlaceholderFieldLabel } from '@extension/storage';
+import { isSkillMentionedInText } from '../../linkedin/formQuestionResolver';
 import { alignValueToOptions, matchQuestionSemantically } from '../../intelligence';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { HumanMessage, SystemMessage } from '@langchain/core/messages';
@@ -344,53 +345,103 @@ export function resolveNaukriQuestion(
         (q.includes('years') || q.includes('yoe') || q.includes('how many') || q.includes('duration'))) ||
       /\b(?:total|overall)\s*experi[ea]nce\b/i.test(q))
   ) {
+    const isGenericTotal =
+      /\b(?:total|overall|all|it\s*industry|industry)\s*(?:years?|yrs?)?\s*(?:of)?\s*(?:work|professional|industry|it)?\s*experi[ea]nce\b/i.test(
+        q,
+      ) ||
+      /\bhow\s*many\s*(?:years?|yrs?)\s*(?:of)?\s*(?:total|overall|all|work|professional|industry|it\s*industry)?\s*experi[ea]nce\b/i.test(
+        q,
+      ) ||
+      /\b(?:total|overall)\s*experi[ea]nce\b/i.test(q) ||
+      /\boverall\s*(?:it\s*)?industry\s*experience\b/i.test(q) ||
+      /\bexperi[ea]nce\s*in\s*(?:the\s*)?(?:it\s*)?industry\b/i.test(q) ||
+      /\bexperi[ea]nce\s*in\s*years\b/i.test(q) ||
+      /^(?:total\s*)?(?:work\s*)?experi[ea]nce\s*(?:\(in\s*years?\))?[:?*]?$/i.test(q);
+
+    const hasSpecificSkill =
+      /\b(?:with|using|in)\s+[a-z0-9#+.]+/i.test(q) &&
+      !/\b(?:in\s+total|in\s+your\s+career|in\s+this\s+field|in\s+the\s+industry|in\s+it\s*industry|in\s+the\s+it\s*industry|with\s+work)\b/i.test(
+        q,
+      );
+
     let expYears = careerBrain.yearsOfExperience ?? 1;
 
-    // Check if question asks about a specific skill registered in skillExperience
-    let skillMatched = false;
-    if (careerBrain.skillExperience) {
-      for (const [skill, yrs] of Object.entries(careerBrain.skillExperience)) {
-        const sLower = skill.toLowerCase().trim();
-        if (
-          sLower &&
-          (q.includes(sLower) ||
-            sLower.includes(
-              q
-                .replace(/how many years of experience do you have in /i, '')
-                .replace(/\?/g, '')
-                .trim(),
-            ))
-        ) {
-          expYears = Number(yrs);
-          skillMatched = true;
-          break;
+    if (isGenericTotal && !hasSpecificSkill) {
+      expYears = careerBrain.yearsOfExperience ?? 1;
+    } else {
+      // Check LLM / Machine learning questions
+      const isLlmOrMl =
+        /\b(?:llms?|large\s*language\s*models?|machine\s*learning|applied\s*machine\s*learning|\bml\b|\bai\b|artificial\s*intelligence|deep\s*learning|nlp|natural\s*language\s*processing|generative\s*ai|genai)\b/i.test(
+          q,
+        );
+      if (isLlmOrMl) {
+        const llmSkillAliases = [
+          'llm',
+          'llms',
+          'large language models',
+          'machine learning',
+          'applied machine learning',
+          'ml',
+          'generative ai',
+          'genai',
+          'artificial intelligence',
+          'ai',
+          'deep learning',
+          'nlp',
+        ];
+        let matched = false;
+        for (const [skill, yrs] of Object.entries(careerBrain.skillExperience || {})) {
+          const sLo = skill.toLowerCase().trim();
+          if (
+            llmSkillAliases.some(
+              alias => alias === sLo || isSkillMentionedInText(alias, sLo) || isSkillMentionedInText(sLo, alias),
+            )
+          ) {
+            expYears = Number(yrs);
+            matched = true;
+            break;
+          }
         }
-      }
-    }
-
-    // If not matched in skillExperience, check candidate's skills list and resume
-    if (!skillMatched) {
-      const candidateSkills = (careerBrain.skills || []).map(s => s.toLowerCase().trim());
-      // Check if any candidate skill matches the question
-      const hasSkill = candidateSkills.some(
-        cs => cs && (q.includes(cs) || (cs.includes('kube') && q.includes('kube'))),
-      );
-      if (hasSkill) {
-        // Candidate has this skill, use their primary years of experience (or at least 2 years)
-        expYears = Math.max(1, careerBrain.yearsOfExperience ?? 3);
+        if (!matched) {
+          const candidateSkills = (careerBrain.skills || []).map(s => s.toLowerCase().trim());
+          const hasEvidence = llmSkillAliases.some(alias => candidateSkills.includes(alias));
+          expYears = hasEvidence ? Math.min(careerBrain.yearsOfExperience ?? 1, 2) : 0;
+        }
       } else {
-        // Check if skill appears in workExperience descriptions or titles
-        const workMentions = (careerBrain.workExperience || []).some(w => {
-          const desc = `${w.title || ''} ${w.description || ''} ${w.company || ''}`.toLowerCase();
-          return q
-            .split(/\s+/)
-            .some(
-              word =>
-                word.length >= 4 && !['years', 'experience', 'have', 'many'].includes(word) && desc.includes(word),
-            );
-        });
-        if (workMentions) {
-          expYears = Math.max(1, careerBrain.yearsOfExperience ?? 2);
+        // Specific skill matching using token/whole-word boundary
+        let skillMatched = false;
+        if (careerBrain.skillExperience) {
+          for (const [skill, yrs] of Object.entries(careerBrain.skillExperience)) {
+            if (isSkillMentionedInText(skill, q)) {
+              expYears = Number(yrs);
+              skillMatched = true;
+              break;
+            }
+          }
+        }
+        if (!skillMatched) {
+          const candidateSkills = (careerBrain.skills || []).map(s => s.toLowerCase().trim());
+          const hasSkill = candidateSkills.some(cs => cs && isSkillMentionedInText(cs, q));
+          if (hasSkill) {
+            expYears = Math.max(1, careerBrain.yearsOfExperience ?? 3);
+          } else {
+            const workMentions = (careerBrain.workExperience || []).some(w => {
+              const desc = `${w.title || ''} ${w.description || ''} ${w.company || ''}`.toLowerCase();
+              return q
+                .split(/\s+/)
+                .some(
+                  word =>
+                    word.length >= 4 &&
+                    !['years', 'experience', 'have', 'many'].includes(word) &&
+                    isSkillMentionedInText(word, desc),
+                );
+            });
+            if (workMentions) {
+              expYears = Math.max(1, careerBrain.yearsOfExperience ?? 2);
+            } else {
+              expYears = 0;
+            }
+          }
         }
       }
     }
@@ -463,7 +514,7 @@ export function resolveNaukriQuestion(
   // 6. Skill Experience (e.g. "How many years in React?")
   if (careerBrain.skillExperience) {
     for (const [skill, yrs] of Object.entries(careerBrain.skillExperience)) {
-      if (q.includes(skill.toLowerCase())) {
+      if (isSkillMentionedInText(skill, q)) {
         const numYrs = Number(yrs);
         if (options.length > 0) {
           const matched = matchNumericRangeOption(numYrs, options);
