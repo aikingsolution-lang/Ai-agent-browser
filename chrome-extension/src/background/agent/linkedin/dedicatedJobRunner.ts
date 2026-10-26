@@ -862,17 +862,34 @@ export function recordSkip(
  */
 export function bucketFillFailureReason(rawReason: string | undefined): string {
   const r = (rawReason || '').toLowerCase();
+  // 1. Modal closed unexpectedly (check before confirmation to avoid false unverified bucket)
+  if (r.includes('modal closed') || r.includes('closed unexpectedly')) return 'form: modal closed unexpectedly';
+
+  // 2. Action button not found (check before submit because string contains "No action button (Next/Review/Submit)")
+  if (r.includes('no action button') || r.includes('action button')) return 'form: no action button found';
+
+  // 3. Security checkpoints
   if (r.includes('security')) return 'form: security checkpoint';
+
+  // 4. Loops and step limits
   if (r.includes('validation loop')) return 'form: validation loop detected';
-  if (r.includes('mandatory')) return 'form: mandatory document missing';
-  if (r.includes('failed validation')) return 'form: step validation failed';
-  if (r.includes('confirmation')) return 'form: submission confirmation unverified';
-  if (r.includes('submit')) return 'form: submit click failed';
-  if (r.includes('validation blocked')) return 'form: Next/Review rejected (validation)';
+  if (r.includes('maximum steps') || r.includes('max steps')) return 'form: max steps exceeded';
+
+  // 5. Mandatory documents/resumes
+  if (r.includes('resume upload failed') || r.includes('mandatory')) return 'form: mandatory document missing';
+
+  // 6. Validation rejections
+  if (r.includes('validation blocked') || r.includes('rejected by linkedin'))
+    return 'form: Next/Review rejected (validation)';
+  if (r.includes('failed validation') || r.includes('unresolved mandatory')) return 'form: step validation failed';
+
+  // 7. Advancement failures
   if (r.includes('advance')) return 'form: could not advance step';
-  if (r.includes('modal closed')) return 'form: modal closed unexpectedly';
-  if (r.includes('no action button')) return 'form: no action button found';
-  if (r.includes('maximum steps')) return 'form: max steps exceeded';
+
+  // 8. Confirmation and submit outcomes
+  if (r.includes('confirmation') || r.includes('unverified')) return 'form: submission confirmation unverified';
+  if (r.includes('submit')) return 'form: submit click failed';
+
   const trimmed = (rawReason || 'unknown error').trim().slice(0, 60);
   return trimmed ? `form: ${trimmed}` : 'form: unknown failure';
 }

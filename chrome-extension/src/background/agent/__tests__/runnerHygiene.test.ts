@@ -366,3 +366,55 @@ describe('Item 2: Job Title Pollution Prevention', () => {
     expect(csv).not.toContain('[Runner]');
   });
 });
+
+describe('Item 4: Skip Breakdown Categorization', () => {
+  it('categorizes "Modal closed unexpectedly without confirmation" under its own category, not confirmation unverified', async () => {
+    const { bucketFillFailureReason } = await import('../linkedin/dedicatedJobRunner');
+
+    // Crucial bug fix verification:
+    const modalClosedCategory = bucketFillFailureReason('Modal closed unexpectedly without confirmation');
+    expect(modalClosedCategory).toBe('form: modal closed unexpectedly');
+    expect(modalClosedCategory).not.toBe('form: submission confirmation unverified');
+
+    // True confirmation failure maps to unverified confirmation
+    const confirmCategory = bucketFillFailureReason('Submission confirmation unverified');
+    expect(confirmCategory).toBe('form: submission confirmation unverified');
+  });
+
+  it('maps each distinct failure reason to its unique, stable category', async () => {
+    const { bucketFillFailureReason, formatSkipBreakdown } = await import('../linkedin/dedicatedJobRunner');
+
+    expect(
+      bucketFillFailureReason(
+        'Next/Review button rejected by LinkedIn (validation blocked). Draft preserved for manual review.',
+      ),
+    ).toBe('form: Next/Review rejected (validation)');
+
+    expect(bucketFillFailureReason('Security checkpoint encountered and not resolved within window')).toBe(
+      'form: security checkpoint',
+    );
+
+    expect(bucketFillFailureReason('Auto-generated resume upload failed')).toBe('form: mandatory document missing');
+
+    expect(bucketFillFailureReason('Validation loop detected after 3 repeated steps')).toBe(
+      'form: validation loop detected',
+    );
+
+    expect(bucketFillFailureReason('No action button (Next/Review/Submit) found on step')).toBe(
+      'form: no action button found',
+    );
+
+    expect(bucketFillFailureReason('Reached maximum steps (15) without submission')).toBe('form: max steps exceeded');
+
+    // Verify formatSkipBreakdown output
+    const breakdown = formatSkipBreakdown({
+      'form: modal closed unexpectedly': 2,
+      'form: submission confirmation unverified': 1,
+      'form: Next/Review rejected (validation)': 3,
+    });
+
+    expect(breakdown).toBe(
+      '📊 Skip breakdown: form: Next/Review rejected (validation) ×3 | form: modal closed unexpectedly ×2 | form: submission confirmation unverified ×1',
+    );
+  });
+});
