@@ -2036,6 +2036,7 @@ export class DedicatedJobRunner {
         while (readAttempts < 3 && jobCards.length === 0) {
           readAttempts++;
           if (!this.isRunning) break;
+          await currentPage.dismissFeedbackModal().catch(() => false);
           this.notifyStatus(
             portToSend,
             `🔍 Scanning LinkedIn job search results ${searchLabel} (attempt ${readAttempts}/3)...`,
@@ -3955,6 +3956,7 @@ export class DedicatedJobRunner {
 
     // 4a. Click Job in Left Pane to Load Details in Right Pane (Split-View)
     let usedDirectFallback = false;
+    await currentPage.dismissFeedbackModal().catch(() => false);
     let clicked = await currentPage.clickJobInSearchList(job.jobId);
     if (!clicked) {
       logger.info(
@@ -4291,6 +4293,7 @@ export class DedicatedJobRunner {
     }
 
     // 4d. Click Easy Apply & Verify Modal Opens
+    await currentPage.dismissFeedbackModal().catch(() => false);
     this.notifyStatus(portToSend, `🚀 Opening Easy Apply for "${displayTitle}"...`, 'info');
     let clickRes = await currentPage.clickEasyApplyButton();
     logger.info(`[DedicatedJobRunner] clickEasyApplyButton attempt 1:`, clickRes);

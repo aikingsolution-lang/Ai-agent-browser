@@ -2582,7 +2582,9 @@ export default class Page {
           // Confirmation / intermediate dialogs must never be mistaken for the form itself.
           const rawText = (dialog.innerText || dialog.textContent || '').trim().slice(0, 900);
           const isIntermediateConfirm =
-            /save this application|save application|discard draft|job search safety|continue applying/i.test(rawText);
+            /save this application|save application|discard draft|job search safety|continue applying|why are these results not helpful|share your feedback|select an option or share your feedback/i.test(
+              rawText,
+            );
 
           // LinkedIn's 2025 Easy Apply UI is a native <dialog> with atomic utility classes
           // (no artdeco/jobs markers) and often paints its fields a moment after opening.
@@ -2691,6 +2693,34 @@ export default class Page {
                 dialogTitle: title,
                 isIntermediate: true,
                 intermediateAction: 'continue',
+                inputsCount: 0,
+                buttonsCount: 0,
+                hasClosedShadow: false,
+              };
+            }
+          }
+
+          // Known intermediate dialog 4: Feedback modal ("Why are these results not helpful?") -> Click cross mark (X)
+          if (
+            /why are these results not helpful|share your feedback|select an option or share your feedback|not working as expected|these filters aren['’]t helpful/i.test(
+              title + ' ' + text,
+            )
+          ) {
+            const closeBtn = dialog.querySelector<HTMLButtonElement>(
+              'button[aria-label*="Dismiss" i], button[aria-label*="Close" i], .artdeco-modal__dismiss, button[data-test-modal-close-btn]',
+            );
+            const cancelBtn = Array.from(dialog.querySelectorAll('button')).find(b =>
+              /^cancel$/i.test((b.textContent || '').trim()),
+            );
+            const btnToClick = closeBtn || cancelBtn;
+            if (btnToClick) {
+              btnToClick.click();
+              return {
+                modalFound: false,
+                inShadow: root instanceof ShadowRoot,
+                dialogTitle: title,
+                isIntermediate: true,
+                intermediateAction: 'safety',
                 inputsCount: 0,
                 buttonsCount: 0,
                 hasClosedShadow: false,
@@ -5888,6 +5918,17 @@ export default class Page {
       const seenJobIds = new Set<string>();
 
       for (const card of cards) {
+        const cardText = (card.textContent || '').trim();
+        // Skip feedback prompts, e.g. "Was this helpful? Share negative feedback"
+        if (
+          /\b(?:why are these results not helpful|share negative feedback|share positive feedback|was this helpful|select an option or share your feedback)\b/i.test(
+            cardText,
+          ) &&
+          !card.querySelector('a[href*="/jobs/view/"], a[href*="currentJobId="]')
+        ) {
+          continue;
+        }
+
         // 1. Try finding job ID from data attributes on card or child elements
         let jobId =
           card.getAttribute('data-job-id') ||
@@ -5972,6 +6013,9 @@ export default class Page {
             link?.getAttribute('aria-label') || link?.getAttribute('title') || card.getAttribute('aria-label') || '';
         }
         const cleanedCardTitle = cleanLinkedInJobTitle(rawTitle);
+        if (/\b(?:negative feedback|share feedback|was this helpful|results not helpful)\b/i.test(cleanedCardTitle)) {
+          continue;
+        }
         const title = isJunkJobTitle(cleanedCardTitle) ? '' : cleanedCardTitle;
 
         // Extract company
@@ -8400,6 +8444,90 @@ export default class Page {
         if (txt === 'done' && btn.offsetParent !== null) {
           btn.click();
           return true;
+        }
+      }
+
+      return false;
+    };
+
+    if (!this._puppeteerPage) {
+      await this.attachPuppeteer().catch(() => false);
+    }
+
+    if (this._puppeteerPage) {
+      try {
+        const res = await this._puppeteerPage.evaluate(dismissInPage);
+        if (res) return true;
+      } catch {}
+    }
+
+    if (this._tabId && typeof chrome !== 'undefined' && chrome.scripting?.executeScript) {
+      try {
+        const results = await chrome.scripting.executeScript({
+          target: { tabId: this._tabId },
+          func: dismissInPage,
+        });
+        if (results?.[0]?.result) return true;
+      } catch {}
+    }
+
+    return false;
+  }
+
+  /**
+   * Dismisses LinkedIn's "Why are these results not helpful?" feedback popup / modal
+   * by clicking its top-right cross mark (X / Dismiss button) or Cancel button.
+   */
+  async dismissFeedbackModal(): Promise<boolean> {
+    const dismissInPage = () => {
+      function isVisible(el: HTMLElement): boolean {
+        if (!el || !el.isConnected) return false;
+        const style = window.getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden') return false;
+        return parseFloat(style.opacity || '1') > 0.05;
+      }
+
+      const dialogCandidates = Array.from(
+        document.querySelectorAll(
+          'div.artdeco-modal, div[role="dialog"], dialog[open], [aria-modal="true"], .jobs-search-results-list__feedback-modal, [data-test-modal]',
+        ),
+      ) as HTMLElement[];
+
+      for (const d of dialogCandidates) {
+        if (!isVisible(d)) continue;
+        const text = (d.innerText || d.textContent || '').trim();
+        const isFeedbackModal =
+          /why are these results not helpful|share your feedback|select an option or share your feedback|not working as expected|jobs are not relevant to my preferences|these filters aren['’]t helpful/i.test(
+            text,
+          );
+
+        if (isFeedbackModal) {
+          // Priority 1: Top-right Cross mark (X / Dismiss button)
+          const closeBtn = d.querySelector<HTMLButtonElement>(
+            'button[aria-label*="Dismiss" i], button[aria-label*="Close" i], .artdeco-modal__dismiss, button[data-test-modal-close-btn], button[data-control-name="overlay.close_overlay"]',
+          );
+          if (closeBtn && isVisible(closeBtn)) {
+            closeBtn.click();
+            return true;
+          }
+
+          // Priority 2: Header button containing SVG / cross icon
+          const header = d.querySelector('header, .artdeco-modal__header, [class*="header"]');
+          if (header) {
+            const headerBtn = header.querySelector<HTMLButtonElement>('button');
+            if (headerBtn && isVisible(headerBtn)) {
+              headerBtn.click();
+              return true;
+            }
+          }
+
+          // Priority 3: Fallback to Cancel button
+          const buttons = Array.from(d.querySelectorAll<HTMLButtonElement>('button'));
+          const cancelBtn = buttons.find(b => /^cancel$/i.test((b.textContent || '').trim()));
+          if (cancelBtn && isVisible(cancelBtn)) {
+            cancelBtn.click();
+            return true;
+          }
         }
       }
 
