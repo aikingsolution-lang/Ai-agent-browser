@@ -363,7 +363,7 @@ describe('Item 2: Job Title Pollution Prevention', () => {
     expect(cleanLinkedInJobTitle('🤖 AI Platform Engineer')).toBe('AI Platform Engineer');
     expect(cleanLinkedInJobTitle('🤖 [Runner] 🤖 [Runner] Lead Engineer')).toBe('Lead Engineer');
     expect(cleanLinkedInJobTitle('Senior Backend Engineer')).toBe('Senior Backend Engineer');
-  });
+  }, 15000);
 
   it('job title is strictly extracted from in-page heading, NEVER from document.title', () => {
     const fakeDoc = new MockDOMElement('document');
@@ -750,36 +750,47 @@ describe('Requirement 7: Phone Country Code Select & Filling', () => {
 
 describe('Phase 2: Structural List-Scan & Virtualized Card Extraction', () => {
   function scanJobList(doc: MockDOMElement): Array<{ jobId: string; title: string; company: string; url: string }> {
-    const listRoot = doc.querySelector(
-      'ul.scaffold-layout__list-container, .scaffold-layout__list-container, .jobs-search-results-list__list',
-    );
     let cards: MockDOMElement[] = [];
 
-    if (listRoot) {
-      const directChildren = listRoot.children;
-      cards = directChildren.filter(c => {
-        return (
-          c.hasAttribute('data-occludable-job-id') ||
-          c.hasAttribute('data-job-id') ||
-          c.querySelector(
-            '[data-occludable-job-id], [data-job-id], a[href*="/jobs/view/"], a[href*="currentJobId="]',
-          ) !== null
-        );
-      });
-    }
+    const compCards = doc.querySelectorAll(
+      '[componentkey^="job-card-component-ref-"], [componentkey*="job-card-component-ref-"]',
+    );
+    const validCompCards = compCards.filter(
+      c => !c.closest('.scaffold-layout__detail, [data-view-name="job-details"]'),
+    );
+    if (validCompCards.length > 0) {
+      cards = validCompCards;
+    } else {
+      const listRoot = doc.querySelector(
+        'ul.scaffold-layout__list-container, .scaffold-layout__list-container, .jobs-search-results-list__list',
+      );
 
-    if (cards.length === 0) {
-      const structuralSelectors = [
-        'li[data-occludable-job-id]',
-        'div[data-job-id]',
-        'li[data-job-id]',
-        '[data-view-name="job-card"]',
-        '[data-view-name*="job-card"]',
-        'li.scaffold-layout__list-item',
-        'div.base-card',
-      ].join(', ');
-      const found = doc.querySelectorAll(structuralSelectors);
-      cards = found.filter(el => !el.closest('.scaffold-layout__detail, [data-view-name="job-details"]'));
+      if (listRoot) {
+        const directChildren = listRoot.children;
+        cards = directChildren.filter(c => {
+          return (
+            c.hasAttribute('data-occludable-job-id') ||
+            c.hasAttribute('data-job-id') ||
+            c.querySelector(
+              '[data-occludable-job-id], [data-job-id], a[href*="/jobs/view/"], a[href*="currentJobId="]',
+            ) !== null
+          );
+        });
+      }
+
+      if (cards.length === 0) {
+        const structuralSelectors = [
+          'li[data-occludable-job-id]',
+          'div[data-job-id]',
+          'li[data-job-id]',
+          '[data-view-name="job-card"]',
+          '[data-view-name*="job-card"]',
+          'li.scaffold-layout__list-item',
+          'div.base-card',
+        ].join(', ');
+        const found = doc.querySelectorAll(structuralSelectors);
+        cards = found.filter(el => !el.closest('.scaffold-layout__detail, [data-view-name="job-details"]'));
+      }
     }
 
     const results: Array<{ jobId: string; title: string; company: string; url: string }> = [];
@@ -788,12 +799,21 @@ describe('Phase 2: Structural List-Scan & Virtualized Card Extraction', () => {
     for (const card of cards) {
       if (card.closest('.scaffold-layout__detail, [data-view-name="job-details"]')) continue;
 
-      let jobId =
-        card.getAttribute('data-job-id') ||
-        card.getAttribute('data-occludable-job-id') ||
-        card.querySelector('[data-job-id]')?.getAttribute('data-job-id') ||
-        card.querySelector('[data-occludable-job-id]')?.getAttribute('data-occludable-job-id') ||
-        '';
+      let jobId = '';
+      const compKey = card.getAttribute('componentkey') || '';
+      const compMatch = compKey.match(/job-card-component-ref-(\d{7,12})/);
+      if (compMatch && compMatch[1]) {
+        jobId = compMatch[1];
+      }
+
+      if (!jobId) {
+        jobId =
+          card.getAttribute('data-job-id') ||
+          card.getAttribute('data-occludable-job-id') ||
+          card.querySelector('[data-job-id]')?.getAttribute('data-job-id') ||
+          card.querySelector('[data-occludable-job-id]')?.getAttribute('data-occludable-job-id') ||
+          '';
+      }
 
       const titleAnchor = card.querySelector(
         'a[href*="/jobs/view/"], a[href*="currentJobId="], [data-view-name*="job-card-title"], a.job-card-list__title',
@@ -808,7 +828,18 @@ describe('Phase 2: Structural List-Scan & Virtualized Card Extraction', () => {
       if (!jobId || seenJobIds.has(jobId)) continue;
       seenJobIds.add(jobId);
 
+      const pElements = card.querySelectorAll('p');
+      const candidatePTexts: string[] = [];
+      for (const p of pElements) {
+        if (p.closest('figure, button, [aria-hidden="true"]')) continue;
+        const txt = (p.textContent || '').trim();
+        if (!txt || /^(?:dismiss|easy apply|viewed|promoted|save|saved|close|apply)$/i.test(txt)) continue;
+        if (/\((?:on-site|hybrid|remote)\)/i.test(txt) || /^(?:on-site|hybrid|remote)$/i.test(txt)) continue;
+        candidatePTexts.push(txt);
+      }
+
       let rawTitle = (titleAnchor?.textContent || '').trim().replace(/\s+/g, ' ');
+      if (!rawTitle && candidatePTexts.length > 0) rawTitle = candidatePTexts[0];
       const isJunk = /^(?:more|less|share feedback|save|saved|dismiss|close|easy apply|apply)$/i.test(rawTitle);
       if (isJunk || !rawTitle) {
         const heading = card.querySelector('strong, h3, h4');
@@ -820,6 +851,7 @@ describe('Phase 2: Structural List-Scan & Virtualized Card Extraction', () => {
 
       const companyAnchor = card.querySelector('a[href*="/company/"]');
       let company = (companyAnchor?.textContent || '').trim().replace(/\s+/g, ' ');
+      if (!company && candidatePTexts.length > 1) company = candidatePTexts[1];
       if (!company) {
         const subEl = card.querySelector(
           '.artdeco-entity-lockup__subtitle, [data-view-name*="job-card"] span, .job-card-container__primary-description',

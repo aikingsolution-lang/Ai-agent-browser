@@ -84,6 +84,7 @@ export default class Page {
   private _state: PageState;
   private _cachedState: PageState | null = null;
   private _cachedStateClickableElementsHashes: CachedStateClickableElementsHashes | null = null;
+  public lastScanDiagnostic: string = '';
 
   constructor(tabId: number, url: string, title: string, config: Partial<BrowserContextConfig> = {}) {
     this._tabId = tabId;
@@ -578,6 +579,21 @@ export default class Page {
 
       logger.error('Navigation failed:', error);
       throw error;
+    }
+  }
+
+  async navigateToDirect(url: string): Promise<void> {
+    logger.info('navigateToDirect', url);
+    try {
+      if (this._puppeteerPage) {
+        await this._puppeteerPage.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      } else if (typeof chrome !== 'undefined' && chrome.tabs?.update && this._tabId) {
+        await chrome.tabs.update(this._tabId, { url });
+      } else if (typeof this.navigateTo === 'function') {
+        await this.navigateTo(url);
+      }
+    } catch (err) {
+      logger.warning(`[navigateToDirect] Direct navigation to ${url} failed:`, err);
     }
   }
 
@@ -6044,37 +6060,59 @@ export default class Page {
 
   /**
    * Reads job cards from the LinkedIn left-hand search results pane.
-   * Scrolls the list container to trigger lazy loading of virtualized cards.
+   * Discovers cards using structural [componentkey^="job-card-component-ref-"] attributes,
+   * extracts title/company from visible <p> text structure without hashed classes,
+   * dynamically identifies the scrollable ancestor, and scrolls in paced steps
+   * until virtualized card rendering stabilizes.
    */
   async readJobListFromSearchPane(scrollAttempts = 4): Promise<SearchJobCard[]> {
     const extractCardsInPage = async (scrolls: number) => {
-      // 1. Identify the scrollable list container for two-column vs single-column layout
-      const listScrollContainer = (() => {
-        const candidates = [
-          document.querySelector('.scaffold-layout__list'),
-          document.querySelector('.jobs-search-results-list'),
-          document.querySelector('ul.scaffold-layout__list-container')?.parentElement,
-          document.querySelector('.scaffold-layout__list-container'),
-        ].filter(Boolean) as HTMLElement[];
-        return candidates.find(c => c.scrollHeight > c.clientHeight) || null;
-      })();
+      // Helper: check if an element is inside the details / split-view pane
+      function isInsideDetailsPane(el: Element | null): boolean {
+        if (!el) return false;
+        return Boolean(
+          el.closest(
+            '.scaffold-layout__detail, [data-view-name="job-details"], .jobs-search__job-details, .jobs-search__job-details--container, [data-view-name="job-details-top-card"], .jobs-details__main-content',
+          ),
+        );
+      }
 
-      // 2. Progressive paced scrolling to hydrate virtualized (occluded) cards
-      for (let s = 0; s < scrolls; s++) {
-        if (listScrollContainer) {
-          listScrollContainer.scrollBy(0, 500);
-        } else {
-          window.scrollBy(0, 500);
+      // Helper: clean text nodes and remove hidden accessibility badges
+      function cleanElementText(el: Element | null): string {
+        if (!el) return '';
+        const clone = el.cloneNode(true) as HTMLElement;
+        const hidden = clone.querySelectorAll(
+          '.visually-hidden, [aria-hidden="true"], .sr-only, .job-card-container__verification-badge, .job-details-jobs-unified-top-card__verification-badge, .artdeco-entity-lockup__badge, [data-test-icon*="verification"]',
+        );
+        hidden.forEach(h => h.remove());
+        let txt = (clone.textContent || '').replace(/\s+/g, ' ').trim();
+        if (!txt) {
+          txt = (el.textContent || '').replace(/\s+/g, ' ').trim();
         }
-        await new Promise(r => setTimeout(r, 350));
-      }
+        if (txt.length <= 4) return txt;
 
-      // 3. Restore scroll to top so upper cards remain in view and clickable
-      if (listScrollContainer && typeof listScrollContainer.scrollTo === 'function') {
-        listScrollContainer.scrollTo({ top: 0, behavior: 'instant' });
+        if (txt.length % 2 === 0) {
+          const half = txt.slice(0, txt.length / 2);
+          if (half + half === txt) return half;
+        }
+
+        const mid = Math.floor(txt.length / 2);
+        if (txt[mid] === ' ') {
+          const left = txt.slice(0, mid).trim();
+          const right = txt.slice(mid + 1).trim();
+          if (left === right) return left;
+        }
+
+        const words = txt.split(/\s+/);
+        if (words.length >= 4 && words.length % 2 === 0) {
+          const halfLen = words.length / 2;
+          const w1 = words.slice(0, halfLen).join(' ');
+          const w2 = words.slice(halfLen).join(' ');
+          if (w1 === w2) return w1;
+        }
+
+        return txt;
       }
-      window.scrollTo({ top: 0, behavior: 'instant' });
-      await new Promise(r => setTimeout(r, 200));
 
       function cleanLinkedInJobTitle(raw: string): string {
         if (!raw) return '';
@@ -6115,10 +6153,6 @@ export default class Page {
         return txt.trim();
       }
 
-      /**
-       * Rejects menu / badge / fallback strings that surface when LinkedIn's
-       * selectors miss the real title ("More", "Easy Apply", "Share feedback", …).
-       */
       function isJunkJobTitle(raw: string): boolean {
         const t = (raw || '').replace(/\s+/g, ' ').trim().toLowerCase();
         if (!t || t.length < 2 || t.length > 120) return true;
@@ -6134,62 +6168,77 @@ export default class Page {
         );
       }
 
-      function cleanElementText(el: Element | null): string {
-        if (!el) return '';
-        const clone = el.cloneNode(true) as HTMLElement;
-        const hidden = clone.querySelectorAll(
-          '.visually-hidden, [aria-hidden="true"], .sr-only, .job-card-container__verification-badge, .job-details-jobs-unified-top-card__verification-badge, .artdeco-entity-lockup__badge, [data-test-icon*="verification"]',
+      function isLocationLine(raw: string): boolean {
+        if (!raw) return false;
+        const t = raw.trim().toLowerCase();
+        if (/\((?:on-site|hybrid|remote)\)/i.test(t)) return true;
+        if (/^(?:on-site|hybrid|remote)$/i.test(t)) return true;
+        if (/\b(?:on-site|hybrid|remote)\b/i.test(t) && (t.includes('(') || t.includes(','))) return true;
+        if (
+          /\b(?:bengaluru|bangalore|mumbai|delhi|hyderabad|pune|chennai|noida|gurugram|gurgaon|san francisco|new york|london|seattle|austin|chicago|singapore|berlin|toronto|sydney)\b/i.test(
+            t,
+          ) &&
+          (/\((?:on-site|hybrid|remote)\)/i.test(t) ||
+            /,\s*[a-z]+/i.test(t) ||
+            /\b(?:area|region|india|usa|uk)\b/i.test(t))
+        ) {
+          return true;
+        }
+        return false;
+      }
+
+      function isBadgeOrButtonLabel(raw: string): boolean {
+        if (!raw) return true;
+        const t = raw.trim().toLowerCase();
+        if (t.length < 2 || t.length > 120) return true;
+        if (
+          /^(?:dismiss|easy apply|viewed|promoted|save|saved|close|apply|applied|apply now|more|less|share feedback|report this job|actively recruiting|be an early applicant|seen)$/i.test(
+            t,
+          )
+        ) {
+          return true;
+        }
+        if (/^(?:reposted\s+)?\d+\s+(?:day|week|month|hour|minute)s?\s+ago$/i.test(t) || /^just now$/i.test(t)) {
+          return true;
+        }
+        if (/\b(?:connection|connections|school alumni|alumni)\b/i.test(t)) {
+          return true;
+        }
+        return isJunkJobTitle(t);
+      }
+
+      // Helper: discover search card DOM elements excluding details pane
+      function querySearchCardElements(): HTMLElement[] {
+        // 1. Primary: componentkey="job-card-component-ref-<digits>"
+        const componentCards = Array.from(
+          document.querySelectorAll(
+            '[componentkey^="job-card-component-ref-"], [componentkey*="job-card-component-ref-"]',
+          ),
+        ) as HTMLElement[];
+        const validComponentCards = componentCards.filter(c => !isInsideDetailsPane(c));
+        if (validComponentCards.length > 0) {
+          return validComponentCards;
+        }
+
+        // 2. Extra fallbacks: list root direct children or structural selectors
+        const listRoot = document.querySelector(
+          'ul.scaffold-layout__list-container, .scaffold-layout__list-container, .jobs-search-results-list__list',
         );
-        hidden.forEach(h => h.remove());
-        let txt = (clone.textContent || '').replace(/\s+/g, ' ').trim();
-        if (!txt) {
-          txt = (el.textContent || '').replace(/\s+/g, ' ').trim();
-        }
-        if (txt.length <= 4) return txt;
-
-        if (txt.length % 2 === 0) {
-          const half = txt.slice(0, txt.length / 2);
-          if (half + half === txt) return half;
-        }
-
-        const mid = Math.floor(txt.length / 2);
-        if (txt[mid] === ' ') {
-          const left = txt.slice(0, mid).trim();
-          const right = txt.slice(mid + 1).trim();
-          if (left === right) return left;
+        if (listRoot) {
+          const directChildren = Array.from(listRoot.children) as HTMLElement[];
+          const listCards = directChildren.filter(c => {
+            return (
+              !isInsideDetailsPane(c) &&
+              (c.hasAttribute('data-occludable-job-id') ||
+                c.hasAttribute('data-job-id') ||
+                c.querySelector(
+                  '[data-occludable-job-id], [data-job-id], a[href*="/jobs/view/"], a[href*="currentJobId="]',
+                ) !== null)
+            );
+          });
+          if (listCards.length > 0) return listCards;
         }
 
-        const words = txt.split(/\s+/);
-        if (words.length >= 4 && words.length % 2 === 0) {
-          const halfLen = words.length / 2;
-          const w1 = words.slice(0, halfLen).join(' ');
-          const w2 = words.slice(halfLen).join(' ');
-          if (w1 === w2) return w1;
-        }
-
-        return txt;
-      }
-
-      // 4. Discover cards with structural selectors (not legacy classes)
-      const listRoot = document.querySelector(
-        'ul.scaffold-layout__list-container, .scaffold-layout__list-container, .jobs-search-results-list__list',
-      );
-      let cards: HTMLElement[] = [];
-
-      if (listRoot) {
-        const directChildren = Array.from(listRoot.children) as HTMLElement[];
-        cards = directChildren.filter(c => {
-          return (
-            c.hasAttribute('data-occludable-job-id') ||
-            c.hasAttribute('data-job-id') ||
-            c.querySelector(
-              '[data-occludable-job-id], [data-job-id], a[href*="/jobs/view/"], a[href*="currentJobId="]',
-            ) !== null
-          );
-        });
-      }
-
-      if (cards.length === 0) {
         const structuralSelectors = [
           'li[data-occludable-job-id]',
           'div[data-job-id]',
@@ -6201,84 +6250,189 @@ export default class Page {
           'div.base-card',
         ].join(', ');
         const found = Array.from(document.querySelectorAll(structuralSelectors)) as HTMLElement[];
-        // Filter out any elements positioned inside the details pane
-        cards = found.filter(el => !el.closest('.scaffold-layout__detail, [data-view-name="job-details"]'));
+        return found.filter(el => !isInsideDetailsPane(el));
       }
 
+      // Helper: find the real scrollable container by walking up from the first card to nearest ancestor with scrollHeight > clientHeight
+      function findScrollableContainer(firstCard: HTMLElement | null): HTMLElement | null {
+        if (firstCard) {
+          let curr: HTMLElement | null = firstCard.parentElement;
+          while (curr && curr !== document.body && curr !== document.documentElement) {
+            if (curr.scrollHeight > curr.clientHeight) {
+              return curr;
+            }
+            curr = curr.parentElement;
+          }
+        }
+        const candidates = [
+          document.querySelector('.scaffold-layout__list'),
+          document.querySelector('.jobs-search-results-list'),
+          document.querySelector('ul.scaffold-layout__list-container')?.parentElement,
+          document.querySelector('.scaffold-layout__list-container'),
+        ].filter(Boolean) as HTMLElement[];
+        return candidates.find(c => c.scrollHeight > c.clientHeight) || null;
+      }
+
+      // Progressive paced scrolling: scroll until virtualized cards stop growing
+      let prevCardCount = 0;
+      let stableCountRounds = 0;
+      const maxScrollSteps = Math.max(scrolls, 8);
+
+      for (let s = 0; s < maxScrollSteps; s++) {
+        const currentCards = querySearchCardElements();
+        const currentCount = currentCards.length;
+
+        if (currentCount > 0 && currentCount === prevCardCount) {
+          stableCountRounds++;
+          if (stableCountRounds >= 2) {
+            break;
+          }
+        } else {
+          stableCountRounds = 0;
+        }
+        prevCardCount = currentCount;
+
+        const scrollContainer = findScrollableContainer(currentCards[0] || null);
+        if (scrollContainer) {
+          scrollContainer.scrollBy(0, 500);
+        } else {
+          window.scrollBy(0, 500);
+        }
+        await new Promise(r => setTimeout(r, 350));
+      }
+
+      // Restore scroll to top so upper cards remain visible and interactive
+      const finalCards = querySearchCardElements();
+      const scrollContainer = findScrollableContainer(finalCards[0] || null);
+      if (scrollContainer && typeof scrollContainer.scrollTo === 'function') {
+        scrollContainer.scrollTo({ top: 0, behavior: 'instant' });
+      }
+      window.scrollTo({ top: 0, behavior: 'instant' });
+      await new Promise(r => setTimeout(r, 200));
+
+      const cardsToProcess = querySearchCardElements();
       const results: SearchJobCard[] = [];
       const seenJobIds = new Set<string>();
 
-      for (const card of cards) {
-        // Exclude elements inside the details pane
-        if (card.closest('.scaffold-layout__detail, [data-view-name="job-details"]')) continue;
+      for (const card of cardsToProcess) {
+        if (isInsideDetailsPane(card)) continue;
 
-        // 1. Try finding job ID from data attributes or primary link
-        let jobId =
-          card.getAttribute('data-job-id') ||
-          card.getAttribute('data-occludable-job-id') ||
-          card.querySelector('[data-job-id]')?.getAttribute('data-job-id') ||
-          card.querySelector('[data-occludable-job-id]')?.getAttribute('data-occludable-job-id') ||
-          (card as any).dataset?.jobId ||
-          (card as any).dataset?.occludableJobId ||
-          '';
+        // 1. Extract jobId: Primary regex on componentkey="job-card-component-ref-<digits>"
+        let jobId = '';
+        const compKey = card.getAttribute('componentkey') || '';
+        const compMatch = compKey.match(/job-card-component-ref-(\d{7,12})/);
+        if (compMatch && compMatch[1]) {
+          jobId = compMatch[1];
+        }
 
-        if (jobId && jobId.includes('urn:li:jobPosting:')) {
-          const urnMatch = jobId.match(/(\d+)/);
-          if (urnMatch && urnMatch[1]) {
-            jobId = urnMatch[1];
+        if (!jobId) {
+          const childComp = card.querySelector('[componentkey*="job-card-component-ref-"]');
+          if (childComp) {
+            const m = (childComp.getAttribute('componentkey') || '').match(/job-card-component-ref-(\d{7,12})/);
+            if (m && m[1]) jobId = m[1];
           }
         }
 
-        // Primary job title anchor
-        const titleAnchor =
-          card.querySelector<HTMLAnchorElement>(
-            'a[href*="/jobs/view/"], a[href*="currentJobId="], [data-view-name*="job-card-title"], a.job-card-list__title, a.job-card-container__link',
-          ) || (card.tagName.toLowerCase() === 'a' ? (card as HTMLAnchorElement) : null);
+        if (!jobId) {
+          jobId =
+            card.getAttribute('data-job-id') ||
+            card.getAttribute('data-occludable-job-id') ||
+            card.querySelector('[data-job-id]')?.getAttribute('data-job-id') ||
+            card.querySelector('[data-occludable-job-id]')?.getAttribute('data-occludable-job-id') ||
+            (card as any).dataset?.jobId ||
+            (card as any).dataset?.occludableJobId ||
+            '';
 
-        if (!jobId && titleAnchor) {
-          const href = titleAnchor.href || '';
-          const match = href.match(/(?:\/jobs\/view\/|currentJobId=)(\d{7,12})/);
-          if (match && match[1]) {
-            jobId = match[1];
+          if (jobId && jobId.includes('urn:li:jobPosting:')) {
+            const urnMatch = jobId.match(/(\d+)/);
+            if (urnMatch && urnMatch[1]) jobId = urnMatch[1];
           }
         }
 
-        if (!jobId || seenJobIds.has(jobId)) {
-          continue;
+        if (!jobId) {
+          const titleAnchor =
+            card.querySelector<HTMLAnchorElement>(
+              'a[href*="/jobs/view/"], a[href*="currentJobId="], [data-view-name*="job-card-title"], a.job-card-list__title, a.job-card-container__link',
+            ) || (card.tagName.toLowerCase() === 'a' ? (card as HTMLAnchorElement) : null);
+          if (titleAnchor) {
+            const href = titleAnchor.href || '';
+            const match = href.match(/(?:\/jobs\/view\/|currentJobId=)(\d{7,12})/);
+            if (match && match[1]) jobId = match[1];
+          }
         }
+
+        if (!jobId || seenJobIds.has(jobId)) continue;
         seenJobIds.add(jobId);
 
-        // 2. Title Extraction
-        let rawTitle = cleanElementText(titleAnchor);
-        if (isJunkJobTitle(rawTitle)) {
-          const heading = card.querySelector('strong, h3, h4');
-          if (heading && !heading.closest('button, [role="button"]')) {
-            rawTitle = cleanElementText(heading);
+        // 2. Title & Company: Derive from visible <p> text structure
+        const pElements = Array.from(card.querySelectorAll('p')) as HTMLElement[];
+        const candidatePTexts: string[] = [];
+
+        for (const p of pElements) {
+          // Skip if inside figure (logo), button, or aria-hidden
+          if (p.closest('figure, button, [aria-hidden="true"]')) continue;
+          if (p.getAttribute('aria-hidden') === 'true') continue;
+
+          const txt = cleanElementText(p);
+          if (!txt) continue;
+          if (isBadgeOrButtonLabel(txt)) continue;
+          if (isLocationLine(txt)) continue;
+
+          candidatePTexts.push(txt);
+        }
+
+        // Title: 1st candidate <p> text, with fallbacks to anchor/heading/aria-label
+        let title = '';
+        if (candidatePTexts.length > 0) {
+          title = candidatePTexts[0];
+        }
+        if (!title || isJunkJobTitle(title)) {
+          const titleAnchor =
+            card.querySelector<HTMLAnchorElement>(
+              'a[href*="/jobs/view/"], a[href*="currentJobId="], [data-view-name*="job-card-title"], a.job-card-list__title, a.job-card-container__link',
+            ) || (card.tagName.toLowerCase() === 'a' ? (card as HTMLAnchorElement) : null);
+          let rawTitle = cleanElementText(titleAnchor);
+          if (!rawTitle || isJunkJobTitle(rawTitle)) {
+            const heading = card.querySelector('strong, h3, h4');
+            if (heading && !heading.closest('button, [role="button"]')) {
+              rawTitle = cleanElementText(heading);
+            }
+          }
+          if (!rawTitle || isJunkJobTitle(rawTitle)) {
+            const aria = titleAnchor?.getAttribute('aria-label') || card.getAttribute('aria-label') || '';
+            if (!isJunkJobTitle(aria)) rawTitle = aria;
+          }
+          title = rawTitle;
+        }
+        title = cleanLinkedInJobTitle(title);
+        if (isJunkJobTitle(title)) title = '';
+
+        // Company: 2nd candidate <p> text, with fallbacks to company anchor / subtitle
+        let company = '';
+        if (candidatePTexts.length > 1) {
+          company = candidatePTexts[1];
+        }
+        if (!company || isJunkJobTitle(company) || isLocationLine(company)) {
+          const companyAnchor = card.querySelector<HTMLAnchorElement>('a[href*="/company/"]');
+          company = cleanElementText(companyAnchor);
+          if (!company || isJunkJobTitle(company) || isLocationLine(company)) {
+            const subEl = card.querySelector(
+              '.artdeco-entity-lockup__subtitle, [data-view-name*="job-card"] .artdeco-entity-lockup__subtitle, .job-card-container__primary-description, .base-search-card__subtitle, span.t-14',
+            );
+            if (subEl && !subEl.closest('button, [role="button"]')) {
+              const subTxt = cleanElementText(subEl);
+              if (!isJunkJobTitle(subTxt) && !isLocationLine(subTxt)) company = subTxt;
+            }
           }
         }
-        if (isJunkJobTitle(rawTitle)) {
-          const aria = titleAnchor?.getAttribute('aria-label') || card.getAttribute('aria-label') || '';
-          if (!isJunkJobTitle(aria)) rawTitle = aria;
-        }
-        const cleanedCardTitle = cleanLinkedInJobTitle(rawTitle);
-        const title = isJunkJobTitle(cleanedCardTitle) ? '' : cleanedCardTitle;
+        if (isJunkJobTitle(company) || isLocationLine(company)) company = '';
 
-        // 3. Company Extraction
-        const companyAnchor = card.querySelector<HTMLAnchorElement>('a[href*="/company/"]');
-        let company = cleanElementText(companyAnchor);
-        if (!company || isJunkJobTitle(company)) {
-          const subEl = card.querySelector(
-            '.artdeco-entity-lockup__subtitle, [data-view-name*="job-card"] .artdeco-entity-lockup__subtitle, .job-card-container__primary-description, .base-search-card__subtitle, span.t-14',
+        // If title or company is empty, log warning and proceed with jobId
+        if (!title || !company) {
+          console.warn(
+            `[readJobListFromSearchPane] Card ${jobId} has missing ${!title ? 'title' : ''}${!title && !company ? ' and ' : ''}${!company ? 'company' : ''}. Proceeding with jobId.`,
           );
-          if (subEl && !subEl.closest('button, [role="button"]')) {
-            const subTxt = cleanElementText(subEl);
-            if (!isJunkJobTitle(subTxt)) company = subTxt;
-          }
         }
-        if (isJunkJobTitle(company)) company = '';
-
-        // Exclude menu buttons or empty card containers
-        if (!title && !company) continue;
 
         const url = `https://www.linkedin.com/jobs/view/${jobId}/`;
 
@@ -6291,24 +6445,57 @@ export default class Page {
       }
 
       // Single-anchor fallback is explicitly rejected: never treat solitary details-pane anchor as a search card
+      let diagnostic = '';
       if (results.length === 0) {
-        console.warn(
-          '[readJobListFromSearchPane] Discovered 0 job cards from search list. Details-pane anchor excluded.',
+        const path = (window.location.pathname || '') + (window.location.search || '');
+        const hasCheckpoint = Boolean(
+          document.querySelector(
+            '.join-form, .login__form, #checkpointSubmitButton, input[name="session_password"], [data-tracking-control-name*="signin"], form[action*="checkpoint"], #login-email',
+          ) ||
+            path.includes('/checkpoint') ||
+            path.includes('/login') ||
+            path.includes('/authwall') ||
+            path.includes('/uas/login'),
         );
+
+        const selCounts = {
+          componentkey: document.querySelectorAll(
+            '[componentkey^="job-card-component-ref-"], [componentkey*="job-card-component-ref-"]',
+          ).length,
+          dataOccludable: document.querySelectorAll('li[data-occludable-job-id], [data-occludable-job-id]').length,
+          dataJobId: document.querySelectorAll('[data-job-id]').length,
+          dataViewName: document.querySelectorAll('[data-view-name*="job-card"]').length,
+          scaffoldList: document.querySelectorAll(
+            'ul.scaffold-layout__list-container > li, .scaffold-layout__list-item',
+          ).length,
+        };
+
+        diagnostic = `Scan found 0 cards on ${path} (checkpoint: ${hasCheckpoint}). Selectors: [componentkey*="job-card-component-ref-"]=${selCounts.componentkey}, [data-occludable-job-id]=${selCounts.dataOccludable}, [data-job-id]=${selCounts.dataJobId}, [data-view-name*="job-card"]=${selCounts.dataViewName}, scaffold-list=${selCounts.scaffoldList}`;
+        console.warn(`[readJobListFromSearchPane] ${diagnostic}`);
       }
 
-      return results;
+      return {
+        cards: results,
+        diagnostic,
+      };
     };
 
     if (!this._puppeteerPage) {
       await this.attachPuppeteer().catch(() => false);
     }
 
+    this.lastScanDiagnostic = '';
+
     if (this._puppeteerPage) {
       try {
-        const cards = await this._puppeteerPage.evaluate(extractCardsInPage, scrollAttempts);
-        if (Array.isArray(cards) && cards.length > 0) {
-          return cards;
+        const res = (await this._puppeteerPage.evaluate(extractCardsInPage, scrollAttempts)) as any;
+        if (res && typeof res === 'object') {
+          if ('diagnostic' in res && typeof res.diagnostic === 'string') {
+            this.lastScanDiagnostic = res.diagnostic;
+          }
+          if (Array.isArray(res.cards) && res.cards.length > 0) {
+            return res.cards;
+          }
         }
       } catch (err) {
         logger.warning(
@@ -6325,13 +6512,22 @@ export default class Page {
           func: extractCardsInPage,
           args: [scrollAttempts],
         });
-        const cards = results?.[0]?.result;
-        if (Array.isArray(cards) && cards.length > 0) {
-          return cards as SearchJobCard[];
+        const res = results?.[0]?.result as any;
+        if (res && typeof res === 'object') {
+          if ('diagnostic' in res && typeof res.diagnostic === 'string') {
+            this.lastScanDiagnostic = res.diagnostic;
+          }
+          if (Array.isArray(res.cards) && res.cards.length > 0) {
+            return res.cards as SearchJobCard[];
+          }
         }
       } catch (scriptErr) {
         logger.warning('[readJobListFromSearchPane] chrome.scripting fallback error:', scriptErr);
       }
+    }
+
+    if (this.lastScanDiagnostic) {
+      logger.warning(`[readJobListFromSearchPane] ${this.lastScanDiagnostic}`);
     }
 
     return [];
@@ -6339,10 +6535,27 @@ export default class Page {
 
   /**
    * Clicks a specific job item in the left-hand search results pane to load it in the right details pane.
+   * Targets the inner [role="button"] child inside [componentkey^="job-card-component-ref-"].
+   * If details pane does not show that job within ~3.5s (single-column layout), falls back to direct navigation.
    */
   async clickJobInSearchList(jobId: string): Promise<boolean> {
     const clickInPage = (targetId: string): boolean => {
       function findAndClickCard(): boolean {
+        // 1. Primary: componentkey="job-card-component-ref-<jobId>"
+        const componentCard = document.querySelector<HTMLElement>(
+          `[componentkey="job-card-component-ref-${targetId}"], [componentkey*="job-card-component-ref-${targetId}"]`,
+        );
+        if (componentCard) {
+          const targetBtn = componentCard.querySelector<HTMLElement>('[role="button"]') || componentCard;
+          targetBtn.scrollIntoView({ behavior: 'instant', block: 'center' });
+          targetBtn.focus?.();
+          targetBtn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+          targetBtn.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
+          targetBtn.click();
+          return true;
+        }
+
+        // 2. Extra fallbacks
         const candidateContainers = [
           document.querySelector('.jobs-search-results-list'),
           document.querySelector('.scaffold-layout__list'),
@@ -6399,7 +6612,11 @@ export default class Page {
           }
 
           if (matches) {
-            const targetEl = link || card.querySelector<HTMLElement>('a, .job-card-list__title') || card;
+            const targetEl =
+              card.querySelector<HTMLElement>('[role="button"]') ||
+              link ||
+              card.querySelector<HTMLElement>('a, .job-card-list__title') ||
+              card;
             targetEl.scrollIntoView({ behavior: 'instant', block: 'center' });
             targetEl.focus?.();
             targetEl.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
@@ -6439,33 +6656,96 @@ export default class Page {
       return false;
     };
 
+    let clicked = false;
     if (!this._puppeteerPage) {
       await this.attachPuppeteer().catch(() => false);
     }
 
     if (this._puppeteerPage) {
       try {
-        const clicked = await this._puppeteerPage.evaluate(clickInPage, jobId);
-        if (clicked) return true;
+        clicked = Boolean(await this._puppeteerPage.evaluate(clickInPage, jobId));
       } catch (err) {
         logger.warning('[clickJobInSearchList] Puppeteer click failed, trying chrome.scripting fallback:', err);
       }
     }
 
-    if (this._tabId && typeof chrome !== 'undefined' && chrome.scripting?.executeScript) {
+    if (!clicked && this._tabId && typeof chrome !== 'undefined' && chrome.scripting?.executeScript) {
       try {
         const results = await chrome.scripting.executeScript({
           target: { tabId: this._tabId },
           func: clickInPage,
           args: [jobId],
         });
-        return Boolean(results?.[0]?.result);
+        clicked = Boolean(results?.[0]?.result);
       } catch (scriptErr) {
         logger.warning('[clickJobInSearchList] chrome.scripting click fallback error:', scriptErr);
       }
     }
 
-    return false;
+    const jobUrl = `https://www.linkedin.com/jobs/view/${jobId}/`;
+
+    if (!clicked) {
+      logger.info(
+        `[clickJobInSearchList] Card for ${jobId} could not be clicked in search list. Navigating directly to ${jobUrl}...`,
+      );
+      await this.navigateToDirect(jobUrl);
+      return true;
+    }
+
+    // Check if details pane shows this job within ~3.5s
+    const checkDetailsShown = (targetId: string): boolean => {
+      const href = window.location.href || '';
+      if (href.includes(`/jobs/view/${targetId}`) || href.includes(`currentJobId=${targetId}`)) {
+        return true;
+      }
+      const detailsContainer = document.querySelector(
+        '.scaffold-layout__detail, [data-view-name="job-details"], .jobs-search__job-details--container, .jobs-details__main-content, [data-view-name="job-details-top-card"]',
+      );
+      if (detailsContainer) {
+        if (
+          detailsContainer.querySelector(
+            `[href*="${targetId}"], [data-job-id="${targetId}"], [componentkey*="${targetId}"]`,
+          ) !== null
+        ) {
+          return true;
+        }
+      }
+      return false;
+    };
+
+    let detailsShown = false;
+    const startTime = Date.now();
+    while (Date.now() - startTime < 3500) {
+      if (this._puppeteerPage) {
+        try {
+          detailsShown = Boolean(await this._puppeteerPage.evaluate(checkDetailsShown, jobId));
+        } catch {
+          // ignore
+        }
+      } else if (this._tabId && typeof chrome !== 'undefined' && chrome.scripting?.executeScript) {
+        try {
+          const res = await chrome.scripting.executeScript({
+            target: { tabId: this._tabId },
+            func: checkDetailsShown,
+            args: [jobId],
+          });
+          detailsShown = Boolean(res?.[0]?.result);
+        } catch {
+          // ignore
+        }
+      }
+      if (detailsShown) break;
+      await new Promise(r => setTimeout(r, 400));
+    }
+
+    if (!detailsShown) {
+      logger.info(
+        `[clickJobInSearchList] Details pane did not show job ${jobId} within 3.5s (single-column layout or delayed). Navigating directly to ${jobUrl}...`,
+      );
+      await this.navigateToDirect(jobUrl);
+    }
+
+    return true;
   }
 
   /**

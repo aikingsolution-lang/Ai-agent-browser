@@ -2101,7 +2101,25 @@ export class DedicatedJobRunner {
         }
 
         totalLinkedInScanned += jobCards.length;
-        if (jobCards.length === 0) return false;
+        if (jobCards.length === 0) {
+          const currentUrl =
+            typeof currentPage?.url === 'function'
+              ? currentPage.url()
+              : (currentPage as any)?.url || 'https://www.linkedin.com/jobs/search/';
+          const diag =
+            (currentPage as any)?.lastScanDiagnostic || `Scan found 0 cards on ${currentUrl} (checkpoint: false).`;
+          this.notifyActivity(portToSend, onLiveActivity, {
+            jobId: `scan-${Date.now()}`,
+            url: currentUrl,
+            title: 'Job Search Results',
+            company: 'LinkedIn',
+            status: 'skipped',
+            reason: diag,
+            creditsUsed: 0,
+          });
+          this.notifyStatus(portToSend, `⚠️ ${diag}`, 'info');
+          return false;
+        }
 
         this.notifyStatus(
           portToSend,
@@ -4066,6 +4084,8 @@ export class DedicatedJobRunner {
       try {
         if (currentPage.puppeteerPage) {
           await currentPage.puppeteerPage.goto(job.url, { waitUntil: 'domcontentloaded', timeout: 35000 });
+        } else if ((currentPage as any).navigateToDirect) {
+          await (currentPage as any).navigateToDirect(job.url);
         } else if ((currentPage as any).navigateTo) {
           await (currentPage as any).navigateTo(job.url);
         }
