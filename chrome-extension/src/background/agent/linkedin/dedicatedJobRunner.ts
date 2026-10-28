@@ -52,6 +52,7 @@ import {
   matchRuleBased,
   rememberResolvedAnswer,
   generateAutonomousFallbackAnswer,
+  generateAutonomousFallbackAnswerWithSource,
 } from './formQuestionResolver';
 import {
   evaluateDeepRelevance,
@@ -5023,8 +5024,9 @@ export class DedicatedJobRunner {
                 }
               }
               if (!answer) {
-                answer = generateAutonomousFallbackAnswer(f, careerBrain);
-                reason = 'Profile-derived autonomous fallback';
+                const fb = generateAutonomousFallbackAnswerWithSource(f, careerBrain);
+                answer = fb.answer;
+                reason = fb.source;
               }
               if (answer) {
                 const fillSuccess = await fillAnswerWithFormat(f, answer);
@@ -5202,8 +5204,9 @@ export class DedicatedJobRunner {
                   }
                 }
                 if (!answer) {
-                  answer = generateAutonomousFallbackAnswer(req, careerBrain);
-                  reason = 'Profile-derived autonomous fallback';
+                  const fb = generateAutonomousFallbackAnswerWithSource(req, careerBrain);
+                  answer = fb.answer;
+                  reason = fb.source;
                 }
                 if (answer) {
                   const fillSuccess = await fillAnswerWithFormat(req, answer);
@@ -5663,126 +5666,185 @@ export class DedicatedJobRunner {
         if (sigBefore !== null && typeof page.getModalStepSignature === 'function') {
           const sigAfter = await page.getModalStepSignature().catch(() => null);
           if (sigAfter !== null && sigAfter === sigBefore) {
-            logger.warning(
-              '[DedicatedJobRunner] Forward click was silently rejected by LinkedIn (step content unchanged). Healing surfaced validation errors and retrying once...',
-            );
-            const blockedValidation = await page.validateModalFormState();
-            // A blocked resume/document step cannot be healed with text answers —
-            // attach the draft resume once, then let the retry click below proceed.
-            if (!uploadAttempted) {
-              const blockedSnap = await page.captureModalSnapshot().catch(() => null);
-              if (blockedSnap?.hasFileInput || blockedValidation.unfulfilledMandatoryFileUpload) {
-                const uploaded = await tryUploadDraftResume('📄 Uploading a draft resume to unblock this form step...');
-                if (uploaded) {
-                  stuckStreak = 0;
-                  lastIterationSignature = null;
+            const MAX_HEAL_ATTEMPTS = 4;
+            let stepAdvanced = false;
+
+            for (let healAttempt = 1; healAttempt <= MAX_HEAL_ATTEMPTS; healAttempt++) {
+              logger.warning(
+                `[DedicatedJobRunner] Forward click was rejected by LinkedIn (validation blocked, attempt ${healAttempt}/${MAX_HEAL_ATTEMPTS}). Healing surfaced validation errors...`,
+              );
+              const blockedValidation = await page.validateModalFormState();
+
+              // A blocked resume/document step cannot be healed with text answers —
+              // attach the draft resume once, then let the retry click below proceed.
+              if (!uploadAttempted) {
+                const blockedSnap = await page.captureModalSnapshot().catch(() => null);
+                if (blockedSnap?.hasFileInput || blockedValidation.unfulfilledMandatoryFileUpload) {
+                  const uploaded = await tryUploadDraftResume(
+                    '📄 Uploading a draft resume to unblock this form step...',
+                  );
+                  if (uploaded) {
+                    stuckStreak = 0;
+                    lastIterationSignature = null;
+                  }
                 }
               }
-            }
-            const activeHealLLM =
-              scopedLLM || (await getJobScopedLLM(jobRunId)) || (await getActiveChatModel(jobRunId));
-            if (blockedValidation.hasErrors) {
-              if (portToSend) {
-                const errMsgs = [
-                  ...blockedValidation.errors.map((e: any) => `${e.fieldLabel}: ${e.errorText}`),
-                  ...blockedValidation.emptyRequiredFields.map((f: any) => `${f.label} (unanswered)`),
-                ];
-                if (errMsgs.length > 0) {
-                  portToSend.postMessage({
-                    type: 'LOG',
-                    payload: {
-                      text: `⚠️ Step blocked by LinkedIn validation: ${errMsgs.join('; ').slice(0, 160)}... Auto-healing...`,
-                    },
-                  });
+
+              const activeHealLLM =
+                scopedLLM || (await getJobScopedLLM(jobRunId)) || (await getActiveChatModel(jobRunId));
+
+              if (blockedValidation.hasErrors) {
+                if (portToSend) {
+                  const errMsgs = [
+                    ...blockedValidation.errors.map((e: any) => `${e.fieldLabel}: ${e.errorText}`),
+                    ...blockedValidation.emptyRequiredFields.map((f: any) => `${f.label} (unanswered)`),
+                  ];
+                  if (errMsgs.length > 0) {
+                    portToSend.postMessage({
+                      type: 'LOG',
+                      payload: {
+                        text: `⚠️ Step blocked by LinkedIn validation (attempt ${healAttempt}/${MAX_HEAL_ATTEMPTS}): ${errMsgs.join('; ').slice(0, 160)}... Auto-healing...`,
+                      },
+                    });
+                  }
                 }
-              }
-              for (const invF of blockedValidation.invalidFieldsWithErrors) {
-                try {
-                  let answer: string | undefined;
-                  if (activeHealLLM) {
-                    const healed = await solveValidationErrorWithLLM(invF, careerBrain, activeHealLLM);
-                    if (healed.success && healed.answer !== undefined) {
-                      answer = healed.answer;
+
+                // Combine invalidFieldsWithErrors and emptyRequiredFields without duplication
+                const fieldsToHeal: Array<any> = [...blockedValidation.invalidFieldsWithErrors];
+                for (const reqF of blockedValidation.emptyRequiredFields) {
+                  if (!fieldsToHeal.some(f => f.label === reqF.label && f.id === reqF.id)) {
+                    fieldsToHeal.push(reqF);
+                  }
+                }
+
+                for (const targetField of fieldsToHeal) {
+                  try {
+                    let answer: string | undefined;
+                    let source = '';
+
+                    // Strategy ladder across up to 4 attempts:
+                    // Attempt 1: Semantic LLM if available, else shape-aware profile fallback
+                    // Attempt 2: Error-directed canonical format (whole number, strict option, short single sentence <= 80 chars)
+                    // Attempt 3: Honest neutral profile-derived fallback (digits-only '0', 'No', 'Not applicable')
+                    // Attempt 4: Minimal DOM-fitting token + trusted native escalation
+                    if (healAttempt === 1 && activeHealLLM) {
+                      const healed = await solveValidationErrorWithLLM(targetField, careerBrain, activeHealLLM);
+                      if (healed.success && healed.answer !== undefined && String(healed.answer).trim() !== '') {
+                        answer = healed.answer;
+                        source = `LLM validation heal (${healed.reason || 'semantic'})`;
+                      }
                     }
-                  }
-                  if (!answer) {
-                    answer = generateAutonomousFallbackAnswer(invF, careerBrain);
-                  }
-                  if (answer !== undefined && String(answer).trim() !== '') {
-                    const adapted = validateAnswerForField(answer, invF as any);
+
+                    if (!answer) {
+                      const fallback = generateAutonomousFallbackAnswerWithSource(
+                        targetField,
+                        careerBrain,
+                        targetField.errorText,
+                        healAttempt,
+                      );
+                      answer = fallback.answer;
+                      source = fallback.source;
+                    }
+
+                    const adapted = validateAnswerForField(answer, targetField as any);
+
+                    // DIAGNOSTIC LOGGING:
+                    // Log: label of required field, intended value, value read back from DOM,
+                    // result and reason of validateAnswerForField, and LinkedIn validation error text.
+                    logger.info(`[DedicatedJobRunner] [DIAGNOSTIC] Forward rejected field check:`, {
+                      fieldLabel: targetField.label,
+                      intendedValue: answer,
+                      guardValid: adapted.valid,
+                      guardReason: adapted.reason || 'VALID',
+                      linkedInErrorText: targetField.errorText || 'none',
+                      attempt: healAttempt,
+                    });
+
                     if (adapted.valid && adapted.value) {
-                      const fillSuccess = await page.fillModalFieldDirect(invF, adapted.value);
+                      const fillSuccess = await page.fillModalFieldDirect(targetField, adapted.value);
+
+                      // Read back value from DOM
+                      let readbackValue = '';
+                      if (typeof page.readModalFieldStatus === 'function') {
+                        const status = await page.readModalFieldStatus(targetField);
+                        readbackValue = status.currentValue;
+                      }
+
+                      logger.info(`[DedicatedJobRunner] [DIAGNOSTIC] Field fill readback outcome:`, {
+                        fieldLabel: targetField.label,
+                        intendedValue: adapted.value,
+                        readbackValue,
+                        fillSuccess,
+                        linkedInErrorText: targetField.errorText,
+                        source,
+                        attempt: healAttempt,
+                      });
+
                       onAuditLog(
                         'GENERATED',
-                        invF.label,
+                        targetField.label,
                         adapted.value,
-                        `Blocked-forward validation heal | Prev: "${invF.currentValue}" | Error: "${invF.errorText}" | Fill: ${fillSuccess ? 'SUCCESS' : 'FAILED'}`,
+                        `Blocked-forward heal (attempt ${healAttempt}) | Source: "${source}" | Error: "${targetField.errorText || 'none'}" | Readback: "${readbackValue}" | Fill: ${fillSuccess ? 'SUCCESS' : 'FAILED'}`,
+                      );
+                    } else {
+                      logger.warning(
+                        `[DedicatedJobRunner] [DIAGNOSTIC] validateAnswerForField REJECTED answer "${answer}" for field "${targetField.label}": ${adapted.reason}`,
                       );
                     }
+                  } catch (healErr) {
+                    logger.warning(
+                      `[DedicatedJobRunner] Failed to heal blocked field "${targetField.label}":`,
+                      healErr,
+                    );
                   }
-                } catch (healErr) {
-                  logger.warning(`[DedicatedJobRunner] Failed to heal blocked field "${invF.label}":`, healErr);
                 }
               }
-              for (const reqF of blockedValidation.emptyRequiredFields) {
-                try {
-                  let answer: string | undefined;
-                  if (activeHealLLM) {
-                    const autoSol = await solveQuestionAutonomousWithLLM(reqF, careerBrain, activeHealLLM);
-                    if (autoSol.success && autoSol.answer) {
-                      answer = autoSol.answer;
-                    }
-                  }
-                  if (!answer) {
-                    answer = generateAutonomousFallbackAnswer(reqF, careerBrain);
-                  }
-                  if (answer !== undefined && String(answer).trim() !== '') {
-                    const adapted = validateAnswerForField(answer, reqF);
-                    if (adapted.valid && adapted.value) {
-                      const fillSuccess = await page.fillModalFieldDirect(reqF, adapted.value);
-                      onAuditLog(
-                        'GENERATED',
-                        reqF.label,
-                        adapted.value,
-                        `Blocked-forward empty-field fill | DOM fill: ${fillSuccess ? 'SUCCESS' : 'FAILED'}`,
-                      );
-                    }
-                  }
-                } catch (healErr) {
-                  logger.warning(`[DedicatedJobRunner] Failed to fill blocked field "${reqF.label}":`, healErr);
-                }
+
+              if (typeof page.scrollModalContent === 'function') {
+                await page.scrollModalContent('bottom');
+                await new Promise(r => setTimeout(r, 300));
+              }
+
+              const retrySigBefore = await page.getModalStepSignature().catch(() => null);
+              await page.clickModalForwardButton();
+              if (typeof page.waitForDomSettlement === 'function') {
+                await page.waitForDomSettlement();
+              } else {
+                await new Promise(r => setTimeout(r, 1200));
+              }
+              const retrySigAfter = await page.getModalStepSignature().catch(() => null);
+              if (retrySigAfter !== null && retrySigBefore !== null && retrySigAfter !== retrySigBefore) {
+                // Retry advanced the modal successfully
+                stepAdvanced = true;
+                step = Math.max(0, step - 1);
+                break;
               }
             }
-            if (typeof page.scrollModalContent === 'function') {
-              await page.scrollModalContent('bottom');
-              await new Promise(r => setTimeout(r, 300));
+
+            if (!stepAdvanced) {
+              const finalValidation = await page.validateModalFormState();
+              const failedField =
+                finalValidation.invalidFieldsWithErrors[0] ||
+                finalValidation.emptyRequiredFields[0] ||
+                finalValidation.errors[0];
+              const fieldLabel = failedField?.label || failedField?.fieldLabel || 'required field';
+              const errorText = failedField?.errorText || 'validation blocked';
+              const specificSkipReason = `Skipped: required field "${fieldLabel}" could not be filled (LinkedIn error: "${errorText}")`;
+
+              logger.error(
+                `[DedicatedJobRunner] Forward button rejected across 4 attempts. Aborting this application cleanly; ${specificSkipReason}. The draft is preserved on LinkedIn for manual review.`,
+              );
+              if (typeof page.ensureNoModalOrDialogRemains === 'function') {
+                await page.ensureNoModalOrDialogRemains(5000).catch(() => {});
+              } else if (typeof page.dismissEasyApplyModal === 'function') {
+                await page.dismissEasyApplyModal(5000).catch(() => {});
+              }
+              return {
+                success: false,
+                reason: specificSkipReason,
+              };
             }
-            const retrySigBefore = await page.getModalStepSignature().catch(() => null);
-            await page.clickModalForwardButton();
-            if (typeof page.waitForDomSettlement === 'function') {
-              await page.waitForDomSettlement();
-            } else {
-              await new Promise(r => setTimeout(r, 1200));
-            }
-            const retrySigAfter = await page.getModalStepSignature().catch(() => null);
-            if (retrySigAfter !== null && retrySigBefore !== null && retrySigAfter !== retrySigBefore) {
-              // Retry advanced the modal successfully
-              step = Math.max(0, step - 1);
-              continue;
-            }
-            logger.error(
-              '[DedicatedJobRunner] Forward button rejected twice by LinkedIn (Next/Review disabled). Aborting this application cleanly; the draft is preserved on LinkedIn for manual review.',
-            );
-            if (typeof page.ensureNoModalOrDialogRemains === 'function') {
-              await page.ensureNoModalOrDialogRemains(5000).catch(() => {});
-            } else if (typeof page.dismissEasyApplyModal === 'function') {
-              await page.dismissEasyApplyModal(5000).catch(() => {});
-            }
-            return {
-              success: false,
-              reason:
-                'Next/Review button rejected by LinkedIn (validation blocked). Draft preserved for manual review.',
-            };
+            continue;
           }
         }
 

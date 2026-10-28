@@ -3101,8 +3101,10 @@ export default class Page {
       currentValue: string;
       errorText: string;
       fieldType: 'text' | 'number' | 'radio' | 'dropdown' | 'checkbox';
+      options?: string[];
       min?: number;
       max?: number;
+      maxLength?: number;
       placeholder?: string;
       hintText?: string;
     }>;
@@ -3584,8 +3586,10 @@ export default class Page {
         currentValue: string;
         errorText: string;
         fieldType: 'text' | 'number' | 'radio' | 'dropdown' | 'checkbox';
+        options?: string[];
         min?: number;
         max?: number;
+        maxLength?: number;
         placeholder?: string;
         hintText?: string;
       }> = [];
@@ -3663,6 +3667,12 @@ export default class Page {
               ? Number(rawMin)
               : undefined;
 
+          const rawMaxLength = (el as HTMLInputElement | HTMLTextAreaElement).getAttribute?.('maxlength');
+          const maxLenVal =
+            rawMaxLength !== null && !isNaN(Number(rawMaxLength)) && Number(rawMaxLength) > 0
+              ? Number(rawMaxLength)
+              : undefined;
+
           const invalidDesc = {
             id: el.id || undefined,
             label: label || '',
@@ -3676,6 +3686,7 @@ export default class Page {
               : undefined,
             min: minVal,
             max: rawMax !== null && !isNaN(Number(rawMax)) ? Number(rawMax) : undefined,
+            maxLength: maxLenVal,
             placeholder: placeholder || undefined,
             hintText: errorMsg || undefined,
           };
@@ -3776,13 +3787,25 @@ export default class Page {
               ? Number(rawMin)
               : undefined;
 
+          const rawErrMaxLength = (inputEl as HTMLInputElement | HTMLTextAreaElement).getAttribute?.('maxlength');
+          const maxErrLenVal =
+            rawErrMaxLength !== null && !isNaN(Number(rawErrMaxLength)) && Number(rawErrMaxLength) > 0
+              ? Number(rawErrMaxLength)
+              : undefined;
+
           const errDesc = {
             id: inputEl.id || undefined,
             label: label || '',
             currentValue: curVal,
             errorText: txt,
             fieldType,
+            options: isSelect
+              ? Array.from((inputEl as HTMLSelectElement).options)
+                  .map(o => cleanDuplicateString(o.text.trim()))
+                  .filter(t => !/select an option/i.test(t))
+              : undefined,
             min: minVal,
+            maxLength: maxErrLenVal,
             placeholder: inputEl.getAttribute('placeholder') || undefined,
             hintText: txt,
           };
@@ -3859,6 +3882,23 @@ export default class Page {
                 fieldType: 'radio',
                 options,
               });
+            }
+
+            if (groupHasError) {
+              let rErrText = '';
+              const rFeedback = fs.querySelector(
+                '.artdeco-inline-feedback--error, .inline-feedback--error, [data-test-form-element-error-message], [role="alert"]',
+              );
+              if (rFeedback) rErrText = cleanElementText(rFeedback);
+              if (!invalidFieldsWithErrors.some(e => e.label === legendText && e.fieldType === 'radio')) {
+                invalidFieldsWithErrors.push({
+                  label: legendText,
+                  currentValue: '',
+                  errorText: rErrText || 'Please make a selection',
+                  fieldType: 'radio',
+                  options,
+                });
+              }
             }
           }
         } else if (checkboxes.length > 0) {
@@ -5321,6 +5361,47 @@ export default class Page {
           }
         } else {
           ok = valuesMatchTolerantly(finalReadback, finalVal, isNumericField);
+          if (!ok) {
+            // Alternative setter retry on readback failure
+            try {
+              targetEl.focus();
+              if (setter) {
+                targetEl.value = finalVal;
+              } else {
+                const proto =
+                  targetEl instanceof HTMLInputElement ? HTMLInputElement.prototype : HTMLTextAreaElement.prototype;
+                const protoSetter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+                if (protoSetter) protoSetter.call(targetEl, finalVal);
+                else targetEl.value = finalVal;
+              }
+              try {
+                targetEl.dispatchEvent(
+                  new InputEvent('beforeinput', {
+                    bubbles: true,
+                    composed: true,
+                    data: finalVal,
+                    inputType: 'insertText',
+                  }),
+                );
+              } catch {}
+              try {
+                targetEl.dispatchEvent(
+                  new InputEvent('input', {
+                    bubbles: true,
+                    composed: true,
+                    data: finalVal,
+                    inputType: 'insertText',
+                  }),
+                );
+              } catch {
+                targetEl.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+              }
+              targetEl.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+              targetEl.dispatchEvent(new Event('blur', { bubbles: true, composed: true }));
+              const retryReadback = (targetEl as HTMLInputElement | HTMLTextAreaElement).value;
+              ok = valuesMatchTolerantly(retryReadback, finalVal, isNumericField);
+            } catch {}
+          }
         }
 
         // Blur so React finalizes the field state and triggers any inline validation
@@ -5454,8 +5535,21 @@ export default class Page {
           targetEl.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
           targetEl.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
           // Readback verification: the DOM must actually hold the selected value.
+          let selOk = targetEl.value === opt.value;
+          if (!selOk) {
+            // Alternative setter retry
+            try {
+              targetEl.value = opt.value;
+              opt.selected = true;
+              targetEl.selectedIndex = opt.index;
+              targetEl.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+              targetEl.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+              targetEl.dispatchEvent(new Event('blur', { bubbles: true, composed: true }));
+              selOk = targetEl.value === opt.value;
+            } catch {}
+          }
           return {
-            ok: targetEl.value === opt.value,
+            ok: selOk,
             targetFound: true,
             isTextField: false,
             typeaheadUnresolved: false,
@@ -5725,6 +5819,140 @@ export default class Page {
     }
 
     return result?.ok ?? false;
+  }
+
+  /**
+   * Reads the current DOM value, error text, aria-invalid status, and shape metadata
+   * for a specific field inside the active modal.
+   */
+  async readModalFieldStatus(identifier: { id?: string; label?: string }): Promise<{
+    found: boolean;
+    currentValue: string;
+    errorText: string;
+    isInvalid: boolean;
+    maxLength?: number;
+    placeholder?: string;
+    options?: string[];
+    fieldType?: string;
+  }> {
+    const readInPage = (ident: { id?: string; label?: string }) => {
+      const modal =
+        (document.querySelector(
+          'dialog, dialog[open], .jobs-easy-apply-modal, [data-test-modal-id="easy-apply-modal"], [data-easy-apply-modal], div.artdeco-modal[role="dialog"], [role="dialog"], [data-test-modal], [aria-modal="true"], .jobs-easy-apply-content, form.jobs-easy-apply-form',
+        ) as HTMLElement | null) || document;
+
+      let el: HTMLElement | null = null;
+      if (ident.id) {
+        try {
+          el = modal.querySelector(`[id="${CSS.escape(ident.id)}"]`) || document.getElementById(ident.id);
+        } catch {}
+      }
+      if (!el && ident.label) {
+        const norm = ident.label.trim().toLowerCase();
+        const inputs = Array.from(
+          modal.querySelectorAll('input, select, textarea, [role="combobox"], [role="radiogroup"], fieldset'),
+        ) as HTMLElement[];
+        for (const input of inputs) {
+          const ariaLabel = (input.getAttribute('aria-label') || '').trim().toLowerCase();
+          if (ariaLabel && (ariaLabel === norm || ariaLabel.includes(norm) || norm.includes(ariaLabel))) {
+            el = input;
+            break;
+          }
+          const container = input.closest(
+            '.fb-dash-form-element, .jobs-easy-apply-form-element, fieldset, div[data-test-form-element]',
+          );
+          if (container) {
+            const lbl = container.querySelector('label, legend');
+            const lblText = (lbl?.textContent || '').trim().toLowerCase();
+            if (lblText && (lblText === norm || lblText.includes(norm) || norm.includes(lblText))) {
+              el = input;
+              break;
+            }
+          }
+        }
+      }
+
+      if (!el) {
+        return { found: false, currentValue: '', errorText: '', isInvalid: false };
+      }
+
+      const input = el as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
+      let currentValue = '';
+      if (input instanceof HTMLInputElement && (input.type === 'radio' || input.type === 'checkbox')) {
+        currentValue = input.checked ? input.value || 'checked' : '';
+      } else if (input instanceof HTMLSelectElement) {
+        currentValue = input.selectedOptions[0]?.text || input.value || '';
+      } else if ('value' in input) {
+        currentValue = (input.value || '').trim();
+      }
+
+      const isInvalid = el.getAttribute('aria-invalid') === 'true' || Boolean(el.closest('.artdeco-text-input--error'));
+      let errorText = '';
+      const describedBy = el.getAttribute('aria-describedby');
+      if (describedBy) {
+        for (const did of describedBy.split(/\s+/)) {
+          if (!did) continue;
+          try {
+            const descEl = modal.querySelector(`[id="${CSS.escape(did)}"]`) || document.getElementById(did);
+            const t = (descEl?.textContent || '').trim();
+            if (t) {
+              errorText = t;
+              break;
+            }
+          } catch {}
+        }
+      }
+      if (!errorText) {
+        const container =
+          el.closest('.fb-dash-form-element, .jobs-easy-apply-form-element, fieldset, div[data-test-form-element]') ||
+          el.parentElement;
+        const feedback = container?.querySelector(
+          '.artdeco-inline-feedback--error, .inline-feedback--error, [data-test-form-element-error-message], [role="alert"]',
+        );
+        if (feedback) {
+          errorText = (feedback.textContent || '').trim();
+        }
+      }
+
+      const rawMaxLen = el.getAttribute('maxlength');
+      const maxLength = rawMaxLen !== null && !isNaN(Number(rawMaxLen)) ? Number(rawMaxLen) : undefined;
+      const placeholder = el.getAttribute('placeholder') || undefined;
+
+      let options: string[] | undefined;
+      if (input instanceof HTMLSelectElement) {
+        options = Array.from(input.options)
+          .map(o => (o.text || '').trim())
+          .filter(Boolean);
+      }
+
+      return {
+        found: true,
+        currentValue,
+        errorText,
+        isInvalid: isInvalid || Boolean(errorText),
+        maxLength,
+        placeholder,
+        options,
+        fieldType: input.tagName?.toLowerCase() === 'select' ? 'dropdown' : (input as HTMLInputElement).type || 'text',
+      };
+    };
+
+    if (this._puppeteerPage) {
+      try {
+        return await this._puppeteerPage.evaluate(readInPage, identifier);
+      } catch {}
+    }
+    if (this._tabId && typeof chrome !== 'undefined' && chrome.scripting?.executeScript) {
+      try {
+        const results = await chrome.scripting.executeScript({
+          target: { tabId: this._tabId },
+          func: readInPage,
+          args: [identifier],
+        });
+        return results?.[0]?.result || { found: false, currentValue: '', errorText: '', isInvalid: false };
+      } catch {}
+    }
+    return { found: false, currentValue: '', errorText: '', isInvalid: false };
   }
 
   /**
