@@ -20,6 +20,9 @@ function normaliseFirebaseKey(val: string | undefined): string | undefined {
   return k.replace(/\\n/g, '\n');
 }
 
+export const DEFAULT_GEMINI_MODEL = 'gemini-3.5-flash';
+export const DEFAULT_GEMINI_FALLBACK_MODEL = 'gemini-3.5-flash-lite';
+
 const envSchema = z.object({
   PORT: z
     .union([z.string(), z.number()])
@@ -42,9 +45,15 @@ const envSchema = z.object({
   GEMINI_API_KEY: z.string().default(''),
   GEMINI_MODEL: z
     .string()
-    .default('gemini-3.5-flash')
+    .default(DEFAULT_GEMINI_MODEL)
     .refine(val => ALLOWED_MODELS.includes(val as any), {
       message: `Invalid GEMINI_MODEL. Allowed models: ${ALLOWED_MODELS.join(', ')}`,
+    }),
+  GEMINI_FALLBACK_MODEL: z
+    .string()
+    .default(DEFAULT_GEMINI_FALLBACK_MODEL)
+    .refine(val => ALLOWED_MODELS.includes(val as any), {
+      message: `Invalid GEMINI_FALLBACK_MODEL. Allowed models: ${ALLOWED_MODELS.join(', ')}`,
     }),
   GEMINI_THINKING_BUDGET: z
     .union([z.number(), z.string()])
@@ -63,10 +72,10 @@ const envSchema = z.object({
       }
       const provider = (process.env.LLM_PROVIDER as 'gemini' | 'bedrock') || 'gemini';
       const providerDefault =
-        provider === 'bedrock' ? 'amazon.nova-lite-v1:0' : process.env.GEMINI_MODEL || 'gemini-3.5-flash';
+        provider === 'bedrock' ? 'amazon.nova-lite-v1:0' : process.env.GEMINI_MODEL || DEFAULT_GEMINI_MODEL;
       return providerDefault;
     })
-    .default('gemini-3.5-flash'),
+    .default(DEFAULT_GEMINI_MODEL),
 
   // ── Google OAuth client ID (used by the extension — public) ───────────────
   GOOGLE_CLIENT_ID: z
@@ -112,7 +121,8 @@ const baseEnv = parsedEnv.success
       RAZORPAY_PLAN_ID_POWER: process.env.RAZORPAY_PLAN_ID_POWER,
       LLM_PROVIDER: (process.env.LLM_PROVIDER as 'gemini' | 'bedrock') || 'gemini',
       GEMINI_API_KEY: process.env.GEMINI_API_KEY || '',
-      GEMINI_MODEL: process.env.GEMINI_MODEL || 'gemini-2.5-flash',
+      GEMINI_MODEL: process.env.GEMINI_MODEL || DEFAULT_GEMINI_MODEL,
+      GEMINI_FALLBACK_MODEL: process.env.GEMINI_FALLBACK_MODEL || DEFAULT_GEMINI_FALLBACK_MODEL,
       GEMINI_THINKING_BUDGET: process.env.GEMINI_THINKING_BUDGET
         ? parseInt(process.env.GEMINI_THINKING_BUDGET, 10)
         : undefined,
@@ -125,7 +135,7 @@ const baseEnv = parsedEnv.success
           ? process.env.LLM_DEFAULT_MODEL
           : process.env.LLM_PROVIDER === 'bedrock'
             ? 'amazon.nova-lite-v1:0'
-            : process.env.GEMINI_MODEL || 'gemini-2.5-flash',
+            : process.env.GEMINI_MODEL || DEFAULT_GEMINI_MODEL,
       GOOGLE_CLIENT_ID:
         process.env.GOOGLE_CLIENT_ID?.trim() ||
         '336340854879-i6hj15oe17se379u6k377slo7pvbvh3v.apps.googleusercontent.com',

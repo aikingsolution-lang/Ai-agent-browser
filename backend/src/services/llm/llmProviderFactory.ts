@@ -66,6 +66,7 @@ export class LlmProviderFactory {
     return new GeminiLlmProvider(
       env.GEMINI_API_KEY,
       env.GEMINI_MODEL,
+      env.GEMINI_FALLBACK_MODEL,
       undefined,
       env.GEMINI_THINKING_BUDGET,
       env.GEMINI_REASONING_EFFORT,

@@ -64,9 +64,9 @@ export class LlmService {
    * Helper to calculate credits based on model multiplier and total tokens.
    *
    * Pricing Assumptions:
-   * - Pro / Reasoning models (claude-3-5-sonnet, nova-pro, gemini-2.5-pro, gemini-1.5-pro):
+   * - Pro / Reasoning models (claude-3-5-sonnet, nova-pro, gemini-pro-latest):
    *   2 credits per 1,000 tokens (minimum 2 credits).
-   * - Standard / Flash models (gemini-2.5-flash, gemini-2.0-flash, gemini-1.5-flash, nova-lite, nova-micro, claude-3-haiku):
+   * - Standard / Flash models (gemini-3.5-flash, gemini-3.8-flash, nova-lite, nova-micro, claude-3-haiku):
    *   1 credit per 1,000 tokens (minimum 1 credit).
    *
    * Token usage is derived directly from the LLM provider's response usage payload (totalTokens).
@@ -76,8 +76,8 @@ export class LlmService {
     const isPremium =
       model.includes('claude-3-5-sonnet') ||
       model.includes('nova-pro') ||
-      model.includes('gemini-2.5-pro') ||
-      model.includes('gemini-1.5-pro');
+      model.includes('gemini-pro') ||
+      model.includes('pro');
     const ratePerThousand = isPremium ? 2 : 1;
     const minimumCredits = ratePerThousand;
     return Math.max(minimumCredits, Math.ceil((totalTokens / 1000) * ratePerThousand));

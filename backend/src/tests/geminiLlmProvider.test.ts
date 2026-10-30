@@ -16,7 +16,7 @@ describe('GeminiLlmProvider & Hardening Tests', () => {
   let provider: GeminiLlmProvider;
 
   beforeEach(() => {
-    provider = new GeminiLlmProvider(mockApiKey, 'gemini-2.5-flash', mockBaseUrl);
+    provider = new GeminiLlmProvider(mockApiKey, 'gemini-3.5-flash', mockBaseUrl);
     vi.restoreAllMocks();
   });
 
@@ -30,7 +30,7 @@ describe('GeminiLlmProvider & Hardening Tests', () => {
       id: 'chatcmpl-test-123',
       object: 'chat.completion',
       created: 1730000000,
-      model: 'gemini-2.5-flash',
+      model: 'gemini-3.5-flash',
       choices: [
         {
           index: 0,
@@ -55,7 +55,7 @@ describe('GeminiLlmProvider & Hardening Tests', () => {
     } as any);
 
     const result = await provider.generateCompletion({
-      model: 'gemini-2.5-flash',
+      model: 'gemini-3.5-flash',
       messages: [{ role: 'user', content: 'Say hello' }],
       temperature: 0.2,
       maxTokens: 500,
@@ -66,7 +66,7 @@ describe('GeminiLlmProvider & Hardening Tests', () => {
     expect(calledUrl).toBe(`${mockBaseUrl}/chat/completions`);
     expect((calledOptions as any).headers['Authorization']).toBe(`Bearer ${mockApiKey}`);
     const parsedBody = JSON.parse((calledOptions as any).body);
-    expect(parsedBody.model).toBe('gemini-2.5-flash');
+    expect(parsedBody.model).toBe('gemini-3.5-flash');
     expect(parsedBody.temperature).toBe(0.2);
     expect(parsedBody.max_tokens).toBe(500);
 
@@ -117,7 +117,7 @@ describe('GeminiLlmProvider & Hardening Tests', () => {
     } as any);
 
     const result = await provider.generateCompletion({
-      model: 'gemini-2.5-flash',
+      model: 'gemini-3.5-flash',
       messages: [{ role: 'user', content: 'Submit the application form' }],
       tools: [
         {
@@ -167,7 +167,7 @@ describe('GeminiLlmProvider & Hardening Tests', () => {
       } as any);
 
     const result = await provider.generateCompletion({
-      model: 'gemini-2.5-flash',
+      model: 'gemini-3.5-flash',
       messages: [{ role: 'user', content: 'Hello' }],
     });
 
@@ -191,7 +191,7 @@ describe('GeminiLlmProvider & Hardening Tests', () => {
 
     await expect(
       provider.generateCompletion({
-        model: 'gemini-2.5-flash',
+        model: 'gemini-3.5-flash',
         messages: [{ role: 'user', content: 'Hi' }],
       }),
     ).rejects.toMatchObject({
@@ -216,7 +216,7 @@ describe('GeminiLlmProvider & Hardening Tests', () => {
 
     await expect(
       provider.generateCompletion({
-        model: 'gemini-2.5-flash',
+        model: 'gemini-3.5-flash',
         messages: [{ role: 'user', content: 'Hi' }],
       }),
     ).rejects.toMatchObject({
@@ -243,7 +243,7 @@ describe('GeminiLlmProvider & Hardening Tests', () => {
 
     await expect(
       provider.generateCompletion({
-        model: 'gemini-2.5-flash',
+        model: 'gemini-3.5-flash',
         messages: [{ role: 'user', content: 'Hi' }],
       }),
     ).rejects.toMatchObject({
@@ -262,7 +262,7 @@ describe('GeminiLlmProvider & Hardening Tests', () => {
 
     await expect(
       provider.generateCompletion({
-        model: 'gemini-2.5-flash',
+        model: 'gemini-3.5-flash',
         messages: [{ role: 'user', content: 'Hi' }],
       }),
     ).rejects.toMatchObject({
@@ -284,7 +284,7 @@ describe('GeminiLlmProvider & Hardening Tests', () => {
 
     await expect(
       provider.generateCompletion({
-        model: 'gemini-2.5-flash',
+        model: 'gemini-3.5-flash',
         messages: [{ role: 'user', content: 'Hi' }],
       }),
     ).rejects.toMatchObject({
@@ -315,7 +315,7 @@ describe('GeminiLlmProvider & Hardening Tests', () => {
 
     await expect(
       provider.generateCompletion({
-        model: 'gemini-2.5-flash',
+        model: 'gemini-3.5-flash',
         messages: [{ role: 'user', content: 'Complex logic problem' }],
       }),
     ).rejects.toMatchObject({
@@ -400,7 +400,7 @@ describe('GeminiLlmProvider & Hardening Tests', () => {
       .post('/api/v1/llm/chat/completions')
       .set('Authorization', `Bearer ${user.token}`)
       .send({
-        model: 'gemini-2.5-flash',
+        model: 'gemini-3.5-flash',
         messages: [{ role: 'user', content: 'What is the next action?' }],
         tools: structuredTools,
         tool_choice: { type: 'function', function: { name: 'NavigatorAgentOutput' } },
@@ -424,5 +424,162 @@ describe('GeminiLlmProvider & Hardening Tests', () => {
     expect(res.body.usage.prompt_tokens).toBe(80);
     expect(res.body.usage.completion_tokens).toBe(35);
     expect(res.body.usage.total_tokens).toBe(115);
+  });
+
+  it('12. Model Fallback Chain: primary model 404 automatically falls back to fallbackModel', async () => {
+    const fallbackProvider = new GeminiLlmProvider(
+      mockApiKey,
+      'gemini-3.5-flash',
+      'gemini-3.5-flash-lite',
+      mockBaseUrl,
+    );
+
+    let callCount = 0;
+    const requestedModels: string[] = [];
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((url, init) => {
+        callCount++;
+        const body = JSON.parse(init.body);
+        requestedModels.push(body.model);
+
+        if (body.model === 'gemini-3.5-flash') {
+          // Primary model retired / 404
+          return Promise.resolve({
+            ok: false,
+            status: 404,
+            json: () =>
+              Promise.resolve({
+                error: {
+                  code: 404,
+                  message: 'This model models/gemini-3.5-flash is no longer available.',
+                  status: 'NOT_FOUND',
+                },
+              }),
+          });
+        }
+
+        // Fallback model succeeds
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () =>
+            Promise.resolve({
+              choices: [
+                {
+                  index: 0,
+                  message: { role: 'assistant', content: 'Fallback response from gemini-3.5-flash-lite' },
+                  finish_reason: 'stop',
+                },
+              ],
+              usage: { prompt_tokens: 10, completion_tokens: 8, total_tokens: 18 },
+            }),
+        });
+      }),
+    );
+
+    const res = await fallbackProvider.generateCompletion({
+      model: 'gemini-3.5-flash',
+      messages: [{ role: 'user', content: 'Hello' }],
+    });
+
+    expect(callCount).toBe(2);
+    expect(requestedModels).toEqual(['gemini-3.5-flash', 'gemini-3.5-flash-lite']);
+    expect(res.content).toBe('Fallback response from gemini-3.5-flash-lite');
+    expect(res.totalTokens).toBe(18);
+  });
+
+  it('13. Model Fallback Chain: primary model 503 high demand falls back to fallbackModel', async () => {
+    const fallbackProvider = new GeminiLlmProvider(
+      mockApiKey,
+      'gemini-3.5-flash',
+      'gemini-3.5-flash-lite',
+      mockBaseUrl,
+    );
+
+    const requestedModels: string[] = [];
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((url, init) => {
+        const body = JSON.parse(init.body);
+        requestedModels.push(body.model);
+
+        if (body.model === 'gemini-3.5-flash') {
+          // Primary model 503 high demand (non-retryable after backoff or direct)
+          return Promise.resolve({
+            ok: false,
+            status: 503,
+            json: () =>
+              Promise.resolve({
+                error: {
+                  code: 503,
+                  message: 'This model is currently experiencing high demand.',
+                  status: 'UNAVAILABLE',
+                },
+              }),
+          });
+        }
+
+        // Fallback model succeeds
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () =>
+            Promise.resolve({
+              choices: [
+                {
+                  index: 0,
+                  message: { role: 'assistant', content: 'Fallback OK' },
+                  finish_reason: 'stop',
+                },
+              ],
+              usage: { prompt_tokens: 12, completion_tokens: 5, total_tokens: 17 },
+            }),
+        });
+      }),
+    );
+
+    const res = await fallbackProvider.generateCompletion({
+      model: 'gemini-3.5-flash',
+      messages: [{ role: 'user', content: 'Hello' }],
+    });
+
+    expect(requestedModels).toContain('gemini-3.5-flash');
+    expect(requestedModels).toContain('gemini-3.5-flash-lite');
+    expect(res.content).toBe('Fallback OK');
+  });
+
+  it('14. Model Fallback Chain: throws when both primary and fallback fail', async () => {
+    const fallbackProvider = new GeminiLlmProvider(
+      mockApiKey,
+      'gemini-3.5-flash',
+      'gemini-3.5-flash-lite',
+      mockBaseUrl,
+    );
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 404,
+        json: () =>
+          Promise.resolve({
+            error: {
+              code: 404,
+              message: 'Model not found',
+              status: 'NOT_FOUND',
+            },
+          }),
+      }),
+    );
+
+    await expect(
+      fallbackProvider.generateCompletion({
+        model: 'gemini-3.5-flash',
+        messages: [{ role: 'user', content: 'Hello' }],
+      }),
+    ).rejects.toThrow();
   });
 });

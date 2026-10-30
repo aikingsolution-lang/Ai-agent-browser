@@ -26,31 +26,78 @@ export class GeminiLlmProvider implements ILlmProvider {
   public readonly providerName = 'gemini';
   private apiKey: string;
   private defaultModel: string;
+  private fallbackModel?: string;
   private baseUrl: string;
   private thinkingBudget?: number;
   private reasoningEffort?: 'none' | 'low' | 'medium' | 'high';
 
   constructor(
     apiKey: string,
-    defaultModel = 'gemini-2.5-flash',
+    defaultModel = 'gemini-3.5-flash',
+    fallbackModelOrBaseUrl?: string,
     baseUrl = 'https://generativelanguage.googleapis.com/v1beta/openai',
     thinkingBudget?: number,
     reasoningEffort?: 'none' | 'low' | 'medium' | 'high',
   ) {
     this.apiKey = apiKey;
     this.defaultModel = defaultModel;
-    this.baseUrl = baseUrl.replace(/\/+$/, '');
+    if (
+      fallbackModelOrBaseUrl &&
+      (fallbackModelOrBaseUrl.startsWith('http://') || fallbackModelOrBaseUrl.startsWith('https://'))
+    ) {
+      this.baseUrl = fallbackModelOrBaseUrl.replace(/\/+$/, '');
+      this.fallbackModel = undefined;
+    } else {
+      this.fallbackModel = fallbackModelOrBaseUrl;
+      this.baseUrl = baseUrl.replace(/\/+$/, '');
+    }
     this.thinkingBudget = thinkingBudget;
     this.reasoningEffort = reasoningEffort;
   }
 
+  private isFallbackEligible(err: any): boolean {
+    const status = err?.statusCode || err?.status;
+    const msg = String(err?.message || '').toLowerCase();
+    const code = String(err?.code || '').toLowerCase();
+
+    if (status === 404 || code === 'provider_model_not_found') return true;
+    if (
+      status === 503 ||
+      code === 'provider_unavailable' ||
+      msg.includes('503') ||
+      msg.includes('high demand') ||
+      msg.includes('spikes in demand')
+    ) {
+      return true;
+    }
+    if (msg.includes('not found') || msg.includes('no longer available') || msg.includes('retired')) return true;
+    return false;
+  }
+
   public async generateCompletion(request: LlmCompletionRequest): Promise<LlmCompletionResponse> {
+    const primaryModel = request.model || this.defaultModel;
+    try {
+      return await this.executeChatCompletion(primaryModel, request);
+    } catch (err: any) {
+      if (this.fallbackModel && this.fallbackModel !== primaryModel && this.isFallbackEligible(err)) {
+        logger.warn(
+          `[GeminiLlmProvider] Primary model '${primaryModel}' failed (${err?.message || 'model unavailable or high demand'}). Falling back to '${this.fallbackModel}'...`,
+        );
+        return await this.executeChatCompletion(this.fallbackModel, request);
+      }
+      throw err;
+    }
+  }
+
+  private async executeChatCompletion(
+    effectiveModel: string,
+    request: LlmCompletionRequest,
+  ): Promise<LlmCompletionResponse> {
     const controller = new AbortController();
     const timeoutMs = request.timeoutMs ?? 30000;
     const startTime = Date.now();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
 
-    const effectiveModel = request.model || this.defaultModel;
     const endpoint = `${this.baseUrl}/chat/completions`;
 
     const requestPayload: Record<string, any> = {
@@ -135,6 +182,20 @@ export class GeminiLlmProvider implements ILlmProvider {
                 'Gemini authentication failed. Please verify API key configuration.',
                 403,
                 'PROVIDER_AUTH_ERROR',
+              );
+            }
+            if (response.status === 404) {
+              throw new AppError(
+                realErrorMessage || 'Gemini model not found or retired.',
+                404,
+                'PROVIDER_MODEL_NOT_FOUND',
+              );
+            }
+            if (response.status === 503) {
+              throw new AppError(
+                realErrorMessage || 'Gemini service unavailable or experiencing high demand.',
+                503,
+                'PROVIDER_UNAVAILABLE',
               );
             }
             if (response.status >= 500) {
