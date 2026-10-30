@@ -1,0 +1,276 @@
+// chrome-extension/src/background/agent/platforms/naukri/naukriDomHelpers.ts
+import { NAUKRI_SELECTORS } from './selectors';
+
+export interface NaukriSuccessResult {
+  isSuccess: boolean;
+  signals: string[];
+  confidence: 'high' | 'medium' | 'none';
+}
+
+/**
+ * Check if an element is visible in the DOM.
+ */
+export function isElementVisible(el: HTMLElement | null): boolean {
+  if (!el) return false;
+  if (el.offsetParent === null && el.tagName !== 'BODY' && el.tagName !== 'HTML') return false;
+  if (typeof window !== 'undefined' && window.getComputedStyle) {
+    const style = window.getComputedStyle(el);
+    if (
+      style.display === 'none' ||
+      style.visibility === 'hidden' ||
+      style.opacity === '0' ||
+      style.pointerEvents === 'none'
+    ) {
+      return false;
+    }
+    const rect = el.getBoundingClientRect();
+    if (rect.width < 10 || rect.height < 10) return false;
+    if (
+      rect.right <= 0 ||
+      rect.bottom <= 0 ||
+      rect.left >= (window.innerWidth || 1920) ||
+      rect.top >= (window.innerHeight || 1080)
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Determines whether an element or any of its ancestors is an upsell,
+ * "Problem of the day", "Become a Pro", FastForward, or quiz widget.
+ */
+export function isNaukriUpsellOrQuiz(
+  el: HTMLElement | null,
+  selectors: typeof NAUKRI_SELECTORS = NAUKRI_SELECTORS,
+): boolean {
+  if (!el) return false;
+  let cur: HTMLElement | null = el;
+  const body = el.ownerDocument?.body || (typeof document !== 'undefined' ? document.body : null);
+  while (cur && cur !== body) {
+    const text = (cur.innerText || cur.textContent || cur.getAttribute('aria-label') || '').toLowerCase();
+    for (const term of selectors.UPSELL_EXCLUSIONS || []) {
+      if (text.includes(term.toLowerCase())) {
+        return true;
+      }
+    }
+    cur = cur.parentElement;
+  }
+  return false;
+}
+
+/**
+ * Recognise success by several independent signals:
+ * 1. Text: "Applied to <Job/Company>" or standard success phrases
+ * 2. Banner: Green check banner, .apply-message, success icons
+ * 3. Primary Button: Button text changed to "Applied", "Already applied", etc.
+ * 4. DOM/URL markers: .applied-badge, applied url parameters
+ */
+export function evaluateNaukriSuccess(
+  root: Document | HTMLElement,
+  selectors: typeof NAUKRI_SELECTORS = NAUKRI_SELECTORS,
+): NaukriSuccessResult {
+  const signals: string[] = [];
+  const doc = (root as Document).body ? (root as Document) : (root as HTMLElement).ownerDocument || (root as any);
+  const container = (root as Document).body || (root as HTMLElement);
+  const bodyText = (container.innerText || container.textContent || '').toLowerCase();
+
+  // 1. Text Signal: "Applied to <Job/Company>" or standard success phrases
+  const appliedToRegex = /(?:applied\s+to|application\s+sent\s+to)\s+([a-z0-9][^\n\r,\.;<]{1,40})/i;
+  const appliedToMatch = bodyText.match(appliedToRegex);
+  if (appliedToMatch) {
+    signals.push(`text: applied to ${appliedToMatch[1].trim()}`);
+  }
+
+  for (const ind of selectors.SUCCESS_INDICATORS) {
+    if (ind.startsWith('.')) continue; // CSS selector, handled in banner section
+    if (bodyText.includes(ind.toLowerCase())) {
+      if (!signals.some(s => s.startsWith('text:'))) {
+        signals.push(`text: ${ind}`);
+      }
+      break;
+    }
+  }
+
+  // 2. Banner / Green tick / Icon signal
+  for (const sel of selectors.SUCCESS_BANNERS || []) {
+    try {
+      const bannerEls = Array.from(doc.querySelectorAll(sel)) as HTMLElement[];
+      for (const b of bannerEls) {
+        if (b.offsetParent !== null || isElementVisible(b)) {
+          signals.push(`banner: ${sel}`);
+          break;
+        }
+      }
+    } catch {}
+    if (signals.some(s => s.startsWith('banner:'))) break;
+  }
+
+  if (!signals.some(s => s.startsWith('banner:'))) {
+    const successIcons = Array.from(doc.querySelectorAll('svg, i, span, div')) as HTMLElement[];
+    for (const icon of successIcons) {
+      if (icon.offsetParent !== null || isElementVisible(icon)) {
+        const cls = (icon.className && typeof icon.className === 'string' ? icon.className : '').toLowerCase();
+        if (
+          cls.includes('success') ||
+          cls.includes('greentick') ||
+          cls.includes('green-tick') ||
+          cls.includes('check-icon')
+        ) {
+          signals.push('banner: success-icon');
+          break;
+        }
+      }
+    }
+  }
+
+  // 3. Primary apply button state
+  for (const sel of selectors.PRIMARY_APPLY_BUTTON) {
+    const el = doc.querySelector(sel) as HTMLElement | null;
+    if (el) {
+      const bt = (el.textContent || (el as HTMLInputElement).value || '').trim().toLowerCase();
+      if (
+        bt === 'applied' ||
+        bt === 'already applied' ||
+        bt.startsWith('applied on') ||
+        bt.startsWith('applied to') ||
+        el.classList.contains('applied') ||
+        el.classList.contains('already-applied')
+      ) {
+        signals.push(`button: ${bt || 'applied'}`);
+        break;
+      }
+    }
+  }
+
+  // 4. URL or DOM markers
+  if (typeof window !== 'undefined' && window.location?.href) {
+    const href = window.location.href.toLowerCase();
+    if (href.includes('applied=true') || href.includes('/applied')) {
+      signals.push('url: applied');
+    }
+  }
+
+  const alreadyAppliedBadge = doc.querySelector(
+    '.applied-badge, .already-applied, [data-qa*="applied" i]',
+  ) as HTMLElement | null;
+  if (alreadyAppliedBadge && (alreadyAppliedBadge.offsetParent !== null || isElementVisible(alreadyAppliedBadge))) {
+    signals.push('marker: applied-badge');
+  }
+
+  const isSuccess = signals.length > 0;
+  const confidence = signals.length >= 2 ? 'high' : signals.length === 1 ? 'medium' : 'none';
+
+  return { isSuccess, signals, confidence };
+}
+
+/**
+ * Questionnaire detection must only count real recruiter questions:
+ * elements inside the questionnaire/chatbot container that contain a question text plus options or inputs.
+ * The post-apply drawer (quiz, upsell, "Applied to ..." banner) must NEVER be treated as a questionnaire.
+ */
+export function findNaukriRealQuestionnaire(
+  root: Document | HTMLElement,
+  selectors: typeof NAUKRI_SELECTORS = NAUKRI_SELECTORS,
+): HTMLElement | null {
+  const doc = (root as Document).body ? (root as Document) : (root as HTMLElement).ownerDocument || (root as any);
+
+  // Gather candidate modals
+  const candidates: HTMLElement[] = [];
+  for (const sel of selectors.MODAL_CONTAINER) {
+    try {
+      const els = Array.from(doc.querySelectorAll(sel)) as HTMLElement[];
+      for (const el of els) {
+        if ((el.offsetParent !== null || isElementVisible(el)) && !candidates.includes(el)) {
+          candidates.push(el);
+        }
+      }
+    } catch {}
+  }
+
+  const allFixed = Array.from(doc.querySelectorAll('div, section, aside, form')) as HTMLElement[];
+  for (const el of allFixed) {
+    if (typeof window !== 'undefined' && window.getComputedStyle) {
+      const style = window.getComputedStyle(el);
+      if (
+        (style.position === 'fixed' || style.position === 'absolute') &&
+        (el.offsetParent !== null || isElementVisible(el)) &&
+        !candidates.includes(el)
+      ) {
+        candidates.push(el);
+      }
+    }
+  }
+
+  for (const modal of candidates) {
+    const text = (modal.innerText || modal.textContent || '').toLowerCase();
+
+    // 1. Explicit exclusion: Upsell / Quiz content ("Problem of the day", "Become a Pro", "FastForward", etc.)
+    const isUpsell = (selectors.UPSELL_EXCLUSIONS || []).some((term: string) => text.includes(term.toLowerCase()));
+    if (isUpsell) {
+      // NEVER treat upsell / quiz drawer as questionnaire!
+      continue;
+    }
+
+    // 2. Explicit exclusion: Post-apply success drawer
+    const isPostApplySuccess =
+      text.includes('applied to') ||
+      text.includes('successfully applied') ||
+      text.includes('application sent') ||
+      text.includes('applied successfully') ||
+      text.includes('your application has been sent');
+
+    // 3. Count only real recruiter inputs and options (ignoring any inside upsell widgets)
+    const inputs = Array.from(
+      modal.querySelectorAll(
+        'input:not([type="hidden"]):not([type="file"]):not([type="submit"]):not([type="button"]):not([type="reset"]):not([type="image"]), select, textarea, [contenteditable="true"]',
+      ),
+    ).filter(inp => !isNaukriUpsellOrQuiz(inp as HTMLElement, selectors));
+
+    const options = Array.from(
+      modal.querySelectorAll(selectors.CHATBOT_OPTIONS.join(', ') + ', [role="radio"], [role="checkbox"]'),
+    ).filter(opt => !isNaukriUpsellOrQuiz(opt as HTMLElement, selectors));
+
+    if (inputs.length === 0 && options.length === 0) {
+      continue;
+    }
+
+    // If it contains post-apply success banner and has no recruiter screening keywords, skip it
+    if (isPostApplySuccess) {
+      const hasRecruiterKeywords =
+        text.includes("recruiter's questions") ||
+        text.includes('kindly answer') ||
+        text.includes('screening questions');
+      if (!hasRecruiterKeywords) {
+        continue;
+      }
+    }
+
+    const hasRecruiterKeywords =
+      text.includes("recruiter's questions") ||
+      text.includes('kindly answer') ||
+      text.includes('answer recruiter') ||
+      text.includes('type message here') ||
+      text.includes('how many years of experience') ||
+      text.includes('skip this question') ||
+      text.includes('current ctc') ||
+      text.includes('expected ctc') ||
+      text.includes('notice period') ||
+      text.includes('in lacs') ||
+      text.includes('screening questions') ||
+      text.includes('relevant experience') ||
+      text.includes('relocate') ||
+      (text.includes('save') && (inputs.length > 0 || options.length > 0));
+
+    const hasSubmitBtn = Array.from(modal.querySelectorAll(selectors.SUBMIT_BUTTON.join(', '))).some(
+      btn => (btn as HTMLElement).offsetParent !== null || isElementVisible(btn as HTMLElement),
+    );
+
+    if ((hasRecruiterKeywords || hasSubmitBtn) && (inputs.length > 0 || options.length > 0)) {
+      return modal;
+    }
+  }
+
+  return null;
+}

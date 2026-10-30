@@ -457,55 +457,80 @@ export class NaukriAdapter implements IPlatformAdapter {
             return false;
           }
           const rect = el.getBoundingClientRect();
-          if (rect.width < 50 || rect.height < 50) return false;
+          if (rect.width < 10 || rect.height < 10) return false;
           if (rect.right <= 0 || rect.bottom <= 0 || rect.left >= window.innerWidth || rect.top >= window.innerHeight) {
             return false;
           }
           return true;
         }
 
-        function findModal(): HTMLElement | null {
-          // 1. Selector match
-          for (const sel of selectors.MODAL_CONTAINER) {
-            const els = Array.from(document.querySelectorAll(sel)) as HTMLElement[];
-            for (const el of els) {
-              if (isVisible(el)) {
-                return el;
-              }
+        function isUpsellElement(el: HTMLElement | null): boolean {
+          if (!el) return false;
+          let cur: HTMLElement | null = el;
+          while (cur && cur !== document.body) {
+            const text = (cur.innerText || cur.textContent || cur.getAttribute('aria-label') || '').toLowerCase();
+            for (const term of selectors.UPSELL_EXCLUSIONS || []) {
+              if (text.includes(term.toLowerCase())) return true;
             }
+            cur = cur.parentElement;
           }
-
-          // 2. Chatbot or fixed modal overlay match
-          const candidates = Array.from(document.querySelectorAll('div, section, aside, form')) as HTMLElement[];
-          for (const el of candidates) {
-            const style = window.getComputedStyle(el);
-            if ((style.position === 'fixed' || style.position === 'absolute') && isVisible(el)) {
-              const text = (el.innerText || '').toLowerCase();
-              if (
-                text.includes("recruiter's questions") ||
-                text.includes('kindly answer all') ||
-                text.includes('type message here') ||
-                text.includes('how many years of experience') ||
-                text.includes('skip this question') ||
-                text.includes('current ctc') ||
-                text.includes('expected ctc') ||
-                text.includes('notice period') ||
-                text.includes('in lacs') ||
-                (text.includes('save') && el.querySelector('input, textarea, [class*="chip" i], [class*="option" i]'))
-              ) {
-                return el;
-              }
-            }
-          }
-          return null;
+          return false;
         }
 
-        function checkSuccess(): boolean {
-          const bodyText = (document.body.innerText || '').toLowerCase();
-          if (selectors.SUCCESS_INDICATORS.some(ind => bodyText.includes(ind))) {
-            return true;
+        function evaluateSuccess(): { isSuccess: boolean; signals: string[]; confidence: 'high' | 'medium' | 'none' } {
+          const signals: string[] = [];
+          const bodyText = (document.body.innerText || document.body.textContent || '').toLowerCase();
+
+          // Signal 1: Text "Applied to <Job/Company>" or standard success phrases
+          const appliedToRegex = /(?:applied\s+to|application\s+sent\s+to)\s+([a-z0-9][\w\s\(\)\.-]{1,60})/i;
+          const appliedToMatch = bodyText.match(appliedToRegex);
+          if (appliedToMatch) {
+            signals.push(`text: applied to ${appliedToMatch[1].trim()}`);
           }
-          // Only inspect primary apply button for this job, NOT all buttons on document
+
+          for (const ind of selectors.SUCCESS_INDICATORS) {
+            if (ind.startsWith('.')) continue;
+            if (bodyText.includes(ind.toLowerCase())) {
+              if (!signals.some(s => s.startsWith('text:'))) {
+                signals.push(`text: ${ind}`);
+              }
+              break;
+            }
+          }
+
+          // Signal 2: Green check banner, .apply-message, success icons
+          for (const sel of selectors.SUCCESS_BANNERS || []) {
+            try {
+              const bannerEls = Array.from(document.querySelectorAll(sel)) as HTMLElement[];
+              for (const b of bannerEls) {
+                if (isVisible(b)) {
+                  signals.push(`banner: ${sel}`);
+                  break;
+                }
+              }
+            } catch {}
+            if (signals.some(s => s.startsWith('banner:'))) break;
+          }
+
+          if (!signals.some(s => s.startsWith('banner:'))) {
+            const successIcons = Array.from(document.querySelectorAll('svg, i, span, div')) as HTMLElement[];
+            for (const icon of successIcons) {
+              if (isVisible(icon)) {
+                const cls = (icon.className && typeof icon.className === 'string' ? icon.className : '').toLowerCase();
+                if (
+                  cls.includes('success') ||
+                  cls.includes('greentick') ||
+                  cls.includes('green-tick') ||
+                  cls.includes('check-icon')
+                ) {
+                  signals.push('banner: success-icon');
+                  break;
+                }
+              }
+            }
+          }
+
+          // Signal 3: Primary apply button state
           for (const sel of selectors.PRIMARY_APPLY_BUTTON) {
             const el = document.querySelector(sel) as HTMLElement | null;
             if (el && isVisible(el)) {
@@ -514,31 +539,146 @@ export class NaukriAdapter implements IPlatformAdapter {
                 bt === 'applied' ||
                 bt === 'already applied' ||
                 bt.startsWith('applied on') ||
+                bt.startsWith('applied to') ||
                 el.classList.contains('applied') ||
                 el.classList.contains('already-applied')
               ) {
-                return true;
+                signals.push(`button: ${bt || 'applied'}`);
+                break;
               }
             }
           }
-          return false;
+
+          // Signal 4: URL or DOM markers
+          try {
+            const href = window.location.href.toLowerCase();
+            if (href.includes('applied=true') || href.includes('/applied')) {
+              signals.push('url: applied');
+            }
+          } catch {}
+
+          const alreadyAppliedBadge = document.querySelector(
+            '.applied-badge, .already-applied, [data-qa*="applied" i]',
+          ) as HTMLElement | null;
+          if (alreadyAppliedBadge && isVisible(alreadyAppliedBadge)) {
+            signals.push('marker: applied-badge');
+          }
+
+          const isSuccess = signals.length > 0;
+          const confidence = signals.length >= 2 ? 'high' : signals.length === 1 ? 'medium' : 'none';
+          return { isSuccess, signals, confidence };
         }
 
-        // CRITICAL: Modal check MUST precede success check!
-        const modal = findModal();
+        function findRealQuestionnaire(): HTMLElement | null {
+          const candidates: HTMLElement[] = [];
+          for (const sel of selectors.MODAL_CONTAINER) {
+            const els = Array.from(document.querySelectorAll(sel)) as HTMLElement[];
+            for (const el of els) {
+              if (isVisible(el) && !candidates.includes(el)) {
+                candidates.push(el);
+              }
+            }
+          }
+
+          const fixedCandidates = Array.from(document.querySelectorAll('div, section, aside, form')) as HTMLElement[];
+          for (const el of fixedCandidates) {
+            const style = window.getComputedStyle(el);
+            if (
+              (style.position === 'fixed' || style.position === 'absolute') &&
+              isVisible(el) &&
+              !candidates.includes(el)
+            ) {
+              candidates.push(el);
+            }
+          }
+
+          for (const modal of candidates) {
+            const text = (modal.innerText || '').toLowerCase();
+
+            // EXPLICIT EXCLUSION: Post-apply drawer (quiz, upsell, "Problem of the day", etc.)
+            const isUpsell = (selectors.UPSELL_EXCLUSIONS || []).some((term: string) =>
+              text.includes(term.toLowerCase()),
+            );
+            if (isUpsell) {
+              continue;
+            }
+
+            const isPostApplySuccess =
+              text.includes('applied to') ||
+              text.includes('successfully applied') ||
+              text.includes('application sent') ||
+              text.includes('applied successfully') ||
+              text.includes('your application has been sent');
+
+            const inputs = Array.from(
+              modal.querySelectorAll(
+                'input:not([type="hidden"]):not([type="file"]):not([type="submit"]):not([type="button"]):not([type="reset"]):not([type="image"]), select, textarea, [contenteditable="true"]',
+              ),
+            ).filter(i => !isUpsellElement(i as HTMLElement));
+
+            const options = Array.from(
+              modal.querySelectorAll(selectors.CHATBOT_OPTIONS.join(', ') + ', [role="radio"], [role="checkbox"]'),
+            ).filter(o => !isUpsellElement(o as HTMLElement));
+
+            if (inputs.length === 0 && options.length === 0) {
+              continue;
+            }
+
+            if (isPostApplySuccess) {
+              const hasRecruiterKeywords =
+                text.includes("recruiter's questions") ||
+                text.includes('kindly answer') ||
+                text.includes('screening questions');
+              if (!hasRecruiterKeywords) {
+                continue;
+              }
+            }
+
+            const hasRecruiterKeywords =
+              text.includes("recruiter's questions") ||
+              text.includes('kindly answer all') ||
+              text.includes('answer recruiter') ||
+              text.includes('type message here') ||
+              text.includes('how many years of experience') ||
+              text.includes('skip this question') ||
+              text.includes('current ctc') ||
+              text.includes('expected ctc') ||
+              text.includes('notice period') ||
+              text.includes('in lacs') ||
+              text.includes('screening questions') ||
+              text.includes('relevant experience') ||
+              text.includes('relocate') ||
+              (text.includes('save') && (inputs.length > 0 || options.length > 0));
+
+            const hasSubmitBtn = Array.from(modal.querySelectorAll(selectors.SUBMIT_BUTTON.join(', '))).some(b =>
+              isVisible(b as HTMLElement),
+            );
+
+            if ((hasRecruiterKeywords || hasSubmitBtn) && (inputs.length > 0 || options.length > 0)) {
+              return modal;
+            }
+          }
+          return null;
+        }
+
+        // REQUIRED: Check success BEFORE modal/questionnaire check!
+        const successEvaluation = evaluateSuccess();
+        if (successEvaluation.isSuccess) {
+          return { type: 'success', signals: successEvaluation.signals };
+        }
+
+        const modal = findRealQuestionnaire();
         if (modal) {
           return { type: 'modal_open' };
-        }
-
-        if (checkSuccess()) {
-          return { type: 'success' };
         }
 
         return { type: 'unknown' };
       }, NAUKRI_SELECTORS);
 
       if (postClickCheck.type === 'success') {
-        logger.info('[NaukriAdapter] Direct 1-Click apply succeeded!');
+        logger.info(
+          `[NaukriAdapter] Direct 1-Click apply succeeded! Signals: ${postClickCheck.signals?.join(', ') || 'verified'}`,
+        );
         return { status: 'applied', creditsUsed: 1 };
       }
 
@@ -569,52 +709,80 @@ export class NaukriAdapter implements IPlatformAdapter {
             return false;
           }
           const rect = el.getBoundingClientRect();
-          if (rect.width < 50 || rect.height < 50) return false;
+          if (rect.width < 10 || rect.height < 10) return false;
           if (rect.right <= 0 || rect.bottom <= 0 || rect.left >= window.innerWidth || rect.top >= window.innerHeight) {
             return false;
           }
           return true;
         }
 
-        function findModal(): HTMLElement | null {
-          for (const sel of selectors.MODAL_CONTAINER) {
-            const els = Array.from(document.querySelectorAll(sel)) as HTMLElement[];
-            for (const el of els) {
-              if (isVisible(el)) {
-                return el;
-              }
+        function isUpsellElement(el: HTMLElement | null): boolean {
+          if (!el) return false;
+          let cur: HTMLElement | null = el;
+          while (cur && cur !== document.body) {
+            const text = (cur.innerText || cur.textContent || cur.getAttribute('aria-label') || '').toLowerCase();
+            for (const term of selectors.UPSELL_EXCLUSIONS || []) {
+              if (text.includes(term.toLowerCase())) return true;
             }
+            cur = cur.parentElement;
           }
-
-          const candidates = Array.from(document.querySelectorAll('div, section, aside, form')) as HTMLElement[];
-          for (const el of candidates) {
-            const style = window.getComputedStyle(el);
-            if ((style.position === 'fixed' || style.position === 'absolute') && isVisible(el)) {
-              const text = (el.innerText || '').toLowerCase();
-              if (
-                text.includes("recruiter's questions") ||
-                text.includes('kindly answer all') ||
-                text.includes('type message here') ||
-                text.includes('how many years of experience') ||
-                text.includes('skip this question') ||
-                text.includes('current ctc') ||
-                text.includes('expected ctc') ||
-                text.includes('notice period') ||
-                text.includes('in lacs') ||
-                (text.includes('save') && el.querySelector('input, textarea, [class*="chip" i], [class*="option" i]'))
-              ) {
-                return el;
-              }
-            }
-          }
-          return null;
+          return false;
         }
 
-        function checkSuccess(): boolean {
-          const bodyText = (document.body.innerText || '').toLowerCase();
-          if (selectors.SUCCESS_INDICATORS.some(ind => bodyText.includes(ind))) {
-            return true;
+        function evaluateSuccess(): { isSuccess: boolean; signals: string[]; confidence: 'high' | 'medium' | 'none' } {
+          const signals: string[] = [];
+          const bodyText = (document.body.innerText || document.body.textContent || '').toLowerCase();
+
+          // Signal 1: Text "Applied to <Job/Company>" or standard success phrases
+          const appliedToRegex = /(?:applied\s+to|application\s+sent\s+to)\s+([a-z0-9][\w\s\(\)\.-]{1,60})/i;
+          const appliedToMatch = bodyText.match(appliedToRegex);
+          if (appliedToMatch) {
+            signals.push(`text: applied to ${appliedToMatch[1].trim()}`);
           }
+
+          for (const ind of selectors.SUCCESS_INDICATORS) {
+            if (ind.startsWith('.')) continue;
+            if (bodyText.includes(ind.toLowerCase())) {
+              if (!signals.some(s => s.startsWith('text:'))) {
+                signals.push(`text: ${ind}`);
+              }
+              break;
+            }
+          }
+
+          // Signal 2: Green check banner, .apply-message, success icons
+          for (const sel of selectors.SUCCESS_BANNERS || []) {
+            try {
+              const bannerEls = Array.from(document.querySelectorAll(sel)) as HTMLElement[];
+              for (const b of bannerEls) {
+                if (isVisible(b)) {
+                  signals.push(`banner: ${sel}`);
+                  break;
+                }
+              }
+            } catch {}
+            if (signals.some(s => s.startsWith('banner:'))) break;
+          }
+
+          if (!signals.some(s => s.startsWith('banner:'))) {
+            const successIcons = Array.from(document.querySelectorAll('svg, i, span, div')) as HTMLElement[];
+            for (const icon of successIcons) {
+              if (isVisible(icon)) {
+                const cls = (icon.className && typeof icon.className === 'string' ? icon.className : '').toLowerCase();
+                if (
+                  cls.includes('success') ||
+                  cls.includes('greentick') ||
+                  cls.includes('green-tick') ||
+                  cls.includes('check-icon')
+                ) {
+                  signals.push('banner: success-icon');
+                  break;
+                }
+              }
+            }
+          }
+
+          // Signal 3: Primary apply button state
           for (const sel of selectors.PRIMARY_APPLY_BUTTON) {
             const el = document.querySelector(sel) as HTMLElement | null;
             if (el && isVisible(el)) {
@@ -623,30 +791,164 @@ export class NaukriAdapter implements IPlatformAdapter {
                 bt === 'applied' ||
                 bt === 'already applied' ||
                 bt.startsWith('applied on') ||
+                bt.startsWith('applied to') ||
                 el.classList.contains('applied') ||
                 el.classList.contains('already-applied')
               ) {
-                return true;
+                signals.push(`button: ${bt || 'applied'}`);
+                break;
               }
             }
           }
-          return false;
+
+          // Signal 4: URL or DOM markers
+          try {
+            const href = window.location.href.toLowerCase();
+            if (href.includes('applied=true') || href.includes('/applied')) {
+              signals.push('url: applied');
+            }
+          } catch {}
+
+          const alreadyAppliedBadge = document.querySelector(
+            '.applied-badge, .already-applied, [data-qa*="applied" i]',
+          ) as HTMLElement | null;
+          if (alreadyAppliedBadge && isVisible(alreadyAppliedBadge)) {
+            signals.push('marker: applied-badge');
+          }
+
+          const isSuccess = signals.length > 0;
+          const confidence = signals.length >= 2 ? 'high' : signals.length === 1 ? 'medium' : 'none';
+          return { isSuccess, signals, confidence };
         }
 
-        // CRITICAL: Modal check MUST precede success check!
-        const modal = findModal();
+        function findRealQuestionnaire(): HTMLElement | null {
+          const candidates: HTMLElement[] = [];
+          for (const sel of selectors.MODAL_CONTAINER) {
+            const els = Array.from(document.querySelectorAll(sel)) as HTMLElement[];
+            for (const el of els) {
+              if (isVisible(el) && !candidates.includes(el)) {
+                candidates.push(el);
+              }
+            }
+          }
+
+          const fixedCandidates = Array.from(document.querySelectorAll('div, section, aside, form')) as HTMLElement[];
+          for (const el of fixedCandidates) {
+            const style = window.getComputedStyle(el);
+            if (
+              (style.position === 'fixed' || style.position === 'absolute') &&
+              isVisible(el) &&
+              !candidates.includes(el)
+            ) {
+              candidates.push(el);
+            }
+          }
+
+          for (const modal of candidates) {
+            const text = (modal.innerText || '').toLowerCase();
+
+            // EXPLICIT EXCLUSION: Post-apply drawer (quiz, upsell, "Problem of the day", etc.)
+            const isUpsell = (selectors.UPSELL_EXCLUSIONS || []).some((term: string) =>
+              text.includes(term.toLowerCase()),
+            );
+            if (isUpsell) {
+              continue;
+            }
+
+            const isPostApplySuccess =
+              text.includes('applied to') ||
+              text.includes('successfully applied') ||
+              text.includes('application sent') ||
+              text.includes('applied successfully') ||
+              text.includes('your application has been sent');
+
+            const inputs = Array.from(
+              modal.querySelectorAll(
+                'input:not([type="hidden"]):not([type="file"]):not([type="submit"]):not([type="button"]):not([type="reset"]):not([type="image"]), select, textarea, [contenteditable="true"]',
+              ),
+            ).filter(i => !isUpsellElement(i as HTMLElement));
+
+            const options = Array.from(
+              modal.querySelectorAll(selectors.CHATBOT_OPTIONS.join(', ') + ', [role="radio"], [role="checkbox"]'),
+            ).filter(o => !isUpsellElement(o as HTMLElement));
+
+            if (inputs.length === 0 && options.length === 0) {
+              continue;
+            }
+
+            if (isPostApplySuccess) {
+              const hasRecruiterKeywords =
+                text.includes("recruiter's questions") ||
+                text.includes('kindly answer') ||
+                text.includes('screening questions');
+              if (!hasRecruiterKeywords) {
+                continue;
+              }
+            }
+
+            const hasRecruiterKeywords =
+              text.includes("recruiter's questions") ||
+              text.includes('kindly answer all') ||
+              text.includes('answer recruiter') ||
+              text.includes('type message here') ||
+              text.includes('how many years of experience') ||
+              text.includes('skip this question') ||
+              text.includes('current ctc') ||
+              text.includes('expected ctc') ||
+              text.includes('notice period') ||
+              text.includes('in lacs') ||
+              text.includes('screening questions') ||
+              text.includes('relevant experience') ||
+              text.includes('relocate') ||
+              (text.includes('save') && (inputs.length > 0 || options.length > 0));
+
+            const hasSubmitBtn = Array.from(modal.querySelectorAll(selectors.SUBMIT_BUTTON.join(', '))).some(b =>
+              isVisible(b as HTMLElement),
+            );
+
+            if ((hasRecruiterKeywords || hasSubmitBtn) && (inputs.length > 0 || options.length > 0)) {
+              return modal;
+            }
+          }
+          return null;
+        }
+
+        // REQUIRED: Check success BEFORE modal/questionnaire check!
+        const successEvaluation = evaluateSuccess();
+        if (successEvaluation.isSuccess) {
+          return { type: 'success', signals: successEvaluation.signals };
+        }
+
+        const modal = findRealQuestionnaire();
         if (modal) {
           return { type: 'modal_open' };
         }
 
-        if (checkSuccess()) {
-          return { type: 'success' };
+        // Last verification step: inspect primary apply button on page
+        for (const sel of selectors.PRIMARY_APPLY_BUTTON) {
+          const el = document.querySelector(sel) as HTMLElement | null;
+          if (el) {
+            const bt = (el.textContent || '').trim().toLowerCase();
+            if (
+              bt === 'applied' ||
+              bt === 'already applied' ||
+              bt.startsWith('applied on') ||
+              bt.startsWith('applied to') ||
+              el.classList.contains('applied') ||
+              el.classList.contains('already-applied')
+            ) {
+              return { type: 'success', signals: [`button: ${bt || 'applied'}`] };
+            }
+          }
         }
 
         return { type: 'unknown' };
       }, NAUKRI_SELECTORS);
 
       if (secondaryCheck.type === 'success') {
+        logger.info(
+          `[NaukriAdapter] Direct apply succeeded on secondary check! Signals: ${secondaryCheck.signals?.join(', ') || 'verified'}`,
+        );
         return { status: 'applied', creditsUsed: 1 };
       }
 
@@ -679,7 +981,7 @@ export class NaukriAdapter implements IPlatformAdapter {
       for (let step = 1; step <= MAX_STEPS; step++) {
         logger.info(`[NaukriAdapter] Handling questionnaire step ${step}/${MAX_STEPS}...`);
 
-        // 1. Check if modal is still open or application is complete
+        // 1. Check if success is ALREADY achieved or application is complete BEFORE looking for modal
         const status = await puppeteerPage.evaluate((selectors: typeof NAUKRI_SELECTORS) => {
           function isVisible(el: HTMLElement): boolean {
             if (!el || el.offsetParent === null) return false;
@@ -693,7 +995,7 @@ export class NaukriAdapter implements IPlatformAdapter {
               return false;
             }
             const rect = el.getBoundingClientRect();
-            if (rect.width < 50 || rect.height < 50) return false;
+            if (rect.width < 10 || rect.height < 10) return false;
             if (
               rect.right <= 0 ||
               rect.bottom <= 0 ||
@@ -705,88 +1007,396 @@ export class NaukriAdapter implements IPlatformAdapter {
             return true;
           }
 
-          function findModal(): HTMLElement | null {
-            for (const sel of selectors.MODAL_CONTAINER) {
-              const els = Array.from(document.querySelectorAll(sel)) as HTMLElement[];
-              for (const el of els) {
-                if (isVisible(el)) return el;
+          function isUpsellElement(el: HTMLElement | null): boolean {
+            if (!el) return false;
+            let cur: HTMLElement | null = el;
+            while (cur && cur !== document.body) {
+              const text = (cur.innerText || cur.textContent || cur.getAttribute('aria-label') || '').toLowerCase();
+              for (const term of selectors.UPSELL_EXCLUSIONS || []) {
+                if (text.includes(term.toLowerCase())) return true;
+              }
+              cur = cur.parentElement;
+            }
+            return false;
+          }
+
+          function evaluateSuccess(): {
+            isSuccess: boolean;
+            signals: string[];
+            confidence: 'high' | 'medium' | 'none';
+          } {
+            const signals: string[] = [];
+            const bodyText = (document.body.innerText || document.body.textContent || '').toLowerCase();
+
+            // 1. Text signal: "Applied to <Job/Company>" or standard success phrases
+            const appliedToRegex = /(?:applied\s+to|application\s+sent\s+to)\s+([a-z0-9][\w\s\(\)\.-]{1,60})/i;
+            const appliedToMatch = bodyText.match(appliedToRegex);
+            if (appliedToMatch) {
+              signals.push(`text: applied to ${appliedToMatch[1].trim()}`);
+            }
+
+            for (const ind of selectors.SUCCESS_INDICATORS) {
+              if (ind.startsWith('.')) continue;
+              if (bodyText.includes(ind.toLowerCase())) {
+                if (!signals.some(s => s.startsWith('text:'))) {
+                  signals.push(`text: ${ind}`);
+                }
+                break;
               }
             }
 
-            const candidates = Array.from(document.querySelectorAll('div, section, aside, form')) as HTMLElement[];
-            for (const el of candidates) {
-              const style = window.getComputedStyle(el);
-              if ((style.position === 'fixed' || style.position === 'absolute') && isVisible(el)) {
-                const text = (el.innerText || '').toLowerCase();
-                if (
-                  text.includes("recruiter's questions") ||
-                  text.includes('kindly answer all') ||
-                  text.includes('type message here') ||
-                  text.includes('how many years of experience') ||
-                  text.includes('skip this question') ||
-                  text.includes('current ctc') ||
-                  text.includes('expected ctc') ||
-                  text.includes('notice period') ||
-                  text.includes('in lacs') ||
-                  (text.includes('save') && el.querySelector('input, textarea, [class*="chip" i], [class*="option" i]'))
-                ) {
-                  return el;
+            // 2. Banner / Green tick / Icon signal
+            for (const sel of selectors.SUCCESS_BANNERS || []) {
+              try {
+                const bannerEls = Array.from(document.querySelectorAll(sel)) as HTMLElement[];
+                for (const b of bannerEls) {
+                  if (isVisible(b)) {
+                    signals.push(`banner: ${sel}`);
+                    break;
+                  }
                 }
+              } catch {}
+              if (signals.some(s => s.startsWith('banner:'))) break;
+            }
+
+            if (!signals.some(s => s.startsWith('banner:'))) {
+              const successIcons = Array.from(document.querySelectorAll('svg, i, span, div')) as HTMLElement[];
+              for (const icon of successIcons) {
+                if (isVisible(icon)) {
+                  const cls = (
+                    icon.className && typeof icon.className === 'string' ? icon.className : ''
+                  ).toLowerCase();
+                  if (
+                    cls.includes('success') ||
+                    cls.includes('greentick') ||
+                    cls.includes('green-tick') ||
+                    cls.includes('check-icon')
+                  ) {
+                    signals.push('banner: success-icon');
+                    break;
+                  }
+                }
+              }
+            }
+
+            // 3. Primary apply button state
+            for (const sel of selectors.PRIMARY_APPLY_BUTTON) {
+              const el = document.querySelector(sel) as HTMLElement | null;
+              if (el && isVisible(el)) {
+                const bt = (el.textContent || '').trim().toLowerCase();
+                if (
+                  bt === 'applied' ||
+                  bt === 'already applied' ||
+                  bt.startsWith('applied on') ||
+                  bt.startsWith('applied to') ||
+                  el.classList.contains('applied') ||
+                  el.classList.contains('already-applied')
+                ) {
+                  signals.push(`button: ${bt || 'applied'}`);
+                  break;
+                }
+              }
+            }
+
+            // 4. URL or DOM markers
+            try {
+              const href = window.location.href.toLowerCase();
+              if (href.includes('applied=true') || href.includes('/applied')) {
+                signals.push('url: applied');
+              }
+            } catch {}
+
+            const alreadyAppliedBadge = document.querySelector(
+              '.applied-badge, .already-applied, [data-qa*="applied" i]',
+            ) as HTMLElement | null;
+            if (alreadyAppliedBadge && isVisible(alreadyAppliedBadge)) {
+              signals.push('marker: applied-badge');
+            }
+
+            const isSuccess = signals.length > 0;
+            const confidence = signals.length >= 2 ? 'high' : signals.length === 1 ? 'medium' : 'none';
+            return { isSuccess, signals, confidence };
+          }
+
+          function findRealQuestionnaire(): HTMLElement | null {
+            const candidates: HTMLElement[] = [];
+            for (const sel of selectors.MODAL_CONTAINER) {
+              const els = Array.from(document.querySelectorAll(sel)) as HTMLElement[];
+              for (const el of els) {
+                if (isVisible(el) && !candidates.includes(el)) {
+                  candidates.push(el);
+                }
+              }
+            }
+
+            const fixedCandidates = Array.from(document.querySelectorAll('div, section, aside, form')) as HTMLElement[];
+            for (const el of fixedCandidates) {
+              const style = window.getComputedStyle(el);
+              if (
+                (style.position === 'fixed' || style.position === 'absolute') &&
+                isVisible(el) &&
+                !candidates.includes(el)
+              ) {
+                candidates.push(el);
+              }
+            }
+
+            for (const modal of candidates) {
+              const text = (modal.innerText || '').toLowerCase();
+
+              // EXPLICIT EXCLUSION: Post-apply drawer (quiz, upsell, "Problem of the day", etc.)
+              const isUpsell = (selectors.UPSELL_EXCLUSIONS || []).some((term: string) =>
+                text.includes(term.toLowerCase()),
+              );
+              if (isUpsell) {
+                continue;
+              }
+
+              const isPostApplySuccess =
+                text.includes('applied to') ||
+                text.includes('successfully applied') ||
+                text.includes('application sent') ||
+                text.includes('applied successfully') ||
+                text.includes('your application has been sent');
+
+              const inputs = Array.from(
+                modal.querySelectorAll(
+                  'input:not([type="hidden"]):not([type="file"]):not([type="submit"]):not([type="button"]):not([type="reset"]):not([type="image"]), select, textarea, [contenteditable="true"]',
+                ),
+              ).filter(i => !isUpsellElement(i as HTMLElement));
+
+              const options = Array.from(
+                modal.querySelectorAll(selectors.CHATBOT_OPTIONS.join(', ') + ', [role="radio"], [role="checkbox"]'),
+              ).filter(o => !isUpsellElement(o as HTMLElement));
+
+              if (inputs.length === 0 && options.length === 0) {
+                continue;
+              }
+
+              if (isPostApplySuccess) {
+                const hasRecruiterKeywords =
+                  text.includes("recruiter's questions") ||
+                  text.includes('kindly answer') ||
+                  text.includes('screening questions');
+                if (!hasRecruiterKeywords) {
+                  continue;
+                }
+              }
+
+              const hasRecruiterKeywords =
+                text.includes("recruiter's questions") ||
+                text.includes('kindly answer all') ||
+                text.includes('answer recruiter') ||
+                text.includes('type message here') ||
+                text.includes('how many years of experience') ||
+                text.includes('skip this question') ||
+                text.includes('current ctc') ||
+                text.includes('expected ctc') ||
+                text.includes('notice period') ||
+                text.includes('in lacs') ||
+                text.includes('screening questions') ||
+                text.includes('relevant experience') ||
+                text.includes('relocate') ||
+                (text.includes('save') && (inputs.length > 0 || options.length > 0));
+
+              const hasSubmitBtn = Array.from(modal.querySelectorAll(selectors.SUBMIT_BUTTON.join(', '))).some(b =>
+                isVisible(b as HTMLElement),
+              );
+
+              if ((hasRecruiterKeywords || hasSubmitBtn) && (inputs.length > 0 || options.length > 0)) {
+                return modal;
               }
             }
             return null;
           }
 
-          const modal = findModal();
-          if (!modal) {
-            return { state: 'closed' };
+          // Check success FIRST
+          const successEvaluation = evaluateSuccess();
+          if (successEvaluation.isSuccess) {
+            return { state: 'success', signals: successEvaluation.signals };
           }
 
-          const modalText = (modal.innerText || '').toLowerCase();
-          if (
-            modalText.includes('successfully applied') ||
-            modalText.includes('application sent') ||
-            modalText.includes('applied successfully') ||
-            modalText.includes('your application has been sent')
-          ) {
-            return { state: 'success' };
+          const modal = findRealQuestionnaire();
+          if (!modal) {
+            return { state: 'closed' };
           }
 
           return { state: 'modal_open' };
         }, NAUKRI_SELECTORS);
 
         if (status.state === 'success') {
-          logger.info(`[NaukriAdapter] Questionnaire completed successfully (success indicator found in modal).`);
+          logger.info(
+            `[NaukriAdapter] Questionnaire completed successfully (signals: ${status.signals?.join(', ') || 'verified'}).`,
+          );
           return { success: true };
         }
 
         if (status.state === 'closed') {
-          if (step > 1) {
-            // Re-verify after a short wait in case the modal is mid-transition/re-rendering between questions
-            await new Promise(r => setTimeout(r, 1500));
-            const recheck = await puppeteerPage.evaluate((selectors: typeof NAUKRI_SELECTORS) => {
-              for (const sel of selectors.MODAL_CONTAINER) {
-                const el = document.querySelector(sel) as HTMLElement | null;
-                if (el && el.offsetParent !== null) return true;
+          // Immediately check for success
+          await new Promise(r => setTimeout(r, 600));
+          const confirmSuccess = await puppeteerPage.evaluate((selectors: typeof NAUKRI_SELECTORS) => {
+            const signals: string[] = [];
+            const bodyText = (document.body.innerText || document.body.textContent || '').toLowerCase();
+            const appliedToRegex = /(?:applied\s+to|application\s+sent\s+to)\s+([a-z0-9][\w\s\(\)\.-]{1,60})/i;
+            const appliedToMatch = bodyText.match(appliedToRegex);
+            if (appliedToMatch) signals.push(`text: applied to ${appliedToMatch[1].trim()}`);
+            for (const ind of selectors.SUCCESS_INDICATORS) {
+              if (ind.startsWith('.')) continue;
+              if (bodyText.includes(ind.toLowerCase())) {
+                if (!signals.some(s => s.startsWith('text:'))) signals.push(`text: ${ind}`);
+                break;
               }
-              const inputs = document.querySelectorAll(
-                'input[placeholder*="Type message" i], textarea[placeholder*="Type message" i], .chatbot-container, [class*="custom-question" i], [class*="chatbot" i]',
-              );
-              return inputs.length > 0;
-            }, NAUKRI_SELECTORS);
-
-            if (recheck) {
-              logger.info(`[NaukriAdapter] Modal or inputs re-appeared after transition. Continuing step ${step}...`);
-              continue;
             }
+            for (const sel of selectors.SUCCESS_BANNERS || []) {
+              try {
+                const el = document.querySelector(sel);
+                if (el) {
+                  signals.push(`banner: ${sel}`);
+                  break;
+                }
+              } catch {}
+            }
+            for (const sel of selectors.PRIMARY_APPLY_BUTTON) {
+              const el = document.querySelector(sel) as HTMLElement | null;
+              if (el) {
+                const bt = (el.textContent || '').trim().toLowerCase();
+                if (
+                  bt === 'applied' ||
+                  bt === 'already applied' ||
+                  bt.startsWith('applied on') ||
+                  bt.startsWith('applied to') ||
+                  el.classList.contains('applied') ||
+                  el.classList.contains('already-applied')
+                ) {
+                  signals.push(`button: ${bt || 'applied'}`);
+                  break;
+                }
+              }
+            }
+            return { isSuccess: signals.length > 0, signals };
+          }, NAUKRI_SELECTORS);
 
+          if (confirmSuccess.isSuccess) {
             logger.info(
-              `[NaukriAdapter] Modal confirmed closed after step ${step - 1}. Application presumed complete.`,
+              `[NaukriAdapter] Questionnaire completed successfully (success confirmed after modal closed: ${confirmSuccess.signals.join(', ')}).`,
             );
             return { success: true };
           }
-          logger.info(`[NaukriAdapter] Modal was closed on step 1.`);
-          return { success: true };
+
+          if (step > 1) {
+            // Re-verify after a short wait in case the modal is mid-transition/re-rendering between questions
+            await new Promise(r => setTimeout(r, 1000));
+            const recheck = await puppeteerPage.evaluate((selectors: typeof NAUKRI_SELECTORS) => {
+              function isVisible(el: HTMLElement): boolean {
+                if (!el || el.offsetParent === null) return false;
+                const style = window.getComputedStyle(el);
+                if (
+                  style.display === 'none' ||
+                  style.visibility === 'hidden' ||
+                  style.opacity === '0' ||
+                  style.pointerEvents === 'none'
+                ) {
+                  return false;
+                }
+                const rect = el.getBoundingClientRect();
+                return rect.width >= 10 && rect.height >= 10;
+              }
+
+              function isUpsellElement(el: HTMLElement | null): boolean {
+                if (!el) return false;
+                let cur: HTMLElement | null = el;
+                while (cur && cur !== document.body) {
+                  const text = (cur.innerText || cur.textContent || cur.getAttribute('aria-label') || '').toLowerCase();
+                  for (const term of selectors.UPSELL_EXCLUSIONS || []) {
+                    if (text.includes(term.toLowerCase())) return true;
+                  }
+                  cur = cur.parentElement;
+                }
+                return false;
+              }
+
+              // Check success FIRST
+              const signals: string[] = [];
+              const bodyText = (document.body.innerText || '').toLowerCase();
+              const appliedToRegex = /(?:applied\s+to|application\s+sent\s+to)\s+([a-z0-9][\w\s\(\)\.-]{1,60})/i;
+              const appliedToMatch = bodyText.match(appliedToRegex);
+              if (appliedToMatch) signals.push(`text: applied to ${appliedToMatch[1].trim()}`);
+              for (const ind of selectors.SUCCESS_INDICATORS) {
+                if (ind.startsWith('.')) continue;
+                if (bodyText.includes(ind.toLowerCase())) {
+                  signals.push(`text: ${ind}`);
+                  break;
+                }
+              }
+              for (const sel of selectors.PRIMARY_APPLY_BUTTON) {
+                const el = document.querySelector(sel) as HTMLElement | null;
+                if (el) {
+                  const bt = (el.textContent || '').trim().toLowerCase();
+                  if (
+                    bt.includes('applied') ||
+                    el.classList.contains('applied') ||
+                    el.classList.contains('already-applied')
+                  ) {
+                    signals.push(`button: ${bt || 'applied'}`);
+                    break;
+                  }
+                }
+              }
+              if (signals.length > 0) {
+                return { state: 'success', signals };
+              }
+
+              // Check real questionnaire (MUST NOT match upsell/quiz/post-apply drawer)
+              for (const sel of selectors.MODAL_CONTAINER) {
+                const els = Array.from(document.querySelectorAll(sel)) as HTMLElement[];
+                for (const el of els) {
+                  if (isVisible(el) && !isUpsellElement(el)) {
+                    const text = (el.innerText || '').toLowerCase();
+                    const isUpsell = (selectors.UPSELL_EXCLUSIONS || []).some(t => text.includes(t.toLowerCase()));
+                    if (!isUpsell) {
+                      const inputs = el.querySelectorAll(
+                        'input:not([type="hidden"]):not([type="file"]), select, textarea',
+                      );
+                      const choices = el.querySelectorAll(
+                        selectors.CHATBOT_OPTIONS.join(', ') + ', [role="radio"], [role="checkbox"]',
+                      );
+                      if (inputs.length > 0 || choices.length > 0) {
+                        return { state: 'modal_open', signals: [] };
+                      }
+                    }
+                  }
+                }
+              }
+
+              return { state: 'closed', signals: [] };
+            }, NAUKRI_SELECTORS);
+
+            if (recheck.state === 'success') {
+              logger.info(
+                `[NaukriAdapter] Questionnaire completed successfully on recheck (signals: ${recheck.signals?.join(', ') || 'verified'}).`,
+              );
+              return { success: true };
+            }
+
+            if (recheck.state === 'modal_open') {
+              logger.info(
+                `[NaukriAdapter] Real questionnaire re-appeared after transition. Continuing step ${step}...`,
+              );
+              continue;
+            }
+
+            consecutiveRepeats++;
+            if (consecutiveRepeats >= 2) {
+              logger.warning(
+                `[NaukriAdapter] Questionnaire closed without success confirmation. Stopping after step ${step}.`,
+              );
+              return { success: false, reason: 'Questionnaire closed without success confirmation.' };
+            }
+            continue;
+          }
+
+          logger.info(`[NaukriAdapter] Modal was closed on step 1 with no real questions.`);
+          return { success: false, reason: 'No recruiter questions found in questionnaire modal.' };
         }
 
         // 2. Extract active question, choice options, form fields, and skip button
@@ -803,7 +1413,7 @@ export class NaukriAdapter implements IPlatformAdapter {
               return false;
             }
             const rect = el.getBoundingClientRect();
-            if (rect.width < 50 || rect.height < 50) return false;
+            if (rect.width < 10 || rect.height < 10) return false;
             if (
               rect.right <= 0 ||
               rect.bottom <= 0 ||
@@ -815,38 +1425,101 @@ export class NaukriAdapter implements IPlatformAdapter {
             return true;
           }
 
-          function findModal(): HTMLElement | null {
+          function isUpsellElement(el: HTMLElement | null): boolean {
+            if (!el) return false;
+            let cur: HTMLElement | null = el;
+            while (cur && cur !== document.body) {
+              const text = (cur.innerText || cur.textContent || cur.getAttribute('aria-label') || '').toLowerCase();
+              for (const term of selectors.UPSELL_EXCLUSIONS || []) {
+                if (text.includes(term.toLowerCase())) return true;
+              }
+              cur = cur.parentElement;
+            }
+            return false;
+          }
+
+          function findRealQuestionnaire(): HTMLElement | null {
+            const candidates: HTMLElement[] = [];
             for (const sel of selectors.MODAL_CONTAINER) {
               const els = Array.from(document.querySelectorAll(sel)) as HTMLElement[];
               for (const el of els) {
-                if (isVisible(el)) return el;
+                if (isVisible(el) && !candidates.includes(el)) {
+                  candidates.push(el);
+                }
               }
             }
-            const candidates = Array.from(document.querySelectorAll('div, section, aside, form')) as HTMLElement[];
-            for (const el of candidates) {
+            const fixedCandidates = Array.from(document.querySelectorAll('div, section, aside, form')) as HTMLElement[];
+            for (const el of fixedCandidates) {
               const style = window.getComputedStyle(el);
-              if ((style.position === 'fixed' || style.position === 'absolute') && isVisible(el)) {
-                const text = (el.innerText || '').toLowerCase();
-                if (
+              if (
+                (style.position === 'fixed' || style.position === 'absolute') &&
+                isVisible(el) &&
+                !candidates.includes(el)
+              ) {
+                candidates.push(el);
+              }
+            }
+
+            for (const modal of candidates) {
+              const text = (modal.innerText || '').toLowerCase();
+              const isUpsell = (selectors.UPSELL_EXCLUSIONS || []).some(t => text.includes(t.toLowerCase()));
+              if (isUpsell) continue;
+
+              const isPostApplySuccess =
+                text.includes('applied to') ||
+                text.includes('successfully applied') ||
+                text.includes('application sent') ||
+                text.includes('applied successfully') ||
+                text.includes('your application has been sent');
+
+              const inputs = Array.from(
+                modal.querySelectorAll(
+                  'input:not([type="hidden"]):not([type="file"]):not([type="submit"]):not([type="button"]):not([type="reset"]):not([type="image"]), select, textarea, [contenteditable="true"]',
+                ),
+              ).filter(i => !isUpsellElement(i as HTMLElement));
+
+              const options = Array.from(
+                modal.querySelectorAll(selectors.CHATBOT_OPTIONS.join(', ') + ', [role="radio"], [role="checkbox"]'),
+              ).filter(o => !isUpsellElement(o as HTMLElement));
+
+              if (inputs.length === 0 && options.length === 0) continue;
+
+              if (isPostApplySuccess) {
+                const hasRecruiterKeywords =
                   text.includes("recruiter's questions") ||
-                  text.includes('kindly answer all') ||
-                  text.includes('type message here') ||
-                  text.includes('how many years of experience') ||
-                  text.includes('skip this question') ||
-                  text.includes('current ctc') ||
-                  text.includes('expected ctc') ||
-                  text.includes('notice period') ||
-                  text.includes('in lacs') ||
-                  (text.includes('save') && el.querySelector('input, textarea, [class*="chip" i], [class*="option" i]'))
-                ) {
-                  return el;
-                }
+                  text.includes('kindly answer') ||
+                  text.includes('screening questions');
+                if (!hasRecruiterKeywords) continue;
+              }
+
+              const hasRecruiterKeywords =
+                text.includes("recruiter's questions") ||
+                text.includes('kindly answer all') ||
+                text.includes('answer recruiter') ||
+                text.includes('type message here') ||
+                text.includes('how many years of experience') ||
+                text.includes('skip this question') ||
+                text.includes('current ctc') ||
+                text.includes('expected ctc') ||
+                text.includes('notice period') ||
+                text.includes('in lacs') ||
+                text.includes('screening questions') ||
+                text.includes('relevant experience') ||
+                text.includes('relocate') ||
+                (text.includes('save') && (inputs.length > 0 || options.length > 0));
+
+              const hasSubmitBtn = Array.from(modal.querySelectorAll(selectors.SUBMIT_BUTTON.join(', '))).some(b =>
+                isVisible(b as HTMLElement),
+              );
+
+              if ((hasRecruiterKeywords || hasSubmitBtn) && (inputs.length > 0 || options.length > 0)) {
+                return modal;
               }
             }
             return null;
           }
 
-          const modal = findModal();
+          const modal = findRealQuestionnaire();
           if (!modal) {
             return {
               modalFound: false,
@@ -858,11 +1531,11 @@ export class NaukriAdapter implements IPlatformAdapter {
             };
           }
 
-          // A. Extract question from Chatbot message bubbles
+          // A. Extract question from Chatbot message bubbles (excluding upsell)
           let activeQuestion = '';
           const bubbleCandidates = Array.from(
             modal.querySelectorAll(selectors.CHATBOT_QUESTION_BUBBLE.join(', ') + ', div, p, span'),
-          ) as HTMLElement[];
+          ).filter(b => !isUpsellElement(b as HTMLElement)) as HTMLElement[];
 
           const questionBubbles: string[] = [];
           for (const b of bubbleCandidates) {
@@ -912,7 +1585,9 @@ export class NaukriAdapter implements IPlatformAdapter {
 
           // B. Check for "Skip this question" button
           let hasSkipBtn = false;
-          const allClickables = Array.from(modal.querySelectorAll('button, a, span, div')) as HTMLElement[];
+          const allClickables = Array.from(modal.querySelectorAll('button, a, span, div')).filter(
+            c => !isUpsellElement(c as HTMLElement),
+          ) as HTMLElement[];
           for (const c of allClickables) {
             const ct = (c.textContent || '').trim().toLowerCase();
             if (ct.includes('skip this question') || ct === 'skip question' || ct === 'skip') {
@@ -927,7 +1602,7 @@ export class NaukriAdapter implements IPlatformAdapter {
             modal.querySelectorAll(
               selectors.CHATBOT_OPTIONS.join(', ') + ', label, li, [role="button"], [role="radio"], [role="checkbox"]',
             ),
-          ) as HTMLElement[];
+          ).filter(c => !isUpsellElement(c as HTMLElement)) as HTMLElement[];
 
           const seenTexts = new Set<string>();
           let cIdx = 0;
@@ -985,22 +1660,22 @@ export class NaukriAdapter implements IPlatformAdapter {
             modal.querySelectorAll(
               'input:not([type="hidden"]):not([type="file"]):not([type="submit"]):not([type="button"]):not([type="reset"]):not([type="image"]), select, textarea',
             ),
-          ) as HTMLElement[];
+          ).filter(el => !isUpsellElement(el as HTMLElement)) as HTMLElement[];
 
-          // Prefer visible and enabled inputs first (fallback to visible if all are currently disabled during animation)
+          // Prefer visible and enabled inputs first
           let inputs = rawInputs.filter(el => isVisible(el));
           const enabledInputs = inputs.filter(el => isEnabledInput(el));
           if (enabledInputs.length > 0) {
             inputs = enabledInputs;
           }
 
-          // If no inputs found inside modal, fallback to checking chatbot inputs in document
+          // If no inputs found inside modal, fallback to checking chatbot inputs in document (excluding upsell)
           if (inputs.length === 0) {
             const docInputs = Array.from(
               document.querySelectorAll(
                 'input[placeholder*="Type message" i]:not([disabled]), textarea[placeholder*="Type message" i]:not([disabled]), input[placeholder*="message" i]:not([disabled]), textarea[placeholder*="message" i]:not([disabled]), [contenteditable="true"]:not([aria-disabled="true"]), input[placeholder*="Type message" i], textarea[placeholder*="Type message" i], input[placeholder*="message" i], textarea[placeholder*="message" i], input[type="text"]:not([type="hidden"]):not([disabled]), textarea:not([disabled])',
               ),
-            ) as HTMLElement[];
+            ).filter(el => !isUpsellElement(el as HTMLElement)) as HTMLElement[];
             const visibleDoc = docInputs.filter(el => isVisible(el));
             const enabledDoc = visibleDoc.filter(el => isEnabledInput(el));
             inputs = enabledDoc.length > 0 ? enabledDoc : visibleDoc;
@@ -1070,12 +1745,12 @@ export class NaukriAdapter implements IPlatformAdapter {
                 if (t && !t.toLowerCase().includes('select')) options.push(t);
               }
             } else if (fieldType === 'radio' || fieldType === 'checkbox') {
-              // Extract all options in this radio/checkbox group
+              // Extract all options in this radio/checkbox group (excluding upsell)
               const inputName = (el as HTMLInputElement).name;
               const inputType = fieldType === 'radio' ? 'radio' : 'checkbox';
               const inputGroup = inputName
-                ? (Array.from(
-                    modal.querySelectorAll(`input[type="${inputType}"][name="${inputName}"]`),
+                ? (Array.from(modal.querySelectorAll(`input[type="${inputType}"][name="${inputName}"]`)).filter(
+                    r => !isUpsellElement(r as HTMLElement),
                   ) as HTMLInputElement[])
                 : [el as HTMLInputElement];
               for (const r of inputGroup) {
@@ -1134,7 +1809,51 @@ export class NaukriAdapter implements IPlatformAdapter {
           };
         }, NAUKRI_SELECTORS);
 
-        const currentQuestion = stepData.activeQuestion || stepData.modalHeading || 'Unknown Question';
+        if (!stepData.modalFound) {
+          // If no real questionnaire was found on this step, check success immediately
+          const succCheck = await puppeteerPage.evaluate((selectors: typeof NAUKRI_SELECTORS) => {
+            const signals: string[] = [];
+            const bodyText = (document.body.innerText || '').toLowerCase();
+            const appliedToRegex = /(?:applied\s+to|application\s+sent\s+to)\s+([a-z0-9][\w\s\(\)\.-]{1,60})/i;
+            const appliedToMatch = bodyText.match(appliedToRegex);
+            if (appliedToMatch) signals.push(`text: applied to ${appliedToMatch[1].trim()}`);
+            for (const ind of selectors.SUCCESS_INDICATORS) {
+              if (ind.startsWith('.')) continue;
+              if (bodyText.includes(ind.toLowerCase())) {
+                signals.push(`text: ${ind}`);
+                break;
+              }
+            }
+            for (const sel of selectors.PRIMARY_APPLY_BUTTON) {
+              const el = document.querySelector(sel) as HTMLElement | null;
+              if (el) {
+                const bt = (el.textContent || '').trim().toLowerCase();
+                if (
+                  bt.includes('applied') ||
+                  el.classList.contains('applied') ||
+                  el.classList.contains('already-applied')
+                ) {
+                  signals.push(`button: ${bt}`);
+                  break;
+                }
+              }
+            }
+            return { isSuccess: signals.length > 0, signals };
+          }, NAUKRI_SELECTORS);
+
+          if (succCheck.isSuccess) {
+            logger.info(
+              `[NaukriAdapter] Application succeeded (no modal found, success detected: ${succCheck.signals.join(', ')}).`,
+            );
+            return { success: true };
+          }
+          return {
+            success: false,
+            reason: 'Questionnaire or modal disappeared without application confirmation.',
+          };
+        }
+
+        const currentQuestion = stepData?.activeQuestion || stepData?.modalHeading || 'Unknown Question';
         if (currentQuestion === lastQuestionHandled && step > 1) {
           consecutiveRepeats++;
           logger.warning(
@@ -1145,34 +1864,68 @@ export class NaukriAdapter implements IPlatformAdapter {
           lastQuestionHandled = currentQuestion;
         }
 
-        // Circuit breaker: If stuck on the exact same question for 2 consecutive cycles and Skip is available, click Skip to advance
-        if (consecutiveRepeats >= 2 && stepData.hasSkipBtn) {
-          logger.info(
-            `[NaukriAdapter] ⏭️ Repeated step on "${lastQuestionHandled}" (${consecutiveRepeats} times). Clicking "Skip this question" to advance...`,
+        const choiceOptions = stepData?.choiceOptions || [];
+        const fields = stepData?.fields || [];
+
+        // If stuck on the same state twice without progress:
+        // Try skip button if available, or stop cleanly instead of burning all 15 steps
+        if (consecutiveRepeats >= 2) {
+          if (stepData?.hasSkipBtn) {
+            logger.info(
+              `[NaukriAdapter] ⏭️ Repeated step on "${lastQuestionHandled}" (${consecutiveRepeats} times). Clicking "Skip this question" to advance...`,
+            );
+            await puppeteerPage.evaluate((selectors: typeof NAUKRI_SELECTORS) => {
+              const skipEls = Array.from(document.querySelectorAll('button, a, span, div')) as HTMLElement[];
+              for (const s of skipEls) {
+                const st = (s.textContent || '').trim().toLowerCase();
+                if (st.includes('skip this question') || st === 'skip question' || st === 'skip') {
+                  s.click();
+                  return;
+                }
+              }
+            }, NAUKRI_SELECTORS);
+            await new Promise(r => setTimeout(r, 2000));
+            continue;
+          }
+
+          // If no skip button and same state repeats twice with no new real question, stop with a clear reason
+          logger.warning(
+            `[NaukriAdapter] Same question state repeated twice without progress ("${lastQuestionHandled}"). Stopping loop.`,
           );
-          await puppeteerPage.evaluate((selectors: typeof NAUKRI_SELECTORS) => {
-            const skipEls = Array.from(document.querySelectorAll('button, a, span, div')) as HTMLElement[];
-            for (const s of skipEls) {
-              const st = (s.textContent || '').trim().toLowerCase();
-              if (st.includes('skip this question') || st === 'skip question' || st === 'skip') {
-                s.click();
-                return;
+          const succCheck = await puppeteerPage.evaluate((selectors: typeof NAUKRI_SELECTORS) => {
+            const signals: string[] = [];
+            const bodyText = (document.body.innerText || '').toLowerCase();
+            const appliedToRegex = /(?:applied\s+to|application\s+sent\s+to)\s+([a-z0-9][\w\s\(\)\.-]{1,60})/i;
+            const appliedToMatch = bodyText.match(appliedToRegex);
+            if (appliedToMatch) signals.push(`text: applied to ${appliedToMatch[1].trim()}`);
+            for (const ind of selectors.SUCCESS_INDICATORS) {
+              if (ind.startsWith('.')) continue;
+              if (bodyText.includes(ind.toLowerCase())) {
+                signals.push(`text: ${ind}`);
+                break;
               }
             }
+            return { isSuccess: signals.length > 0, signals };
           }, NAUKRI_SELECTORS);
-          await new Promise(r => setTimeout(r, 2000));
-          continue;
+
+          if (succCheck.isSuccess) {
+            return { success: true };
+          }
+          return {
+            success: false,
+            reason: `Questionnaire remained open without progress. Last question: "${lastQuestionHandled}"`,
+          };
         }
 
         logger.info(
-          `[NaukriAdapter] Step ${step}: Question: "${lastQuestionHandled}" | Options: ${stepData.choiceOptions.length} | Fields: ${stepData.fields.length} | Skip: ${stepData.hasSkipBtn}`,
+          `[NaukriAdapter] Step ${step}: Question: "${lastQuestionHandled}" | Options: ${choiceOptions.length} | Fields: ${fields.length} | Skip: ${stepData?.hasSkipBtn || false}`,
         );
 
         let didAnswer = false;
 
         // 3A. Process Choice Options (Chatbot choice chips/radios)
-        if (stepData.choiceOptions && stepData.choiceOptions.length > 0) {
-          const optTexts = (stepData.choiceOptions as Array<{ text: string; index: number }>).map(
+        if (choiceOptions.length > 0) {
+          const optTexts = (choiceOptions as Array<{ text: string; index: number }>).map(
             (o: { text: string; index: number }) => o.text,
           );
           let resolvedChoice = resolveNaukriQuestion(lastQuestionHandled, 'radio', optTexts, careerBrain);
@@ -1204,15 +1957,28 @@ export class NaukriAdapter implements IPlatformAdapter {
                 return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
               }
 
+              function isUpsellElement(el: HTMLElement | null): boolean {
+                if (!el) return false;
+                let cur: HTMLElement | null = el;
+                while (cur && cur !== document.body) {
+                  const text = (cur.innerText || cur.textContent || cur.getAttribute('aria-label') || '').toLowerCase();
+                  for (const term of selectors.UPSELL_EXCLUSIONS || []) {
+                    if (text.includes(term.toLowerCase())) return true;
+                  }
+                  cur = cur.parentElement;
+                }
+                return false;
+              }
+
               for (const sel of selectors.MODAL_CONTAINER) {
                 const modal = document.querySelector(sel) as HTMLElement | null;
-                if (modal && isVisible(modal)) {
+                if (modal && isVisible(modal) && !isUpsellElement(modal)) {
                   const choiceEls = Array.from(
                     modal.querySelectorAll(
                       selectors.CHATBOT_OPTIONS.join(', ') +
                         ', label, li, [role="button"], [role="radio"], [role="checkbox"]',
                     ),
-                  ) as HTMLElement[];
+                  ).filter(c => !isUpsellElement(c as HTMLElement)) as HTMLElement[];
 
                   const tLower = targetChoice.toLowerCase().trim();
                   let bestEl: HTMLElement | null = null;
@@ -1227,7 +1993,7 @@ export class NaukriAdapter implements IPlatformAdapter {
                     }
                   }
 
-                  if (bestEl) {
+                  if (bestEl && !isUpsellElement(bestEl)) {
                     // Check native radio/checkbox input if inside or linked to bestEl
                     const innerInput = (
                       bestEl.tagName.toLowerCase() === 'input'
@@ -1291,8 +2057,8 @@ export class NaukriAdapter implements IPlatformAdapter {
         }
 
         // 3B. Process Form Fields (Text, Number, Select, etc.)
-        if (stepData.fields.length > 0) {
-          for (const f of stepData.fields) {
+        if (fields.length > 0) {
+          for (const f of fields) {
             const qText = f.labelText || lastQuestionHandled;
             let answer = resolveNaukriQuestion(qText, f.fieldType as any, f.options, careerBrain, f.placeholder);
             const isLakhsQ = qText.toLowerCase().includes('lac') || qText.toLowerCase().includes('lakh');
@@ -1379,10 +2145,28 @@ export class NaukriAdapter implements IPlatformAdapter {
                   return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
                 }
 
+                function isUpsellElement(el: HTMLElement | null): boolean {
+                  if (!el) return false;
+                  let cur: HTMLElement | null = el;
+                  while (cur && cur !== document.body) {
+                    const text = (
+                      cur.innerText ||
+                      cur.textContent ||
+                      cur.getAttribute('aria-label') ||
+                      ''
+                    ).toLowerCase();
+                    for (const term of selectors.UPSELL_EXCLUSIONS || []) {
+                      if (text.includes(term.toLowerCase())) return true;
+                    }
+                    cur = cur.parentElement;
+                  }
+                  return false;
+                }
+
                 let modal: HTMLElement | null = null;
                 for (const sel of selectors.MODAL_CONTAINER) {
                   const el = document.querySelector(sel) as HTMLElement | null;
-                  if (el && isVisible(el)) {
+                  if (el && isVisible(el) && !isUpsellElement(el)) {
                     modal = el;
                     break;
                   }
@@ -1393,7 +2177,11 @@ export class NaukriAdapter implements IPlatformAdapter {
                   ) as HTMLElement[];
                   for (const el of candidates) {
                     const style = window.getComputedStyle(el);
-                    if ((style.position === 'fixed' || style.position === 'absolute') && isVisible(el)) {
+                    if (
+                      (style.position === 'fixed' || style.position === 'absolute') &&
+                      isVisible(el) &&
+                      !isUpsellElement(el)
+                    ) {
                       const text = (el.innerText || '').toLowerCase();
                       if (
                         text.includes("recruiter's questions") ||
@@ -1420,7 +2208,7 @@ export class NaukriAdapter implements IPlatformAdapter {
                   modal.querySelectorAll(
                     'input:not([type="hidden"]):not([type="file"]):not([type="submit"]):not([type="button"]):not([type="reset"]):not([type="image"]), select, textarea',
                   ),
-                ) as HTMLElement[];
+                ).filter(inp => !isUpsellElement(inp as HTMLElement)) as HTMLElement[];
                 let inputs = rawInputs.filter(el => isVisible(el));
                 if (inputs.length === 0) {
                   const docInputs = Array.from(
@@ -1485,11 +2273,14 @@ export class NaukriAdapter implements IPlatformAdapter {
                   }
                 } else if (fType === 'radio') {
                   let targetRadio = el;
+                  if (isUpsellElement(targetRadio)) {
+                    return { x: 0, y: 0 };
+                  }
                   const radioName = el.name;
                   if (radioName) {
                     const allRadios = Array.from(
                       modal.querySelectorAll(`input[type="radio"][name="${radioName}"]`),
-                    ) as HTMLInputElement[];
+                    ).filter(r => !isUpsellElement(r as HTMLElement)) as HTMLInputElement[];
                     const vLower = val.toLowerCase().trim();
                     for (const r of allRadios) {
                       const rLabel = (
@@ -1506,6 +2297,9 @@ export class NaukriAdapter implements IPlatformAdapter {
                         break;
                       }
                     }
+                  }
+                  if (isUpsellElement(targetRadio)) {
+                    return { x: 0, y: 0 };
                   }
                   try {
                     const proto = window.HTMLInputElement.prototype;
@@ -1978,10 +2772,23 @@ export class NaukriAdapter implements IPlatformAdapter {
             return rect.width > 0 && rect.height > 0;
           }
 
+          function isUpsellElement(el: HTMLElement | null): boolean {
+            if (!el) return false;
+            let cur: HTMLElement | null = el;
+            while (cur && cur !== document.body) {
+              const text = (cur.innerText || cur.textContent || cur.getAttribute('aria-label') || '').toLowerCase();
+              for (const term of selectors.UPSELL_EXCLUSIONS || []) {
+                if (text.includes(term.toLowerCase())) return true;
+              }
+              cur = cur.parentElement;
+            }
+            return false;
+          }
+
           let modal: HTMLElement | null = null;
           for (const sel of selectors.MODAL_CONTAINER) {
             const el = document.querySelector(sel) as HTMLElement | null;
-            if (el && isVisible(el)) {
+            if (el && isVisible(el) && !isUpsellElement(el)) {
               modal = el;
               break;
             }
@@ -1993,7 +2800,7 @@ export class NaukriAdapter implements IPlatformAdapter {
           // Strategy 1: Look inside modal using SUBMIT_BUTTON selectors
           for (const sel of selectors.SUBMIT_BUTTON) {
             const btn = modal.querySelector(sel) as HTMLElement | null;
-            if (btn && isVisible(btn)) {
+            if (btn && isVisible(btn) && !isUpsellElement(btn)) {
               actionBtn = btn;
               break;
             }
@@ -2196,51 +3003,205 @@ export class NaukriAdapter implements IPlatformAdapter {
             return true;
           }
 
-          function findModal(): HTMLElement | null {
+          function isUpsellElement(el: HTMLElement | null): boolean {
+            if (!el) return false;
+            let cur: HTMLElement | null = el;
+            while (cur && cur !== document.body) {
+              const text = (cur.innerText || cur.textContent || cur.getAttribute('aria-label') || '').toLowerCase();
+              for (const term of selectors.UPSELL_EXCLUSIONS || []) {
+                if (text.includes(term.toLowerCase())) return true;
+              }
+              cur = cur.parentElement;
+            }
+            return false;
+          }
+
+          function evaluateSuccess(): {
+            isSuccess: boolean;
+            signals: string[];
+            confidence: 'high' | 'medium' | 'none';
+          } {
+            const signals: string[] = [];
+            const bodyText = (document.body.innerText || document.body.textContent || '').toLowerCase();
+
+            // 1. Text signal: "Applied to <Job/Company>" or standard success phrases
+            const appliedToRegex = /(?:applied\s+to|application\s+sent\s+to)\s+([a-z0-9][\w\s\(\)\.-]{1,60})/i;
+            const appliedToMatch = bodyText.match(appliedToRegex);
+            if (appliedToMatch) {
+              signals.push(`text: applied to ${appliedToMatch[1].trim()}`);
+            }
+
+            for (const ind of selectors.SUCCESS_INDICATORS) {
+              if (ind.startsWith('.')) continue;
+              if (bodyText.includes(ind.toLowerCase())) {
+                if (!signals.some(s => s.startsWith('text:'))) {
+                  signals.push(`text: ${ind}`);
+                }
+                break;
+              }
+            }
+
+            // 2. Banner / Green tick / Icon signal
+            for (const sel of selectors.SUCCESS_BANNERS || []) {
+              try {
+                const bannerEls = Array.from(document.querySelectorAll(sel)) as HTMLElement[];
+                for (const b of bannerEls) {
+                  if (isVisible(b)) {
+                    signals.push(`banner: ${sel}`);
+                    break;
+                  }
+                }
+              } catch {}
+              if (signals.some(s => s.startsWith('banner:'))) break;
+            }
+
+            if (!signals.some(s => s.startsWith('banner:'))) {
+              const successIcons = Array.from(document.querySelectorAll('svg, i, span, div')) as HTMLElement[];
+              for (const icon of successIcons) {
+                if (isVisible(icon)) {
+                  const cls = (
+                    icon.className && typeof icon.className === 'string' ? icon.className : ''
+                  ).toLowerCase();
+                  if (
+                    cls.includes('success') ||
+                    cls.includes('greentick') ||
+                    cls.includes('green-tick') ||
+                    cls.includes('check-icon')
+                  ) {
+                    signals.push('banner: success-icon');
+                    break;
+                  }
+                }
+              }
+            }
+
+            // 3. Primary apply button state
+            for (const sel of selectors.PRIMARY_APPLY_BUTTON) {
+              const el = document.querySelector(sel) as HTMLElement | null;
+              if (el && isVisible(el)) {
+                const bt = (el.textContent || '').trim().toLowerCase();
+                if (
+                  bt === 'applied' ||
+                  bt === 'already applied' ||
+                  bt.startsWith('applied on') ||
+                  bt.startsWith('applied to') ||
+                  el.classList.contains('applied') ||
+                  el.classList.contains('already-applied')
+                ) {
+                  signals.push(`button: ${bt || 'applied'}`);
+                  break;
+                }
+              }
+            }
+
+            // 4. URL or DOM markers
+            try {
+              const href = window.location.href.toLowerCase();
+              if (href.includes('applied=true') || href.includes('/applied')) {
+                signals.push('url: applied');
+              }
+            } catch {}
+
+            const alreadyAppliedBadge = document.querySelector(
+              '.applied-badge, .already-applied, [data-qa*="applied" i]',
+            ) as HTMLElement | null;
+            if (alreadyAppliedBadge && isVisible(alreadyAppliedBadge)) {
+              signals.push('marker: applied-badge');
+            }
+
+            const isSuccess = signals.length > 0;
+            const confidence = signals.length >= 2 ? 'high' : signals.length === 1 ? 'medium' : 'none';
+            return { isSuccess, signals, confidence };
+          }
+
+          function findRealQuestionnaire(): HTMLElement | null {
+            const candidates: HTMLElement[] = [];
             for (const sel of selectors.MODAL_CONTAINER) {
               const els = Array.from(document.querySelectorAll(sel)) as HTMLElement[];
               for (const el of els) {
-                if (isVisible(el)) return el;
+                if (isVisible(el) && !candidates.includes(el)) {
+                  candidates.push(el);
+                }
               }
             }
-            const candidates = Array.from(document.querySelectorAll('div, section, aside, form')) as HTMLElement[];
-            for (const el of candidates) {
+            const fixedCandidates = Array.from(document.querySelectorAll('div, section, aside, form')) as HTMLElement[];
+            for (const el of fixedCandidates) {
               const style = window.getComputedStyle(el);
-              if ((style.position === 'fixed' || style.position === 'absolute') && isVisible(el)) {
-                const text = (el.innerText || '').toLowerCase();
-                if (
+              if (
+                (style.position === 'fixed' || style.position === 'absolute') &&
+                isVisible(el) &&
+                !candidates.includes(el)
+              ) {
+                candidates.push(el);
+              }
+            }
+
+            for (const modal of candidates) {
+              const text = (modal.innerText || '').toLowerCase();
+              const isUpsell = (selectors.UPSELL_EXCLUSIONS || []).some(t => text.includes(t.toLowerCase()));
+              if (isUpsell) continue;
+
+              const isPostApplySuccess =
+                text.includes('applied to') ||
+                text.includes('successfully applied') ||
+                text.includes('application sent') ||
+                text.includes('applied successfully') ||
+                text.includes('your application has been sent');
+
+              const inputs = Array.from(
+                modal.querySelectorAll(
+                  'input:not([type="hidden"]):not([type="file"]):not([type="submit"]):not([type="button"]):not([type="reset"]):not([type="image"]), select, textarea, [contenteditable="true"]',
+                ),
+              ).filter(i => !isUpsellElement(i as HTMLElement));
+
+              const options = Array.from(
+                modal.querySelectorAll(selectors.CHATBOT_OPTIONS.join(', ') + ', [role="radio"], [role="checkbox"]'),
+              ).filter(o => !isUpsellElement(o as HTMLElement));
+
+              if (inputs.length === 0 && options.length === 0) continue;
+
+              if (isPostApplySuccess) {
+                const hasRecruiterKeywords =
                   text.includes("recruiter's questions") ||
-                  text.includes('kindly answer all') ||
-                  text.includes('type message here') ||
-                  text.includes('how many years of experience') ||
-                  text.includes('skip this question') ||
-                  text.includes('current ctc') ||
-                  text.includes('expected ctc') ||
-                  text.includes('notice period') ||
-                  text.includes('in lacs') ||
-                  (text.includes('save') && el.querySelector('input, textarea, [class*="chip" i], [class*="option" i]'))
-                ) {
-                  return el;
-                }
+                  text.includes('kindly answer') ||
+                  text.includes('screening questions');
+                if (!hasRecruiterKeywords) continue;
+              }
+
+              const hasRecruiterKeywords =
+                text.includes("recruiter's questions") ||
+                text.includes('kindly answer all') ||
+                text.includes('answer recruiter') ||
+                text.includes('type message here') ||
+                text.includes('how many years of experience') ||
+                text.includes('skip this question') ||
+                text.includes('current ctc') ||
+                text.includes('expected ctc') ||
+                text.includes('notice period') ||
+                text.includes('in lacs') ||
+                text.includes('screening questions') ||
+                text.includes('relevant experience') ||
+                text.includes('relocate') ||
+                (text.includes('save') && (inputs.length > 0 || options.length > 0));
+
+              const hasSubmitBtn = Array.from(modal.querySelectorAll(selectors.SUBMIT_BUTTON.join(', '))).some(b =>
+                isVisible(b as HTMLElement),
+              );
+
+              if ((hasRecruiterKeywords || hasSubmitBtn) && (inputs.length > 0 || options.length > 0)) {
+                return modal;
               }
             }
             return null;
           }
 
-          // A. Explicit success message anywhere in modal or page
-          const bodyText = (document.body.innerText || '').toLowerCase();
-          const hasSuccessMsg =
-            selectors.SUCCESS_INDICATORS.some(ind => bodyText.includes(ind)) ||
-            bodyText.includes('successfully applied') ||
-            bodyText.includes('application sent') ||
-            bodyText.includes('applied successfully') ||
-            bodyText.includes('your application has been sent');
-
-          if (hasSuccessMsg) {
-            return { finished: true, reason: 'success_message_detected' };
+          // 1. Explicit success check FIRST
+          const succ = evaluateSuccess();
+          if (succ.isSuccess) {
+            return { finished: true, success: true, signals: succ.signals };
           }
 
-          // B. Check primary apply button state
+          // 2. Check primary apply button state
           for (const sel of selectors.PRIMARY_APPLY_BUTTON) {
             const el = document.querySelector(sel) as HTMLElement | null;
             if (el && isVisible(el)) {
@@ -2249,48 +3210,48 @@ export class NaukriAdapter implements IPlatformAdapter {
                 bt === 'applied' ||
                 bt === 'already applied' ||
                 bt.startsWith('applied on') ||
+                bt.startsWith('applied to') ||
                 el.classList.contains('applied') ||
                 el.classList.contains('already-applied')
               ) {
-                return { finished: true, reason: 'primary_button_applied' };
+                return { finished: true, success: true, signals: [`button: ${bt || 'applied'}`] };
               }
             }
           }
 
-          const modal = findModal();
+          // 3. Check if real questionnaire STILL has active inputs or choice options
+          const modal = findRealQuestionnaire();
           if (modal) {
-            const modalText = (modal.innerText || '').toLowerCase();
-            if (
-              modalText.includes('successfully applied') ||
-              modalText.includes('application sent') ||
-              modalText.includes('applied successfully') ||
-              modalText.includes('your application has been sent')
-            ) {
-              return { finished: true, reason: 'modal_success_text' };
+            const modalSucc = evaluateSuccess();
+            if (modalSucc.isSuccess) {
+              return { finished: true, success: true, signals: modalSucc.signals };
             }
 
-            // Check if modal STILL has active inputs or choice options
-            const inputs = modal.querySelectorAll('input:not([type="hidden"]):not([type="file"]), select, textarea');
-            const choices = modal.querySelectorAll(
-              selectors.CHATBOT_OPTIONS.join(', ') + ', [role="radio"], [role="checkbox"]',
-            );
+            const inputs = Array.from(
+              modal.querySelectorAll('input:not([type="hidden"]):not([type="file"]), select, textarea'),
+            ).filter(i => !isUpsellElement(i as HTMLElement));
+            const choices = Array.from(
+              modal.querySelectorAll(selectors.CHATBOT_OPTIONS.join(', ') + ', [role="radio"], [role="checkbox"]'),
+            ).filter(c => !isUpsellElement(c as HTMLElement));
+
             if (inputs.length > 0 || choices.length > 0) {
-              return { finished: false, reason: 'more_questions_in_modal' };
+              return { finished: false, success: false, reason: 'more_questions_in_modal' };
             }
           }
 
-          // If no modal found right now, DO NOT prematurely declare finished!
-          // We let the next loop iteration check or confirm after transition
-          return { finished: false, reason: 'modal_transitioning_or_unconfirmed' };
+          // If no real questionnaire found right now, wait for next check
+          return { finished: false, success: false, reason: 'modal_transitioning_or_unconfirmed' };
         }, NAUKRI_SELECTORS);
 
-        if (postSubmitCheck.finished) {
-          logger.info(`[NaukriAdapter] Application finished after step ${step} (${postSubmitCheck.reason}).`);
+        if (postSubmitCheck.finished && postSubmitCheck.success) {
+          logger.info(
+            `[NaukriAdapter] Application finished after step ${step} (${postSubmitCheck.signals?.join(', ') || 'verified'}).`,
+          );
           return { success: true };
         }
       }
 
-      // Check final state after loop: Only succeed if modal is ACTUALLY closed or shows success message
+      // Check final state after loop: Only succeed if success signal is present
       const finalCheck = await puppeteerPage.evaluate((selectors: typeof NAUKRI_SELECTORS) => {
         function isVisible(el: HTMLElement): boolean {
           if (!el || el.offsetParent === null) return false;
@@ -2298,25 +3259,81 @@ export class NaukriAdapter implements IPlatformAdapter {
           return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
         }
 
-        for (const sel of selectors.MODAL_CONTAINER) {
-          const el = document.querySelector(sel) as HTMLElement | null;
-          if (el && isVisible(el)) {
-            const modalText = (el.innerText || '').toLowerCase();
-            if (
-              modalText.includes('successfully applied') ||
-              modalText.includes('application sent') ||
-              modalText.includes('applied successfully') ||
-              modalText.includes('your application has been sent')
-            ) {
-              return true; // Application completed successfully!
+        function isUpsellElement(el: HTMLElement | null): boolean {
+          if (!el) return false;
+          let cur: HTMLElement | null = el;
+          while (cur && cur !== document.body) {
+            const text = (cur.innerText || cur.textContent || cur.getAttribute('aria-label') || '').toLowerCase();
+            for (const term of selectors.UPSELL_EXCLUSIONS || []) {
+              if (text.includes(term.toLowerCase())) return true;
             }
-            return false; // Modal is still open!
+            cur = cur.parentElement;
+          }
+          return false;
+        }
+
+        // 1. Success check FIRST
+        const signals: string[] = [];
+        const bodyText = (document.body.innerText || '').toLowerCase();
+        const appliedToRegex = /(?:applied\s+to|application\s+sent\s+to)\s+([a-z0-9][\w\s\(\)\.-]{1,60})/i;
+        const appliedToMatch = bodyText.match(appliedToRegex);
+        if (appliedToMatch) signals.push(`text: applied to ${appliedToMatch[1].trim()}`);
+        for (const ind of selectors.SUCCESS_INDICATORS) {
+          if (ind.startsWith('.')) continue;
+          if (bodyText.includes(ind.toLowerCase())) {
+            signals.push(`text: ${ind}`);
+            break;
           }
         }
-        return true;
+        for (const sel of selectors.SUCCESS_BANNERS || []) {
+          try {
+            const el = document.querySelector(sel);
+            if (el && isVisible(el as HTMLElement)) {
+              signals.push(`banner: ${sel}`);
+              break;
+            }
+          } catch {}
+        }
+        for (const sel of selectors.PRIMARY_APPLY_BUTTON) {
+          const el = document.querySelector(sel) as HTMLElement | null;
+          if (el) {
+            const bt = (el.textContent || '').trim().toLowerCase();
+            if (
+              bt.includes('applied') ||
+              el.classList.contains('applied') ||
+              el.classList.contains('already-applied')
+            ) {
+              signals.push(`button: ${bt}`);
+              break;
+            }
+          }
+        }
+
+        if (signals.length > 0) {
+          return { success: true, signals };
+        }
+
+        // Check if real questionnaire is still open
+        for (const sel of selectors.MODAL_CONTAINER) {
+          const el = document.querySelector(sel) as HTMLElement | null;
+          if (el && isVisible(el) && !isUpsellElement(el)) {
+            const inputs = el.querySelectorAll('input:not([type="hidden"]):not([type="file"]), select, textarea');
+            const choices = el.querySelectorAll(
+              selectors.CHATBOT_OPTIONS.join(', ') + ', [role="radio"], [role="checkbox"]',
+            );
+            if (inputs.length > 0 || choices.length > 0) {
+              return { success: false, reason: 'real_modal_still_open' };
+            }
+          }
+        }
+
+        return { success: false, reason: 'no_success_signal' };
       }, NAUKRI_SELECTORS);
 
-      if (finalCheck) {
+      if (finalCheck.success) {
+        logger.info(
+          `[NaukriAdapter] Application confirmed successful on final check (${finalCheck.signals?.join(', ') || 'verified'}).`,
+        );
         return { success: true };
       }
 
