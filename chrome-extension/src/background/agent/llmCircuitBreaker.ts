@@ -12,12 +12,14 @@ interface CircuitBreakerState {
   isAvailable: boolean;
   unavailableReason?: string;
   hasAnnouncedLiveActivity: boolean;
+  consecutiveTransientFailures: number;
 }
 
 let circuitBreakerState: CircuitBreakerState = {
   isAvailable: true,
   unavailableReason: undefined,
   hasAnnouncedLiveActivity: false,
+  consecutiveTransientFailures: 0,
 };
 
 let registeredLiveActivityEmitter: LiveActivityAlertEmitter | null = null;
@@ -31,6 +33,7 @@ export function resetLlmCircuitBreaker(emitter?: LiveActivityAlertEmitter | null
     isAvailable: true,
     unavailableReason: undefined,
     hasAnnouncedLiveActivity: false,
+    consecutiveTransientFailures: 0,
   };
   if (emitter !== undefined) {
     registeredLiveActivityEmitter = emitter;
@@ -50,6 +53,68 @@ export function setLlmCircuitBreakerEmitter(emitter: LiveActivityAlertEmitter | 
  */
 export function isLlmAvailable(): boolean {
   return circuitBreakerState.isAvailable;
+}
+
+/**
+ * Checks if an error is a permanent configuration or authentication error that warrants
+ * tripping the circuit breaker immediately on 1 failure (400, 401, 403, PROVIDER_BAD_REQUEST).
+ */
+export function isConfigurationError(err: unknown): boolean {
+  if (!err) return false;
+  const status = (err as any)?.status || (err as any)?.statusCode || (err as any)?.response?.status;
+  if (status === 400 || status === 401 || status === 403 || status === '400' || status === '401' || status === '403') {
+    return true;
+  }
+  const errCode = (err as any)?.code || (err as any)?.error?.code || (err as any)?.error?.type || '';
+  if (typeof errCode === 'string' && (/PROVIDER_BAD_REQUEST/i.test(errCode) || /PROVIDER_AUTH_ERROR/i.test(errCode))) {
+    return true;
+  }
+  const msg = ((err as any)?.message || String(err || '')).toLowerCase();
+  return (
+    msg.includes('provider_bad_request') ||
+    msg.includes('provider_auth_error') ||
+    msg.includes('unauthorized') ||
+    msg.includes('forbidden') ||
+    msg.includes('invalid api key')
+  );
+}
+
+/**
+ * Checks if an error is a 429 rate limit error.
+ */
+export function isRateLimitError(err: unknown): boolean {
+  if (!err) return false;
+  const status = (err as any)?.status || (err as any)?.statusCode || (err as any)?.response?.status;
+  if (status === 429 || status === '429') return true;
+  const code = (err as any)?.code || (err as any)?.error?.code || (err as any)?.error?.type || '';
+  if (typeof code === 'string' && (/PROVIDER_RATE_LIMIT/i.test(code) || /RATE_LIMIT/i.test(code))) return true;
+  const msg = ((err as any)?.message || String(err || '')).toLowerCase();
+  return (
+    msg.includes('429') ||
+    msg.includes('rate limit') ||
+    msg.includes('too many requests') ||
+    msg.includes('quota exceeded')
+  );
+}
+
+/**
+ * Extracts Retry-After header or delay from error, converted to milliseconds (bounded between 500ms and 5000ms).
+ */
+export function extractRetryAfterMs(err: unknown): number {
+  if (!err) return 1000;
+  const headerVal =
+    (err as any)?.response?.headers?.get?.('retry-after') ||
+    (err as any)?.response?.headers?.['retry-after'] ||
+    (err as any)?.retryAfter ||
+    (err as any)?.error?.retryAfter;
+  if (headerVal !== undefined) {
+    const parsed = parseFloat(String(headerVal));
+    if (!isNaN(parsed) && parsed >= 0) {
+      const ms = Math.round(parsed * 1000);
+      return Math.min(ms, 5000);
+    }
+  }
+  return 1000;
 }
 
 /**
@@ -126,8 +191,9 @@ export function tripLlmCircuitBreaker(err?: unknown, emitter?: LiveActivityAlert
 
 /**
  * Wraps a BaseChatModel instance with the circuit breaker.
- * If the circuit breaker is tripped, any invocation rejects immediately without contacting the LLM.
- * If invocation fails with a circuit breaker error, trips the circuit breaker for the current run.
+ * - Single 429 honors Retry-After with a short wait and 1 retry.
+ * - 400/401/403 configuration errors trip the breaker immediately.
+ * - Transient errors trip only after 3 consecutive failures.
  */
 export function wrapChatModelWithCircuitBreaker<T extends BaseChatModel>(
   model: T,
@@ -145,12 +211,44 @@ export function wrapChatModelWithCircuitBreaker<T extends BaseChatModel>(
     }
 
     try {
-      return await originalInvoke(input, options);
+      const result = await originalInvoke(input, options);
+      circuitBreakerState.consecutiveTransientFailures = 0;
+      return result;
     } catch (err) {
-      if (isCircuitBreakerError(err)) {
+      // 1. Immediate trip on configuration or auth errors (400, 401, 403)
+      if (isConfigurationError(err)) {
         tripLlmCircuitBreaker(err, emitter);
+        throw err;
       }
-      throw err;
+
+      let activeError = err;
+
+      // 2. Rate limit 429: honor Retry-After with a short wait and 1 retry
+      if (isRateLimitError(err)) {
+        const waitMs = extractRetryAfterMs(err);
+        logger.warning(`[LLMCircuitBreaker] 429 rate limit encountered. Waiting ${waitMs}ms before 1 retry...`);
+        try {
+          await new Promise(r => setTimeout(r, waitMs));
+          const retryResult = await originalInvoke(input, options);
+          circuitBreakerState.consecutiveTransientFailures = 0;
+          return retryResult;
+        } catch (retryErr) {
+          activeError = retryErr;
+        }
+      }
+
+      // 3. Transient failure: trip ONLY after 3 consecutive failures
+      if (isCircuitBreakerError(activeError)) {
+        circuitBreakerState.consecutiveTransientFailures++;
+        logger.warning(
+          `[LLMCircuitBreaker] Transient failure ${circuitBreakerState.consecutiveTransientFailures}/3: ${(activeError as any)?.message}`,
+        );
+        if (circuitBreakerState.consecutiveTransientFailures >= 3) {
+          tripLlmCircuitBreaker(activeError, emitter);
+        }
+      }
+
+      throw activeError;
     }
   };
 
@@ -169,11 +267,38 @@ export async function callWithLlmCircuitBreaker<T>(
     return null;
   }
   try {
-    return await fn();
+    const result = await fn();
+    circuitBreakerState.consecutiveTransientFailures = 0;
+    return result;
   } catch (err) {
-    if (isCircuitBreakerError(err)) {
+    if (isConfigurationError(err)) {
       tripLlmCircuitBreaker(err, emitter);
+      throw err;
     }
-    throw err;
+
+    let activeError = err;
+    if (isRateLimitError(err)) {
+      const waitMs = extractRetryAfterMs(err);
+      logger.warning(`[LLMCircuitBreaker] 429 rate limit encountered. Waiting ${waitMs}ms before 1 retry...`);
+      try {
+        await new Promise(r => setTimeout(r, waitMs));
+        const retryResult = await fn();
+        circuitBreakerState.consecutiveTransientFailures = 0;
+        return retryResult;
+      } catch (retryErr) {
+        activeError = retryErr;
+      }
+    }
+
+    if (isCircuitBreakerError(activeError)) {
+      circuitBreakerState.consecutiveTransientFailures++;
+      logger.warning(
+        `[LLMCircuitBreaker] Transient failure ${circuitBreakerState.consecutiveTransientFailures}/3: ${(activeError as any)?.message}`,
+      );
+      if (circuitBreakerState.consecutiveTransientFailures >= 3) {
+        tripLlmCircuitBreaker(activeError, emitter);
+      }
+    }
+    throw activeError;
   }
 }

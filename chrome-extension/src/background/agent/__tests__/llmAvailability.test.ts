@@ -323,5 +323,76 @@ describe('LLM Availability & Circuit Breaker', () => {
       expect(deMatch.matched).toBe(true);
       expect(deMatch.answer).toBe('Germany (+49)');
     });
+
+    it('single 429 rate limit honors Retry-After, retries once, and stays available if retry succeeds', async () => {
+      const liveActivitySpy = vi.fn();
+      resetLlmCircuitBreaker(liveActivitySpy);
+
+      let attempts = 0;
+      const invokeMock = vi.fn().mockImplementation(() => {
+        attempts++;
+        if (attempts === 1) {
+          const err: any = new Error('429 Too Many Requests: Rate limit exceeded');
+          err.status = 429;
+          err.retryAfter = 0.005;
+          return Promise.reject(err);
+        }
+        return Promise.resolve({ content: '{"answer":"Success on retry"}' });
+      });
+
+      const mockModel = { invoke: invokeMock } as unknown as BaseChatModel;
+      const wrapped = wrapChatModelWithCircuitBreaker(mockModel, liveActivitySpy);
+
+      const res = await wrapped.invoke('test prompt');
+      expect((res as any).content).toBe('{"answer":"Success on retry"}');
+      expect(attempts).toBe(2);
+      expect(isLlmAvailable()).toBe(true);
+      expect(liveActivitySpy).not.toHaveBeenCalled();
+    });
+
+    it('single 429 failure after retry does NOT disable AI for the whole run (requires 3 consecutive failures)', async () => {
+      const liveActivitySpy = vi.fn();
+      resetLlmCircuitBreaker(liveActivitySpy);
+
+      const err429: any = new Error('429 Rate limit');
+      err429.status = 429;
+      err429.retryAfter = 0.005;
+
+      const invokeMock = vi.fn().mockRejectedValue(err429);
+      const mockModel = { invoke: invokeMock } as unknown as BaseChatModel;
+      const wrapped = wrapChatModelWithCircuitBreaker(mockModel, liveActivitySpy);
+
+      // Call 1 fails (initial + 1 retry)
+      await expect(wrapped.invoke('call 1')).rejects.toThrow();
+      expect(isLlmAvailable()).toBe(true); // NOT tripped yet!
+      expect(liveActivitySpy).not.toHaveBeenCalled();
+
+      // Call 2 fails
+      await expect(wrapped.invoke('call 2')).rejects.toThrow();
+      expect(isLlmAvailable()).toBe(true); // Still NOT tripped!
+      expect(liveActivitySpy).not.toHaveBeenCalled();
+
+      // Call 3 fails -> Now 3 consecutive failures -> TRIPS!
+      await expect(wrapped.invoke('call 3')).rejects.toThrow();
+      expect(isLlmAvailable()).toBe(false);
+      expect(liveActivitySpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('configuration error (400, 401, 403, PROVIDER_BAD_REQUEST) trips immediately on first failure', async () => {
+      const liveActivitySpy = vi.fn();
+      resetLlmCircuitBreaker(liveActivitySpy);
+
+      const authErr: any = new Error('403 Forbidden: Invalid API Key');
+      authErr.status = 403;
+
+      const invokeMock = vi.fn().mockRejectedValue(authErr);
+      const mockModel = { invoke: invokeMock } as unknown as BaseChatModel;
+      const wrapped = wrapChatModelWithCircuitBreaker(mockModel, liveActivitySpy);
+
+      await expect(wrapped.invoke('call')).rejects.toThrow();
+      // Must trip immediately
+      expect(isLlmAvailable()).toBe(false);
+      expect(liveActivitySpy).toHaveBeenCalledTimes(1);
+    });
   });
 });

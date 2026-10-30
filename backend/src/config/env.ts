@@ -98,6 +98,14 @@ const envSchema = z.object({
     .union([z.number(), z.string()])
     .transform(val => (typeof val === 'number' ? val : parseInt(val || '50', 10)))
     .default(50),
+  LLM_RATE_PER_USER_RPM: z
+    .union([z.number(), z.string()])
+    .transform(val => (typeof val === 'number' ? val : parseInt(String(val || '60'), 10)))
+    .default(60),
+  LLM_RATE_GLOBAL_RPM: z
+    .union([z.number(), z.string()])
+    .transform(val => (typeof val === 'number' ? val : parseInt(String(val || '600'), 10)))
+    .default(600),
 });
 
 const parsedEnv = envSchema.safeParse(process.env);
@@ -142,6 +150,8 @@ const baseEnv = parsedEnv.success
       ENABLE_CREDITS_RECONCILE:
         process.env.ENABLE_CREDITS_RECONCILE === 'true' || process.env.ENABLE_CREDITS_RECONCILE === '1',
       MAX_DAILY_REFUND_CAP: parseInt(process.env.MAX_DAILY_REFUND_CAP || '50', 10),
+      LLM_RATE_PER_USER_RPM: parseInt(process.env.LLM_RATE_PER_USER_RPM || '60', 10),
+      LLM_RATE_GLOBAL_RPM: parseInt(process.env.LLM_RATE_GLOBAL_RPM || '600', 10),
     };
 
 /**

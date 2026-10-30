@@ -248,12 +248,16 @@ export class GeminiLlmProvider implements ILlmProvider {
           const totalTokens = usage.total_tokens || promptTokens + completionTokens;
 
           clearTimeout(timer);
+          const servedBy: 'primary' | 'fallback' = effectiveModel === this.defaultModel ? 'primary' : 'fallback';
+          logger.info(`[GeminiLlmProvider] Completion served by ${servedBy} model: '${effectiveModel}'`);
           return {
             content,
             promptTokens,
             completionTokens,
             totalTokens,
             finishReason,
+            model: effectiveModel,
+            servedBy,
             ...(toolCalls ? { toolCalls } : {}),
           };
         } catch (fetchErr: any) {

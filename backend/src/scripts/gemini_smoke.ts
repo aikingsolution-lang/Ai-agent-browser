@@ -16,15 +16,14 @@ import { GeminiLlmProvider } from '../services/llm/geminiLlmProvider.js';
 async function main(): Promise<void> {
   const apiKey = (process.env.GEMINI_API_KEY || '').trim();
   const model = (process.env.GEMINI_MODEL || 'gemini-3.5-flash').trim();
-  const fallbackModel = (process.env.GEMINI_FALLBACK_MODEL || 'gemini-3.5-flash-lite').trim();
-
   if (!apiKey) {
     console.error('Status: 400 Missing Configuration');
     console.error('Error: GEMINI_API_KEY environment variable is not set.');
     process.exit(1);
   }
 
-  const provider = new GeminiLlmProvider(apiKey, model, fallbackModel);
+  // Strict smoke test: test ONLY the configured primary model (no fallback)
+  const provider = new GeminiLlmProvider(apiKey, model);
 
   try {
     const startTime = Date.now();

@@ -24,6 +24,8 @@ export interface LlmCompletionResponse {
   totalTokens: number;
   finishReason: string;
   toolCalls?: any[];
+  model?: string;
+  servedBy?: 'primary' | 'fallback';
 }
 
 export interface ILlmProvider {

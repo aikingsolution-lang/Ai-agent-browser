@@ -1,5 +1,6 @@
 import rateLimit from 'express-rate-limit';
 import { env } from '../config/env.js';
+import { logger } from '../utils/logger.js';
 
 const isTest = () => env.NODE_ENV === 'test';
 
@@ -86,18 +87,54 @@ export const getLlmRateLimiterKey = (req: any): string => req.user?.uid || req.u
 
 export const llmRateLimiter = rateLimit({
   windowMs: 60 * 1000, // 1 minute
-  max: 60, // Limit each authenticated user to 60 LLM requests per minute
+  max: env.LLM_RATE_PER_USER_RPM, // Configurable per-user RPM (default: 60)
   standardHeaders: true,
   legacyHeaders: false,
   skip: isTest,
   keyGenerator: getLlmRateLimiterKey,
-  message: {
-    success: false,
-    message: 'Too many LLM requests. Please try again after 1 minute.',
-    error: {
-      code: 'TOO_MANY_REQUESTS',
-    },
-    timestamp: new Date().toISOString(),
+  handler: (req, res, _next, options) => {
+    const retryAfter = Math.ceil(options.windowMs / 1000);
+    res.setHeader('Retry-After', String(retryAfter));
+    logger.warn('[RateLimiter] User rate limit exceeded on LLM gateway', {
+      userId: getLlmRateLimiterKey(req),
+      limit: options.max,
+      retryAfter,
+    });
+    res.status(429).json({
+      success: false,
+      message: `Too many LLM requests. Rate limit is ${options.max} requests per minute. Please try again after ${retryAfter} seconds.`,
+      error: {
+        code: 'PROVIDER_RATE_LIMIT',
+        retryAfter,
+      },
+      timestamp: new Date().toISOString(),
+    });
+  },
+});
+
+export const globalLlmRateLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: env.LLM_RATE_GLOBAL_RPM, // Configurable global gateway RPM (default: 600)
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: isTest,
+  keyGenerator: () => 'global_llm_gateway',
+  handler: (req, res, _next, options) => {
+    const retryAfter = Math.ceil(options.windowMs / 1000);
+    res.setHeader('Retry-After', String(retryAfter));
+    logger.warn('[RateLimiter] Global capacity limit reached on LLM gateway', {
+      globalLimit: options.max,
+      retryAfter,
+    });
+    res.status(429).json({
+      success: false,
+      message: 'Global LLM gateway capacity reached. Please try again shortly.',
+      error: {
+        code: 'PROVIDER_RATE_LIMIT',
+        retryAfter,
+      },
+      timestamp: new Date().toISOString(),
+    });
   },
 });
 

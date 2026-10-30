@@ -187,9 +187,21 @@ export class LlmService {
         metadata: {
           content: completion.content,
           runId,
+          servedModel: completion.model || model,
+          servedBy: completion.servedBy || 'primary',
           ...(completion.toolCalls ? { toolCalls: completion.toolCalls } : {}),
           ...(premiumCovered ? { coveredBy: 'jobform-premium', creditsEquivalent: creditsToDeduct } : {}),
         },
+      });
+
+      logger.info('[LLM Gateway] Completion served', {
+        requestId,
+        userId,
+        provider: provider.providerName,
+        model: completion.model || model,
+        servedBy: completion.servedBy || 'primary',
+        totalTokens: completion.totalTokens,
+        latencyMs,
       });
 
       return {
