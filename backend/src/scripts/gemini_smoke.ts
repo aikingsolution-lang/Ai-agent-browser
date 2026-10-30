@@ -15,7 +15,7 @@ import { GeminiLlmProvider } from '../services/llm/geminiLlmProvider.js';
 
 async function main(): Promise<void> {
   const apiKey = (process.env.GEMINI_API_KEY || '').trim();
-  const model = (process.env.GEMINI_MODEL || 'gemini-2.5-flash').trim();
+  const model = (process.env.GEMINI_MODEL || 'gemini-3.5-flash').trim();
 
   if (!apiKey) {
     console.error('Status: 400 Missing Configuration');
@@ -31,7 +31,7 @@ async function main(): Promise<void> {
       model,
       messages: [{ role: 'user', content: 'Respond with "PONG" and nothing else.' }],
       temperature: 0.1,
-      maxTokens: 20,
+      maxTokens: 100,
     });
     const latencyMs = Date.now() - startTime;
 

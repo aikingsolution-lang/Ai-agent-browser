@@ -42,7 +42,7 @@ const envSchema = z.object({
   GEMINI_API_KEY: z.string().default(''),
   GEMINI_MODEL: z
     .string()
-    .default('gemini-2.5-flash')
+    .default('gemini-3.5-flash')
     .refine(val => ALLOWED_MODELS.includes(val as any), {
       message: `Invalid GEMINI_MODEL. Allowed models: ${ALLOWED_MODELS.join(', ')}`,
     }),
@@ -63,10 +63,10 @@ const envSchema = z.object({
       }
       const provider = (process.env.LLM_PROVIDER as 'gemini' | 'bedrock') || 'gemini';
       const providerDefault =
-        provider === 'bedrock' ? 'amazon.nova-lite-v1:0' : process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+        provider === 'bedrock' ? 'amazon.nova-lite-v1:0' : process.env.GEMINI_MODEL || 'gemini-3.5-flash';
       return providerDefault;
     })
-    .default('gemini-2.5-flash'),
+    .default('gemini-3.5-flash'),
 
   // ── Google OAuth client ID (used by the extension — public) ───────────────
   GOOGLE_CLIENT_ID: z

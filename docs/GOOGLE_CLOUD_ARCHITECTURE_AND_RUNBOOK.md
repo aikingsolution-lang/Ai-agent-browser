@@ -213,7 +213,7 @@ If you ever need to switch to a **different Google Cloud account or new project*
      --allow-unauthenticated \
      --service-account="${SA_EMAIL}" \
      --set-env-vars="NODE_ENV=production,CORS_ORIGIN=*,GOOGLE_CLIENT_ID=YOUR_CLIENT_ID,RAZORPAY_KEY_ID=YOUR_KEY_ID,LLM_PROVIDER=gemini,GEMINI_MODEL=gemini-2.5-flash,AWS_BEDROCK_REGION=us-east-1,LLM_DEFAULT_MODEL=gemini-2.5-flash,FIREBASE_PROJECT_ID=jobform-automator-website,FIREBASE_DATABASE_URL=https://jobform-automator-website-default-rtdb.firebaseio.com,FIREBASE_ADMIN_CLIENT_EMAIL=YOUR_SERVICE_ACCOUNT_CLIENT_EMAIL,NANOBROWSER_RTDB_ROOT=nanobrowser" \
-     --set-secrets="FIREBASE_ADMIN_PRIVATE_KEY=FIREBASE_ADMIN_PRIVATE_KEY:latest,JWT_SECRET=JWT_SECRET:latest,RAZORPAY_KEY_SECRET=RAZORPAY_KEY_SECRET:latest,RAZORPAY_WEBHOOK_SECRET=RAZORPAY_WEBHOOK_SECRET:latest,GEMINI_API_KEY=GEMINI_API_KEY:latest,AWS_BEDROCK_API_KEY=AWS_BEDROCK_API_KEY:latest"
+     --set-secrets="FIREBASE_ADMIN_PRIVATE_KEY=FIREBASE_ADMIN_PRIVATE_KEY:latest,JWT_SECRET=JWT_SECRET:latest,RAZORPAY_KEY_SECRET=RAZORPAY_KEY_SECRET:latest,RAZORPAY_WEBHOOK_SECRET=RAZORPAY_WEBHOOK_SECRET:latest,GEMINI_API_KEY=GEMINI_API_KEY:latest"
    ```
 
    > Keep the old `MONGO_URI` secret in Secret Manager (unmounted) until the MongoDB → RTDB data
