@@ -68,9 +68,7 @@ export class GeminiLlmProvider implements ILlmProvider {
     if (request.tool_choice !== undefined) {
       requestPayload.tool_choice = request.tool_choice;
     }
-    if (this.thinkingBudget !== undefined) {
-      requestPayload.thinking = { budget_tokens: this.thinkingBudget };
-    }
+    // Note: Google's OpenAI-compatible endpoint accepts `reasoning_effort`, but rejects unknown `thinking` object with HTTP 400.
     if (this.reasoningEffort) {
       requestPayload.reasoning_effort = this.reasoningEffort;
     }
@@ -271,9 +269,7 @@ export class GeminiLlmProvider implements ILlmProvider {
     if (request.tool_choice !== undefined) {
       requestPayload.tool_choice = request.tool_choice;
     }
-    if (this.thinkingBudget !== undefined) {
-      requestPayload.thinking = { budget_tokens: this.thinkingBudget };
-    }
+    // Note: Google's OpenAI-compatible endpoint accepts `reasoning_effort`, but rejects unknown `thinking` object with HTTP 400.
     if (this.reasoningEffort) {
       requestPayload.reasoning_effort = this.reasoningEffort;
     }

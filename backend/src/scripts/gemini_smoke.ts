@@ -15,7 +15,7 @@ import { GeminiLlmProvider } from '../services/llm/geminiLlmProvider.js';
 
 async function main(): Promise<void> {
   const apiKey = (process.env.GEMINI_API_KEY || '').trim();
-  const model = (process.env.GEMINI_MODEL || 'gemini-3.5-flash').trim();
+  const model = (process.env.GEMINI_MODEL || 'gemini-3.5-flash-lite').trim();
 
   if (!apiKey) {
     console.error('Status: 400 Missing Configuration');
