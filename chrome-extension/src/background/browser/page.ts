@@ -6135,9 +6135,6 @@ export default class Page {
         );
         company = cleanElementText(compLink);
       }
-      if (!company) {
-        company = 'Unknown Company';
-      }
 
       // 4. Extract Location
       const locationEl = document.querySelector(
@@ -6215,8 +6212,8 @@ export default class Page {
         .slice(0, 3000);
 
       return {
-        title: title || 'LinkedIn Job',
-        company: company || 'Unknown Company',
+        title: title || '',
+        company: company || '',
         location,
         isClosed,
         isAlreadyApplied,

@@ -243,13 +243,36 @@ export function matchesQuestionLoosely(q1: string, q2: string): boolean {
   return false;
 }
 
+const EXCLUDED_TOPIC_WORDS =
+  /^(?:a|an|the|any|your|our|this|that|of|work|total|overall|relevant|professional|experience|years|hands-on|hand|hands|offer|offers|offer\s+in\s+hand|offers\s+in\s+hand|notice|notice\s+period|last\s+working\s+day|lwd|team|teams|relocation|commute|salary|ctc|scale|rating)$/i;
+
+/**
+ * Formats a Date object according to expected hint/placeholder formats (DD/MM/YYYY, YYYY-MM-DD, MM/DD/YYYY).
+ */
+export function formatProjectedDate(date: Date, hint?: string): string {
+  const dd = String(date.getDate()).padStart(2, '0');
+  const mm = String(date.getMonth() + 1).padStart(2, '0');
+  const yyyy = date.getFullYear();
+  const h = (hint || '').toLowerCase();
+  if (/yyyy-mm-dd/.test(h)) {
+    return `${yyyy}-${mm}-${dd}`;
+  }
+  if (/mm\/dd\/yyyy/.test(h)) {
+    return `${mm}/${dd}/${yyyy}`;
+  }
+  return `${dd}/${mm}/${yyyy}`;
+}
+
 /**
  * Extracts candidate skill or topic from a question text.
  */
 export function extractQuestionTopic(questionText: string): string | null {
   const cleanQ = cleanLinkedInText(questionText);
+  if (/\b(?:offer\s*in\s*hand|offers?\s*in\s*hand|notice\s*period|last\s*working\s*day)\b/i.test(cleanQ)) {
+    return null;
+  }
   const extracted = userQuestionManager.extractSkillName(cleanQ);
-  if (extracted) return cleanLinkedInText(extracted);
+  if (extracted && !EXCLUDED_TOPIC_WORDS.test(extracted.trim())) return cleanLinkedInText(extracted);
 
   const patterns = [
     /(?:how\s+many\s+years|years\s+of|experience).*?\b(?:with|in|using)\s+([A-Za-z0-9#+.\s-]{2,40}?)(?:\?|\*|$|\s*\(|\s+in\s+years)/i,
@@ -267,25 +290,14 @@ export function extractQuestionTopic(questionText: string): string | null {
         .replace(/[^\w#+.-]/g, ' ')
         .replace(/\s+/g, ' ')
         .trim();
-      if (
-        clean.length >= 2 &&
-        !/^(a|an|the|any|your|our|this|that|of|work|total|overall|relevant|professional|experience|years|hands-on)$/i.test(
-          clean,
-        )
-      ) {
+      if (clean.length >= 2 && !EXCLUDED_TOPIC_WORDS.test(clean)) {
         return clean;
       }
     }
   }
 
   const norm = normalizeQuestionForMatch(cleanQ);
-  if (
-    norm.length >= 2 &&
-    norm.length <= 40 &&
-    !/^(a|an|the|any|your|our|this|that|of|work|total|overall|relevant|professional|experience|years|hands-on)$/i.test(
-      norm,
-    )
-  ) {
+  if (norm.length >= 2 && norm.length <= 40 && !EXCLUDED_TOPIC_WORDS.test(norm)) {
     return norm;
   }
   return null;
@@ -2255,16 +2267,29 @@ export function matchRuleBased(
     return { matched: true, answer: careerBrain.fullName.trim(), sourceDetail: 'profile: fullName' };
   }
   // Location Willingness, Commute, Relocation, and Hybrid/Client Location questions
+  // Location Willingness, Commute, Relocation, and Hybrid/Client Location questions
   if (
     /comfortable\s*(?:with)?|willing\s*(?:to)?|open\s*to|able\s*to\s*commute|can\s*you\s*work|work\s*from|relocate|commute|onsite/i.test(
       labelLower,
     ) &&
     /location|office|client|hybrid|city|travel|relocate|commute|bangalore|bengaluru/i.test(labelLower)
   ) {
-    return { matched: true, answer: 'Yes', sourceDetail: 'profile standard: location / onsite willingness' };
+    const isWilling =
+      !careerBrain.willingToRelocate || /^(?:yes|true|open|willing)/i.test(careerBrain.willingToRelocate.trim());
+    return {
+      matched: true,
+      answer: isWilling ? 'Yes' : 'No',
+      sourceDetail: `profile: willingToRelocate ("${careerBrain.willingToRelocate || 'Yes'}")`,
+    };
   }
   if (/onsite|commute|relocate/i.test(labelLower)) {
-    return { matched: true, answer: 'Yes', sourceDetail: 'profile standard: onsite willingness' };
+    const isWilling =
+      !careerBrain.willingToRelocate || /^(?:yes|true|open|willing)/i.test(careerBrain.willingToRelocate.trim());
+    return {
+      matched: true,
+      answer: isWilling ? 'Yes' : 'No',
+      sourceDetail: `profile: willingToRelocate ("${careerBrain.willingToRelocate || 'Yes'}")`,
+    };
   }
 
   // Timezone overlap, working hours, shift flexibility, US Eastern/PST/GMT/UTC overlap
@@ -2304,6 +2329,154 @@ export function matchRuleBased(
     };
   }
 
+  // Official Last Working Day / Expected Last Working Day / Notice Period End Date
+  if (
+    /\b(?:official\s*last\s*working\s*day|last\s*working\s*day|expected\s*last\s*working\s*day|lwd)\b/i.test(labelLower)
+  ) {
+    if (careerBrain.noticePeriod) {
+      const notice = careerBrain.noticePeriod.trim();
+      const isDate =
+        (field.fieldType as string) === 'date' || /date|dd\/mm\/yyyy|yyyy-mm-dd|mm\/dd\/yyyy/i.test(labelLower);
+      const hint = `${field.placeholder || ''} ${field.hintText || ''}`.toLowerCase();
+      let targetDate: Date;
+      let sourceNote = '';
+
+      if (/immediate|\b0\s*days?\b|\b0\b|now|not\s*employed|unemployed|currently\s*available/i.test(notice)) {
+        targetDate = new Date();
+        sourceNote = `profile: noticePeriod is Immediate -> derived from application date (${formatProjectedDate(targetDate, hint)})`;
+      } else {
+        let days = 15;
+        const monthMatch = notice.match(/(\d+)\s*month/i);
+        const daysMatch = notice.match(/(\d+)\s*day/i) || notice.match(/(\d+)/);
+        if (monthMatch) {
+          days = parseInt(monthMatch[1], 10) * 30;
+        } else if (daysMatch) {
+          days = parseInt(daysMatch[1], 10);
+        }
+        targetDate = new Date(Date.now() + days * 86400000);
+        sourceNote = `profile: noticePeriod ("${notice}") -> projected ${days} days from application date (${formatProjectedDate(targetDate, hint)})`;
+      }
+
+      const formatted = formatProjectedDate(targetDate, hint);
+      if (isDate) {
+        return { matched: true, answer: formatted, sourceDetail: sourceNote };
+      }
+      if (field.fieldType === 'text') {
+        const textAns = /immediate|\b0\s*days?\b|\b0\b|now/i.test(notice)
+          ? `Immediate (official last working day: ${formatted})`
+          : `${notice} notice (official last working day: ${formatted})`;
+        return { matched: true, answer: textAns, sourceDetail: sourceNote };
+      }
+    }
+    return { matched: false };
+  }
+
+  // Offers in Hand / Competing Offers
+  if (/\b(?:offer\s*in\s*hand|offers?\s*in\s*hand|competing\s*offer)\b/i.test(labelLower)) {
+    const customAns =
+      careerBrain.customAnswers?.[labelLower] || careerBrain.customAnswers?.[cleanLinkedInText(field.label || '')];
+    if (customAns) {
+      return {
+        matched: true,
+        answer: customAns,
+        sourceDetail: `profile custom answer: offer in hand ("${customAns}")`,
+      };
+    }
+    const isYesNo =
+      field.options &&
+      field.options.some(o => /^yes$/i.test(o.trim())) &&
+      field.options.some(o => /^no$/i.test(o.trim()));
+    if (isYesNo) {
+      const noOpt = field.options?.find(o => /^no$/i.test(o.trim())) || 'No';
+      return {
+        matched: true,
+        answer: noOpt,
+        sourceDetail: 'profile: no competing offers recorded (truthful neutral: "No")',
+      };
+    }
+    if (field.fieldType === 'text') {
+      return {
+        matched: true,
+        answer: 'None',
+        sourceDetail: 'profile: no competing offers recorded (truthful neutral: "None")',
+      };
+    }
+    return { matched: false };
+  }
+
+  // Team Management / Leadership
+  if (/\b(?:manag\w*.*team\w*|team\w*.*size|leadership\s*experience|managed\s*(?:a\s*)?team)\b/i.test(labelLower)) {
+    const leadershipTitle = /\b(?:lead|manager|head|director|supervisor|chief)\b/i.test(careerBrain.currentTitle || '');
+    const leadershipSkill =
+      careerBrain.skills &&
+      careerBrain.skills.some(s => /\b(?:team\s*lead|engineering\s*manager|management|leadership)\b/i.test(s));
+    const leadershipExp =
+      careerBrain.workExperience &&
+      careerBrain.workExperience.some(
+        w =>
+          /\b(?:lead|manager|head|director)\b/i.test(w.title || '') ||
+          /\b(?:managed|led)\s+(?:a\s+)?team\b/i.test(w.description || ''),
+      );
+    const hasLeadership = Boolean(leadershipTitle || leadershipSkill || leadershipExp);
+    const isYesNo =
+      field.options &&
+      field.options.some(o => /^yes$/i.test(o.trim())) &&
+      field.options.some(o => /^no$/i.test(o.trim()));
+
+    if (hasLeadership) {
+      if (isYesNo) {
+        const yesOpt = field.options?.find(o => /^yes$/i.test(o.trim())) || 'Yes';
+        return {
+          matched: true,
+          answer: yesOpt,
+          sourceDetail: `profile: leadership role in profile (${careerBrain.currentTitle || 'workExperience'})`,
+        };
+      }
+      if (field.fieldType === 'text') {
+        return {
+          matched: true,
+          answer: 'Experienced in technical leadership and engineering team collaboration.',
+          sourceDetail: `profile: leadership role in profile (${careerBrain.currentTitle || 'workExperience'})`,
+        };
+      }
+    } else {
+      if (isYesNo) {
+        const noOpt = field.options?.find(o => /^no$/i.test(o.trim())) || 'No';
+        return {
+          matched: true,
+          answer: noOpt,
+          sourceDetail: 'profile: individual contributor (no team management role in profile)',
+        };
+      }
+      if (
+        field.fieldType === 'number' ||
+        /^\s*(?:team\s*size|how\s*many\s*(?:people|members|direct\s*reports))\s*$/i.test(labelLower)
+      ) {
+        return {
+          matched: true,
+          answer: '0',
+          sourceDetail: 'profile: individual contributor (0 direct reports)',
+        };
+      }
+      if (field.fieldType === 'text') {
+        return {
+          matched: true,
+          answer: 'Individual contributor with no formal team management responsibilities.',
+          sourceDetail: 'profile: individual contributor (no team management role in profile)',
+        };
+      }
+    }
+  }
+
+  // Self-Ratings (Scale of 1-5, 1-10): Never invent a rating without profile/golden answers
+  if (
+    /\b(?:scale\s*of\s*1\s*(?:to|[-–])\s*5|rate.*1.*5|scale\s*of\s*1\s*(?:to|[-–])\s*10|rate.*1.*10)\b/i.test(
+      labelLower,
+    )
+  ) {
+    return { matched: false };
+  }
+
   // Cover Letter / Application Pitch / "Why should we hire you?"
   if (
     /cover\s*letter|cover\s*note|why\s*(?:should\s*we\s*hire|are\s*you\s*interested|do\s*you\s*want\s*to\s*work)|pitch\s*for|note\s*(?:to|for)\s*(?:the\s*)?hiring\s*manager|tell\s*us\s*why\s*you/i.test(
@@ -2322,12 +2495,12 @@ export function matchRuleBased(
   if (
     /preferred\s*location|target\s*location|which\s*location|location\s*preference/i.test(labelLower) &&
     !/comfortable|willing|open\s+to|commute|relocate|able\s+to|hybrid|onsite|are\s+you/i.test(labelLower) &&
-    (careerBrain.preferredLocations?.length || careerBrain.preferredLocation || careerBrain.currentLocation)
+    (careerBrain.preferredLocations?.length || careerBrain.preferredLocation)
   ) {
     const list =
       Array.isArray(careerBrain.preferredLocations) && careerBrain.preferredLocations.length > 0
         ? careerBrain.preferredLocations
-        : [careerBrain.preferredLocation || careerBrain.currentLocation || ''];
+        : [careerBrain.preferredLocation || ''];
 
     if (field.options && field.options.length > 0) {
       for (let pIdx = 0; pIdx < list.length; pIdx++) {
@@ -2357,19 +2530,22 @@ export function matchRuleBased(
       }
     }
 
-    const priority1 = list[0] || careerBrain.preferredLocation || careerBrain.currentLocation || '';
+    const priority1 = list[0] || careerBrain.preferredLocation || '';
     const cleanCity = cleanLocationForCityField(priority1);
     const finalAns = cleanCity || priority1;
-    return {
-      matched: true,
-      answer: finalAns,
-      sourceDetail: `profile: preferredLocations [Priority 1] ("${finalAns}")`,
-    };
+    if (finalAns) {
+      return {
+        matched: true,
+        answer: finalAns,
+        sourceDetail: `profile: preferredLocations [Priority 1] ("${finalAns}")`,
+      };
+    }
   }
 
   // City / Residential Location / Current Residence / Base Location (must NOT be a willingness or binary question)
+  // Strict rule: Use ONLY profile's currentLocation, NEVER preferred or search location
   const isCurrentLocationQuestion =
-    /(?:^|\b)(?:where\s+are\s+you\s+(?:currently\s+)?(?:based|located|residing|living)|current\s*(?:city|location|residence|place\s*of\s*stay)|base\s*location|where\s+do\s+you\s+live|city|location)(?:\b|$)/i.test(
+    /(?:^|\b)(?:where\s+are\s+you\s+(?:currently\s+)?(?:based|located|residing|living)|current\s*(?:city|location|residence|place\s*of\s*stay)|base\s*location|where\s+do\s+you\s+live|current\s*city|residence)(?:\b|$)/i.test(
       labelLower,
     ) &&
     !/comfortable|willing|open\s+to|commute|relocate|able\s+to|hybrid|onsite|are\s+you\s+(?:open|willing|comfortable)/i.test(
@@ -2377,47 +2553,22 @@ export function matchRuleBased(
     );
 
   if (isCurrentLocationQuestion) {
-    let rawLoc =
-      careerBrain.currentLocation ||
-      careerBrain.preferredLocation ||
-      (careerBrain.preferredLocations && careerBrain.preferredLocations.length > 0
-        ? careerBrain.preferredLocations[0]
-        : '') ||
-      '';
-    if (!rawLoc) {
-      const resume = (careerBrain.resumeText || '').toLowerCase();
-      const majorCities = [
-        'Bengaluru',
-        'Bangalore',
-        'Hyderabad',
-        'Pune',
-        'Mumbai',
-        'Delhi',
-        'Gurgaon',
-        'Gurugram',
-        'Noida',
-        'Chennai',
-        'Kolkata',
-        'Ahmedabad',
-        'San Francisco',
-        'New York',
-        'London',
-        'Toronto',
-        'Singapore',
-        'Berlin',
-        'Dubai',
-      ];
-      for (const city of majorCities) {
-        if (new RegExp(`\\b${city}\\b`, 'i').test(resume)) {
-          rawLoc = city === 'Bangalore' ? 'Bengaluru' : city;
-          break;
-        }
-      }
-      if (!rawLoc) rawLoc = 'Bengaluru';
+    if (!careerBrain.currentLocation) {
+      // Grounded rule: No currentLocation in profile, do not invent one or fallback to preferredLocation!
+      return { matched: false };
     }
-    const cleanCity = cleanLocationForCityField(rawLoc);
-    const finalAnswer = cleanCity || rawLoc;
-    return { matched: true, answer: finalAnswer, sourceDetail: `profile: location ("${finalAnswer}")` };
+    const cleanCity = cleanLocationForCityField(careerBrain.currentLocation) || careerBrain.currentLocation.trim();
+    if (field.options && field.options.length > 0) {
+      const cityLo = cleanCity.toLowerCase();
+      const matchedOpt = field.options.find(opt => {
+        const optLo = opt.toLowerCase();
+        return cityLo.includes(optLo) || optLo.includes(cityLo);
+      });
+      if (matchedOpt) {
+        return { matched: true, answer: matchedOpt, sourceDetail: `profile: currentLocation ("${matchedOpt}")` };
+      }
+    }
+    return { matched: true, answer: cleanCity, sourceDetail: `profile: currentLocation ("${cleanCity}")` };
   }
 
   // State / Province / Region
@@ -2943,32 +3094,37 @@ export async function matchFromResumeText(
 ): Promise<{ matched: boolean; answer?: string; sourceDetail?: string }> {
   const resumeText = (careerBrain.resumeText || '').trim();
   if (!resumeText) return { matched: false };
-
-  const cleanLabel = cleanLinkedInText(field.label || '');
-  const topic = extractQuestionTopic(cleanLabel);
-
   const resumeLower = resumeText.toLowerCase();
 
+  const cleanLabel = cleanLinkedInText(field.label || '');
+
+  // Administrative, status, offer, clearance, or employment questions must NEVER be resolved from resume text
+  const isAdministrativeOrStatusQuestion =
+    /\b(?:offer\s*in\s*hand|offers?\s*in\s*hand|competing\s*offer|other\s*offer|notice\s*period|last\s*working\s*day|official\s*last|relocat\w*|preferred\s*cit\w*|manag\w*\s*team\w*|team\s*size|rate\s*(?:yourself|your\s*skills?)|scale\s*of\s*1|driver'?s?\s*license|security\s*clearance|work\s*auth\w*|visa|sponsorship|salary|ctc)\b/i.test(
+      cleanLabel,
+    );
+  if (isAdministrativeOrStatusQuestion) {
+    return { matched: false };
+  }
+
+  const topic = extractQuestionTopic(cleanLabel);
+  if (!topic) return { matched: false };
+
   // 1. Topic presence verification:
-  // If a topic was identified, verify that the resume actually mentions it.
-  // If the resume has NO mention of this topic (e.g. "Intershop Commerce Suite"),
-  // return immediately with matched: false to trigger ask_user.
+  // Requires whole-phrase match with word boundaries in resume text (NO unanchored substring search)
   let isTopicMentioned = false;
   let topicPattern: RegExp | null = null;
 
-  if (topic) {
-    const escapedTopic = topic.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    topicPattern = new RegExp(`\\b${escapedTopic}\\b`, 'i');
-    if (topicPattern.test(resumeText) || resumeLower.includes(topic.toLowerCase())) {
-      isTopicMentioned = true;
-    }
+  const escapedTopic = topic.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  topicPattern = new RegExp(`\\b${escapedTopic}\\b`, 'i');
+  if (topicPattern.test(resumeText)) {
+    isTopicMentioned = true;
   }
 
   // Also check if candidate's explicit skills list mentions it
-  if (!isTopicMentioned && Array.isArray(careerBrain.skills) && topic) {
-    const skillFound = careerBrain.skills.some(
-      s => s.toLowerCase() === topic.toLowerCase() || s.toLowerCase().includes(topic.toLowerCase()),
-    );
+  if (!isTopicMentioned && Array.isArray(careerBrain.skills)) {
+    const topicLo = topic.toLowerCase();
+    const skillFound = careerBrain.skills.some(s => s.toLowerCase() === topicLo);
     if (skillFound) {
       isTopicMentioned = true;
     }
@@ -2990,15 +3146,22 @@ export async function matchFromResumeText(
     field.options.some(o => /^no$/i.test(o.trim()));
 
   const isFamiliarityQuestion =
-    /do you have|have you worked|familiar with|knowledge of|experience with|completed|level of education|degree|graduate/i.test(
+    /(?:do\s+you\s+have\s+(?:experience|hands-on|practical|work|prior|verified)|have\s+you\s+worked\s+with|familiar\s+with|knowledge\s+of|experience\s+with|proficient\s+in|completed\s+(?:the\s+following\s+level|a\s+degree)|degree|graduate)/i.test(
       cleanLabel,
     );
 
-  if (isYesNoQuestion && isFamiliarityQuestion && isTopicMentioned) {
+  // Require whole-phrase, question-relevant evidence for yes/no answers taken from resume text
+  const isQuestionRelevantSkill =
+    Boolean(topic) &&
+    (isValidSkillName(topic) ||
+      (Array.isArray(careerBrain.skills) && careerBrain.skills.some(s => s.toLowerCase() === topic.toLowerCase())) ||
+      /(?:bachelor|master|phd|diploma|degree|certification)/i.test(topic));
+
+  if (isYesNoQuestion && isFamiliarityQuestion && isTopicMentioned && isQuestionRelevantSkill) {
     return {
       matched: true,
       answer: 'Yes',
-      sourceDetail: `from resume text: explicit mention of "${topic}"`,
+      sourceDetail: `from resume text: explicit whole-phrase mention of "${topic}"`,
     };
   }
 
@@ -3471,7 +3634,7 @@ DECISION RULES:
      ALWAYS output "${careerBrain.portfolioUrl || careerBrain.githubUrl || ''}".
 18. SELF-RATING & SCALE QUESTIONS (Scale of 1–5, 1–10):
    - For questions asking to rate communication, stakeholder engagement, technical skill, or competency on a scale (e.g. "Scale of 1–5", "Rate from 1 to 5", "Scale 1-10"):
-     ALWAYS output a top favorable rating to qualify for screening ("5" for 1-5 scale, "9" or "10" for 1-10 scale). For numeric inputs, output bare digits (e.g. "5").
+     Resolve ONLY if an explicit rating exists in Verified Answers or profile. If the profile has NO explicit rating, do NOT invent "5" or "10"! Leave answer empty/unresolved.
 19. TOOLS, PLATFORMS, OR TECHNOLOGIES PROFICIENCY:
    - For "Which tools, platforms, or technologies are you proficient in?" or "Please list the primary technologies you've worked with":
      Output candidate's verified core technologies from profile and resume: "${skillsList || 'JavaScript, TypeScript, React, Node.js, Angular, Python, Git, GitHub, Jira, SQL, Docker, REST APIs'}".
@@ -3483,18 +3646,22 @@ DECISION RULES:
      Output: "Seeking new technical challenges, professional growth, and the opportunity to build scalable production applications with an engineering-driven team."
 21. TEAM MANAGEMENT & PROJECT SCALE:
    - For "Have you managed teams before? If yes, what was the team size and structure?":
-     Output: "Experienced in mentoring junior developers, coordinating sprint deliverables in agile frameworks, and collaborating closely with cross-functional engineering teams."
+     Examine candidate's verified roles and work experience. If candidate held leadership roles (Lead/Manager), answer based on profile. If candidate is an Individual Contributor (IC) and did NOT manage teams, answer truthfully: "No" (for Yes/No), "0" (for team size), or "Individual contributor with no formal team management responsibilities." (for text). NEVER invent claims about mentoring, team coordination, or agile leadership that are not in the profile!
    - For "Have you worked on both small-scale and large-scale projects/products? Please provide examples.":
-     Output: "Yes, developed modular MVPs and end-to-end full-stack applications as well as scalable production web services handling backend APIs, databases, and client integrations."
+     Output: "Developed modular software applications and production web services based on candidate's verified background."
 22. CERTIFICATIONS & TRAINING:
    - For "Have you completed any relevant certifications or training programs? Please list them.":
      Output: "Completed comprehensive software engineering coursework, full-stack web development training programs, and continuous hands-on project implementations."
 23. SERVING NOTICE & OFFICIAL LAST WORKING DAY:
    - For "If you are serving notice, what will be your official last working day?" or "Official last working day":
-     If field asks for DD/MM/YYYY date, output a realistic date 15-30 days out in DD/MM/YYYY format. If free text, output: "Available immediately / 15-30 days notice; official last working day is flexible upon offer."
+     DERIVE ONLY FROM PROFILE NOTICE PERIOD AND APPLICATION DATE. NEVER USE A FIXED DATE!
+     If profile notice period is Immediate (or 0 / now / not employed): derive from application date (today: ${formatProjectedDate(new Date())}).
+     If notice period specifies days/months (e.g. 15, 30 days): project from today's application date (${formatProjectedDate(new Date(Date.now() + (parseInt(careerBrain.noticePeriod || '0', 10) || 15) * 86400000))}).
+     If profile has no notice period specified: do NOT invent a date! Leave unresolved.
 24. RELOCATION & PREFERRED CITIES/ZONES:
    - For "Are you open to relocation or travel for work? If yes, please specify preferred cities and zones":
-     Output: "Yes, open to relocation and work-related travel. Preferred location(s): ${careerBrain.preferredLocations?.join(', ') || careerBrain.preferredLocation || careerBrain.currentLocation || 'Bengaluru, Kolkata, Remote'}."
+     Check candidate's willingToRelocate: if "No", answer "No, not open to relocation."
+     If "Yes": If candidate has explicit preferred locations in profile (${careerBrain.preferredLocations && careerBrain.preferredLocations.length > 0 ? careerBrain.preferredLocations.slice(0, 3).join(', ') : ''}), list ONLY those verified preferred locations. If profile has no preferred locations configured, output "Yes, open to relocation and work-related travel" WITHOUT inventing unlisted cities!
 
 OUTPUT STRICTLY VALID JSON ONLY:
 {
@@ -3881,12 +4048,70 @@ export function generateAutonomousFallbackAnswerWithSource(
     if (validOptions.length > 0) {
       // 1a. Relocation / travel: choose affirmative option if candidate is open to relocation
       if (/\b(?:relocation|travel)\b/i.test(labelLower)) {
-        const yesOpt = validOptions.find(o => /^(?:yes\b|open\b|willing\b|agree\b)/i.test(o));
-        if (yesOpt) {
+        const isWilling =
+          !careerBrain.willingToRelocate || /^(?:yes|true|open|willing)/i.test(careerBrain.willingToRelocate.trim());
+        if (isWilling) {
+          const yesOpt = validOptions.find(o => /^(?:yes\b|open\b|willing\b|agree\b)/i.test(o));
+          if (yesOpt) {
+            return {
+              answer: yesOpt,
+              source: `Option selected from available choices: "${yesOpt}" (profile: willingToRelocate "${careerBrain.willingToRelocate || 'Yes'}")`,
+            };
+          }
+        } else {
+          const noOpt = validOptions.find(o => /^(?:no\b|unwilling\b|not\s*open)/i.test(o));
+          if (noOpt) {
+            return {
+              answer: noOpt,
+              source: `Option selected from available choices: "${noOpt}" (profile: willingToRelocate "${careerBrain.willingToRelocate}")`,
+            };
+          }
+        }
+      }
+
+      // 1a-2. Offers in Hand / Competing offers choice
+      if (/\b(?:offer\s*in\s*hand|offers?\s*in\s*hand|competing\s*offer)\b/i.test(labelLower)) {
+        const noOpt = validOptions.find(o => /^(?:no\b|false\b|none\b)/i.test(o));
+        if (noOpt) {
           return {
-            answer: yesOpt,
-            source: `Option selected from available choices: "${yesOpt}" (relocation affirmative)`,
+            answer: noOpt,
+            source: `Option selected from available choices: "${noOpt}" (profile: no competing offers recorded)`,
           };
+        }
+      }
+
+      // 1a-3. Team Management / Leadership choice
+      if (/\b(?:manag\w*.*team\w*|team\w*.*size|leadership\s*experience|managed\s*(?:a\s*)?team)\b/i.test(labelLower)) {
+        const leadershipTitle = /\b(?:lead|manager|head|director|supervisor|chief)\b/i.test(
+          careerBrain.currentTitle || '',
+        );
+        const leadershipSkill =
+          careerBrain.skills &&
+          careerBrain.skills.some(s => /\b(?:team\s*lead|engineering\s*manager|management|leadership)\b/i.test(s));
+        const leadershipExp =
+          careerBrain.workExperience &&
+          careerBrain.workExperience.some(
+            w =>
+              /\b(?:lead|manager|head|director)\b/i.test(w.title || '') ||
+              /\b(?:managed|led)\s+(?:a\s+)?team\b/i.test(w.description || ''),
+          );
+        const hasLeadership = Boolean(leadershipTitle || leadershipSkill || leadershipExp);
+        if (hasLeadership) {
+          const yesOpt = validOptions.find(o => /^(?:yes\b|agree\b|true\b)/i.test(o));
+          if (yesOpt) {
+            return {
+              answer: yesOpt,
+              source: `Option selected from available choices: "${yesOpt}" (profile: leadership role)`,
+            };
+          }
+        } else {
+          const noOpt = validOptions.find(o => /^(?:no\b|disagree\b|false\b)/i.test(o));
+          if (noOpt) {
+            return {
+              answer: noOpt,
+              source: `Option selected from available choices: "${noOpt}" (profile: individual contributor)`,
+            };
+          }
         }
       }
 
@@ -3976,14 +4201,15 @@ export function generateAutonomousFallbackAnswerWithSource(
       !/describe|explain|summary/i.test(labelLower));
 
   if (isNumeric) {
-    if (/scale\s*of\s*1[–-]5|rate.*1.*5/i.test(labelLower)) {
-      return { answer: '5', source: 'Rating scale default (5)' };
-    }
-    if (/scale\s*of\s*1[–-]10|rate.*1.*10/i.test(labelLower)) {
-      return { answer: '10', source: 'Rating scale default (10)' };
+    if (/scale\s*of\s*1[–-]5|rate.*1.*5|scale\s*of\s*1[–-]10|rate.*1.*10/i.test(labelLower)) {
+      // Grounded answering rule: Never invent self-ratings without explicit profile values!
+      return { answer: '', source: '' };
     }
     if (/notice|start/i.test(labelLower)) {
-      const days = careerBrain.noticePeriod ? String(careerBrain.noticePeriod) : '15';
+      if (!careerBrain.noticePeriod) {
+        return { answer: '', source: '' };
+      }
+      const days = String(careerBrain.noticePeriod).replace(/\D/g, '') || '0';
       return { answer: days, source: `Profile: notice period (${days} days)` };
     }
     if (/experience|years/i.test(labelLower)) {
@@ -4010,29 +4236,56 @@ export function generateAutonomousFallbackAnswerWithSource(
   // 3. Date fields: Expected format (DD/MM/YYYY)
   const isDate =
     (field.fieldType as string) === 'date' ||
-    /official\s*last\s*working\s*day|notice.*last\s*day|last\s*working\s*day|joining\s*date|start\s*date/i.test(
+    /official\s*last\s*working\s*day|notice.*last\s*day|last\s*working\s*day|joining\s*date|start\s*date|lwd/i.test(
       labelLower,
     );
 
   if (isDate) {
-    const futureDate = new Date(Date.now() + 15 * 86400000);
-    const dd = String(futureDate.getDate()).padStart(2, '0');
-    const mm = String(futureDate.getMonth() + 1).padStart(2, '0');
-    const yyyy = futureDate.getFullYear();
-    const hint = `${field.placeholder || ''} ${field.hintText || ''} ${validationErrorText || ''}`.toLowerCase();
-    let dateStr = `${dd}/${mm}/${yyyy}`;
-    if (/yyyy-mm-dd/.test(hint)) {
-      dateStr = `${yyyy}-${mm}-${dd}`;
-    } else if (/mm\/dd\/yyyy/.test(hint)) {
-      dateStr = `${mm}/${dd}/${yyyy}`;
+    const isLwd = /official\s*last\s*working\s*day|notice.*last\s*day|last\s*working\s*day|lwd/i.test(labelLower);
+    const notice = (careerBrain.noticePeriod || '').trim();
+    if (isLwd && !notice) {
+      // Grounded rule: No notice period in profile, do not invent a date!
+      return { answer: '', source: '' };
     }
-    return { answer: dateStr, source: `Profile-derived projected date (15-day notice)` };
+
+    let targetDate: Date;
+    let sourceNote = '';
+    if (
+      isLwd &&
+      (/immediate|\b0\s*days?\b|\b0\b|now|not\s*employed|unemployed|currently\s*available/i.test(notice) || !notice)
+    ) {
+      // Immediate notice: derive from application date (today)
+      targetDate = new Date();
+      sourceNote = `Profile-derived projected date (derived from application date for Immediate notice)`;
+    } else {
+      let days = 15;
+      const monthMatch = notice.match(/(\d+)\s*month/i);
+      const daysMatch = notice.match(/(\d+)\s*day/i) || notice.match(/(\d+)/);
+      if (monthMatch) {
+        days = parseInt(monthMatch[1], 10) * 30;
+      } else if (daysMatch) {
+        days = parseInt(daysMatch[1], 10);
+      }
+      targetDate = new Date(Date.now() + days * 86400000);
+      sourceNote = `Profile-derived projected date (${days}-day notice)`;
+    }
+
+    const hint = `${field.placeholder || ''} ${field.hintText || ''} ${validationErrorText || ''}`.toLowerCase();
+    const dateStr = formatProjectedDate(targetDate, hint);
+    return { answer: dateStr, source: sourceNote };
   }
 
   // 4. Compound relocation / travel questions: ONE short sentence (<= 80 chars, respect maxlength)
   if (/\b(?:relocation|travel)\b/i.test(labelLower)) {
-    const primaryCity = careerBrain.currentLocation ? careerBrain.currentLocation.split(',')[0].trim() : 'Bengaluru';
-    let ans = `Yes, open to relocation and work-related travel (preferred: ${primaryCity}).`;
+    const isWilling =
+      !careerBrain.willingToRelocate || /^(?:yes|true|open|willing)/i.test(careerBrain.willingToRelocate.trim());
+    if (!isWilling) {
+      return { answer: 'No, not open to relocation.', source: 'profile: willingToRelocate is "No"' };
+    }
+    const hasPrefs = Array.isArray(careerBrain.preferredLocations) && careerBrain.preferredLocations.length > 0;
+    let ans = hasPrefs
+      ? `Yes, open to relocation (preferred: ${careerBrain.preferredLocations.slice(0, 3).join(', ')}).`
+      : 'Yes, open to relocation and work-related travel.';
     if (ans.length > 80 || (maxLen && ans.length > maxLen)) {
       ans = 'Yes, open to relocation and travel.';
     }
@@ -4042,16 +4295,29 @@ export function generateAutonomousFallbackAnswerWithSource(
     if (maxLen && ans.length > maxLen) {
       ans = 'Yes.';
     }
-    return { answer: ans, source: 'Profile-derived relocation willingness (short single sentence)' };
+    return {
+      answer: ans,
+      source: hasPrefs
+        ? `profile: willingToRelocate ("Yes") + preferredLocations (${careerBrain.preferredLocations.slice(0, 3).join(', ')})`
+        : 'profile: willingToRelocate ("Yes")',
+    };
   }
 
   // 5. Single-line text / Location / Residence: ONE short sentence (<= 80 chars, respect maxlength)
   if (/\b(?:where\s*are\s*you|based|location|residence|current\s*city)\b/i.test(labelLower)) {
-    let loc = careerBrain.currentLocation || 'Bengaluru, India';
+    if (!careerBrain.currentLocation) {
+      return { answer: '', source: '' };
+    }
+    let loc = cleanLocationForCityField(careerBrain.currentLocation) || careerBrain.currentLocation.trim();
     if (loc.length > 80 || (maxLen && loc.length > maxLen)) {
       loc = loc.split(',')[0].trim();
     }
-    return { answer: loc, source: 'Profile: current location' };
+    return { answer: loc, source: `Profile: currentLocation ("${loc}")` };
+  }
+
+  // 5b. Offers in Hand fallback for text fields
+  if (/\b(?:offer\s*in\s*hand|offers?\s*in\s*hand|competing\s*offer)\b/i.test(labelLower)) {
+    return { answer: 'None', source: 'profile: no competing offers recorded (truthful neutral: "None")' };
   }
 
   // 6. Professional narrative / free text (single sentence <= 80 chars for single-line, 2-3 sentences for textarea)
@@ -4090,14 +4356,32 @@ export function generateAutonomousFallbackAnswerWithSource(
   }
 
   // 7. Honesty rule: Team leadership (do not invent team management claims unless in profile)
-  if (/\b(?:manag\w*.*team\w*|team\w*.*size|leadership)\b/i.test(labelLower)) {
-    const hasLeadership =
-      /\b(?:lead|manager|head)\b/i.test(careerBrain.currentTitle || '') ||
-      (careerBrain.skills && careerBrain.skills.some(s => /\blead|management\b/i.test(s)));
-    const ans = hasLeadership
-      ? 'Experienced in technical leadership and collaborating with agile sprint teams.'
-      : 'Collaborated as an individual contributor in agile engineering teams.';
-    return { answer: ans, source: 'Honest team collaboration summary' };
+  if (/\b(?:manag\w*.*team\w*|team\w*.*size|leadership\s*experience|managed\s*(?:a\s*)?team)\b/i.test(labelLower)) {
+    const leadershipTitle = /\b(?:lead|manager|head|director|supervisor|chief)\b/i.test(careerBrain.currentTitle || '');
+    const leadershipSkill =
+      careerBrain.skills &&
+      careerBrain.skills.some(s => /\b(?:team\s*lead|engineering\s*manager|management|leadership)\b/i.test(s));
+    const leadershipExp =
+      careerBrain.workExperience &&
+      careerBrain.workExperience.some(
+        w =>
+          /\b(?:lead|manager|head|director)\b/i.test(w.title || '') ||
+          /\b(?:managed|led)\s+(?:a\s+)?team\b/i.test(w.description || ''),
+      );
+    const hasLeadership = Boolean(leadershipTitle || leadershipSkill || leadershipExp);
+    if (hasLeadership) {
+      const ans = 'Experienced in technical leadership and collaborating with agile sprint teams.';
+      return {
+        answer: maxLen && ans.length > maxLen ? 'Experienced in technical leadership.' : ans,
+        source: `profile: leadership role in profile (${careerBrain.currentTitle || 'workExperience'})`,
+      };
+    } else {
+      const ans = 'Individual contributor with no formal team management responsibilities.';
+      return {
+        answer: maxLen && ans.length > maxLen ? 'Individual contributor.' : ans,
+        source: 'Honest profile summary: individual contributor (no team management experience in profile)',
+      };
+    }
   }
 
   if (/\b(?:small-scale|large-scale|projects?.*products?)\b/i.test(labelLower)) {

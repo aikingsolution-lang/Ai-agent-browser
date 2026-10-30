@@ -79,13 +79,18 @@ export function generateJobsCsv(records: ExportableJobRecord[]): string {
 
   const rows = appliedRecords.map(rec => {
     const platformStr = rec.platform || detectPlatformFromUrl(rec.url);
-    const rawTitle = rec.title || 'Untitled Role';
+    const rawTitle = rec.title || '';
+    const isPlaceholderTitle = !rawTitle || /^(?:linkedin\s*job|untitled(?:\s*role)?)$/i.test(rawTitle.trim());
+    const cleanedTitle = rawTitle
+      .replace(/^\s*(?:🤖\s*)?(?:\[Runner\]\s*)+/i, '')
+      .replace(/^\s*🤖\s*/, '')
+      .trim();
     const titleStr =
-      rawTitle
-        .replace(/^\s*(?:🤖\s*)?(?:\[Runner\]\s*)+/i, '')
-        .replace(/^\s*🤖\s*/, '')
-        .trim() || 'Untitled Role';
-    const companyStr = rec.company || 'Unknown Company';
+      !isPlaceholderTitle && cleanedTitle ? cleanedTitle : rec.jobId ? `Job #${rec.jobId}` : 'Untitled Role';
+
+    const rawCompany = rec.company || '';
+    const isPlaceholderComp = !rawCompany || /^(?:unknown\s*company|company)$/i.test(rawCompany.trim());
+    const companyStr = !isPlaceholderComp ? rawCompany.trim() : '';
     const statusLabel = 'Applied';
     const fitScoreStr = typeof rec.fitScore === 'number' ? `${rec.fitScore}%` : 'N/A';
     const reasonStr = rec.reason || 'Successfully submitted via Easy Apply';

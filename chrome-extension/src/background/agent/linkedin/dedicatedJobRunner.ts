@@ -1416,11 +1416,12 @@ export class DedicatedJobRunner {
 
       // Update state with extracted title & company
       let jobTitle = cleanLinkedInJobTitle(topCard.title);
-      if (!jobTitle) {
+      if (!jobTitle || /^(?:linkedin\s*job|untitled(?:\s*role)?|job|error)$/i.test(jobTitle.trim())) {
         logger.warning(`[DedicatedRunner] Missing job title heading for job ${jobId}. Using job ID in messages.`);
         jobTitle = `Job #${jobId}`;
       }
-      const companyName = topCard.company || 'Company';
+      const companyName =
+        !topCard.company || /^(?:unknown\s*company|company)$/i.test(topCard.company.trim()) ? '' : topCard.company;
       const location = topCard.location || '';
 
       await runnerStateStore.updateRunStatus('running', { jobTitle, company: companyName });
@@ -1630,7 +1631,7 @@ export class DedicatedJobRunner {
 
       this.notify(
         portToSend,
-        `🎉 Successfully submitted application for "${jobTitle}" at "${companyName}"!`,
+        `🎉 Successfully submitted application for "${jobTitle}"${companyName ? ` at "${companyName}"` : ''}!`,
         false,
         runId,
       );
@@ -4128,17 +4129,28 @@ export class DedicatedJobRunner {
       topCard = await currentPage.extractJobTopCardContext(4500);
     }
 
-    const rawTitle = topCard.title || job.title;
-    let displayTitle = cleanLinkedInJobTitle(rawTitle);
-    if (!displayTitle) {
-      logger.warning(`[DedicatedRunner] Missing job title heading for job ${job.jobId}. Using job ID in messages.`);
-      displayTitle = `Job #${job.jobId}`;
-    }
-    const displayCompany = topCard.company || job.company;
+    const isPlaceholderTitle = (t?: string | null) =>
+      !t || /^(?:linkedin\s*job|untitled(?:\s*role)?|job|error)$/i.test(t.trim());
+    const isPlaceholderCompany = (c?: string | null) => !c || /^(?:unknown\s*company|company)$/i.test(c.trim());
 
-    // Check if details extraction completely failed
+    // Prefer real title/company from topCard or search card over any placeholder
+    const realTitleFromCard = !isPlaceholderTitle(job.title) ? job.title : '';
+    const realTitleFromTop = !isPlaceholderTitle(topCard.title) ? topCard.title : '';
+    const rawTitle = realTitleFromTop || realTitleFromCard || topCard.title || job.title || '';
+
+    let displayTitle = cleanLinkedInJobTitle(rawTitle);
+    if (!displayTitle || isPlaceholderTitle(displayTitle)) {
+      displayTitle = cleanLinkedInJobTitle(realTitleFromCard) || realTitleFromCard || `Job #${job.jobId}`;
+    }
+
+    const realCompanyFromCard = !isPlaceholderCompany(job.company) ? job.company : '';
+    const realCompanyFromTop = !isPlaceholderCompany(topCard.company) ? topCard.company : '';
+    const displayCompany = realCompanyFromTop || realCompanyFromCard || '';
+
+    // Check if details extraction completely failed (both topCard and search card have no title and company)
     if (
-      (!topCard.title || !topCard.company) &&
+      (!displayTitle || isPlaceholderTitle(displayTitle)) &&
+      !displayCompany &&
       !topCard.isClosed &&
       !topCard.isAlreadyApplied &&
       !topCard.isLoginWall
@@ -4526,7 +4538,7 @@ export class DedicatedJobRunner {
         if (stats) stats.applied++;
         await DailyQuotaManager.commitApplication(applicationKey(job.jobId, job.url));
         await queueSafetyStore.setSingleApplyVerified(true);
-        const successMsg = `Applied to "${displayTitle}" at ${displayCompany || 'company'} successfully! 🎉`;
+        const successMsg = `Applied to "${displayTitle}"${displayCompany ? ` at ${displayCompany}` : ''} successfully! 🎉`;
         this.notifyStatus(portToSend, `✅ ${successMsg}`, 'ok');
 
         await processedJobsStore.recordJob({

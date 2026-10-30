@@ -139,6 +139,19 @@ export const processedJobsStore: ProcessedJobsStorageType = {
       skippedSet.delete(cleanId);
       // A later success clears any prior negative-cache entry for this job.
       delete failedJobs[cleanId];
+
+      // Never store placeholder "LinkedIn Job" or "Unknown Company" for applied jobs
+      const isPlaceholderTitle = (t?: string | null) =>
+        !t || /^(?:linkedin\s*job|untitled(?:\s*role)?|job|error)$/i.test(t.trim());
+      const isPlaceholderCompany = (c?: string | null) => !c || /^(?:unknown\s*company|company)$/i.test(c.trim());
+
+      const priorRecord = data.records.find(r => r.jobId === cleanId);
+      if (isPlaceholderTitle(fullRecord.title)) {
+        fullRecord.title = (!isPlaceholderTitle(priorRecord?.title) ? priorRecord?.title : '') || `Job #${cleanId}`;
+      }
+      if (isPlaceholderCompany(fullRecord.company)) {
+        fullRecord.company = (!isPlaceholderCompany(priorRecord?.company) ? priorRecord?.company : '') || '';
+      }
     } else if (record.status === 'skipped') {
       skippedSet.add(cleanId);
       // Permanent skip: also clear any negative-cache entry.
