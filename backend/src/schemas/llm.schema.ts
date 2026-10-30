@@ -1,6 +1,11 @@
 import { z } from 'zod';
 
 export const ALLOWED_MODELS = [
+  'gemini-2.5-flash',
+  'gemini-2.5-pro',
+  'gemini-2.0-flash',
+  'gemini-1.5-flash',
+  'gemini-1.5-pro',
   'anthropic.claude-3-5-sonnet-20240620-v1:0',
   'anthropic.claude-3-haiku-20240307-v1:0',
   'amazon.nova-micro-v1:0',
@@ -29,13 +34,18 @@ export const llmChatMessageSchema = z.object({
 });
 
 export const llmChatCompletionSchema = z.object({
-  model: z.string().refine(val => ALLOWED_MODELS.includes(val as any), {
-    message: `Invalid model requested. Allowed models: ${ALLOWED_MODELS.join(', ')}`,
-  }),
+  model: z
+    .string()
+    .optional()
+    .refine(val => !val || ALLOWED_MODELS.includes(val as any), {
+      message: `Invalid model requested. Allowed models: ${ALLOWED_MODELS.join(', ')}`,
+    }),
   messages: z.array(llmChatMessageSchema).min(1, 'At least one message is required'),
   stream: z.boolean().optional().default(false),
   temperature: z.number().min(0).max(2).optional().default(0.7),
   max_tokens: z.number().int().positive().optional(),
+  tools: z.array(z.any()).optional(),
+  tool_choice: z.any().optional(),
   idempotencyKey: z.string().optional(),
 });
 

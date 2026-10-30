@@ -1,5 +1,6 @@
 import dotenv from 'dotenv';
 import { z } from 'zod';
+import { ALLOWED_MODELS } from '../schemas/llm.schema.js';
 
 dotenv.config();
 
@@ -37,10 +38,30 @@ const envSchema = z.object({
   RAZORPAY_PLAN_ID_POWER: z.string().optional(),
 
   // ── LLM Providers (server-only) ───────────────────────────────────────────
+  LLM_PROVIDER: z.enum(['gemini', 'bedrock']).default('gemini'),
+  GEMINI_API_KEY: z.string().default(''),
+  GEMINI_MODEL: z
+    .string()
+    .default('gemini-2.5-flash')
+    .refine(val => ALLOWED_MODELS.includes(val as any), {
+      message: `Invalid GEMINI_MODEL. Allowed models: ${ALLOWED_MODELS.join(', ')}`,
+    }),
   AWS_BEDROCK_API_KEY: z.string().default(''),
   AWS_BEDROCK_REGION: z.string().default('us-east-1'),
   OPENAI_API_KEY: z.string().optional(),
-  LLM_DEFAULT_MODEL: z.string().default('amazon.nova-lite-v1:0'),
+  LLM_DEFAULT_MODEL: z
+    .string()
+    .optional()
+    .transform(val => {
+      if (val && val.trim() && ALLOWED_MODELS.includes(val.trim() as any)) {
+        return val.trim();
+      }
+      const provider = (process.env.LLM_PROVIDER as 'gemini' | 'bedrock') || 'gemini';
+      const providerDefault =
+        provider === 'bedrock' ? 'amazon.nova-lite-v1:0' : process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+      return providerDefault;
+    })
+    .default('gemini-2.5-flash'),
 
   // ── Google OAuth client ID (used by the extension — public) ───────────────
   GOOGLE_CLIENT_ID: z
@@ -84,10 +105,18 @@ const baseEnv = parsedEnv.success
       RAZORPAY_PLAN_ID_STARTER: process.env.RAZORPAY_PLAN_ID_STARTER,
       RAZORPAY_PLAN_ID_PRO: process.env.RAZORPAY_PLAN_ID_PRO,
       RAZORPAY_PLAN_ID_POWER: process.env.RAZORPAY_PLAN_ID_POWER,
+      LLM_PROVIDER: (process.env.LLM_PROVIDER as 'gemini' | 'bedrock') || 'gemini',
+      GEMINI_API_KEY: process.env.GEMINI_API_KEY || '',
+      GEMINI_MODEL: process.env.GEMINI_MODEL || 'gemini-2.5-flash',
       AWS_BEDROCK_API_KEY: process.env.AWS_BEDROCK_API_KEY || '',
       AWS_BEDROCK_REGION: process.env.AWS_BEDROCK_REGION || 'us-east-1',
       OPENAI_API_KEY: process.env.OPENAI_API_KEY,
-      LLM_DEFAULT_MODEL: process.env.LLM_DEFAULT_MODEL || 'amazon.nova-lite-v1:0',
+      LLM_DEFAULT_MODEL:
+        process.env.LLM_DEFAULT_MODEL && ALLOWED_MODELS.includes(process.env.LLM_DEFAULT_MODEL as any)
+          ? process.env.LLM_DEFAULT_MODEL
+          : process.env.LLM_PROVIDER === 'bedrock'
+            ? 'amazon.nova-lite-v1:0'
+            : process.env.GEMINI_MODEL || 'gemini-2.5-flash',
       GOOGLE_CLIENT_ID:
         process.env.GOOGLE_CLIENT_ID?.trim() ||
         '336340854879-i6hj15oe17se379u6k377slo7pvbvh3v.apps.googleusercontent.com',

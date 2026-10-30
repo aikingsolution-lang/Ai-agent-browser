@@ -13,6 +13,8 @@ export interface LlmCompletionRequest {
   temperature?: number;
   maxTokens?: number;
   timeoutMs?: number;
+  tools?: any[];
+  tool_choice?: any;
 }
 
 export interface LlmCompletionResponse {
@@ -21,6 +23,7 @@ export interface LlmCompletionResponse {
   completionTokens: number;
   totalTokens: number;
   finishReason: string;
+  toolCalls?: any[];
 }
 
 export interface ILlmProvider {

@@ -2,6 +2,7 @@ import { env } from '../../config/env.js';
 import type { ILlmProvider } from './llmProvider.interface.js';
 import { MockLlmProvider, type MockLlmOptions } from './mockLlmProvider.js';
 import { BedrockLlmProvider } from './bedrockLlmProvider.js';
+import { GeminiLlmProvider } from './geminiLlmProvider.js';
 
 let mockProviderInstance: MockLlmProvider | null = null;
 let overrideProvider: ILlmProvider | null = null;
@@ -12,14 +13,34 @@ export class LlmProviderFactory {
       return overrideProvider;
     }
 
-    if (env.NODE_ENV === 'test' || !env.AWS_BEDROCK_API_KEY || env.AWS_BEDROCK_API_KEY.startsWith('mock')) {
+    if (env.NODE_ENV === 'test') {
       if (!mockProviderInstance) {
         mockProviderInstance = new MockLlmProvider();
       }
       return mockProviderInstance;
     }
 
-    return new BedrockLlmProvider(env.AWS_BEDROCK_API_KEY, env.AWS_BEDROCK_REGION);
+    const providerType = env.LLM_PROVIDER;
+
+    if (providerType === 'bedrock') {
+      if (!env.AWS_BEDROCK_API_KEY || env.AWS_BEDROCK_API_KEY.startsWith('mock')) {
+        if (!mockProviderInstance) {
+          mockProviderInstance = new MockLlmProvider();
+        }
+        return mockProviderInstance;
+      }
+      return new BedrockLlmProvider(env.AWS_BEDROCK_API_KEY, env.AWS_BEDROCK_REGION);
+    }
+
+    // Default provider: gemini
+    if (!env.GEMINI_API_KEY || env.GEMINI_API_KEY.startsWith('mock')) {
+      if (!mockProviderInstance) {
+        mockProviderInstance = new MockLlmProvider();
+      }
+      return mockProviderInstance;
+    }
+
+    return new GeminiLlmProvider(env.GEMINI_API_KEY, env.GEMINI_MODEL);
   }
 
   public static setMockOptions(options: MockLlmOptions): MockLlmProvider {

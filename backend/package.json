@@ -15,7 +15,8 @@
     "migrate:auth-users": "tsx src/scripts/migrate-mongo-to-rtdb/auth-import-cli.ts",
     "migrate:mongo-to-rtdb": "tsx src/scripts/migrate-mongo-to-rtdb/index.ts",
     "lint": "eslint src --ext .ts",
-    "prettier": "prettier --check \"src/**/*.ts\""
+    "prettier": "prettier --check \"src/**/*.ts\"",
+    "smoke:gemini": "tsx src/scripts/gemini_smoke.ts"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

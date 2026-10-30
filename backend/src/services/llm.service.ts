@@ -15,6 +15,8 @@ export interface ProcessLlmChatParams {
   messages: LlmMessage[];
   temperature?: number;
   maxTokens?: number;
+  tools?: any[];
+  tool_choice?: any;
   idempotencyKey?: string;
   runId?: string;
   /** Covered by verified JobForm Automator Premium: usage is recorded but no credits are drawn. */
@@ -31,6 +33,8 @@ export interface LlmChatResult {
   model: string;
   provider: string;
   content: string;
+  toolCalls?: any[];
+  finishReason?: string;
   usage: {
     promptTokens: number;
     completionTokens: number;
@@ -58,9 +62,22 @@ async function recordUsage(userId: string, input: UsageLogInput): Promise<void> 
 export class LlmService {
   /**
    * Helper to calculate credits based on model multiplier and total tokens.
+   *
+   * Pricing Assumptions:
+   * - Pro / Reasoning models (claude-3-5-sonnet, nova-pro, gemini-2.5-pro, gemini-1.5-pro):
+   *   2 credits per 1,000 tokens (minimum 2 credits).
+   * - Standard / Flash models (gemini-2.5-flash, gemini-2.0-flash, gemini-1.5-flash, nova-lite, nova-micro, claude-3-haiku):
+   *   1 credit per 1,000 tokens (minimum 1 credit).
+   *
+   * Token usage is derived directly from the LLM provider's response usage payload (totalTokens).
+   * Failed or timed out requests incur 0 credits (refunded / not deducted).
    */
   public static calculateRequiredCredits(model: string, totalTokens: number): number {
-    const isPremium = model.includes('claude-3-5-sonnet') || model.includes('nova-pro');
+    const isPremium =
+      model.includes('claude-3-5-sonnet') ||
+      model.includes('nova-pro') ||
+      model.includes('gemini-2.5-pro') ||
+      model.includes('gemini-1.5-pro');
     const ratePerThousand = isPremium ? 2 : 1;
     const minimumCredits = ratePerThousand;
     return Math.max(minimumCredits, Math.ceil((totalTokens / 1000) * ratePerThousand));
@@ -70,7 +87,18 @@ export class LlmService {
    * Process a non-streaming LLM chat completion request.
    */
   public static async processChatCompletion(params: ProcessLlmChatParams): Promise<LlmChatResult> {
-    const { userId, model, messages, temperature, maxTokens, idempotencyKey, runId, premiumCovered = false } = params;
+    const {
+      userId,
+      model,
+      messages,
+      temperature,
+      maxTokens,
+      tools,
+      tool_choice,
+      idempotencyKey,
+      runId,
+      premiumCovered = false,
+    } = params;
 
     // 1. Idempotency Check
     if (idempotencyKey) {
@@ -117,6 +145,8 @@ export class LlmService {
         messages,
         temperature,
         maxTokens,
+        tools,
+        tool_choice,
       });
 
       const latencyMs = Date.now() - startTime;
@@ -157,6 +187,7 @@ export class LlmService {
         metadata: {
           content: completion.content,
           runId,
+          ...(completion.toolCalls ? { toolCalls: completion.toolCalls } : {}),
           ...(premiumCovered ? { coveredBy: 'jobform-premium', creditsEquivalent: creditsToDeduct } : {}),
         },
       });
@@ -166,6 +197,8 @@ export class LlmService {
         model,
         provider: provider.providerName,
         content: completion.content,
+        toolCalls: completion.toolCalls,
+        finishReason: completion.finishReason,
         usage: {
           promptTokens: completion.promptTokens,
           completionTokens: completion.completionTokens,

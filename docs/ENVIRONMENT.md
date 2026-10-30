@@ -26,10 +26,13 @@ Environment variables for the backend are validated at startup in `backend/src/c
 | `RAZORPAY_KEY_ID` | **Yes** (Prod) | `rzp_test_mock_key_id_12345` | String | Commercial payment Key ID from Razorpay. |
 | `RAZORPAY_KEY_SECRET` | **Yes** (Prod) | `rzp_test_mock_key_secret_67890` | String | Commercial payment Secret from Razorpay. |
 | `RAZORPAY_WEBHOOK_SECRET` | **Yes** (Prod) | `rzp_test_mock_webhook_secret_abcde` | String | Webhook HMAC verification secret. |
-| `AWS_BEDROCK_API_KEY` | **Yes** (Prod) | `mock_bedrock_api_key` | String | Bearer token / runtime key for AWS Bedrock. |
-| `AWS_BEDROCK_REGION` | No | `us-east-1` | String | AWS region hosting Claude 3.5 Sonnet. |
+| `LLM_PROVIDER` | No | `gemini` | Enum (`gemini`, `bedrock`) | Active managed LLM provider for the backend proxy gateway. |
+| `GEMINI_API_KEY` | **Yes** (when using Gemini) | `""` | String | API Key for Google Gemini (Google AI Studio / Secret Manager). |
+| `GEMINI_MODEL` | No | `gemini-2.5-flash` | String | Model identifier for Google Gemini (e.g. `gemini-2.5-flash`, `gemini-2.5-pro`). |
+| `AWS_BEDROCK_API_KEY` | **Yes** (when using Bedrock) | `mock_bedrock_api_key` | String | Bearer token / runtime key for AWS Bedrock. |
+| `AWS_BEDROCK_REGION` | No | `us-east-1` | String | AWS region hosting Bedrock models. |
 | `OPENAI_API_KEY` | Optional | `undefined` | String | Fallback OpenAI API key for GPT-4o models. |
-| `LLM_DEFAULT_MODEL` | No | `anthropic.claude-3-5-sonnet-20240620-v1:0` | String | Default model identifier for LLM proxy. |
+| `LLM_DEFAULT_MODEL` | No | `gemini-2.5-flash` | String | Default model identifier for LLM proxy (validated against `ALLOWED_MODELS`). |
 
 ---
 

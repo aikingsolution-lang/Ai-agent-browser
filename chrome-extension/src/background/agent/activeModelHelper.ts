@@ -3,7 +3,7 @@ import { ChatOpenAI } from '@langchain/openai';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { createChatModel } from './helper';
 import { createLogger } from '../log';
-import { BACKEND_LLM_URL } from '@extension/shared';
+import { BACKEND_LLM_URL, DEFAULT_LLM_MODEL } from '@extension/shared';
 import { isLlmAvailable, wrapChatModelWithCircuitBreaker } from './llmCircuitBreaker';
 
 const logger = createLogger('ActiveModelHelper');
@@ -49,7 +49,7 @@ export async function getActiveChatModel(jobRunId?: string): Promise<BaseChatMod
       }
     }
 
-    // 3. Cloud Bedrock session token gateway (if backend server is reachable)
+    // 3. Cloud LLM session token gateway (Gemini/Bedrock via backend server)
     const session = await authStorage.getSession().catch(() => null);
     if (session?.token) {
       const headers: Record<string, string> = {
@@ -59,7 +59,7 @@ export async function getActiveChatModel(jobRunId?: string): Promise<BaseChatMod
         headers['x-run-id'] = jobRunId;
       }
       const model = new ChatOpenAI({
-        modelName: 'amazon.nova-lite-v1:0',
+        modelName: DEFAULT_LLM_MODEL,
         apiKey: session.token,
         configuration: {
           baseURL: BACKEND_LLM_URL,

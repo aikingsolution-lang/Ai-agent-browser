@@ -74,6 +74,8 @@ const readEnv = (name: string): string | undefined => {
   return undefined;
 };
 
+export const DEFAULT_LLM_MODEL: string = readEnv('VITE_LLM_DEFAULT_MODEL') || 'gemini-2.5-flash';
+
 /**
  * Public Firebase Web API key of the JobForm Automator Firebase project (the project the backend
  * verifies ID tokens for). Like the Google client ID above it is a public identifier, not a secret:

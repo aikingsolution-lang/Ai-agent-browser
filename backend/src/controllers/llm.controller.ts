@@ -21,6 +21,8 @@ export class LlmController {
       const messages = body.messages;
       const temperature = body.temperature;
       const maxTokens = body.max_tokens;
+      const tools = body.tools;
+      const tool_choice = body.tool_choice;
       const stream = Boolean(body.stream);
 
       // Support header or body idempotency key and runId
@@ -83,12 +85,22 @@ export class LlmController {
         messages,
         temperature,
         maxTokens,
+        tools,
+        tool_choice,
         idempotencyKey,
         runId,
         premiumCovered: req.premiumCovered === true,
       });
 
       if (req.path.endsWith('/completions')) {
+        const assistantMessage: Record<string, any> = {
+          role: 'assistant',
+          content: result.content,
+        };
+        if (result.toolCalls && result.toolCalls.length > 0) {
+          assistantMessage.tool_calls = result.toolCalls;
+        }
+
         res.status(200).json({
           id: result.requestId,
           object: 'chat.completion',
@@ -97,11 +109,9 @@ export class LlmController {
           choices: [
             {
               index: 0,
-              message: {
-                role: 'assistant',
-                content: result.content,
-              },
-              finish_reason: 'stop',
+              message: assistantMessage,
+              finish_reason:
+                result.finishReason || (result.toolCalls && result.toolCalls.length > 0 ? 'tool_calls' : 'stop'),
             },
           ],
           usage: {

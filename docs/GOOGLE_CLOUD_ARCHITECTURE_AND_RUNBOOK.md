@@ -184,13 +184,14 @@ If you ever need to switch to a **different Google Cloud account or new project*
    echo -n "YOUR_JWT_SECRET" | gcloud secrets create JWT_SECRET --data-file=-
    echo -n "YOUR_RAZORPAY_KEY_SECRET" | gcloud secrets create RAZORPAY_KEY_SECRET --data-file=-
    echo -n "YOUR_RAZORPAY_WEBHOOK_SECRET" | gcloud secrets create RAZORPAY_WEBHOOK_SECRET --data-file=-
+   echo -n "YOUR_GEMINI_API_KEY" | gcloud secrets create GEMINI_API_KEY --data-file=-
    echo -n "YOUR_AWS_BEDROCK_API_KEY" | gcloud secrets create AWS_BEDROCK_API_KEY --data-file=-
 
    # Grant IAM access to the service account
    PROJECT_ID=$(gcloud config get-value project)
    SA_EMAIL="nanobrowser-backend@${PROJECT_ID}.iam.gserviceaccount.com"
 
-   for SECRET in FIREBASE_ADMIN_PRIVATE_KEY JWT_SECRET RAZORPAY_KEY_SECRET RAZORPAY_WEBHOOK_SECRET AWS_BEDROCK_API_KEY; do
+   for SECRET in FIREBASE_ADMIN_PRIVATE_KEY JWT_SECRET RAZORPAY_KEY_SECRET RAZORPAY_WEBHOOK_SECRET GEMINI_API_KEY AWS_BEDROCK_API_KEY; do
      gcloud secrets add-iam-policy-binding "$SECRET" \
        --member="serviceAccount:${SA_EMAIL}" \
        --role="roles/secretmanager.secretAccessor"
@@ -211,8 +212,8 @@ If you ever need to switch to a **different Google Cloud account or new project*
      --platform managed \
      --allow-unauthenticated \
      --service-account="${SA_EMAIL}" \
-     --set-env-vars="NODE_ENV=production,CORS_ORIGIN=*,GOOGLE_CLIENT_ID=YOUR_CLIENT_ID,RAZORPAY_KEY_ID=YOUR_KEY_ID,AWS_BEDROCK_REGION=us-east-1,LLM_DEFAULT_MODEL=amazon.nova-lite-v1:0,FIREBASE_PROJECT_ID=jobform-automator-website,FIREBASE_DATABASE_URL=https://jobform-automator-website-default-rtdb.firebaseio.com,FIREBASE_ADMIN_CLIENT_EMAIL=YOUR_SERVICE_ACCOUNT_CLIENT_EMAIL,NANOBROWSER_RTDB_ROOT=nanobrowser" \
-     --set-secrets="FIREBASE_ADMIN_PRIVATE_KEY=FIREBASE_ADMIN_PRIVATE_KEY:latest,JWT_SECRET=JWT_SECRET:latest,RAZORPAY_KEY_SECRET=RAZORPAY_KEY_SECRET:latest,RAZORPAY_WEBHOOK_SECRET=RAZORPAY_WEBHOOK_SECRET:latest,AWS_BEDROCK_API_KEY=AWS_BEDROCK_API_KEY:latest"
+     --set-env-vars="NODE_ENV=production,CORS_ORIGIN=*,GOOGLE_CLIENT_ID=YOUR_CLIENT_ID,RAZORPAY_KEY_ID=YOUR_KEY_ID,LLM_PROVIDER=gemini,GEMINI_MODEL=gemini-2.5-flash,AWS_BEDROCK_REGION=us-east-1,LLM_DEFAULT_MODEL=gemini-2.5-flash,FIREBASE_PROJECT_ID=jobform-automator-website,FIREBASE_DATABASE_URL=https://jobform-automator-website-default-rtdb.firebaseio.com,FIREBASE_ADMIN_CLIENT_EMAIL=YOUR_SERVICE_ACCOUNT_CLIENT_EMAIL,NANOBROWSER_RTDB_ROOT=nanobrowser" \
+     --set-secrets="FIREBASE_ADMIN_PRIVATE_KEY=FIREBASE_ADMIN_PRIVATE_KEY:latest,JWT_SECRET=JWT_SECRET:latest,RAZORPAY_KEY_SECRET=RAZORPAY_KEY_SECRET:latest,RAZORPAY_WEBHOOK_SECRET=RAZORPAY_WEBHOOK_SECRET:latest,GEMINI_API_KEY=GEMINI_API_KEY:latest,AWS_BEDROCK_API_KEY=AWS_BEDROCK_API_KEY:latest"
    ```
 
    > Keep the old `MONGO_URI` secret in Secret Manager (unmounted) until the MongoDB → RTDB data
