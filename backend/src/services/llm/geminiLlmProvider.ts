@@ -13,6 +13,11 @@ import type { ILlmProvider, LlmCompletionRequest, LlmCompletionResponse } from '
  *    without complex bidirectional translation between Google and OpenAI schema types.
  * 4. Zero additional heavy SDK dependencies.
  *
+ * Token & Credit Accounting:
+ * - Total tokens are taken directly from `usage.total_tokens` (or `prompt_tokens` + `completion_tokens`).
+ * - For reasoning / thinking models (Gemini 2.5/3.x), internal thinking tokens are included in `completion_tokens`
+ *   as reported by Google's API, and therefore accurately billed without under-counting.
+ *
  * Security:
  * - API key is injected via constructor from environment / Secret Manager.
  * - Never logs API keys or full prompt/content texts to logs.
@@ -22,20 +27,27 @@ export class GeminiLlmProvider implements ILlmProvider {
   private apiKey: string;
   private defaultModel: string;
   private baseUrl: string;
+  private thinkingBudget?: number;
+  private reasoningEffort?: 'none' | 'low' | 'medium' | 'high';
 
   constructor(
     apiKey: string,
     defaultModel = 'gemini-2.5-flash',
     baseUrl = 'https://generativelanguage.googleapis.com/v1beta/openai',
+    thinkingBudget?: number,
+    reasoningEffort?: 'none' | 'low' | 'medium' | 'high',
   ) {
     this.apiKey = apiKey;
     this.defaultModel = defaultModel;
     this.baseUrl = baseUrl.replace(/\/+$/, '');
+    this.thinkingBudget = thinkingBudget;
+    this.reasoningEffort = reasoningEffort;
   }
 
   public async generateCompletion(request: LlmCompletionRequest): Promise<LlmCompletionResponse> {
     const controller = new AbortController();
     const timeoutMs = request.timeoutMs ?? 30000;
+    const startTime = Date.now();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
 
     const effectiveModel = request.model || this.defaultModel;
@@ -56,95 +68,160 @@ export class GeminiLlmProvider implements ILlmProvider {
     if (request.tool_choice !== undefined) {
       requestPayload.tool_choice = request.tool_choice;
     }
+    if (this.thinkingBudget !== undefined) {
+      requestPayload.thinking = { budget_tokens: this.thinkingBudget };
+    }
+    if (this.reasoningEffort) {
+      requestPayload.reasoning_effort = this.reasoningEffort;
+    }
+
+    const maxRetries = 2;
+    let attempt = 0;
+    let lastError: any = null;
 
     try {
-      const response = await fetch(endpoint, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${this.apiKey}`,
-        },
-        body: JSON.stringify(requestPayload),
-        signal: controller.signal,
-      });
+      while (attempt <= maxRetries) {
+        // Guard total execution time so retries finish comfortably before request timeout
+        const elapsed = Date.now() - startTime;
+        if (elapsed >= timeoutMs - 1000) {
+          throw new AppError('LLM Provider request timed out', 504, 'PROVIDER_TIMEOUT');
+        }
+
+        try {
+          const response = await fetch(endpoint, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${this.apiKey}`,
+            },
+            body: JSON.stringify(requestPayload),
+            signal: controller.signal,
+          });
+
+          if (!response.ok) {
+            let errorData: any = {};
+            try {
+              errorData = await response.json();
+            } catch {
+              // Body was not JSON
+            }
+
+            const realErrorMessage =
+              errorData?.error?.message ||
+              errorData?.message ||
+              `Gemini provider returned HTTP status ${response.status}`;
+
+            logger.error('[GeminiLlmProvider] HTTP error from Gemini API:', {
+              status: response.status,
+              model: effectiveModel,
+              attempt: attempt + 1,
+              error: realErrorMessage,
+            });
+
+            const isRetryable = response.status === 429 || response.status >= 500;
+            if (isRetryable && attempt < maxRetries) {
+              attempt++;
+              const backoffMs = Math.min(1000 * Math.pow(2, attempt - 1), 3000); // 1000ms, 2000ms
+              logger.warn(
+                `[GeminiLlmProvider] Retryable status HTTP ${response.status}. Retrying in ${backoffMs}ms (attempt ${attempt}/${maxRetries})...`,
+              );
+              await new Promise(resolve => setTimeout(resolve, backoffMs));
+              continue;
+            }
+
+            if (response.status === 429) {
+              throw new AppError('Gemini rate limit exceeded. Please try again later.', 429, 'PROVIDER_RATE_LIMIT');
+            }
+            if (response.status === 401 || response.status === 403) {
+              throw new AppError(
+                'Gemini authentication failed. Please verify API key configuration.',
+                403,
+                'PROVIDER_AUTH_ERROR',
+              );
+            }
+            if (response.status >= 500) {
+              throw new AppError('Gemini service error. Please try again later.', 502, 'PROVIDER_ERROR');
+            }
+            if (response.status === 400) {
+              throw new AppError('Bad request sent to Gemini provider.', 400, 'PROVIDER_BAD_REQUEST');
+            }
+            throw new AppError('Failed to communicate with Gemini provider', 502, 'PROVIDER_ERROR');
+          }
+
+          let data: any;
+          try {
+            data = await response.json();
+          } catch (parseErr) {
+            logger.error('[GeminiLlmProvider] Failed to parse JSON response from Gemini:', parseErr);
+            throw new AppError('Invalid response payload from Gemini', 502, 'PROVIDER_INVALID_RESPONSE');
+          }
+
+          const choice = data?.choices?.[0];
+          if (!choice || typeof choice !== 'object') {
+            logger.error('[GeminiLlmProvider] Malformed response: choices array is missing or empty.');
+            throw new AppError('Invalid response payload from Gemini', 502, 'PROVIDER_INVALID_RESPONSE');
+          }
+
+          const message = choice.message || {};
+          const content = typeof message.content === 'string' ? message.content : '';
+          const toolCalls =
+            Array.isArray(message.tool_calls) && message.tool_calls.length > 0 ? message.tool_calls : undefined;
+
+          const finishReason = choice.finish_reason || (toolCalls ? 'tool_calls' : 'stop');
+
+          // Empty replies or reasoning token exhaustion check:
+          // If content is completely blank and no tool calls were returned, throw PROVIDER_EMPTY_RESPONSE
+          if (!content.trim() && (!toolCalls || toolCalls.length === 0)) {
+            logger.warn(
+              `[GeminiLlmProvider] Empty content returned from Gemini with finishReason='${finishReason}'. Full choice:`,
+              choice,
+            );
+            throw new AppError(
+              `Gemini provider returned an empty completion (finishReason: ${finishReason}). The model may have exhausted max_tokens on internal reasoning or produced no output.`,
+              502,
+              'PROVIDER_EMPTY_RESPONSE',
+            );
+          }
+
+          const usage = data.usage || {};
+          const promptTokens = usage.prompt_tokens || 0;
+          const completionTokens = usage.completion_tokens || 0;
+          const totalTokens = usage.total_tokens || promptTokens + completionTokens;
+
+          clearTimeout(timer);
+          return {
+            content,
+            promptTokens,
+            completionTokens,
+            totalTokens,
+            finishReason,
+            ...(toolCalls ? { toolCalls } : {}),
+          };
+        } catch (fetchErr: any) {
+          if (fetchErr instanceof AppError) {
+            throw fetchErr;
+          }
+          if (fetchErr.name === 'AbortError') {
+            throw new AppError('LLM Provider request timed out', 504, 'PROVIDER_TIMEOUT');
+          }
+
+          lastError = fetchErr;
+          if (attempt < maxRetries) {
+            attempt++;
+            const backoffMs = Math.min(1000 * Math.pow(2, attempt - 1), 3000);
+            logger.warn(
+              `[GeminiLlmProvider] Network error communicating with Gemini. Retrying in ${backoffMs}ms (attempt ${attempt}/${maxRetries})...`,
+            );
+            await new Promise(resolve => setTimeout(resolve, backoffMs));
+            continue;
+          }
+          break;
+        }
+      }
 
       clearTimeout(timer);
-
-      if (!response.ok) {
-        let errorData: any = {};
-        try {
-          errorData = await response.json();
-        } catch {
-          // Response body was not JSON
-        }
-
-        const realErrorMessage =
-          errorData?.error?.message || errorData?.message || `Gemini provider returned HTTP status ${response.status}`;
-
-        // Log real provider error internally on server without exposing credentials or full prompts
-        logger.error('[GeminiLlmProvider] HTTP error from Gemini API:', {
-          status: response.status,
-          model: effectiveModel,
-          error: realErrorMessage,
-        });
-
-        if (response.status === 429) {
-          throw new AppError('Gemini rate limit exceeded. Please try again later.', 429, 'PROVIDER_RATE_LIMIT');
-        }
-        if (response.status === 401 || response.status === 403) {
-          throw new AppError(
-            'Gemini authentication failed. Please verify API key configuration.',
-            403,
-            'PROVIDER_AUTH_ERROR',
-          );
-        }
-        if (response.status >= 500) {
-          throw new AppError('Gemini service error. Please try again later.', 502, 'PROVIDER_ERROR');
-        }
-        if (response.status === 400) {
-          throw new AppError('Bad request sent to Gemini provider.', 400, 'PROVIDER_BAD_REQUEST');
-        }
-        throw new AppError('Failed to communicate with Gemini provider', 502, 'PROVIDER_ERROR');
-      }
-
-      let data: any;
-      try {
-        data = await response.json();
-      } catch (parseErr) {
-        logger.error('[GeminiLlmProvider] Failed to parse JSON response from Gemini:', parseErr);
-        throw new AppError('Invalid response payload from Gemini', 502, 'PROVIDER_INVALID_RESPONSE');
-      }
-
-      const choice = data?.choices?.[0];
-      if (!choice || typeof choice !== 'object') {
-        logger.error('[GeminiLlmProvider] Malformed response: choices array is missing or empty.');
-        throw new AppError('Invalid response payload from Gemini', 502, 'PROVIDER_INVALID_RESPONSE');
-      }
-
-      const message = choice.message || {};
-      const content = typeof message.content === 'string' ? message.content : '';
-      const toolCalls =
-        Array.isArray(message.tool_calls) && message.tool_calls.length > 0 ? message.tool_calls : undefined;
-
-      const finishReason = choice.finish_reason || (toolCalls ? 'tool_calls' : 'stop');
-
-      const usage = data.usage || {};
-      const promptTokens = usage.prompt_tokens || 0;
-      const completionTokens = usage.completion_tokens || 0;
-      const totalTokens = usage.total_tokens || promptTokens + completionTokens;
-
-      logger.info(
-        `[GeminiLlmProvider] Completed request with model ${effectiveModel} (prompt: ${promptTokens}, completion: ${completionTokens}, total: ${totalTokens})`,
-      );
-
-      return {
-        content,
-        promptTokens,
-        completionTokens,
-        totalTokens,
-        finishReason,
-        ...(toolCalls ? { toolCalls } : {}),
-      };
+      logger.error('[GeminiLlmProvider] Request failed after retries:', lastError);
+      throw new AppError('Failed to communicate with Gemini provider', 502, 'PROVIDER_ERROR');
     } catch (err: any) {
       clearTimeout(timer);
       if (err instanceof AppError) {
@@ -193,6 +270,12 @@ export class GeminiLlmProvider implements ILlmProvider {
     }
     if (request.tool_choice !== undefined) {
       requestPayload.tool_choice = request.tool_choice;
+    }
+    if (this.thinkingBudget !== undefined) {
+      requestPayload.thinking = { budget_tokens: this.thinkingBudget };
+    }
+    if (this.reasoningEffort) {
+      requestPayload.reasoning_effort = this.reasoningEffort;
     }
 
     try {

@@ -5,8 +5,18 @@ import { PlanSeedService } from './services/planSeed.service.js';
 import { TrialService } from './services/trial.service.js';
 import { TrialExpirationWorker } from './workers/trialExpiration.worker.js';
 import { isRtdbAvailable, RTDB_ROOT } from './services/rtdb/client.js';
+import { LlmProviderFactory } from './services/llm/llmProviderFactory.js';
 
 async function startServer(): Promise<void> {
+  // Validate LLM provider configuration at startup
+  try {
+    LlmProviderFactory.validateConfiguration();
+    logger.info(`LLM Provider configured: ${env.LLM_PROVIDER} (default model: ${env.LLM_DEFAULT_MODEL})`);
+  } catch (err: any) {
+    logger.error(`Fatal LLM configuration error at startup: ${err.message}`);
+    process.exit(1);
+  }
+
   const app = createApp();
 
   const host = '0.0.0.0';

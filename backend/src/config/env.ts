@@ -46,6 +46,11 @@ const envSchema = z.object({
     .refine(val => ALLOWED_MODELS.includes(val as any), {
       message: `Invalid GEMINI_MODEL. Allowed models: ${ALLOWED_MODELS.join(', ')}`,
     }),
+  GEMINI_THINKING_BUDGET: z
+    .union([z.number(), z.string()])
+    .transform(val => (typeof val === 'number' ? val : parseInt(val, 10)))
+    .optional(),
+  GEMINI_REASONING_EFFORT: z.enum(['none', 'low', 'medium', 'high']).optional(),
   AWS_BEDROCK_API_KEY: z.string().default(''),
   AWS_BEDROCK_REGION: z.string().default('us-east-1'),
   OPENAI_API_KEY: z.string().optional(),
@@ -108,6 +113,10 @@ const baseEnv = parsedEnv.success
       LLM_PROVIDER: (process.env.LLM_PROVIDER as 'gemini' | 'bedrock') || 'gemini',
       GEMINI_API_KEY: process.env.GEMINI_API_KEY || '',
       GEMINI_MODEL: process.env.GEMINI_MODEL || 'gemini-2.5-flash',
+      GEMINI_THINKING_BUDGET: process.env.GEMINI_THINKING_BUDGET
+        ? parseInt(process.env.GEMINI_THINKING_BUDGET, 10)
+        : undefined,
+      GEMINI_REASONING_EFFORT: process.env.GEMINI_REASONING_EFFORT as 'none' | 'low' | 'medium' | 'high' | undefined,
       AWS_BEDROCK_API_KEY: process.env.AWS_BEDROCK_API_KEY || '',
       AWS_BEDROCK_REGION: process.env.AWS_BEDROCK_REGION || 'us-east-1',
       OPENAI_API_KEY: process.env.OPENAI_API_KEY,
