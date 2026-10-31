@@ -48,7 +48,7 @@ export function isNaukriUpsellOrQuiz(
   if (!el) return false;
   let cur: HTMLElement | null = el;
   const body = el.ownerDocument?.body || (typeof document !== 'undefined' ? document.body : null);
-  while (cur && cur !== body) {
+  while (cur && cur !== body && cur.tagName !== 'BODY' && cur.tagName !== 'HTML') {
     const text = (cur.innerText || cur.textContent || cur.getAttribute('aria-label') || '').toLowerCase();
     for (const term of selectors.UPSELL_EXCLUSIONS || []) {
       if (text.includes(term.toLowerCase())) {
@@ -62,10 +62,11 @@ export function isNaukriUpsellOrQuiz(
 
 /**
  * Recognise success by several independent signals:
- * 1. Text: "Applied to <Job/Company>" or standard success phrases
- * 2. Banner: Green check banner, .apply-message, success icons
- * 3. Primary Button: Button text changed to "Applied", "Already applied", etc.
- * 4. DOM/URL markers: .applied-badge, applied url parameters
+ * 1. Banner: Green check banner, .apply-message, success icons (Strong)
+ * 2. Primary Button: Button text changed to "Applied", "Already applied", etc. (Strong)
+ * 3. Container Text: Explicit "Applied to <Job/Company>" inside an apply-confirmation container (Strong)
+ * 4. DOM/URL markers: .applied-badge, applied url parameters (Strong)
+ * 5. General body text: Text outside confirmation container (Weak - NEVER enough on its own)
  */
 export function evaluateNaukriSuccess(
   root: Document | HTMLElement,
@@ -76,29 +77,12 @@ export function evaluateNaukriSuccess(
   const container = (root as Document).body || (root as HTMLElement);
   const bodyText = (container.innerText || container.textContent || '').toLowerCase();
 
-  // 1. Text Signal: "Applied to <Job/Company>" or standard success phrases
-  const appliedToRegex = /(?:applied\s+to|application\s+sent\s+to)\s+([a-z0-9][^\n\r,\.;<]{1,40})/i;
-  const appliedToMatch = bodyText.match(appliedToRegex);
-  if (appliedToMatch) {
-    signals.push(`text: applied to ${appliedToMatch[1].trim()}`);
-  }
-
-  for (const ind of selectors.SUCCESS_INDICATORS) {
-    if (ind.startsWith('.')) continue; // CSS selector, handled in banner section
-    if (bodyText.includes(ind.toLowerCase())) {
-      if (!signals.some(s => s.startsWith('text:'))) {
-        signals.push(`text: ${ind}`);
-      }
-      break;
-    }
-  }
-
-  // 2. Banner / Green tick / Icon signal
+  // 1. Strong Signal: Confirmation Banner / Tick / Icon
   for (const sel of selectors.SUCCESS_BANNERS || []) {
     try {
       const bannerEls = Array.from(doc.querySelectorAll(sel)) as HTMLElement[];
       for (const b of bannerEls) {
-        if (b.offsetParent !== null || isElementVisible(b)) {
+        if (!isNaukriUpsellOrQuiz(b, selectors) && (b.offsetParent !== null || isElementVisible(b))) {
           signals.push(`banner: ${sel}`);
           break;
         }
@@ -110,7 +94,7 @@ export function evaluateNaukriSuccess(
   if (!signals.some(s => s.startsWith('banner:'))) {
     const successIcons = Array.from(doc.querySelectorAll('svg, i, span, div')) as HTMLElement[];
     for (const icon of successIcons) {
-      if (icon.offsetParent !== null || isElementVisible(icon)) {
+      if (!isNaukriUpsellOrQuiz(icon, selectors) && (icon.offsetParent !== null || isElementVisible(icon))) {
         const cls = (icon.className && typeof icon.className === 'string' ? icon.className : '').toLowerCase();
         if (
           cls.includes('success') ||
@@ -125,10 +109,10 @@ export function evaluateNaukriSuccess(
     }
   }
 
-  // 3. Primary apply button state
+  // 2. Strong Signal: Primary apply button state (changes to "Applied", "Already applied", etc.)
   for (const sel of selectors.PRIMARY_APPLY_BUTTON) {
     const el = doc.querySelector(sel) as HTMLElement | null;
-    if (el) {
+    if (el && (el.offsetParent !== null || isElementVisible(el))) {
       const bt = (el.textContent || (el as HTMLInputElement).value || '').trim().toLowerCase();
       if (
         bt === 'applied' ||
@@ -144,7 +128,42 @@ export function evaluateNaukriSuccess(
     }
   }
 
-  // 4. URL or DOM markers
+  // 3. Strong Signal: Explicit confirmation text inside an apply-confirmation container
+  const appliedToRegex = /(?:applied\s+to|application\s+sent\s+to)\s+([a-z0-9][^\n\r,\.;<]{1,40})/i;
+  const confirmationContainers: HTMLElement[] = [];
+  for (const cSel of selectors.APPLY_CONFIRMATION_CONTAINERS || []) {
+    try {
+      const matching = Array.from(doc.querySelectorAll(cSel)) as HTMLElement[];
+      for (const m of matching) {
+        if (!isNaukriUpsellOrQuiz(m, selectors) && (m.offsetParent !== null || isElementVisible(m))) {
+          confirmationContainers.push(m);
+        }
+      }
+    } catch {}
+  }
+
+  let foundContainerText = false;
+  for (const c of confirmationContainers) {
+    const cText = (c.innerText || c.textContent || '').trim();
+    const cMatch = cText.match(appliedToRegex);
+    if (cMatch) {
+      signals.push(`container_text: applied to ${cMatch[1].trim()}`);
+      foundContainerText = true;
+      break;
+    }
+    const cLower = cText.toLowerCase();
+    for (const ind of selectors.SUCCESS_INDICATORS) {
+      if (ind.startsWith('.')) continue;
+      if (cLower.includes(ind.toLowerCase())) {
+        signals.push(`container_text: ${ind}`);
+        foundContainerText = true;
+        break;
+      }
+    }
+    if (foundContainerText) break;
+  }
+
+  // 4. Strong Signal: URL or DOM markers
   if (typeof window !== 'undefined' && window.location?.href) {
     const href = window.location.href.toLowerCase();
     if (href.includes('applied=true') || href.includes('/applied')) {
@@ -159,8 +178,38 @@ export function evaluateNaukriSuccess(
     signals.push('marker: applied-badge');
   }
 
-  const isSuccess = signals.length > 0;
-  const confidence = signals.length >= 2 ? 'high' : signals.length === 1 ? 'medium' : 'none';
+  // 5. Weak Signal: General body text outside confirmation containers (e.g. JD description, similar jobs)
+  if (!foundContainerText) {
+    const appliedToMatch = bodyText.match(appliedToRegex);
+    if (appliedToMatch) {
+      signals.push(`weak_text: applied to ${appliedToMatch[1].trim()}`);
+    } else {
+      for (const ind of selectors.SUCCESS_INDICATORS) {
+        if (ind.startsWith('.')) continue;
+        if (bodyText.includes(ind.toLowerCase())) {
+          signals.push(`weak_text: ${ind}`);
+          break;
+        }
+      }
+    }
+  }
+
+  // Strong signals require confirmation banner/tick, button state, container text, or marker/url.
+  // Weak text appearing merely in general body (such as JD description or similar jobs)
+  // MUST NOT return applied on its own.
+  const strongSignals = signals.filter(
+    s =>
+      s.startsWith('banner:') ||
+      s.startsWith('button:') ||
+      s.startsWith('container_text:') ||
+      s.startsWith('marker:') ||
+      s.startsWith('url:'),
+  );
+
+  const hasStrongSignal = strongSignals.length > 0;
+  const isSuccess = hasStrongSignal;
+  const confidence: 'high' | 'medium' | 'none' =
+    strongSignals.length >= 2 ? 'high' : hasStrongSignal ? 'medium' : 'none';
 
   return { isSuccess, signals, confidence };
 }

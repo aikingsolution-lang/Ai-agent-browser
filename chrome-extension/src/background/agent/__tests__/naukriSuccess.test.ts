@@ -458,6 +458,117 @@ describe('Naukri Success Detection & Questionnaire Filtering', () => {
       const modal = findNaukriRealQuestionnaire(body as any, NAUKRI_SELECTORS);
       expect(modal).toBeNull();
     });
+
+    it('(f) Weak text signal ("applied to", "applied today") in job description or similar-jobs section does NOT return applied on its own', () => {
+      const body = new MockDOMElement('body');
+
+      // Primary apply button is unclicked
+      const btn = new MockDOMElement('button', { id: 'apply-button', class: 'apply-button' }, 'Apply');
+      body.appendChild(btn);
+
+      // Job description containing "applied to"
+      const jd = new MockDOMElement('div', { class: 'job-desc' });
+      jd.appendChild(
+        new MockDOMElement(
+          'p',
+          {},
+          'Candidates who have applied to similar enterprise roles or applied today with Java and React skills are preferred.',
+        ),
+      );
+      body.appendChild(jd);
+
+      // Similar jobs section containing "applied to"
+      const similar = new MockDOMElement('div', { class: 'similar-jobs' });
+      similar.appendChild(new MockDOMElement('span', {}, 'Jobs applied to by other jobseekers'));
+      body.appendChild(similar);
+
+      const result = evaluateNaukriSuccess(body as any, NAUKRI_SELECTORS);
+
+      // Must NOT return applied
+      expect(result.isSuccess).toBe(false);
+      expect(result.confidence).toBe('none');
+      // The weak signal is tracked as weak_text, not as a strong confirmation
+      expect(result.signals.some(s => s.startsWith('weak_text:'))).toBe(true);
+      expect(
+        result.signals.some(s => s.startsWith('banner:') || s.startsWith('button:') || s.startsWith('container_text:')),
+      ).toBe(false);
+    });
+
+    it('(g) Synthetic real-page layout fixture: before apply (with "applied to" in JD & similar jobs) vs after apply (with confirmation drawer, banner and button)', () => {
+      // NOTE: This fixture is strictly synthetic, modeled accurately on the DOM layout of real Naukri job pages
+      const page = new MockDOMElement('body');
+
+      // Top header with company and apply button
+      const header = new MockDOMElement('div', { class: 'job-header' });
+      const applyBtn = new MockDOMElement(
+        'button',
+        { id: 'apply-button', class: 'apply-button waves-effect' },
+        'Apply',
+      );
+      header.appendChild(new MockDOMElement('h1', { class: 'job-title' }, 'Java Full Stack Developer'));
+      header.appendChild(new MockDOMElement('div', { class: 'company-name' }, 'Infosys'));
+      header.appendChild(applyBtn);
+      page.appendChild(header);
+
+      // JD with phrases like "applied to"
+      const jdSection = new MockDOMElement('section', { class: 'job-desc' });
+      jdSection.appendChild(new MockDOMElement('h2', {}, 'Job description'));
+      jdSection.appendChild(
+        new MockDOMElement('p', {}, 'Principles applied to cloud architectures in this project...'),
+      );
+      jdSection.appendChild(new MockDOMElement('span', {}, '15 applicants applied today'));
+      page.appendChild(jdSection);
+
+      // Similar jobs sidebar
+      const similarSection = new MockDOMElement('section', { class: 'similar-jobs' });
+      similarSection.appendChild(new MockDOMElement('h3', {}, 'Similar jobs applied to recently'));
+      page.appendChild(similarSection);
+
+      // BEFORE APPLY:
+      const beforeResult = evaluateNaukriSuccess(page as any, NAUKRI_SELECTORS);
+      expect(beforeResult.isSuccess).toBe(false);
+      expect(beforeResult.confidence).toBe('none');
+
+      // AFTER APPLY:
+      // Primary button updates to "Applied"
+      applyBtn.className = 'apply-button applied already-applied';
+      applyBtn.textContent = 'Applied';
+      applyBtn.innerText = 'Applied';
+
+      // Confirmation banner appears in an apply confirmation container
+      const confirmContainer = new MockDOMElement('div', { class: 'apply-message-container' });
+      const banner = new MockDOMElement(
+        'div',
+        { class: 'apply-message' },
+        'Applied to Java Full Stack Developer (Infosys)',
+      );
+      const greenTick = new MockDOMElement('i', { class: 'green-tick icon-success' });
+      confirmContainer.appendChild(greenTick);
+      confirmContainer.appendChild(banner);
+      page.appendChild(confirmContainer);
+
+      // Post-apply drawer opens with quiz and upsell
+      const drawer = new MockDOMElement('div', { class: 'drawer-wrapper', role: 'dialog' });
+      const potd = new MockDOMElement('div', { class: 'potd' });
+      potd.appendChild(new MockDOMElement('h3', {}, 'Problem of the day'));
+      potd.appendChild(new MockDOMElement('input', { type: 'radio', name: 'potd_opt', value: '1' }));
+      const upsell = new MockDOMElement('div', { class: 'pro-upsell' });
+      upsell.appendChild(new MockDOMElement('h4', {}, 'Become a Pro with Naukri FastForward'));
+      drawer.appendChild(potd);
+      drawer.appendChild(upsell);
+      page.appendChild(drawer);
+
+      const afterResult = evaluateNaukriSuccess(page as any, NAUKRI_SELECTORS);
+      expect(afterResult.isSuccess).toBe(true);
+      expect(afterResult.confidence).toBe('high');
+      expect(afterResult.signals.some(s => s.startsWith('banner:'))).toBe(true);
+      expect(afterResult.signals).toContain('button: applied');
+      expect(afterResult.signals.some(s => s.startsWith('container_text:'))).toBe(true);
+
+      // Drawer is verified as NOT a questionnaire
+      const realModal = findNaukriRealQuestionnaire(page as any, NAUKRI_SELECTORS);
+      expect(realModal).toBeNull();
+    });
   });
 
   describe('NaukriAdapter.applyToJob End-to-End Execution Flow', () => {

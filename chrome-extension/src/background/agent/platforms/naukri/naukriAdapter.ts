@@ -467,7 +467,7 @@ export class NaukriAdapter implements IPlatformAdapter {
         function isUpsellElement(el: HTMLElement | null): boolean {
           if (!el) return false;
           let cur: HTMLElement | null = el;
-          while (cur && cur !== document.body) {
+          while (cur && cur !== document.body && cur.tagName !== 'BODY' && cur.tagName !== 'HTML') {
             const text = (cur.innerText || cur.textContent || cur.getAttribute('aria-label') || '').toLowerCase();
             for (const term of selectors.UPSELL_EXCLUSIONS || []) {
               if (text.includes(term.toLowerCase())) return true;
@@ -481,29 +481,12 @@ export class NaukriAdapter implements IPlatformAdapter {
           const signals: string[] = [];
           const bodyText = (document.body.innerText || document.body.textContent || '').toLowerCase();
 
-          // Signal 1: Text "Applied to <Job/Company>" or standard success phrases
-          const appliedToRegex = /(?:applied\s+to|application\s+sent\s+to)\s+([a-z0-9][\w\s\(\)\.-]{1,60})/i;
-          const appliedToMatch = bodyText.match(appliedToRegex);
-          if (appliedToMatch) {
-            signals.push(`text: applied to ${appliedToMatch[1].trim()}`);
-          }
-
-          for (const ind of selectors.SUCCESS_INDICATORS) {
-            if (ind.startsWith('.')) continue;
-            if (bodyText.includes(ind.toLowerCase())) {
-              if (!signals.some(s => s.startsWith('text:'))) {
-                signals.push(`text: ${ind}`);
-              }
-              break;
-            }
-          }
-
-          // Signal 2: Green check banner, .apply-message, success icons
+          // 1. Strong Signal: Confirmation Banner / Tick / Icon
           for (const sel of selectors.SUCCESS_BANNERS || []) {
             try {
               const bannerEls = Array.from(document.querySelectorAll(sel)) as HTMLElement[];
               for (const b of bannerEls) {
-                if (isVisible(b)) {
+                if (isVisible(b) && !isUpsellElement(b)) {
                   signals.push(`banner: ${sel}`);
                   break;
                 }
@@ -515,7 +498,7 @@ export class NaukriAdapter implements IPlatformAdapter {
           if (!signals.some(s => s.startsWith('banner:'))) {
             const successIcons = Array.from(document.querySelectorAll('svg, i, span, div')) as HTMLElement[];
             for (const icon of successIcons) {
-              if (isVisible(icon)) {
+              if (isVisible(icon) && !isUpsellElement(icon)) {
                 const cls = (icon.className && typeof icon.className === 'string' ? icon.className : '').toLowerCase();
                 if (
                   cls.includes('success') ||
@@ -530,7 +513,7 @@ export class NaukriAdapter implements IPlatformAdapter {
             }
           }
 
-          // Signal 3: Primary apply button state
+          // 2. Strong Signal: Primary apply button state
           for (const sel of selectors.PRIMARY_APPLY_BUTTON) {
             const el = document.querySelector(sel) as HTMLElement | null;
             if (el && isVisible(el)) {
@@ -549,7 +532,41 @@ export class NaukriAdapter implements IPlatformAdapter {
             }
           }
 
-          // Signal 4: URL or DOM markers
+          // 3. Strong Signal: Explicit confirmation text inside an apply-confirmation container
+          const appliedToRegex = /(?:applied\s+to|application\s+sent\s+to)\s+([a-z0-9][\w\s\(\)\.-]{1,60})/i;
+          const confirmationContainers: HTMLElement[] = [];
+          for (const cSel of selectors.APPLY_CONFIRMATION_CONTAINERS || []) {
+            try {
+              const matching = Array.from(document.querySelectorAll(cSel)) as HTMLElement[];
+              for (const m of matching) {
+                if (isVisible(m) && !isUpsellElement(m)) {
+                  confirmationContainers.push(m);
+                }
+              }
+            } catch {}
+          }
+          let foundContainerText = false;
+          for (const c of confirmationContainers) {
+            const cText = (c.innerText || c.textContent || '').trim();
+            const cMatch = cText.match(appliedToRegex);
+            if (cMatch) {
+              signals.push(`container_text: applied to ${cMatch[1].trim()}`);
+              foundContainerText = true;
+              break;
+            }
+            const cLower = cText.toLowerCase();
+            for (const ind of selectors.SUCCESS_INDICATORS) {
+              if (ind.startsWith('.')) continue;
+              if (cLower.includes(ind.toLowerCase())) {
+                signals.push(`container_text: ${ind}`);
+                foundContainerText = true;
+                break;
+              }
+            }
+            if (foundContainerText) break;
+          }
+
+          // 4. Strong Signal: URL or DOM markers
           try {
             const href = window.location.href.toLowerCase();
             if (href.includes('applied=true') || href.includes('/applied')) {
@@ -564,8 +581,37 @@ export class NaukriAdapter implements IPlatformAdapter {
             signals.push('marker: applied-badge');
           }
 
-          const isSuccess = signals.length > 0;
-          const confidence = signals.length >= 2 ? 'high' : signals.length === 1 ? 'medium' : 'none';
+          // 5. Weak Signal: General body text outside confirmation containers (e.g. JD description, similar jobs)
+          if (!foundContainerText) {
+            const appliedToMatch = bodyText.match(appliedToRegex);
+            if (appliedToMatch) {
+              signals.push(`weak_text: applied to ${appliedToMatch[1].trim()}`);
+            } else {
+              for (const ind of selectors.SUCCESS_INDICATORS) {
+                if (ind.startsWith('.')) continue;
+                if (bodyText.includes(ind.toLowerCase())) {
+                  signals.push(`weak_text: ${ind}`);
+                  break;
+                }
+              }
+            }
+          }
+
+          // Strong signals require confirmation banner/tick, button state, container text, or marker/url.
+          // Weak text appearing merely in general body (such as JD description or similar jobs)
+          // MUST NOT return applied on its own.
+          const strongSignals = signals.filter(
+            s =>
+              s.startsWith('banner:') ||
+              s.startsWith('button:') ||
+              s.startsWith('container_text:') ||
+              s.startsWith('marker:') ||
+              s.startsWith('url:'),
+          );
+
+          const hasStrongSignal = strongSignals.length > 0;
+          const isSuccess = hasStrongSignal;
+          const confidence = strongSignals.length >= 2 ? 'high' : hasStrongSignal ? 'medium' : 'none';
           return { isSuccess, signals, confidence };
         }
 
@@ -719,7 +765,7 @@ export class NaukriAdapter implements IPlatformAdapter {
         function isUpsellElement(el: HTMLElement | null): boolean {
           if (!el) return false;
           let cur: HTMLElement | null = el;
-          while (cur && cur !== document.body) {
+          while (cur && cur !== document.body && cur.tagName !== 'BODY' && cur.tagName !== 'HTML') {
             const text = (cur.innerText || cur.textContent || cur.getAttribute('aria-label') || '').toLowerCase();
             for (const term of selectors.UPSELL_EXCLUSIONS || []) {
               if (text.includes(term.toLowerCase())) return true;
@@ -733,29 +779,12 @@ export class NaukriAdapter implements IPlatformAdapter {
           const signals: string[] = [];
           const bodyText = (document.body.innerText || document.body.textContent || '').toLowerCase();
 
-          // Signal 1: Text "Applied to <Job/Company>" or standard success phrases
-          const appliedToRegex = /(?:applied\s+to|application\s+sent\s+to)\s+([a-z0-9][\w\s\(\)\.-]{1,60})/i;
-          const appliedToMatch = bodyText.match(appliedToRegex);
-          if (appliedToMatch) {
-            signals.push(`text: applied to ${appliedToMatch[1].trim()}`);
-          }
-
-          for (const ind of selectors.SUCCESS_INDICATORS) {
-            if (ind.startsWith('.')) continue;
-            if (bodyText.includes(ind.toLowerCase())) {
-              if (!signals.some(s => s.startsWith('text:'))) {
-                signals.push(`text: ${ind}`);
-              }
-              break;
-            }
-          }
-
-          // Signal 2: Green check banner, .apply-message, success icons
+          // 1. Strong Signal: Confirmation Banner / Tick / Icon
           for (const sel of selectors.SUCCESS_BANNERS || []) {
             try {
               const bannerEls = Array.from(document.querySelectorAll(sel)) as HTMLElement[];
               for (const b of bannerEls) {
-                if (isVisible(b)) {
+                if (isVisible(b) && !isUpsellElement(b)) {
                   signals.push(`banner: ${sel}`);
                   break;
                 }
@@ -767,7 +796,7 @@ export class NaukriAdapter implements IPlatformAdapter {
           if (!signals.some(s => s.startsWith('banner:'))) {
             const successIcons = Array.from(document.querySelectorAll('svg, i, span, div')) as HTMLElement[];
             for (const icon of successIcons) {
-              if (isVisible(icon)) {
+              if (isVisible(icon) && !isUpsellElement(icon)) {
                 const cls = (icon.className && typeof icon.className === 'string' ? icon.className : '').toLowerCase();
                 if (
                   cls.includes('success') ||
@@ -782,7 +811,7 @@ export class NaukriAdapter implements IPlatformAdapter {
             }
           }
 
-          // Signal 3: Primary apply button state
+          // 2. Strong Signal: Primary apply button state
           for (const sel of selectors.PRIMARY_APPLY_BUTTON) {
             const el = document.querySelector(sel) as HTMLElement | null;
             if (el && isVisible(el)) {
@@ -801,7 +830,41 @@ export class NaukriAdapter implements IPlatformAdapter {
             }
           }
 
-          // Signal 4: URL or DOM markers
+          // 3. Strong Signal: Explicit confirmation text inside an apply-confirmation container
+          const appliedToRegex = /(?:applied\s+to|application\s+sent\s+to)\s+([a-z0-9][\w\s\(\)\.-]{1,60})/i;
+          const confirmationContainers: HTMLElement[] = [];
+          for (const cSel of selectors.APPLY_CONFIRMATION_CONTAINERS || []) {
+            try {
+              const matching = Array.from(document.querySelectorAll(cSel)) as HTMLElement[];
+              for (const m of matching) {
+                if (isVisible(m) && !isUpsellElement(m)) {
+                  confirmationContainers.push(m);
+                }
+              }
+            } catch {}
+          }
+          let foundContainerText = false;
+          for (const c of confirmationContainers) {
+            const cText = (c.innerText || c.textContent || '').trim();
+            const cMatch = cText.match(appliedToRegex);
+            if (cMatch) {
+              signals.push(`container_text: applied to ${cMatch[1].trim()}`);
+              foundContainerText = true;
+              break;
+            }
+            const cLower = cText.toLowerCase();
+            for (const ind of selectors.SUCCESS_INDICATORS) {
+              if (ind.startsWith('.')) continue;
+              if (cLower.includes(ind.toLowerCase())) {
+                signals.push(`container_text: ${ind}`);
+                foundContainerText = true;
+                break;
+              }
+            }
+            if (foundContainerText) break;
+          }
+
+          // 4. Strong Signal: URL or DOM markers
           try {
             const href = window.location.href.toLowerCase();
             if (href.includes('applied=true') || href.includes('/applied')) {
@@ -816,8 +879,37 @@ export class NaukriAdapter implements IPlatformAdapter {
             signals.push('marker: applied-badge');
           }
 
-          const isSuccess = signals.length > 0;
-          const confidence = signals.length >= 2 ? 'high' : signals.length === 1 ? 'medium' : 'none';
+          // 5. Weak Signal: General body text outside confirmation containers (e.g. JD description, similar jobs)
+          if (!foundContainerText) {
+            const appliedToMatch = bodyText.match(appliedToRegex);
+            if (appliedToMatch) {
+              signals.push(`weak_text: applied to ${appliedToMatch[1].trim()}`);
+            } else {
+              for (const ind of selectors.SUCCESS_INDICATORS) {
+                if (ind.startsWith('.')) continue;
+                if (bodyText.includes(ind.toLowerCase())) {
+                  signals.push(`weak_text: ${ind}`);
+                  break;
+                }
+              }
+            }
+          }
+
+          // Strong signals require confirmation banner/tick, button state, container text, or marker/url.
+          // Weak text appearing merely in general body (such as JD description or similar jobs)
+          // MUST NOT return applied on its own.
+          const strongSignals = signals.filter(
+            s =>
+              s.startsWith('banner:') ||
+              s.startsWith('button:') ||
+              s.startsWith('container_text:') ||
+              s.startsWith('marker:') ||
+              s.startsWith('url:'),
+          );
+
+          const hasStrongSignal = strongSignals.length > 0;
+          const isSuccess = hasStrongSignal;
+          const confidence = strongSignals.length >= 2 ? 'high' : hasStrongSignal ? 'medium' : 'none';
           return { isSuccess, signals, confidence };
         }
 
@@ -1010,7 +1102,7 @@ export class NaukriAdapter implements IPlatformAdapter {
           function isUpsellElement(el: HTMLElement | null): boolean {
             if (!el) return false;
             let cur: HTMLElement | null = el;
-            while (cur && cur !== document.body) {
+            while (cur && cur !== document.body && cur.tagName !== 'BODY' && cur.tagName !== 'HTML') {
               const text = (cur.innerText || cur.textContent || cur.getAttribute('aria-label') || '').toLowerCase();
               for (const term of selectors.UPSELL_EXCLUSIONS || []) {
                 if (text.includes(term.toLowerCase())) return true;
@@ -1028,29 +1120,12 @@ export class NaukriAdapter implements IPlatformAdapter {
             const signals: string[] = [];
             const bodyText = (document.body.innerText || document.body.textContent || '').toLowerCase();
 
-            // 1. Text signal: "Applied to <Job/Company>" or standard success phrases
-            const appliedToRegex = /(?:applied\s+to|application\s+sent\s+to)\s+([a-z0-9][\w\s\(\)\.-]{1,60})/i;
-            const appliedToMatch = bodyText.match(appliedToRegex);
-            if (appliedToMatch) {
-              signals.push(`text: applied to ${appliedToMatch[1].trim()}`);
-            }
-
-            for (const ind of selectors.SUCCESS_INDICATORS) {
-              if (ind.startsWith('.')) continue;
-              if (bodyText.includes(ind.toLowerCase())) {
-                if (!signals.some(s => s.startsWith('text:'))) {
-                  signals.push(`text: ${ind}`);
-                }
-                break;
-              }
-            }
-
-            // 2. Banner / Green tick / Icon signal
+            // 1. Strong Signal: Confirmation Banner / Tick / Icon
             for (const sel of selectors.SUCCESS_BANNERS || []) {
               try {
                 const bannerEls = Array.from(document.querySelectorAll(sel)) as HTMLElement[];
                 for (const b of bannerEls) {
-                  if (isVisible(b)) {
+                  if (isVisible(b) && !isUpsellElement(b)) {
                     signals.push(`banner: ${sel}`);
                     break;
                   }
@@ -1062,7 +1137,7 @@ export class NaukriAdapter implements IPlatformAdapter {
             if (!signals.some(s => s.startsWith('banner:'))) {
               const successIcons = Array.from(document.querySelectorAll('svg, i, span, div')) as HTMLElement[];
               for (const icon of successIcons) {
-                if (isVisible(icon)) {
+                if (isVisible(icon) && !isUpsellElement(icon)) {
                   const cls = (
                     icon.className && typeof icon.className === 'string' ? icon.className : ''
                   ).toLowerCase();
@@ -1079,7 +1154,7 @@ export class NaukriAdapter implements IPlatformAdapter {
               }
             }
 
-            // 3. Primary apply button state
+            // 2. Strong Signal: Primary apply button state
             for (const sel of selectors.PRIMARY_APPLY_BUTTON) {
               const el = document.querySelector(sel) as HTMLElement | null;
               if (el && isVisible(el)) {
@@ -1098,7 +1173,41 @@ export class NaukriAdapter implements IPlatformAdapter {
               }
             }
 
-            // 4. URL or DOM markers
+            // 3. Strong Signal: Explicit confirmation text inside an apply-confirmation container
+            const appliedToRegex = /(?:applied\s+to|application\s+sent\s+to)\s+([a-z0-9][\w\s\(\)\.-]{1,60})/i;
+            const confirmationContainers: HTMLElement[] = [];
+            for (const cSel of selectors.APPLY_CONFIRMATION_CONTAINERS || []) {
+              try {
+                const matching = Array.from(document.querySelectorAll(cSel)) as HTMLElement[];
+                for (const m of matching) {
+                  if (isVisible(m) && !isUpsellElement(m)) {
+                    confirmationContainers.push(m);
+                  }
+                }
+              } catch {}
+            }
+            let foundContainerText = false;
+            for (const c of confirmationContainers) {
+              const cText = (c.innerText || c.textContent || '').trim();
+              const cMatch = cText.match(appliedToRegex);
+              if (cMatch) {
+                signals.push(`container_text: applied to ${cMatch[1].trim()}`);
+                foundContainerText = true;
+                break;
+              }
+              const cLower = cText.toLowerCase();
+              for (const ind of selectors.SUCCESS_INDICATORS) {
+                if (ind.startsWith('.')) continue;
+                if (cLower.includes(ind.toLowerCase())) {
+                  signals.push(`container_text: ${ind}`);
+                  foundContainerText = true;
+                  break;
+                }
+              }
+              if (foundContainerText) break;
+            }
+
+            // 4. Strong Signal: URL or DOM markers
             try {
               const href = window.location.href.toLowerCase();
               if (href.includes('applied=true') || href.includes('/applied')) {
@@ -1113,8 +1222,37 @@ export class NaukriAdapter implements IPlatformAdapter {
               signals.push('marker: applied-badge');
             }
 
-            const isSuccess = signals.length > 0;
-            const confidence = signals.length >= 2 ? 'high' : signals.length === 1 ? 'medium' : 'none';
+            // 5. Weak Signal: General body text outside confirmation containers (e.g. JD description, similar jobs)
+            if (!foundContainerText) {
+              const appliedToMatch = bodyText.match(appliedToRegex);
+              if (appliedToMatch) {
+                signals.push(`weak_text: applied to ${appliedToMatch[1].trim()}`);
+              } else {
+                for (const ind of selectors.SUCCESS_INDICATORS) {
+                  if (ind.startsWith('.')) continue;
+                  if (bodyText.includes(ind.toLowerCase())) {
+                    signals.push(`weak_text: ${ind}`);
+                    break;
+                  }
+                }
+              }
+            }
+
+            // Strong signals require confirmation banner/tick, button state, container text, or marker/url.
+            // Weak text appearing merely in general body (such as JD description or similar jobs)
+            // MUST NOT return applied on its own.
+            const strongSignals = signals.filter(
+              s =>
+                s.startsWith('banner:') ||
+                s.startsWith('button:') ||
+                s.startsWith('container_text:') ||
+                s.startsWith('marker:') ||
+                s.startsWith('url:'),
+            );
+
+            const hasStrongSignal = strongSignals.length > 0;
+            const isSuccess = hasStrongSignal;
+            const confidence = strongSignals.length >= 2 ? 'high' : hasStrongSignal ? 'medium' : 'none';
             return { isSuccess, signals, confidence };
           }
 
@@ -1237,16 +1375,8 @@ export class NaukriAdapter implements IPlatformAdapter {
           const confirmSuccess = await puppeteerPage.evaluate((selectors: typeof NAUKRI_SELECTORS) => {
             const signals: string[] = [];
             const bodyText = (document.body.innerText || document.body.textContent || '').toLowerCase();
-            const appliedToRegex = /(?:applied\s+to|application\s+sent\s+to)\s+([a-z0-9][\w\s\(\)\.-]{1,60})/i;
-            const appliedToMatch = bodyText.match(appliedToRegex);
-            if (appliedToMatch) signals.push(`text: applied to ${appliedToMatch[1].trim()}`);
-            for (const ind of selectors.SUCCESS_INDICATORS) {
-              if (ind.startsWith('.')) continue;
-              if (bodyText.includes(ind.toLowerCase())) {
-                if (!signals.some(s => s.startsWith('text:'))) signals.push(`text: ${ind}`);
-                break;
-              }
-            }
+
+            // 1. Banner
             for (const sel of selectors.SUCCESS_BANNERS || []) {
               try {
                 const el = document.querySelector(sel);
@@ -1256,6 +1386,8 @@ export class NaukriAdapter implements IPlatformAdapter {
                 }
               } catch {}
             }
+
+            // 2. Primary button
             for (const sel of selectors.PRIMARY_APPLY_BUTTON) {
               const el = document.querySelector(sel) as HTMLElement | null;
               if (el) {
@@ -1273,7 +1405,45 @@ export class NaukriAdapter implements IPlatformAdapter {
                 }
               }
             }
-            return { isSuccess: signals.length > 0, signals };
+
+            // 3. Container text inside confirmation containers
+            const appliedToRegex = /(?:applied\s+to|application\s+sent\s+to)\s+([a-z0-9][\w\s\(\)\.-]{1,60})/i;
+            const confirmationContainers: HTMLElement[] = [];
+            for (const cSel of selectors.APPLY_CONFIRMATION_CONTAINERS || []) {
+              try {
+                const matching = Array.from(document.querySelectorAll(cSel)) as HTMLElement[];
+                for (const m of matching) {
+                  confirmationContainers.push(m);
+                }
+              } catch {}
+            }
+            for (const c of confirmationContainers) {
+              const cText = (c.innerText || c.textContent || '').trim();
+              const cMatch = cText.match(appliedToRegex);
+              if (cMatch) {
+                signals.push(`container_text: applied to ${cMatch[1].trim()}`);
+                break;
+              }
+              const cLower = cText.toLowerCase();
+              for (const ind of selectors.SUCCESS_INDICATORS) {
+                if (ind.startsWith('.')) continue;
+                if (cLower.includes(ind.toLowerCase())) {
+                  signals.push(`container_text: ${ind}`);
+                  break;
+                }
+              }
+            }
+
+            const strongSignals = signals.filter(
+              s =>
+                s.startsWith('banner:') ||
+                s.startsWith('button:') ||
+                s.startsWith('container_text:') ||
+                s.startsWith('marker:') ||
+                s.startsWith('url:'),
+            );
+
+            return { isSuccess: strongSignals.length > 0, signals };
           }, NAUKRI_SELECTORS);
 
           if (confirmSuccess.isSuccess) {
@@ -1305,7 +1475,7 @@ export class NaukriAdapter implements IPlatformAdapter {
               function isUpsellElement(el: HTMLElement | null): boolean {
                 if (!el) return false;
                 let cur: HTMLElement | null = el;
-                while (cur && cur !== document.body) {
+                while (cur && cur !== document.body && cur.tagName !== 'BODY' && cur.tagName !== 'HTML') {
                   const text = (cur.innerText || cur.textContent || cur.getAttribute('aria-label') || '').toLowerCase();
                   for (const term of selectors.UPSELL_EXCLUSIONS || []) {
                     if (text.includes(term.toLowerCase())) return true;
@@ -1317,20 +1487,23 @@ export class NaukriAdapter implements IPlatformAdapter {
 
               // Check success FIRST
               const signals: string[] = [];
-              const bodyText = (document.body.innerText || '').toLowerCase();
-              const appliedToRegex = /(?:applied\s+to|application\s+sent\s+to)\s+([a-z0-9][\w\s\(\)\.-]{1,60})/i;
-              const appliedToMatch = bodyText.match(appliedToRegex);
-              if (appliedToMatch) signals.push(`text: applied to ${appliedToMatch[1].trim()}`);
-              for (const ind of selectors.SUCCESS_INDICATORS) {
-                if (ind.startsWith('.')) continue;
-                if (bodyText.includes(ind.toLowerCase())) {
-                  signals.push(`text: ${ind}`);
-                  break;
-                }
+
+              for (const sel of selectors.SUCCESS_BANNERS || []) {
+                try {
+                  const bannerEls = Array.from(document.querySelectorAll(sel)) as HTMLElement[];
+                  for (const b of bannerEls) {
+                    if (isVisible(b) && !isUpsellElement(b)) {
+                      signals.push(`banner: ${sel}`);
+                      break;
+                    }
+                  }
+                } catch {}
+                if (signals.some(s => s.startsWith('banner:'))) break;
               }
+
               for (const sel of selectors.PRIMARY_APPLY_BUTTON) {
                 const el = document.querySelector(sel) as HTMLElement | null;
-                if (el) {
+                if (el && isVisible(el)) {
                   const bt = (el.textContent || '').trim().toLowerCase();
                   if (
                     bt.includes('applied') ||
@@ -1342,7 +1515,46 @@ export class NaukriAdapter implements IPlatformAdapter {
                   }
                 }
               }
-              if (signals.length > 0) {
+
+              const appliedToRegex = /(?:applied\s+to|application\s+sent\s+to)\s+([a-z0-9][\w\s\(\)\.-]{1,60})/i;
+              const confirmationContainers: HTMLElement[] = [];
+              for (const cSel of selectors.APPLY_CONFIRMATION_CONTAINERS || []) {
+                try {
+                  const matching = Array.from(document.querySelectorAll(cSel)) as HTMLElement[];
+                  for (const m of matching) {
+                    if (isVisible(m) && !isUpsellElement(m)) {
+                      confirmationContainers.push(m);
+                    }
+                  }
+                } catch {}
+              }
+              for (const c of confirmationContainers) {
+                const cText = (c.innerText || c.textContent || '').trim();
+                const cMatch = cText.match(appliedToRegex);
+                if (cMatch) {
+                  signals.push(`container_text: applied to ${cMatch[1].trim()}`);
+                  break;
+                }
+                const cLower = cText.toLowerCase();
+                for (const ind of selectors.SUCCESS_INDICATORS) {
+                  if (ind.startsWith('.')) continue;
+                  if (cLower.includes(ind.toLowerCase())) {
+                    signals.push(`container_text: ${ind}`);
+                    break;
+                  }
+                }
+              }
+
+              const strongSignals = signals.filter(
+                s =>
+                  s.startsWith('banner:') ||
+                  s.startsWith('button:') ||
+                  s.startsWith('container_text:') ||
+                  s.startsWith('marker:') ||
+                  s.startsWith('url:'),
+              );
+
+              if (strongSignals.length > 0) {
                 return { state: 'success', signals };
               }
 
@@ -1428,7 +1640,7 @@ export class NaukriAdapter implements IPlatformAdapter {
           function isUpsellElement(el: HTMLElement | null): boolean {
             if (!el) return false;
             let cur: HTMLElement | null = el;
-            while (cur && cur !== document.body) {
+            while (cur && cur !== document.body && cur.tagName !== 'BODY' && cur.tagName !== 'HTML') {
               const text = (cur.innerText || cur.textContent || cur.getAttribute('aria-label') || '').toLowerCase();
               for (const term of selectors.UPSELL_EXCLUSIONS || []) {
                 if (text.includes(term.toLowerCase())) return true;
@@ -1812,21 +2024,44 @@ export class NaukriAdapter implements IPlatformAdapter {
         if (!stepData.modalFound) {
           // If no real questionnaire was found on this step, check success immediately
           const succCheck = await puppeteerPage.evaluate((selectors: typeof NAUKRI_SELECTORS) => {
-            const signals: string[] = [];
-            const bodyText = (document.body.innerText || '').toLowerCase();
-            const appliedToRegex = /(?:applied\s+to|application\s+sent\s+to)\s+([a-z0-9][\w\s\(\)\.-]{1,60})/i;
-            const appliedToMatch = bodyText.match(appliedToRegex);
-            if (appliedToMatch) signals.push(`text: applied to ${appliedToMatch[1].trim()}`);
-            for (const ind of selectors.SUCCESS_INDICATORS) {
-              if (ind.startsWith('.')) continue;
-              if (bodyText.includes(ind.toLowerCase())) {
-                signals.push(`text: ${ind}`);
-                break;
-              }
+            function isVisible(el: HTMLElement): boolean {
+              if (!el || el.offsetParent === null) return false;
+              const style = window.getComputedStyle(el);
+              return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
             }
+            function isUpsellElement(el: HTMLElement | null): boolean {
+              if (!el) return false;
+              let cur: HTMLElement | null = el;
+              while (cur && cur !== document.body && cur.tagName !== 'BODY' && cur.tagName !== 'HTML') {
+                const text = (cur.innerText || cur.textContent || cur.getAttribute('aria-label') || '').toLowerCase();
+                for (const term of selectors.UPSELL_EXCLUSIONS || []) {
+                  if (text.includes(term.toLowerCase())) return true;
+                }
+                cur = cur.parentElement;
+              }
+              return false;
+            }
+
+            const signals: string[] = [];
+
+            // 1. Banner
+            for (const sel of selectors.SUCCESS_BANNERS || []) {
+              try {
+                const bannerEls = Array.from(document.querySelectorAll(sel)) as HTMLElement[];
+                for (const b of bannerEls) {
+                  if (!isUpsellElement(b) && isVisible(b)) {
+                    signals.push(`banner: ${sel}`);
+                    break;
+                  }
+                }
+              } catch {}
+              if (signals.some(s => s.startsWith('banner:'))) break;
+            }
+
+            // 2. Primary button
             for (const sel of selectors.PRIMARY_APPLY_BUTTON) {
               const el = document.querySelector(sel) as HTMLElement | null;
-              if (el) {
+              if (el && isVisible(el)) {
                 const bt = (el.textContent || '').trim().toLowerCase();
                 if (
                   bt.includes('applied') ||
@@ -1838,7 +2073,47 @@ export class NaukriAdapter implements IPlatformAdapter {
                 }
               }
             }
-            return { isSuccess: signals.length > 0, signals };
+
+            // 3. Container text
+            const appliedToRegex = /(?:applied\s+to|application\s+sent\s+to)\s+([a-z0-9][\w\s\(\)\.-]{1,60})/i;
+            const confirmationContainers: HTMLElement[] = [];
+            for (const cSel of selectors.APPLY_CONFIRMATION_CONTAINERS || []) {
+              try {
+                const matching = Array.from(document.querySelectorAll(cSel)) as HTMLElement[];
+                for (const m of matching) {
+                  if (!isUpsellElement(m) && isVisible(m)) {
+                    confirmationContainers.push(m);
+                  }
+                }
+              } catch {}
+            }
+            for (const c of confirmationContainers) {
+              const cText = (c.innerText || c.textContent || '').trim();
+              const cMatch = cText.match(appliedToRegex);
+              if (cMatch) {
+                signals.push(`container_text: applied to ${cMatch[1].trim()}`);
+                break;
+              }
+              const cLower = cText.toLowerCase();
+              for (const ind of selectors.SUCCESS_INDICATORS) {
+                if (ind.startsWith('.')) continue;
+                if (cLower.includes(ind.toLowerCase())) {
+                  signals.push(`container_text: ${ind}`);
+                  break;
+                }
+              }
+            }
+
+            const strongSignals = signals.filter(
+              s =>
+                s.startsWith('banner:') ||
+                s.startsWith('button:') ||
+                s.startsWith('container_text:') ||
+                s.startsWith('marker:') ||
+                s.startsWith('url:'),
+            );
+
+            return { isSuccess: strongSignals.length > 0, signals };
           }, NAUKRI_SELECTORS);
 
           if (succCheck.isSuccess) {
@@ -1868,44 +2143,106 @@ export class NaukriAdapter implements IPlatformAdapter {
         const fields = stepData?.fields || [];
 
         // If stuck on the same state twice without progress:
-        // Try skip button if available, or stop cleanly instead of burning all 15 steps
+        // Must NOT click "Skip this question" on a mandatory question and must NOT submit an incomplete questionnaire.
+        // Stop cleanly with a clear failure reason instead of burning all 15 steps.
         if (consecutiveRepeats >= 2) {
-          if (stepData?.hasSkipBtn) {
-            logger.info(
-              `[NaukriAdapter] ⏭️ Repeated step on "${lastQuestionHandled}" (${consecutiveRepeats} times). Clicking "Skip this question" to advance...`,
-            );
-            await puppeteerPage.evaluate((selectors: typeof NAUKRI_SELECTORS) => {
-              const skipEls = Array.from(document.querySelectorAll('button, a, span, div')) as HTMLElement[];
-              for (const s of skipEls) {
-                const st = (s.textContent || '').trim().toLowerCase();
-                if (st.includes('skip this question') || st === 'skip question' || st === 'skip') {
-                  s.click();
-                  return;
-                }
-              }
-            }, NAUKRI_SELECTORS);
-            await new Promise(r => setTimeout(r, 2000));
-            continue;
-          }
-
-          // If no skip button and same state repeats twice with no new real question, stop with a clear reason
           logger.warning(
-            `[NaukriAdapter] Same question state repeated twice without progress ("${lastQuestionHandled}"). Stopping loop.`,
+            `[NaukriAdapter] Same question state repeated twice without progress ("${lastQuestionHandled}"). Stopping loop without submitting incomplete questionnaire.`,
           );
           const succCheck = await puppeteerPage.evaluate((selectors: typeof NAUKRI_SELECTORS) => {
+            function isVisible(el: HTMLElement): boolean {
+              if (!el || el.offsetParent === null) return false;
+              const style = window.getComputedStyle(el);
+              return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
+            }
+            function isUpsellElement(el: HTMLElement | null): boolean {
+              if (!el) return false;
+              let cur: HTMLElement | null = el;
+              while (cur && cur !== document.body && cur.tagName !== 'BODY' && cur.tagName !== 'HTML') {
+                const text = (cur.innerText || cur.textContent || cur.getAttribute('aria-label') || '').toLowerCase();
+                for (const term of selectors.UPSELL_EXCLUSIONS || []) {
+                  if (text.includes(term.toLowerCase())) return true;
+                }
+                cur = cur.parentElement;
+              }
+              return false;
+            }
+
             const signals: string[] = [];
-            const bodyText = (document.body.innerText || '').toLowerCase();
-            const appliedToRegex = /(?:applied\s+to|application\s+sent\s+to)\s+([a-z0-9][\w\s\(\)\.-]{1,60})/i;
-            const appliedToMatch = bodyText.match(appliedToRegex);
-            if (appliedToMatch) signals.push(`text: applied to ${appliedToMatch[1].trim()}`);
-            for (const ind of selectors.SUCCESS_INDICATORS) {
-              if (ind.startsWith('.')) continue;
-              if (bodyText.includes(ind.toLowerCase())) {
-                signals.push(`text: ${ind}`);
-                break;
+
+            // 1. Banner / Tick
+            for (const sel of selectors.SUCCESS_BANNERS || []) {
+              try {
+                const bannerEls = Array.from(document.querySelectorAll(sel)) as HTMLElement[];
+                for (const b of bannerEls) {
+                  if (!isUpsellElement(b) && isVisible(b)) {
+                    signals.push(`banner: ${sel}`);
+                    break;
+                  }
+                }
+              } catch {}
+              if (signals.some(s => s.startsWith('banner:'))) break;
+            }
+
+            // 2. Primary button
+            for (const sel of selectors.PRIMARY_APPLY_BUTTON) {
+              const el = document.querySelector(sel) as HTMLElement | null;
+              if (el && isVisible(el)) {
+                const bt = (el.textContent || '').trim().toLowerCase();
+                if (
+                  bt === 'applied' ||
+                  bt === 'already applied' ||
+                  bt.startsWith('applied on') ||
+                  bt.startsWith('applied to') ||
+                  el.classList.contains('applied') ||
+                  el.classList.contains('already-applied')
+                ) {
+                  signals.push(`button: ${bt || 'applied'}`);
+                  break;
+                }
               }
             }
-            return { isSuccess: signals.length > 0, signals };
+
+            // 3. Container text inside confirmation containers
+            const appliedToRegex = /(?:applied\s+to|application\s+sent\s+to)\s+([a-z0-9][\w\s\(\)\.-]{1,60})/i;
+            const confirmationContainers: HTMLElement[] = [];
+            for (const cSel of selectors.APPLY_CONFIRMATION_CONTAINERS || []) {
+              try {
+                const matching = Array.from(document.querySelectorAll(cSel)) as HTMLElement[];
+                for (const m of matching) {
+                  if (!isUpsellElement(m) && isVisible(m)) {
+                    confirmationContainers.push(m);
+                  }
+                }
+              } catch {}
+            }
+            for (const c of confirmationContainers) {
+              const cText = (c.innerText || c.textContent || '').trim();
+              const cMatch = cText.match(appliedToRegex);
+              if (cMatch) {
+                signals.push(`container_text: applied to ${cMatch[1].trim()}`);
+                break;
+              }
+              const cLower = cText.toLowerCase();
+              for (const ind of selectors.SUCCESS_INDICATORS) {
+                if (ind.startsWith('.')) continue;
+                if (cLower.includes(ind.toLowerCase())) {
+                  signals.push(`container_text: ${ind}`);
+                  break;
+                }
+              }
+            }
+
+            const strongSignals = signals.filter(
+              s =>
+                s.startsWith('banner:') ||
+                s.startsWith('button:') ||
+                s.startsWith('container_text:') ||
+                s.startsWith('marker:') ||
+                s.startsWith('url:'),
+            );
+
+            return { isSuccess: strongSignals.length > 0, signals };
           }, NAUKRI_SELECTORS);
 
           if (succCheck.isSuccess) {
@@ -1913,7 +2250,7 @@ export class NaukriAdapter implements IPlatformAdapter {
           }
           return {
             success: false,
-            reason: `Questionnaire remained open without progress. Last question: "${lastQuestionHandled}"`,
+            reason: `Questionnaire remained open after repeated attempts on question: "${lastQuestionHandled}"`,
           };
         }
 
@@ -1960,7 +2297,7 @@ export class NaukriAdapter implements IPlatformAdapter {
               function isUpsellElement(el: HTMLElement | null): boolean {
                 if (!el) return false;
                 let cur: HTMLElement | null = el;
-                while (cur && cur !== document.body) {
+                while (cur && cur !== document.body && cur.tagName !== 'BODY' && cur.tagName !== 'HTML') {
                   const text = (cur.innerText || cur.textContent || cur.getAttribute('aria-label') || '').toLowerCase();
                   for (const term of selectors.UPSELL_EXCLUSIONS || []) {
                     if (text.includes(term.toLowerCase())) return true;
@@ -2148,7 +2485,7 @@ export class NaukriAdapter implements IPlatformAdapter {
                 function isUpsellElement(el: HTMLElement | null): boolean {
                   if (!el) return false;
                   let cur: HTMLElement | null = el;
-                  while (cur && cur !== document.body) {
+                  while (cur && cur !== document.body && cur.tagName !== 'BODY' && cur.tagName !== 'HTML') {
                     const text = (
                       cur.innerText ||
                       cur.textContent ||
@@ -2775,7 +3112,7 @@ export class NaukriAdapter implements IPlatformAdapter {
           function isUpsellElement(el: HTMLElement | null): boolean {
             if (!el) return false;
             let cur: HTMLElement | null = el;
-            while (cur && cur !== document.body) {
+            while (cur && cur !== document.body && cur.tagName !== 'BODY' && cur.tagName !== 'HTML') {
               const text = (cur.innerText || cur.textContent || cur.getAttribute('aria-label') || '').toLowerCase();
               for (const term of selectors.UPSELL_EXCLUSIONS || []) {
                 if (text.includes(term.toLowerCase())) return true;
@@ -2945,18 +3282,7 @@ export class NaukriAdapter implements IPlatformAdapter {
             };
           }
 
-          // If no submit button is found at all, check if a skip button exists to advance
-          const skipEls = Array.from(document.querySelectorAll('button, a, span, div')) as HTMLElement[];
-          for (const s of skipEls) {
-            const st = (s.textContent || '').trim().toLowerCase();
-            if (st.includes('skip this question') || st === 'skip question' || st === 'skip') {
-              if (isVisible(s)) {
-                s.click();
-                return { clicked: true, action: 'skip_due_to_no_submit_button' };
-              }
-            }
-          }
-
+          // If no submit button is found, do NOT click skip on mandatory questions
           return { clicked: false, reason: 'no_action_button' };
         }, NAUKRI_SELECTORS);
 
@@ -3006,7 +3332,7 @@ export class NaukriAdapter implements IPlatformAdapter {
           function isUpsellElement(el: HTMLElement | null): boolean {
             if (!el) return false;
             let cur: HTMLElement | null = el;
-            while (cur && cur !== document.body) {
+            while (cur && cur !== document.body && cur.tagName !== 'BODY' && cur.tagName !== 'HTML') {
               const text = (cur.innerText || cur.textContent || cur.getAttribute('aria-label') || '').toLowerCase();
               for (const term of selectors.UPSELL_EXCLUSIONS || []) {
                 if (text.includes(term.toLowerCase())) return true;
@@ -3024,29 +3350,12 @@ export class NaukriAdapter implements IPlatformAdapter {
             const signals: string[] = [];
             const bodyText = (document.body.innerText || document.body.textContent || '').toLowerCase();
 
-            // 1. Text signal: "Applied to <Job/Company>" or standard success phrases
-            const appliedToRegex = /(?:applied\s+to|application\s+sent\s+to)\s+([a-z0-9][\w\s\(\)\.-]{1,60})/i;
-            const appliedToMatch = bodyText.match(appliedToRegex);
-            if (appliedToMatch) {
-              signals.push(`text: applied to ${appliedToMatch[1].trim()}`);
-            }
-
-            for (const ind of selectors.SUCCESS_INDICATORS) {
-              if (ind.startsWith('.')) continue;
-              if (bodyText.includes(ind.toLowerCase())) {
-                if (!signals.some(s => s.startsWith('text:'))) {
-                  signals.push(`text: ${ind}`);
-                }
-                break;
-              }
-            }
-
-            // 2. Banner / Green tick / Icon signal
+            // 1. Strong Signal: Confirmation Banner / Tick / Icon
             for (const sel of selectors.SUCCESS_BANNERS || []) {
               try {
                 const bannerEls = Array.from(document.querySelectorAll(sel)) as HTMLElement[];
                 for (const b of bannerEls) {
-                  if (isVisible(b)) {
+                  if (isVisible(b) && !isUpsellElement(b)) {
                     signals.push(`banner: ${sel}`);
                     break;
                   }
@@ -3058,7 +3367,7 @@ export class NaukriAdapter implements IPlatformAdapter {
             if (!signals.some(s => s.startsWith('banner:'))) {
               const successIcons = Array.from(document.querySelectorAll('svg, i, span, div')) as HTMLElement[];
               for (const icon of successIcons) {
-                if (isVisible(icon)) {
+                if (isVisible(icon) && !isUpsellElement(icon)) {
                   const cls = (
                     icon.className && typeof icon.className === 'string' ? icon.className : ''
                   ).toLowerCase();
@@ -3075,7 +3384,7 @@ export class NaukriAdapter implements IPlatformAdapter {
               }
             }
 
-            // 3. Primary apply button state
+            // 2. Strong Signal: Primary apply button state
             for (const sel of selectors.PRIMARY_APPLY_BUTTON) {
               const el = document.querySelector(sel) as HTMLElement | null;
               if (el && isVisible(el)) {
@@ -3094,7 +3403,41 @@ export class NaukriAdapter implements IPlatformAdapter {
               }
             }
 
-            // 4. URL or DOM markers
+            // 3. Strong Signal: Explicit confirmation text inside an apply-confirmation container
+            const appliedToRegex = /(?:applied\s+to|application\s+sent\s+to)\s+([a-z0-9][\w\s\(\)\.-]{1,60})/i;
+            const confirmationContainers: HTMLElement[] = [];
+            for (const cSel of selectors.APPLY_CONFIRMATION_CONTAINERS || []) {
+              try {
+                const matching = Array.from(document.querySelectorAll(cSel)) as HTMLElement[];
+                for (const m of matching) {
+                  if (isVisible(m) && !isUpsellElement(m)) {
+                    confirmationContainers.push(m);
+                  }
+                }
+              } catch {}
+            }
+            let foundContainerText = false;
+            for (const c of confirmationContainers) {
+              const cText = (c.innerText || c.textContent || '').trim();
+              const cMatch = cText.match(appliedToRegex);
+              if (cMatch) {
+                signals.push(`container_text: applied to ${cMatch[1].trim()}`);
+                foundContainerText = true;
+                break;
+              }
+              const cLower = cText.toLowerCase();
+              for (const ind of selectors.SUCCESS_INDICATORS) {
+                if (ind.startsWith('.')) continue;
+                if (cLower.includes(ind.toLowerCase())) {
+                  signals.push(`container_text: ${ind}`);
+                  foundContainerText = true;
+                  break;
+                }
+              }
+              if (foundContainerText) break;
+            }
+
+            // 4. Strong Signal: URL or DOM markers
             try {
               const href = window.location.href.toLowerCase();
               if (href.includes('applied=true') || href.includes('/applied')) {
@@ -3109,8 +3452,37 @@ export class NaukriAdapter implements IPlatformAdapter {
               signals.push('marker: applied-badge');
             }
 
-            const isSuccess = signals.length > 0;
-            const confidence = signals.length >= 2 ? 'high' : signals.length === 1 ? 'medium' : 'none';
+            // 5. Weak Signal: General body text outside confirmation containers (e.g. JD description, similar jobs)
+            if (!foundContainerText) {
+              const appliedToMatch = bodyText.match(appliedToRegex);
+              if (appliedToMatch) {
+                signals.push(`weak_text: applied to ${appliedToMatch[1].trim()}`);
+              } else {
+                for (const ind of selectors.SUCCESS_INDICATORS) {
+                  if (ind.startsWith('.')) continue;
+                  if (bodyText.includes(ind.toLowerCase())) {
+                    signals.push(`weak_text: ${ind}`);
+                    break;
+                  }
+                }
+              }
+            }
+
+            // Strong signals require confirmation banner/tick, button state, container text, or marker/url.
+            // Weak text appearing merely in general body (such as JD description or similar jobs)
+            // MUST NOT return applied on its own.
+            const strongSignals = signals.filter(
+              s =>
+                s.startsWith('banner:') ||
+                s.startsWith('button:') ||
+                s.startsWith('container_text:') ||
+                s.startsWith('marker:') ||
+                s.startsWith('url:'),
+            );
+
+            const hasStrongSignal = strongSignals.length > 0;
+            const isSuccess = hasStrongSignal;
+            const confidence = strongSignals.length >= 2 ? 'high' : hasStrongSignal ? 'medium' : 'none';
             return { isSuccess, signals, confidence };
           }
 
@@ -3262,7 +3634,7 @@ export class NaukriAdapter implements IPlatformAdapter {
         function isUpsellElement(el: HTMLElement | null): boolean {
           if (!el) return false;
           let cur: HTMLElement | null = el;
-          while (cur && cur !== document.body) {
+          while (cur && cur !== document.body && cur.tagName !== 'BODY' && cur.tagName !== 'HTML') {
             const text = (cur.innerText || cur.textContent || cur.getAttribute('aria-label') || '').toLowerCase();
             for (const term of selectors.UPSELL_EXCLUSIONS || []) {
               if (text.includes(term.toLowerCase())) return true;
@@ -3274,43 +3646,78 @@ export class NaukriAdapter implements IPlatformAdapter {
 
         // 1. Success check FIRST
         const signals: string[] = [];
-        const bodyText = (document.body.innerText || '').toLowerCase();
-        const appliedToRegex = /(?:applied\s+to|application\s+sent\s+to)\s+([a-z0-9][\w\s\(\)\.-]{1,60})/i;
-        const appliedToMatch = bodyText.match(appliedToRegex);
-        if (appliedToMatch) signals.push(`text: applied to ${appliedToMatch[1].trim()}`);
-        for (const ind of selectors.SUCCESS_INDICATORS) {
-          if (ind.startsWith('.')) continue;
-          if (bodyText.includes(ind.toLowerCase())) {
-            signals.push(`text: ${ind}`);
-            break;
-          }
-        }
+
+        // Banner
         for (const sel of selectors.SUCCESS_BANNERS || []) {
           try {
             const el = document.querySelector(sel);
-            if (el && isVisible(el as HTMLElement)) {
+            if (el && isVisible(el as HTMLElement) && !isUpsellElement(el as HTMLElement)) {
               signals.push(`banner: ${sel}`);
               break;
             }
           } catch {}
         }
+
+        // Primary button
         for (const sel of selectors.PRIMARY_APPLY_BUTTON) {
           const el = document.querySelector(sel) as HTMLElement | null;
-          if (el) {
+          if (el && isVisible(el)) {
             const bt = (el.textContent || '').trim().toLowerCase();
             if (
-              bt.includes('applied') ||
+              bt === 'applied' ||
+              bt === 'already applied' ||
+              bt.startsWith('applied on') ||
+              bt.startsWith('applied to') ||
               el.classList.contains('applied') ||
               el.classList.contains('already-applied')
             ) {
-              signals.push(`button: ${bt}`);
+              signals.push(`button: ${bt || 'applied'}`);
               break;
             }
           }
         }
 
-        if (signals.length > 0) {
-          return { success: true, signals };
+        // Container text inside confirmation container
+        const appliedToRegex = /(?:applied\s+to|application\s+sent\s+to)\s+([a-z0-9][\w\s\(\)\.-]{1,60})/i;
+        const confirmationContainers: HTMLElement[] = [];
+        for (const cSel of selectors.APPLY_CONFIRMATION_CONTAINERS || []) {
+          try {
+            const matching = Array.from(document.querySelectorAll(cSel)) as HTMLElement[];
+            for (const m of matching) {
+              if (isVisible(m) && !isUpsellElement(m)) {
+                confirmationContainers.push(m);
+              }
+            }
+          } catch {}
+        }
+        for (const c of confirmationContainers) {
+          const cText = (c.innerText || c.textContent || '').trim();
+          const cMatch = cText.match(appliedToRegex);
+          if (cMatch) {
+            signals.push(`container_text: applied to ${cMatch[1].trim()}`);
+            break;
+          }
+          const cLower = cText.toLowerCase();
+          for (const ind of selectors.SUCCESS_INDICATORS) {
+            if (ind.startsWith('.')) continue;
+            if (cLower.includes(ind.toLowerCase())) {
+              signals.push(`container_text: ${ind}`);
+              break;
+            }
+          }
+        }
+
+        const strongSignals = signals.filter(
+          s =>
+            s.startsWith('banner:') ||
+            s.startsWith('button:') ||
+            s.startsWith('container_text:') ||
+            s.startsWith('marker:') ||
+            s.startsWith('url:'),
+        );
+
+        if (strongSignals.length > 0) {
+          return { success: true, signals: strongSignals };
         }
 
         // Check if real questionnaire is still open
