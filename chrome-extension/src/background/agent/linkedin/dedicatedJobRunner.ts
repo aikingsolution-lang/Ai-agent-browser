@@ -2006,10 +2006,18 @@ export class DedicatedJobRunner {
       const searchUrl = linkedinAdapter.buildSearchUrl(role, primaryLocation, candidateNameSources);
 
       const runnerMode: RunnerMode = options.runnerMode || 'tab';
+      logger.info(
+        `[DedicatedJobRunner] [${new Date().toISOString()}] [Stage 1/5] Opening/acquiring runner ${runnerMode} (searchUrl: ${searchUrl})...`,
+      );
       if (runnerMode === 'tab') {
-        this.notifyStatus(portToSend, `🌐 Opening dedicated runner tab in current window for LinkedIn...`, 'info');
+        this.notifyStatus(
+          portToSend,
+          `🌐 Opening dedicated runner tab in current window for LinkedIn...`,
+          'info',
+          runToken,
+        );
       } else {
-        this.notifyStatus(portToSend, `🌐 Opening dedicated runner window for LinkedIn...`, 'info');
+        this.notifyStatus(portToSend, `🌐 Opening dedicated runner window for LinkedIn...`, 'info', runToken);
       }
 
       let runnerTarget: { windowId: number; tabId: number; mode?: RunnerMode };
@@ -2020,20 +2028,23 @@ export class DedicatedJobRunner {
         });
       } catch (err: any) {
         const openErrMsg = `🛑 Failed to open runner ${runnerMode}: ${err?.message || 'Unknown error'}. Please check browser permissions and try again.`;
-        logger.error('[DedicatedJobRunner]', openErrMsg);
-        this.notifyStatus(portToSend, openErrMsg, 'fail');
-        this.cleanupRun();
+        logger.error(`[DedicatedJobRunner] [${new Date().toISOString()}] ${openErrMsg}`);
+        this.notifyStatus(portToSend, openErrMsg, 'fail', runToken);
+        this.cleanupRun(openErrMsg, stats, runToken);
         return { status: 'stopped', message: openErrMsg, stats };
       }
 
       const { windowId, tabId } = runnerTarget;
       this.browserContext.updateCurrentTabId(tabId);
+      logger.info(
+        `[DedicatedJobRunner] [${new Date().toISOString()}] [Stage 2/5] Runner target acquired (tabId=${tabId}, windowId=${windowId}). Registering lifecycle listeners...`,
+      );
 
       // 1. Close listener (handles user closing the tab or window mid-run)
       this.unregisterWindowCloseListener = dedicatedWindowManager.onWindowClosed(async reason => {
         if (this.isRunning && this.activeRunId === runId) {
           logger.warning(
-            `Dedicated runner target closed while LinkedIn auto loop ${runId} was active (reason: ${reason}).`,
+            `[DedicatedJobRunner] [${new Date().toISOString()}] Dedicated runner target closed while LinkedIn auto loop ${runId} was active (reason: ${reason}).`,
           );
           const closeMsg =
             reason === 'tab_closed' || runnerMode === 'tab'
@@ -2047,7 +2058,9 @@ export class DedicatedJobRunner {
       // 2. Navigation boundary listener (handles user manually typing a different URL mid-run)
       this.unregisterNavAwayListener = dedicatedWindowManager.onNavigatedAway(async (newUrl: string) => {
         if (this.isRunning && this.activeRunId === runId) {
-          logger.warning(`Runner tab navigated away to ${newUrl} while LinkedIn auto loop ${runId} was active.`);
+          logger.warning(
+            `[DedicatedJobRunner] [${new Date().toISOString()}] Runner tab navigated away to ${newUrl} while LinkedIn auto loop ${runId} was active.`,
+          );
           this.notifyStatus(
             portToSend,
             `🛑 Runner tab navigated away from LinkedIn (${newUrl}) — application stopped cleanly.`,
@@ -2058,72 +2071,217 @@ export class DedicatedJobRunner {
         }
       });
 
+      logger.info(
+        `[DedicatedJobRunner] [${new Date().toISOString()}] [Stage 3/5] Attaching browser page context for tab ${tabId}...`,
+      );
       const currentPage = await this.browserContext.getCurrentPage();
 
-      // Allow Chrome tab navigation to load the LinkedIn search page
-      const navWaitAborted = await this.interruptibleSleep(3000);
-      if (navWaitAborted || !this.isRunning || this.isStopping) {
-        throw new AbortRunError(this.stopReason || 'Stopped by user');
+      // Bounded wait function for LinkedIn search results container
+      const waitForSearchReady = async (maxMs: number): Promise<boolean> => {
+        const start = Date.now();
+        while (Date.now() - start < maxMs) {
+          if (!this.isRunning || this.isStopping) return false;
+          this.checkAbort(runToken, this.abortController?.signal);
+
+          try {
+            const isReady = await Promise.race([
+              currentPage.evaluate(() => {
+                const resultsContainer = document.querySelector(
+                  '.jobs-search-results-list, .scaffold-layout__list, [data-view-name="job-card"], [componentkey*="job-card"]',
+                );
+                const hasCards =
+                  document.querySelectorAll('[data-job-id], [componentkey*="job-card-component-ref"]').length > 0;
+                return Boolean(resultsContainer || hasCards);
+              }),
+              new Promise<boolean>(r => setTimeout(() => r(false), 2000)),
+            ]);
+            if (isReady) return true;
+          } catch (evalErr) {
+            if (isCdpTabClosedError(evalErr)) throw evalErr;
+          }
+
+          const sleepAborted = await this.interruptibleSleep(800);
+          if (sleepAborted || !this.isRunning || this.isStopping) return false;
+        }
+        return false;
+      };
+
+      logger.info(
+        `[DedicatedJobRunner] [${new Date().toISOString()}] [Stage 4/5] Waiting for LinkedIn search page settlement (max 20s)...`,
+      );
+      this.notifyActivity(
+        portToSend,
+        onLiveActivity,
+        {
+          jobId: 'page_settle_wait',
+          url: searchUrl,
+          title: 'Loading Search Page',
+          company: 'LinkedIn Runner',
+          status: 'running',
+          reason: 'Waiting for search results layout (max 20s)...',
+          creditsUsed: 0,
+        },
+        runToken,
+      );
+
+      let searchSettled = await waitForSearchReady(20000);
+
+      // If page did not settle in 20s (e.g. stuck in skeleton state), reload once and retry
+      if (!searchSettled && this.isRunning && !this.isStopping) {
+        const reloadNotice = 'LinkedIn page did not finish loading in 20s, reloading once...';
+        logger.warning(`[DedicatedJobRunner] [${new Date().toISOString()}] ⚠️ ${reloadNotice}`);
+        this.notifyStatus(portToSend, `⚠️ ${reloadNotice}`, 'info', runToken);
+        this.notifyActivity(
+          portToSend,
+          onLiveActivity,
+          {
+            jobId: 'page_reload',
+            url: searchUrl,
+            title: 'Reloading Page',
+            company: 'LinkedIn Runner',
+            status: 'running',
+            reason: reloadNotice,
+            creditsUsed: 0,
+          },
+          runToken,
+        );
+
+        try {
+          if (currentPage.tabId && typeof chrome !== 'undefined' && chrome.tabs?.reload) {
+            await chrome.tabs.reload(currentPage.tabId);
+          } else if (currentPage.puppeteerPage) {
+            await currentPage.puppeteerPage.reload({ waitUntil: 'domcontentloaded', timeout: 20000 });
+          }
+        } catch (reloadErr) {
+          logger.warning('[DedicatedJobRunner] Tab reload failed or timed out:', reloadErr);
+        }
+
+        // Retry wait for up to 15s after reload
+        searchSettled = await waitForSearchReady(15000);
       }
+
+      if (!searchSettled && this.isRunning && !this.isStopping) {
+        const failMsg =
+          '🛑 LinkedIn search page failed to finish loading after reload (details pane stayed in skeleton state). Halting run cleanly.';
+        logger.error(`[DedicatedJobRunner] [${new Date().toISOString()}] ${failMsg}`);
+        this.notifyStatus(portToSend, failMsg, 'fail', runToken);
+        this.notifyActivity(
+          portToSend,
+          onLiveActivity,
+          {
+            jobId: 'page_load_failed',
+            url: searchUrl,
+            title: 'Search Page Unavailable',
+            company: 'LinkedIn Runner',
+            status: 'failed',
+            reason: 'LinkedIn search page did not finish loading (timed out)',
+            creditsUsed: 0,
+          },
+          runToken,
+        );
+        this.cleanupRun(failMsg, stats, runToken);
+        return { status: 'error', message: failMsg, stats };
+      }
+
       this.checkAbort(runToken, this.abortController?.signal);
 
-      if (typeof currentPage.waitForDomSettlement === 'function') {
-        await currentPage.waitForDomSettlement(
-          '.jobs-search-results-list, .scaffold-layout__list, [data-view-name="job-card"]',
-          { maxWaitMs: 5000, quietPeriodMs: 200 },
-        );
-      }
+      // Fast, bounded visual runner marker
       await this.markRunnerTabVisually(currentPage);
+
       const devtoolsNotice =
         '⚠️ DevTools detected on job tab - this may cause a disconnect if DevTools is kept open or toggled.';
-      this.notifyStatus(portToSend, devtoolsNotice, 'info');
-      this.notifyActivity(portToSend, onLiveActivity, {
-        jobId: 'devtools_guard',
-        url: searchUrl,
-        title: 'Debugger Attached',
-        company: 'LinkedIn Runner',
-        status: 'running',
-        reason: devtoolsNotice,
-        creditsUsed: 0,
-      });
+      this.notifyStatus(portToSend, devtoolsNotice, 'info', runToken);
+      this.notifyActivity(
+        portToSend,
+        onLiveActivity,
+        {
+          jobId: 'devtools_guard',
+          url: searchUrl,
+          title: 'Debugger Attached',
+          company: 'LinkedIn Runner',
+          status: 'running',
+          reason: devtoolsNotice,
+          creditsUsed: 0,
+        },
+        runToken,
+      );
 
-      // 4. Login Wall Detection & Pause Gate
-      let topCardCheck = await currentPage.extractJobTopCardContext(5000);
-      if (topCardCheck.isLoginWall) {
+      // Fast, bounded Login Wall Detection
+      logger.info(
+        `[DedicatedJobRunner] [${new Date().toISOString()}] [Stage 5/5] Checking login-wall status (bounded)...`,
+      );
+      const isLoginWall = await Promise.race([
+        currentPage.evaluate(() => {
+          const url = window.location.href.toLowerCase();
+          const pathname = window.location.pathname.toLowerCase();
+          const isAuthUrl =
+            pathname.includes('/login') ||
+            pathname.includes('/authwall') ||
+            pathname.includes('/checkpoint') ||
+            url.includes('linkedin.com/uas/login');
+          const hasLoginForm = !!(
+            document.querySelector('form.login__form') ||
+            document.querySelector('#username') ||
+            document.querySelector('input[name="session_key"]') ||
+            document.querySelector('.authwall-join-form') ||
+            document.querySelector('form[data-id="sign-in-form"]')
+          );
+          const hasJobContent = !!document.querySelector(
+            '.jobs-unified-top-card, .jobs-search__job-details--container, div[data-job-id], h1.job-details-jobs-unified-top-card__job-title, .topcard',
+          );
+          return isAuthUrl || (hasLoginForm && !hasJobContent);
+        }),
+        new Promise<boolean>(r => setTimeout(() => r(false), 3000)),
+      ]).catch(() => false);
+
+      if (isLoginWall) {
         this.notifyStatus(
           portToSend,
           '⚠️ LinkedIn login required. Please log in to LinkedIn in the runner window. (Pausing without spending credits...)',
           'info',
+          runToken,
         );
-
-        this.notifyActivity(portToSend, onLiveActivity, {
-          jobId: 'login_check',
-          url: searchUrl,
-          title: 'Waiting for login',
-          company: 'LinkedIn',
-          status: 'running',
-          reason: 'Please log in to LinkedIn in the runner window',
-          creditsUsed: 0,
-        });
+        this.notifyActivity(
+          portToSend,
+          onLiveActivity,
+          {
+            jobId: 'login_check',
+            url: searchUrl,
+            title: 'Waiting for login',
+            company: 'LinkedIn',
+            status: 'running',
+            reason: 'Please log in to LinkedIn in the runner window',
+            creditsUsed: 0,
+          },
+          runToken,
+        );
 
         const loginStartTime = Date.now();
         let loggedIn = false;
         while (Date.now() - loginStartTime < 300_000) {
           const sleepAborted = await this.interruptibleSleep(3000);
-          if (sleepAborted || !this.isRunning) break;
+          if (sleepAborted || !this.isRunning || this.isStopping) break;
 
-          topCardCheck = await currentPage.extractJobTopCardContext(4000);
-          if (!topCardCheck.isLoginWall) {
+          const stillWall = await Promise.race([
+            currentPage.evaluate(() => {
+              const url = window.location.href.toLowerCase();
+              const pathname = window.location.pathname.toLowerCase();
+              return pathname.includes('/login') || pathname.includes('/authwall') || pathname.includes('/checkpoint');
+            }),
+            new Promise<boolean>(r => setTimeout(() => r(true), 2500)),
+          ]).catch(() => true);
+
+          if (!stillWall) {
             loggedIn = true;
-            this.notifyStatus(portToSend, '✅ Login detected! Resuming autonomous search...', 'ok');
+            this.notifyStatus(portToSend, '✅ Login detected! Resuming autonomous search...', 'ok', runToken);
             break;
           }
         }
 
         if (!loggedIn) {
           const timeoutMsg = 'Login timeout (5 minutes reached). Please log in and retry.';
-          this.notifyStatus(portToSend, `🛑 ${timeoutMsg}`, 'fail');
-          this.cleanupRun();
+          this.notifyStatus(portToSend, `🛑 ${timeoutMsg}`, 'fail', runToken);
+          this.cleanupRun(timeoutMsg, stats, runToken);
           return { status: 'error', message: timeoutMsg, stats };
         }
       }
@@ -2576,7 +2734,14 @@ export class DedicatedJobRunner {
     role: string,
     location: string | string[],
     runId: string,
-    stats: { totalFound: number; applied: number; modalOpened: number; skipped: number; failed: number },
+    stats: {
+      totalFound: number;
+      applied: number;
+      modalOpened: number;
+      skipped: number;
+      failed: number;
+      skipReasons?: Record<string, number>;
+    },
     runToken?: string,
   ): Promise<{
     status: 'success' | 'stopped' | 'error';
@@ -2760,7 +2925,7 @@ export class DedicatedJobRunner {
     for (const job of jobs) {
       const proc = await processedJobsStore.isJobProcessed(job.jobId);
       if (proc.isProcessed && proc.status === 'applied') {
-        stats.skipped++;
+        recordSkip(stats, 'already applied earlier');
         this.notifyActivity(
           portToSend,
           onLiveActivity,
@@ -2854,7 +3019,7 @@ export class DedicatedJobRunner {
       );
       if (blacklist.blacklisted) {
         this.notifyStatus(portToSend, `🚫 [Naukri] Skipped "${job.title}": ${blacklist.reason}.`, 'info', runToken);
-        stats.skipped++;
+        recordSkip(stats, 'blacklisted company');
         await this.safeRecordJob(runToken, {
           jobId: job.jobId,
           url: job.url,
@@ -2880,7 +3045,7 @@ export class DedicatedJobRunner {
           'info',
           runToken,
         );
-        stats.skipped++;
+        recordSkip(stats, 'low skill relevance');
         await this.safeRecordJob(runToken, {
           jobId: job.jobId,
           url: job.url,
@@ -3011,7 +3176,22 @@ export class DedicatedJobRunner {
           runToken,
         );
       } else if (applyResult.status === 'skipped') {
-        stats.skipped++;
+        const reasonLower = (applyResult.reason || '').toLowerCase();
+        let skipKey = 'skipped';
+        if (reasonLower.includes('already applied')) {
+          skipKey = 'already applied on Naukri';
+        } else if (reasonLower.includes('company website') || reasonLower.includes('external')) {
+          skipKey = 'company website (external)';
+        } else if (reasonLower.includes('no active apply button') || reasonLower.includes('no apply button')) {
+          skipKey = 'no apply button';
+        } else if (
+          reasonLower.includes('otp') ||
+          reasonLower.includes('captcha') ||
+          reasonLower.includes('verification')
+        ) {
+          skipKey = 'verification wall';
+        }
+        recordSkip(stats, skipKey);
         await this.safeRecordJob(runToken, {
           jobId: job.jobId,
           url: job.url,
@@ -3100,7 +3280,8 @@ export class DedicatedJobRunner {
       }
     }
 
-    const summaryMsg = `Naukri Apply complete: ${stats.applied} applied, ${stats.skipped} skipped, ${stats.failed} failed.`;
+    const skipBreakdown = formatSkipBreakdown(stats.skipReasons);
+    const summaryMsg = `Naukri Apply complete: ${stats.applied} applied, ${stats.skipped} skipped, ${stats.failed} failed.${skipBreakdown ? ` [Skips: ${skipBreakdown}]` : ''}`;
     this.notifyStatus(portToSend, `🏁 ${summaryMsg}`, 'ok', runToken);
     this.cleanupRun(summaryMsg, stats, runToken);
     return { status: 'success', message: summaryMsg, stats };
@@ -3115,7 +3296,14 @@ export class DedicatedJobRunner {
     role: string,
     locationInput: string | string[],
     runId: string,
-    stats: { totalFound: number; applied: number; modalOpened: number; skipped: number; failed: number },
+    stats: {
+      totalFound: number;
+      applied: number;
+      modalOpened: number;
+      skipped: number;
+      failed: number;
+      skipReasons?: Record<string, number>;
+    },
     runToken?: string,
   ): Promise<{
     status: 'success' | 'stopped' | 'error';
@@ -3757,7 +3945,7 @@ export class DedicatedJobRunner {
           'info',
           runToken,
         );
-        stats.skipped++;
+        recordSkip(stats, 'low skill relevance');
         await this.safeRecordJob(runToken, {
           jobId: job.jobId,
           url: job.url,
@@ -3897,7 +4085,22 @@ export class DedicatedJobRunner {
           runToken,
         );
       } else if (applyResult.status === 'skipped') {
-        stats.skipped++;
+        const reasonLower = (applyResult.reason || '').toLowerCase();
+        let skipKey = 'skipped';
+        if (reasonLower.includes('already applied')) {
+          skipKey = 'already applied on Naukri';
+        } else if (reasonLower.includes('company website') || reasonLower.includes('external')) {
+          skipKey = 'company website (external)';
+        } else if (reasonLower.includes('no active apply button') || reasonLower.includes('no apply button')) {
+          skipKey = 'no apply button';
+        } else if (
+          reasonLower.includes('otp') ||
+          reasonLower.includes('captcha') ||
+          reasonLower.includes('verification')
+        ) {
+          skipKey = 'verification wall';
+        }
+        recordSkip(stats, skipKey);
         await this.safeRecordJob(runToken, {
           jobId: job.jobId,
           url: job.url,

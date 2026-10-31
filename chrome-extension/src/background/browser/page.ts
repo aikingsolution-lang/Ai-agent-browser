@@ -9750,9 +9750,8 @@ export default class Page {
     const startTime = Date.now();
 
     while (Date.now() - startTime < maxWaitMs) {
-      const check = await this._puppeteerPage
-        .evaluate((sel: string) => {
-          // Check for active loading spinners
+      const check = await Promise.race([
+        this._puppeteerPage.evaluate((sel: string) => {
           const spinnerSelectors = [
             '.artdeco-loader',
             '.loading-spinner',
@@ -9763,15 +9762,19 @@ export default class Page {
             '.fb-form-element--loading',
             '.spinner',
           ];
-          const hasSpinner = Boolean(document.querySelector(spinnerSelectors.join(', ')));
-          if (hasSpinner) {
-            return { hasSpinner: true, targetFound: false };
-          }
 
           // Target container inspection: If sel is provided, we MUST find sel; do NOT fall back to document.body
           const target = sel ? document.querySelector(sel) : document.body;
           if (!target) {
             return { hasSpinner: false, targetFound: false };
+          }
+
+          // Scope spinner inspection to the target container so an unrelated right-pane skeleton
+          // does not block settlement of the search results list
+          const spinnerHost = target !== document.body ? target : document;
+          const hasSpinner = Boolean(spinnerHost.querySelector(spinnerSelectors.join(', ')));
+          if (hasSpinner) {
+            return { hasSpinner: true, targetFound: false };
           }
 
           const style = window.getComputedStyle(target);
@@ -9780,11 +9783,14 @@ export default class Page {
           }
 
           return { hasSpinner: false, targetFound: true };
-        }, targetSelector)
-        .catch((err: any) => {
-          if (isCdpTabClosedError(err)) throw err;
-          return { hasSpinner: false, targetFound: false };
-        });
+        }, targetSelector),
+        new Promise<{ hasSpinner: boolean; targetFound: boolean }>(resolve =>
+          setTimeout(() => resolve({ hasSpinner: false, targetFound: false }), 2500),
+        ),
+      ]).catch((err: any) => {
+        if (isCdpTabClosedError(err)) throw err;
+        return { hasSpinner: false, targetFound: false };
+      });
 
       if (!check.hasSpinner && check.targetFound) {
         // Allow quietPeriodMs to guarantee layout stability

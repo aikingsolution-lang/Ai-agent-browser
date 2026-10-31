@@ -15,6 +15,8 @@ import { createLogger } from '@src/background/log';
 import { solveQuestionAutonomousWithLLM } from '../../linkedin/formQuestionResolver';
 import { getActiveChatModel } from '../../activeModelHelper';
 import { AbortRunError, isCdpTabClosedError } from '../../../utils';
+import { inspectNaukriJobPage, type NaukriClassificationResult } from './classification';
+export { inspectNaukriJobPage, type NaukriClassificationResult };
 
 const logger = createLogger('NaukriAdapter');
 
@@ -312,6 +314,7 @@ export class NaukriAdapter implements IPlatformAdapter {
         return { status: 'failed', reason: 'Browser page instance unavailable' };
       }
 
+      const navStartTime = Date.now();
       logger.info(`[NaukriAdapter] Navigating to Naukri job: ${job.title} (${job.url})`);
 
       // 1. Navigate to job page if not already there
@@ -358,64 +361,91 @@ export class NaukriAdapter implements IPlatformAdapter {
         }
       }
 
-      // 3. Check if already applied
-      const alreadyApplied = await puppeteerPage.evaluate((selectors: typeof NAUKRI_SELECTORS) => {
-        const text = (document.body.innerText || '').toLowerCase();
-        return selectors.ALREADY_APPLIED_INDICATORS.some(ind => text.includes(ind));
-      }, NAUKRI_SELECTORS);
+      // 3. Classification with polling (up to 8s) to ensure React/PWA apply container has rendered
+      const pollStart = Date.now();
+      const maxWaitMs = 8000;
+      let classification: NaukriClassificationResult = {
+        type: 'waiting',
+        buttonText: '',
+        applyAreaExists: false,
+        documentReadyState: 'loading',
+        applyRelatedButtons: [],
+      };
 
-      if (alreadyApplied) {
+      while (Date.now() - pollStart < maxWaitMs) {
+        if (context.signal?.aborted) {
+          throw new AbortRunError();
+        }
+
+        const raw: any = await puppeteerPage.evaluate(inspectNaukriJobPage).catch(() => null);
+        if (raw && typeof raw.type === 'string') {
+          classification = raw;
+        } else if (raw && 'found' in raw) {
+          // Compatibility with legacy mock structures
+          if (!raw.found) {
+            classification = {
+              type: 'no_button',
+              buttonText: '',
+              applyAreaExists: false,
+              documentReadyState: 'complete',
+              applyRelatedButtons: [],
+            };
+          } else if (raw.isExternal) {
+            classification = {
+              type: 'external',
+              buttonText: raw.text || 'Company website',
+              applyAreaExists: true,
+              documentReadyState: 'complete',
+              applyRelatedButtons: [],
+            };
+          } else {
+            classification = {
+              type: 'direct_apply',
+              buttonText: raw.text || 'Apply',
+              applyAreaExists: true,
+              documentReadyState: 'complete',
+              applyRelatedButtons: [],
+            };
+          }
+        }
+
+        if (classification.type !== 'waiting') {
+          break;
+        }
+
+        await new Promise(r => setTimeout(r, 500));
+      }
+
+      if (classification.type === 'waiting') {
+        classification.type = 'no_button';
+      }
+
+      const navElapsedSec = ((Date.now() - navStartTime) / 1000).toFixed(1);
+      const timestamp = new Date().toISOString();
+      const buttonsSummary =
+        classification.applyRelatedButtons.length > 0 ? `[${classification.applyRelatedButtons.join(', ')}]` : '[]';
+
+      logger.info(
+        `[NaukriClassification] [${timestamp}] Job ${job.jobId || 'unknown'} ("${job.title}"): timeSinceNav=${navElapsedSec}s | readyState=${classification.documentReadyState} | applyAreaExists=${classification.applyAreaExists} | result=${classification.type} ("${classification.buttonText}") | applyRelatedButtons=(${classification.applyRelatedButtons.length}) ${buttonsSummary}`,
+      );
+
+      if (classification.type === 'already_applied') {
         return { status: 'skipped', reason: 'You already applied to this job earlier on Naukri.' };
       }
 
-      // 3. Find Apply Button with strict priority: Direct Apply > External Site
-      const applyBtnState = await puppeteerPage.evaluate((selectors: typeof NAUKRI_SELECTORS) => {
-        // Direct apply button has highest priority
-        const directBtn = document.querySelector(
-          'button#apply-button, button.apply-button, button.waves-effect',
-        ) as HTMLElement | null;
-        if (directBtn && directBtn.offsetParent !== null) {
-          const directText = (directBtn.textContent || '').trim().toLowerCase();
-          const isExt = selectors.EXTERNAL_APPLY_INDICATORS.some(ind => directText.includes(ind));
-          return { found: true, isExternal: isExt, text: (directBtn.textContent || '').trim() };
-        }
-
-        // Dedicated external company site button
-        const externalBtn = document.querySelector(
-          'button#company-site-button, button.company-site-button, .company-site-button',
-        ) as HTMLElement | null;
-        if (externalBtn && externalBtn.offsetParent !== null) {
-          return { found: true, isExternal: true, text: (externalBtn.textContent || '').trim() };
-        }
-
-        // Fallback: search visible action buttons
-        const buttons = Array.from(document.querySelectorAll('button, a'));
-        for (const b of buttons) {
-          const bText = (b.textContent || '').trim().toLowerCase();
-          if (bText === 'apply' || bText === 'quick apply') {
-            return { found: true, isExternal: false, text: (b.textContent || '').trim() };
-          }
-          if (selectors.EXTERNAL_APPLY_INDICATORS.some(ind => bText.includes(ind))) {
-            return { found: true, isExternal: true, text: (b.textContent || '').trim() };
-          }
-        }
-
-        return { found: false, isExternal: false, text: '' };
-      }, NAUKRI_SELECTORS);
-
-      if (!applyBtnState.found) {
-        return { status: 'skipped', reason: 'No active Apply button found on job page.' };
-      }
-
-      if (applyBtnState.isExternal) {
+      if (classification.type === 'external') {
         return {
           status: 'skipped',
           reason: 'Requires applying directly on company website (not direct apply).',
         };
       }
 
+      if (classification.type === 'no_button') {
+        return { status: 'skipped', reason: 'No active Apply button found on job page.' };
+      }
+
       // 4. Click the Apply button
-      logger.info(`[NaukriAdapter] Clicking Apply button: "${applyBtnState.text}"`);
+      logger.info(`[NaukriAdapter] Clicking Apply button: "${classification.buttonText}"`);
       await puppeteerPage.evaluate((selectors: typeof NAUKRI_SELECTORS) => {
         function robustClick(target: HTMLElement) {
           target.scrollIntoView({ behavior: 'instant', block: 'center' });
@@ -438,7 +468,7 @@ export class NaukriAdapter implements IPlatformAdapter {
         const buttons = Array.from(document.querySelectorAll('button, a'));
         for (const b of buttons) {
           const bText = (b.textContent || '').trim().toLowerCase();
-          if (bText === 'apply' || bText === 'apply on website') {
+          if (bText === 'apply' || bText === 'quick apply' || bText === 'apply now') {
             robustClick(b as HTMLElement);
             return;
           }
