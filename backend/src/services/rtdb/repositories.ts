@@ -27,6 +27,7 @@ import { ServerValue } from 'firebase-admin/database';
 import type { DataSnapshot } from 'firebase-admin/database';
 import { dbRef, paths, rootRef } from './client.js';
 import { hashKey, stripUndefined } from './rtdbUtils.js';
+import { logger } from '../../utils/logger.js';
 import type {
   CareerBrainRecord,
   CreditBalanceRecord,
@@ -380,8 +381,17 @@ export class CreditRepository {
 
   /** Ledger entries for one agent run (needs `.indexOn: ["runId"]` on credit_ledger/$uid). */
   static async findLedgerByRunId(uid: string, runId: string): Promise<CreditLedgerRecord[]> {
-    const snap = await dbRef(paths.creditLedger(uid)).orderByChild('runId').equalTo(runId).get();
-    return childrenOf<CreditLedgerRecord>(snap);
+    try {
+      const snap = await dbRef(paths.creditLedger(uid)).orderByChild('runId').equalTo(runId).get();
+      return childrenOf<CreditLedgerRecord>(snap);
+    } catch (err: any) {
+      logger.warn(
+        `[CreditRepository.findLedgerByRunId] Indexed query for runId "${runId}" on user ${uid} failed: ${err?.message}. Falling back to user ledger scan.`,
+      );
+      const snap = await dbRef(paths.creditLedger(uid)).get();
+      const all = childrenOf<CreditLedgerRecord>(snap);
+      return all.filter(entry => entry.runId === runId || entry.metadata?.runId === runId);
+    }
   }
 
   static async listLedger(
