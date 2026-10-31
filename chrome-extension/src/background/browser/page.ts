@@ -22,6 +22,12 @@ import { createLogger } from '@src/background/log';
 import { ClickableElementProcessor } from './dom/clickable/service';
 import { isUrlAllowed } from './util';
 import { isCdpTabClosedError } from '../utils';
+import {
+  inspectLinkedInSplitPane,
+  inspectLinkedInEasyApplyFailure,
+  type LinkedInSplitPaneDiag,
+  type LinkedInEasyApplyFailureDiag,
+} from './linkedinDiagnostics';
 
 const logger = createLogger('Page');
 
@@ -6215,6 +6221,62 @@ export default class Page {
         .trim()
         .slice(0, 3000);
 
+      let easyApplyDiag: any = undefined;
+      if (!hasEasyApply) {
+        try {
+          const headingEl = detailsRoot.querySelector(
+            'h1, h2, [data-view-name="job-details-top-card"] h1, [data-view-name="job-details-top-card"] h2, .jobs-unified-top-card__job-title, .job-details-jobs-unified-top-card__job-title',
+          );
+          const headingText = (headingEl?.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 80);
+          const spinnerEl = detailsRoot.querySelector(
+            '.artdeco-loader, .artdeco-spinner, [data-test-async-loader], .jobs-details__main-content--loading, .loading-indicator, .jobs-details-skeleton, .ghost-card, [class*="skeleton"], [class*="shimmer"]',
+          );
+          const hasSpinner = Boolean(spinnerEl);
+          const isEmptyHeading = headingText.length === 0;
+          const isPaneLoading = hasSpinner || isEmptyHeading;
+
+          const buttonsAndLinks: string[] = [];
+          for (const el of applyButtons) {
+            if (buttonsAndLinks.length >= 15) break;
+            const rawText = (el.textContent || el.getAttribute('aria-label') || el.getAttribute('title') || '').trim();
+            const cleanText = rawText.replace(/\s+/g, ' ').slice(0, 40);
+            if (cleanText) {
+              const tag = el.tagName ? el.tagName.toLowerCase() : 'el';
+              buttonsAndLinks.push(`<${tag}> ${cleanText}`);
+            }
+          }
+
+          const selectorResults: Record<string, boolean> = {
+            'button.jobs-apply-button': Boolean(detailsRoot.querySelector('button.jobs-apply-button')),
+            btn_text_easy_apply: false,
+            aria_label_easy_apply: false,
+            svg_icon_easy_apply: Boolean(detailsRoot.querySelector('svg[data-test-icon*="easy-apply"]')),
+            jobs_apply_button_class: Boolean(detailsRoot.querySelector('.jobs-apply-button')),
+          };
+          for (const el of applyButtons) {
+            const t = (el.textContent || '').trim();
+            const a = (el.getAttribute('aria-label') || '').trim();
+            if (/\beasy\s*apply\b/i.test(t)) selectorResults['btn_text_easy_apply'] = true;
+            if (/\beasy\s*apply\b/i.test(a)) selectorResults['aria_label_easy_apply'] = true;
+          }
+          const matched = Object.entries(selectorResults)
+            .filter(([, m]) => m)
+            .map(([s]) => s);
+          const selectorSummary =
+            matched.length > 0 ? `matched: [${matched.join(', ')}]` : 'all Easy Apply selectors failed';
+
+          easyApplyDiag = {
+            headingText: headingText || '<empty>',
+            isPaneLoading,
+            hasSpinner,
+            isEmptyHeading,
+            buttonsAndLinks,
+            selectorResults,
+            selectorSummary,
+          };
+        } catch {}
+      }
+
       return {
         title: title || '',
         company: company || '',
@@ -6224,6 +6286,7 @@ export default class Page {
         hasEasyApply,
         isLoginWall,
         descriptionSnippet,
+        easyApplyDiag,
       };
     };
 
@@ -6278,6 +6341,7 @@ export default class Page {
       await new Promise(r => setTimeout(r, pollInterval));
     }
 
+    const fallbackDiag = await this.getLinkedInEasyApplyFailureDiag().catch(() => undefined);
     return {
       title: '',
       company: '',
@@ -6286,7 +6350,55 @@ export default class Page {
       isAlreadyApplied: false,
       hasEasyApply: false,
       isLoginWall: false,
+      easyApplyDiag: fallbackDiag,
     };
+  }
+
+  async getLinkedInSplitPaneDiag(targetJobId: string): Promise<LinkedInSplitPaneDiag> {
+    if (this._puppeteerPage) {
+      try {
+        const diag = await this._puppeteerPage.evaluate(inspectLinkedInSplitPane, targetJobId);
+        if (diag) return diag;
+      } catch (err) {
+        if (isCdpTabClosedError(err)) throw err;
+      }
+    }
+    if (this._tabId && typeof chrome !== 'undefined' && chrome.scripting?.executeScript) {
+      try {
+        const res = await chrome.scripting.executeScript({
+          target: { tabId: this._tabId },
+          func: inspectLinkedInSplitPane,
+          args: [targetJobId],
+        });
+        if (res?.[0]?.result) return res[0].result as LinkedInSplitPaneDiag;
+      } catch (err) {
+        if (isCdpTabClosedError(err)) throw err;
+      }
+    }
+    return inspectLinkedInSplitPane(targetJobId);
+  }
+
+  async getLinkedInEasyApplyFailureDiag(): Promise<LinkedInEasyApplyFailureDiag> {
+    if (this._puppeteerPage) {
+      try {
+        const diag = await this._puppeteerPage.evaluate(inspectLinkedInEasyApplyFailure);
+        if (diag) return diag;
+      } catch (err) {
+        if (isCdpTabClosedError(err)) throw err;
+      }
+    }
+    if (this._tabId && typeof chrome !== 'undefined' && chrome.scripting?.executeScript) {
+      try {
+        const res = await chrome.scripting.executeScript({
+          target: { tabId: this._tabId },
+          func: inspectLinkedInEasyApplyFailure,
+        });
+        if (res?.[0]?.result) return res[0].result as LinkedInEasyApplyFailureDiag;
+      } catch (err) {
+        if (isCdpTabClosedError(err)) throw err;
+      }
+    }
+    return inspectLinkedInEasyApplyFailure();
   }
 
   /**
@@ -10163,4 +10275,5 @@ export interface JobTopCardContext {
   hasEasyApply: boolean;
   isLoginWall: boolean;
   descriptionSnippet?: string;
+  easyApplyDiag?: LinkedInEasyApplyFailureDiag;
 }

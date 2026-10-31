@@ -42,6 +42,11 @@ import {
 } from '../llmCircuitBreaker';
 import { AbortRunError, isCdpTabClosedError } from '../../utils';
 export { AbortRunError, isCdpTabClosedError };
+import {
+  summarizeLinkedInCardScan,
+  type LinkedInSplitPaneDiag,
+  type LinkedInEasyApplyFailureDiag,
+} from '../../browser/linkedinDiagnostics';
 import { ChatOpenAI } from '@langchain/openai';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import {
@@ -928,6 +933,7 @@ export class DedicatedJobRunner {
   private loopFinishedResolver: (() => void) | null = null;
   private isLoopFinished = true;
   private hasRefundedCurrentRun = false;
+  private hasLoggedInkedInCardScanDiag = false;
   private hasSentRunFinished = false;
   private activeStats: {
     totalFound: number;
@@ -1325,6 +1331,7 @@ export class DedicatedJobRunner {
     this.isStopping = false;
     this.stopReason = null;
     this.hasRefundedCurrentRun = false;
+    this.hasLoggedInkedInCardScanDiag = false;
     this.hasSentRunFinished = false;
     this.isLoopFinished = false;
     this.loopFinishedPromise = new Promise<void>(resolve => {
@@ -1880,6 +1887,7 @@ export class DedicatedJobRunner {
     const runToken = `run_token_${Date.now()}_${Math.random().toString(36).slice(2)}`;
     this.activeRunToken = runToken;
     this.hasRefundedCurrentRun = false;
+    this.hasLoggedInkedInCardScanDiag = false;
     this.hasSentRunFinished = false;
     this.activeStats = stats;
 
@@ -2249,6 +2257,27 @@ export class DedicatedJobRunner {
           `📋 Found ${jobCards.length} job cards ${searchLabel}. Applying one by one (${stats.applied}/${BATCH_CAP} done so far)...`,
           'info',
         );
+
+        if (!this.hasLoggedInkedInCardScanDiag && jobCards.length > 0) {
+          this.hasLoggedInkedInCardScanDiag = true;
+          const cardSummary = summarizeLinkedInCardScan(jobCards);
+          logger.info(`[DedicatedJobRunner] ${cardSummary.consoleLog}`);
+          this.notifyActivity(
+            portToSend,
+            onLiveActivity,
+            {
+              jobId: `diag-cards-${Date.now()}`,
+              url: searchPageUrl,
+              title: 'LinkedIn Search Card Scan',
+              company: 'LinkedIn Search',
+              status: 'running',
+              reason: cardSummary.liveActivityLine,
+              creditsUsed: 0,
+            },
+            runToken,
+          );
+          this.notifyStatus(portToSend, cardSummary.liveActivityLine, 'info', runToken);
+        }
 
         for (const card of jobCards) {
           this.checkAbort(runToken, this.abortController?.signal);
@@ -4442,7 +4471,46 @@ export class DedicatedJobRunner {
     }
     this.checkAbort(runToken, this.abortController?.signal);
 
-    // 4b. Pure DOM Top-Card Extraction + Max-3 Retry Guard
+    // Diagnostic 1: Split-pane inspection (card data, url path, viewport width, details pane match)
+    const splitDiag: LinkedInSplitPaneDiag =
+      typeof currentPage.getLinkedInSplitPaneDiag === 'function'
+        ? await currentPage.getLinkedInSplitPaneDiag(job.jobId).catch(() => ({
+            urlPath: '',
+            viewportWidth: 0,
+            detailsMatchesJobId: false,
+            detailsJobIdFound: null,
+            currentJobIdInUrl: null,
+          }))
+        : {
+            urlPath: '',
+            viewportWidth: 0,
+            detailsMatchesJobId: false,
+            detailsJobIdFound: null,
+            currentJobIdInUrl: null,
+          };
+
+    const matchInfo = splitDiag.detailsMatchesJobId
+      ? `YES (matches ${job.jobId})`
+      : `NO (detailsFound=${splitDiag.detailsJobIdFound ?? 'none'}, urlJobId=${splitDiag.currentJobIdInUrl ?? 'none'})`;
+    logger.info(
+      `[LinkedInSplitPaneDiag] #${candidateNumber} Card: id=${job.jobId}, title="${job.title}", company="${job.company}" | Path: ${splitDiag.urlPath || '<none>'} | ViewportWidth: ${splitDiag.viewportWidth}px | ShowingThisJobId: ${matchInfo}`,
+    );
+
+    const splitLiveLine = `[Diag] #${candidateNumber} id=${job.jobId} | "${safeTitle}" @ "${safeCompany}" | w=${splitDiag.viewportWidth}px | path=${splitDiag.urlPath || '/'} | paneMatch=${splitDiag.detailsMatchesJobId}`;
+    this.notifyActivity(
+      portToSend,
+      onLiveActivity,
+      {
+        jobId: job.jobId,
+        url: job.url,
+        title: safeTitle,
+        company: safeCompany,
+        status: 'running',
+        reason: splitLiveLine,
+        creditsUsed: 0,
+      },
+      runToken,
+    );
     // (generous budget: slow networks / heavy LinkedIn JS often need >10s to render
     // the job details pane; premature failure here caused false "details unavailable" skips)
     this.checkAbort(runToken, this.abortController?.signal);
@@ -4658,9 +4726,35 @@ export class DedicatedJobRunner {
 
     if (!topCard.hasEasyApply) {
       this.checkAbort(runToken, this.abortController?.signal);
+
+      // Diagnostic 2: Detailed Easy Apply failure diagnostics on the last attempt
+      let eaDiag: LinkedInEasyApplyFailureDiag | undefined = topCard.easyApplyDiag;
+      if (!eaDiag && typeof currentPage.getLinkedInEasyApplyFailureDiag === 'function') {
+        eaDiag = await currentPage.getLinkedInEasyApplyFailureDiag().catch(() => undefined);
+      }
+      if (!eaDiag) {
+        eaDiag = {
+          headingText: topCard.title || '<empty>',
+          isPaneLoading: false,
+          hasSpinner: false,
+          isEmptyHeading: !topCard.title,
+          buttonsAndLinks: [],
+          selectorResults: { 'button.jobs-apply-button': false },
+          selectorSummary: 'details pane missing or inaccessible',
+        };
+      }
+
+      const buttonsListStr =
+        eaDiag.buttonsAndLinks.length > 0 ? eaDiag.buttonsAndLinks.map((b: string) => `"${b}"`).join(', ') : '<none>';
+      logger.info(
+        `[LinkedInEasyApplyDiag] hasEasyApply=false on last attempt for job ${job.jobId} ("${displayTitle}"): Heading: "${eaDiag.headingText}" | Loading: ${eaDiag.isPaneLoading} (spinner=${eaDiag.hasSpinner}, emptyHeading=${eaDiag.isEmptyHeading}) | Selectors: ${eaDiag.selectorSummary} | Buttons/Links (${eaDiag.buttonsAndLinks.length}): [${buttonsListStr}]`,
+      );
+
+      const eaCompactLine = `[Diag] No Easy Apply for ${job.jobId}: heading="${eaDiag.headingText.slice(0, 25)}" | load=${eaDiag.isPaneLoading} | sel=${eaDiag.selectorSummary} | btns=[${eaDiag.buttonsAndLinks.slice(0, 5).join(', ')}]`;
+
       this.notifyStatus(
         portToSend,
-        `ℹ️ Skipped "${displayTitle}": Requires applying directly on company website (not Easy Apply).`,
+        `ℹ️ Skipped "${displayTitle}": Requires applying directly on company website (not Easy Apply). ${eaCompactLine}`,
         'info',
         runToken,
       );
@@ -4683,7 +4777,7 @@ export class DedicatedJobRunner {
           title: displayTitle,
           company: displayCompany,
           status: 'skipped',
-          reason: 'External application only',
+          reason: `External application only | ${eaCompactLine}`,
           creditsUsed: 0,
         },
         runToken,
