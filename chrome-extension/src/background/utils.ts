@@ -125,3 +125,33 @@ export function convertZodToJsonSchema(zodSchema: z.ZodType, name: string, addTi
   // logger.info('Navigator json schema', JSON.stringify(jsonSchema, null, 2));
   return jsonSchema;
 }
+
+export class AbortRunError extends Error {
+  public readonly reason: string;
+  constructor(reason: string = 'Run aborted') {
+    super(reason);
+    this.name = 'AbortRunError';
+    this.reason = reason;
+    if (Error.captureStackTrace) {
+      Error.captureStackTrace(this, AbortRunError);
+    }
+  }
+}
+
+export function isCdpTabClosedError(err: unknown): boolean {
+  if (!err) return false;
+  const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
+  return (
+    msg.includes('no tab with given id') ||
+    msg.includes('no target with given id') ||
+    msg.includes('target closed') ||
+    msg.includes('session closed') ||
+    msg.includes('debugger is not attached') ||
+    msg.includes('debugger detached') ||
+    msg.includes('execution context was destroyed') ||
+    msg.includes('connection closed') ||
+    msg.includes('detached from target') ||
+    (msg.includes('protocol error') &&
+      (msg.includes('target') || msg.includes('tab') || msg.includes('session') || msg.includes('id')))
+  );
+}

@@ -64,7 +64,7 @@ export function recordLlmNetworkFailure(err?: unknown): void {
 export function recordLlmSuccess(): void {
   consecutiveLlmNetworkFailures = 0;
   llmDisabledUntilTimestamp = 0;
-  resetLlmCircuitBreaker();
+  // Note: LLM circuit breaker maintains per-run semantics and is reset once at the start of a run, not per successful call.
 }
 
 export function isLlmTierAvailable(): boolean {

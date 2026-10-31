@@ -40,6 +40,8 @@ import {
   tripLlmCircuitBreaker,
   isCircuitBreakerError,
 } from '../llmCircuitBreaker';
+import { AbortRunError, isCdpTabClosedError } from '../../utils';
+export { AbortRunError, isCdpTabClosedError };
 import { ChatOpenAI } from '@langchain/openai';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import {
@@ -919,6 +921,22 @@ export class DedicatedJobRunner {
   private executorSubscriber: ((exec: Executor) => Promise<void>) | null = null;
   private currentExecutor: Executor | null = null;
   private isRunning = false;
+  private isStopping = false;
+  private stopReason: string | null = null;
+  private activeRunToken: string | null = null;
+  private loopFinishedPromise: Promise<void> | null = null;
+  private loopFinishedResolver: (() => void) | null = null;
+  private isLoopFinished = true;
+  private hasRefundedCurrentRun = false;
+  private hasSentRunFinished = false;
+  private activeStats: {
+    totalFound: number;
+    applied: number;
+    modalOpened: number;
+    skipped: number;
+    failed: number;
+    skipReasons?: Record<string, number>;
+  } | null = null;
   private activeRunId: string | null = null;
   private activeJobId: string | null = null;
   private activePort: chrome.runtime.Port | null = null;
@@ -929,18 +947,60 @@ export class DedicatedJobRunner {
   private abortController: AbortController | null = null;
   private onStopCallbacks: Set<() => void> = new Set();
 
-  private async syncJobApplicationToBackend(record: {
-    jobId: string;
-    jobTitle: string;
-    company: string;
-    platform?: string;
-    applicationUrl?: string;
-    location?: string;
-    salaryRange?: string;
-    fitScore?: number;
-    status?: string;
-    appliedAt?: string;
-  }): Promise<void> {
+  public isTokenActive(token?: string | null): boolean {
+    if (!token) return this.isRunning && !this.isStopping;
+    return this.activeRunToken === token && this.isRunning && !this.isStopping;
+  }
+
+  public getActiveRunToken(): string | null {
+    return this.activeRunToken;
+  }
+
+  public isStoppingRun(): boolean {
+    return this.isStopping;
+  }
+
+  private checkAbort(runToken?: string, signal?: AbortSignal): void {
+    if (
+      (runToken && this.activeRunToken !== runToken) ||
+      !this.isRunning ||
+      this.isStopping ||
+      signal?.aborted ||
+      this.abortController?.signal?.aborted
+    ) {
+      throw new AbortRunError(this.stopReason || 'Stopped by user');
+    }
+  }
+
+  private async safeRecordJob(
+    runToken: string | undefined,
+    jobRecord: Parameters<typeof processedJobsStore.recordJob>[0],
+  ): Promise<void> {
+    if ((runToken && this.activeRunToken !== runToken) || !this.isRunning || this.isStopping) {
+      logger.debug('[DedicatedJobRunner] safeRecordJob ignored for inactive run token or stopping runner');
+      return;
+    }
+    await processedJobsStore.recordJob(jobRecord);
+  }
+
+  private async syncJobApplicationToBackend(
+    record: {
+      jobId: string;
+      jobTitle: string;
+      company: string;
+      platform?: string;
+      applicationUrl?: string;
+      location?: string;
+      salaryRange?: string;
+      fitScore?: number;
+      status?: string;
+      appliedAt?: string;
+    },
+    runToken?: string,
+  ): Promise<void> {
+    if (runToken && this.activeRunToken && runToken !== this.activeRunToken) {
+      return;
+    }
     try {
       const session = await authStorage.getSession();
       if (!session?.token) {
@@ -1038,7 +1098,11 @@ export class DedicatedJobRunner {
     portToSend: chrome.runtime.Port | null | undefined,
     text: string,
     status: 'ok' | 'fail' | 'info' = 'info',
+    runToken?: string,
   ): void {
+    if (runToken && this.activeRunToken && runToken !== this.activeRunToken) {
+      return;
+    }
     logger.info(`[DedicatedJobRunner] ${text}`);
     if (portToSend) {
       try {
@@ -1063,7 +1127,11 @@ export class DedicatedJobRunner {
       reason?: string;
       creditsUsed?: number;
     },
+    runToken?: string,
   ): void {
+    if (runToken && this.activeRunToken && runToken !== this.activeRunToken) {
+      return;
+    }
     if (onLiveActivity) {
       try {
         onLiveActivity(activity);
@@ -1151,6 +1219,12 @@ export class DedicatedJobRunner {
         } catch {}
       }
       return { status: 'error', message: authErr };
+    }
+
+    if (this.isStopping || (this.loopFinishedPromise && !this.isLoopFinished)) {
+      const waitMsg = '⚠️ Previous run is still stopping, try again in a few seconds';
+      this.notify(portToSend, waitMsg, true);
+      return { status: 'error', message: waitMsg };
     }
 
     if (this.isRunning) {
@@ -1243,20 +1317,35 @@ export class DedicatedJobRunner {
     }
 
     const runId = `easy_apply_${jobId}_${Date.now()}`;
+    const runToken = `run_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
     this.activeRunId = runId;
+    this.activeRunToken = runToken;
     this.activePort = portToSend || null;
     this.activeLiveActivity = onLiveActivity;
+    this.isStopping = false;
+    this.stopReason = null;
+    this.hasRefundedCurrentRun = false;
+    this.hasSentRunFinished = false;
+    this.isLoopFinished = false;
+    this.loopFinishedPromise = new Promise<void>(resolve => {
+      this.loopFinishedResolver = resolve;
+    });
 
     resetLlmCircuitBreaker((msg, type) => {
-      this.notifyStatus(portToSend, `⚠️ ${msg}`, type === 'warn' ? 'info' : 'fail');
-      this.notifyActivity(portToSend, onLiveActivity, {
-        jobId: runId,
-        url: '',
-        title: 'Auto Apply',
-        company: 'Indeed',
-        status: 'running',
-        reason: msg,
-      });
+      this.notifyStatus(portToSend, `⚠️ ${msg}`, type === 'warn' ? 'info' : 'fail', runToken);
+      this.notifyActivity(
+        portToSend,
+        onLiveActivity,
+        {
+          jobId: runId,
+          url: '',
+          title: 'Auto Apply',
+          company: 'LinkedIn',
+          status: 'running',
+          reason: msg,
+        },
+        runToken,
+      );
     });
 
     try {
@@ -1668,8 +1757,13 @@ export class DedicatedJobRunner {
         });
       }
 
-      this.cleanupRun();
+      this.cleanupRun(errMsg, undefined, runToken);
       return { status: 'error', message: errMsg };
+    } finally {
+      this.isLoopFinished = true;
+      this.loopFinishedResolver?.();
+      this.loopFinishedResolver = null;
+      this.loopFinishedPromise = null;
     }
   }
 
@@ -1736,6 +1830,19 @@ export class DedicatedJobRunner {
       return { status: 'error', message: authErr, stats };
     }
 
+    // 1. Concurrency Guard & Start Guard
+    if (this.isStopping || (this.loopFinishedPromise && !this.isLoopFinished)) {
+      const stoppingMsg = 'Previous run is still stopping, try again in a few seconds';
+      this.notifyStatus(portToSend, `⚠️ ${stoppingMsg}`, 'fail');
+      return { status: 'error', message: stoppingMsg, stats };
+    }
+
+    if (this.isRunning) {
+      const busyMsg = '⚠️ A job application run is already active.';
+      this.notifyStatus(portToSend, busyMsg, 'fail');
+      return { status: 'error', message: busyMsg, stats };
+    }
+
     // 0.1 PREFLIGHT CHECK: API Reachability & Entitlement / Quota (Fail-Closed)
     this.notifyStatus(portToSend, '🔍 Performing preflight health check & verifying credit balance...', 'info');
     const preflight = await runPreflight();
@@ -1752,13 +1859,6 @@ export class DedicatedJobRunner {
       return { status: 'error', message: preflight.statusMessage, stats };
     }
 
-    // 1. Concurrency Guard
-    if (this.isRunning) {
-      const busyMsg = '⚠️ A job application run is already active.';
-      this.notifyStatus(portToSend, busyMsg, 'fail');
-      return { status: 'error', message: busyMsg, stats };
-    }
-
     if (!this.browserContext) {
       const errCtx = '⚠️ Browser context not initialized.';
       this.notifyStatus(portToSend, errCtx, 'fail');
@@ -1766,7 +1866,22 @@ export class DedicatedJobRunner {
     }
 
     this.isRunning = true;
+    this.isStopping = false;
+    this.stopReason = null;
     this.abortController = new AbortController();
+
+    let resolver: () => void;
+    this.loopFinishedPromise = new Promise<void>(resolve => {
+      resolver = resolve;
+    });
+    this.loopFinishedResolver = resolver!;
+    this.isLoopFinished = false;
+
+    const runToken = `run_token_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    this.activeRunToken = runToken;
+    this.hasRefundedCurrentRun = false;
+    this.hasSentRunFinished = false;
+    this.activeStats = stats;
 
     const BATCH_CAP = Math.min(options.maxJobs || 10, 10);
     const runId = `auto_loop_${Date.now()}`;
@@ -1775,15 +1890,20 @@ export class DedicatedJobRunner {
     this.activeLiveActivity = onLiveActivity;
 
     resetLlmCircuitBreaker((msg, type) => {
-      this.notifyStatus(portToSend, `⚠️ ${msg}`, type === 'warn' ? 'info' : 'fail');
-      this.notifyActivity(portToSend, onLiveActivity, {
-        jobId: runId,
-        url: '',
-        title: 'Auto Apply',
-        company: 'Indeed',
-        status: 'running',
-        reason: msg,
-      });
+      this.notifyStatus(portToSend, `⚠️ ${msg}`, type === 'warn' ? 'info' : 'fail', runToken);
+      this.notifyActivity(
+        portToSend,
+        onLiveActivity,
+        {
+          jobId: runId,
+          url: '',
+          title: 'Auto Apply',
+          company: 'Auto Apply',
+          status: 'running',
+          reason: msg,
+        },
+        runToken,
+      );
     });
 
     try {
@@ -1867,11 +1987,11 @@ export class DedicatedJobRunner {
       }
 
       if (options.platform === 'naukri') {
-        return await this.startNaukriJobLoop(options, careerBrain, role, prioritizedLocations, runId, stats);
+        return await this.startNaukriJobLoop(options, careerBrain, role, prioritizedLocations, runId, stats, runToken);
       }
 
       if (options.platform === 'indeed') {
-        return await this.startIndeedJobLoop(options, careerBrain, role, prioritizedLocations, runId, stats);
+        return await this.startIndeedJobLoop(options, careerBrain, role, prioritizedLocations, runId, stats, runToken);
       }
 
       this.notifyStatus(
@@ -1919,8 +2039,8 @@ export class DedicatedJobRunner {
             reason === 'tab_closed' || runnerMode === 'tab'
               ? '🛑 Runner tab was closed — application stopped.'
               : '🛑 Runner window was closed — application stopped.';
-          this.notifyStatus(portToSend, closeMsg, 'fail');
-          this.stop();
+          this.notifyStatus(portToSend, closeMsg, 'fail', runToken);
+          this.stop(reason === 'tab_closed' ? 'tab_closed' : 'window_closed');
         }
       });
 
@@ -1932,8 +2052,9 @@ export class DedicatedJobRunner {
             portToSend,
             `🛑 Runner tab navigated away from LinkedIn (${newUrl}) — application stopped cleanly.`,
             'fail',
+            runToken,
           );
-          this.stop();
+          this.stop('navigated_away');
         }
       });
 
@@ -1941,10 +2062,10 @@ export class DedicatedJobRunner {
 
       // Allow Chrome tab navigation to load the LinkedIn search page
       const navWaitAborted = await this.interruptibleSleep(3000);
-      if (navWaitAborted || !this.isRunning) {
-        this.cleanupRun('Stopped by user', stats);
-        return { status: 'stopped', message: 'Stopped by user', stats };
+      if (navWaitAborted || !this.isRunning || this.isStopping) {
+        throw new AbortRunError(this.stopReason || 'Stopped by user');
       }
+      this.checkAbort(runToken, this.abortController?.signal);
 
       if (typeof currentPage.waitForDomSettlement === 'function') {
         await currentPage.waitForDomSettlement(
@@ -2130,22 +2251,28 @@ export class DedicatedJobRunner {
         );
 
         for (const card of jobCards) {
-          if (!this.isRunning || halted || stats.applied >= BATCH_CAP) return true;
+          this.checkAbort(runToken, this.abortController?.signal);
+          if (halted || stats.applied >= BATCH_CAP) return true;
           if (seenJobIds.has(card.jobId)) continue;
           seenJobIds.add(card.jobId);
 
           const proc = await processedJobsStore.isJobProcessed(card.jobId);
           if (proc.isProcessed && proc.status === 'applied') {
             recordSkip(stats, 'already applied previously');
-            this.notifyActivity(portToSend, onLiveActivity, {
-              jobId: card.jobId,
-              url: card.url,
-              title: card.title,
-              company: card.company,
-              status: 'skipped',
-              reason: 'Already applied previously',
-              creditsUsed: 0,
-            });
+            this.notifyActivity(
+              portToSend,
+              onLiveActivity,
+              {
+                jobId: card.jobId,
+                url: card.url,
+                title: card.title,
+                company: card.company,
+                status: 'skipped',
+                reason: 'Already applied previously',
+                creditsUsed: 0,
+              },
+              runToken,
+            );
             continue;
           }
 
@@ -2159,35 +2286,64 @@ export class DedicatedJobRunner {
               portToSend,
               `⏳ Skipped "${card.title}": failed recently (${recentFail.reason || 'application error'}). Retry available tomorrow.`,
               'info',
+              runToken,
             );
-            this.notifyActivity(portToSend, onLiveActivity, {
-              jobId: card.jobId,
-              url: card.url,
-              title: card.title,
-              company: card.company,
-              status: 'skipped',
-              reason: 'Failed recently (retry available tomorrow)',
-              creditsUsed: 0,
-            });
+            this.notifyActivity(
+              portToSend,
+              onLiveActivity,
+              {
+                jobId: card.jobId,
+                url: card.url,
+                title: card.title,
+                company: card.company,
+                status: 'skipped',
+                reason: 'Failed recently (retry available tomorrow)',
+                creditsUsed: 0,
+              },
+              runToken,
+            );
             continue;
           }
 
           candidateCount++;
-          const res = await this.applySingleLinkedInJobInSplitPane(
-            currentPage,
-            { jobId: card.jobId, title: card.title, company: card.company, url: card.url },
-            searchPageUrl,
-            searchRole,
-            candidateNameSources,
-            config,
-            careerBrain,
-            runId,
-            portToSend,
-            onLiveActivity,
-            stats,
-            candidateCount,
-            BATCH_CAP,
-          );
+          let res: { status: 'applied' | 'skipped' | 'failed' | 'halt'; usedDirectFallback?: boolean };
+          try {
+            this.checkAbort(runToken, this.abortController?.signal);
+            res = await this.applySingleLinkedInJobInSplitPane(
+              currentPage,
+              { jobId: card.jobId, title: card.title, company: card.company, url: card.url },
+              searchPageUrl,
+              searchRole,
+              candidateNameSources,
+              config,
+              careerBrain,
+              runId,
+              portToSend,
+              onLiveActivity,
+              stats,
+              candidateCount,
+              BATCH_CAP,
+              runToken,
+            );
+            this.checkAbort(runToken, this.abortController?.signal);
+          } catch (err: any) {
+            if (
+              err instanceof AbortRunError ||
+              this.isStopping ||
+              !this.isRunning ||
+              (runToken && this.activeRunToken !== runToken) ||
+              isCdpTabClosedError(err)
+            ) {
+              logger.info(`[DedicatedJobRunner] LinkedIn job loop aborted: ${err?.message || 'stop requested'}`);
+              throw new AbortRunError(this.stopReason || 'Stopped by user');
+            }
+            if (isCdpTabClosedError(err)) {
+              this.notifyStatus(portToSend, '🛑 Runner tab was closed. Ending run cleanly.', 'fail', runToken);
+              throw new AbortRunError('Runner tab was closed');
+            }
+            logger.error(`[DedicatedJobRunner] Unexpected error applying to ${card.jobId}:`, err);
+            continue;
+          }
 
           if (res.status === 'halt') {
             halted = true;
@@ -2196,23 +2352,27 @@ export class DedicatedJobRunner {
 
           // If the job had to be opened by direct URL, restore the search page so the next
           // card can be picked from the split-pane list again.
-          if (res.usedDirectFallback && this.isRunning && stats.applied < BATCH_CAP) {
+          if (res.usedDirectFallback && this.isRunning && !this.isStopping && stats.applied < BATCH_CAP) {
+            this.checkAbort(runToken, this.abortController?.signal);
             logger.info(`[DedicatedJobRunner] Restoring search page ${searchPageUrl} for next job...`);
             await navigateLinkedInTab(searchPageUrl);
+            this.checkAbort(runToken, this.abortController?.signal);
             await currentPage.waitForDomSettlement?.(
               '.jobs-search-results-list, .scaffold-layout__list, [data-view-name="job-card"]',
               { maxWaitMs: 3500, quietPeriodMs: 200 },
             );
+            this.checkAbort(runToken, this.abortController?.signal);
           }
 
           // Inter-job pacing & anti-bot safety jitter after every completed attempt.
-          if (this.isRunning && stats.applied < BATCH_CAP) {
+          if (this.isRunning && !this.isStopping && stats.applied < BATCH_CAP) {
             // Strict sequential completion: ensure the previous application modal or leftover dialog is fully
             // closed before picking the next job (prevents overlap between jobs).
             const interJobStart = Date.now();
             const MAX_INTER_JOB_CLEANUP_MS = 8000;
 
             while (Date.now() - interJobStart < MAX_INTER_JOB_CLEANUP_MS) {
+              this.checkAbort(runToken, this.abortController?.signal);
               const dialogRemains =
                 typeof currentPage.hasAnyOpenModalOrDialog === 'function'
                   ? await currentPage.hasAnyOpenModalOrDialog().catch(() => false)
@@ -2249,9 +2409,13 @@ export class DedicatedJobRunner {
               portToSend,
               `⏳ Pacing safety delay (${Math.round(jitterMs / 100) / 10}s) before next candidate job...`,
               'info',
+              runToken,
             );
             const jitterAborted = await this.interruptibleSleep(jitterMs);
-            if (jitterAborted || !this.isRunning) return true;
+            if (jitterAborted || !this.isRunning || this.isStopping) {
+              throw new AbortRunError(this.stopReason || 'Stopped by user');
+            }
+            this.checkAbort(runToken, this.abortController?.signal);
           }
         }
 
@@ -2359,46 +2523,45 @@ export class DedicatedJobRunner {
 
       // 6. Final Summary
       const summaryMsg = `🏁 Auto Apply finished! Submitted ${stats.applied} application${stats.applied === 1 ? '' : 's'} (${stats.skipped} skipped).`;
-      this.notifyStatus(portToSend, summaryMsg, 'ok');
+      this.notifyStatus(portToSend, summaryMsg, 'ok', runToken);
       const skipBreakdown = formatSkipBreakdown(stats.skipReasons);
       if (skipBreakdown) {
-        this.notifyStatus(portToSend, skipBreakdown, 'info');
+        this.notifyStatus(portToSend, skipBreakdown, 'info', runToken);
       }
 
-      if (portToSend) {
-        try {
-          portToSend.postMessage({
-            type: 'LINKEDIN_RUN_FINISHED',
-            summary: summaryMsg,
-            stats,
-          });
-        } catch {}
-      }
-
-      this.cleanupRun();
+      this.cleanupRun(summaryMsg, stats, runToken);
       return { status: 'success', message: summaryMsg, stats };
     } catch (err: any) {
-      if (!this.isRunning) {
-        logger.info('[DedicatedJobRunner] Autonomous loop exited cleanly after stop or window close.');
-        this.cleanupRun();
-        return { status: 'stopped', message: 'Application stopped by user', stats };
+      if (
+        err instanceof AbortRunError ||
+        this.isStopping ||
+        !this.isRunning ||
+        (runToken && this.activeRunToken !== runToken)
+      ) {
+        logger.info('[DedicatedJobRunner] Autonomous loop exited cleanly on abort.');
+        const summaryMsg = 'Auto Apply stopped by user';
+        this.notifyStatus(portToSend, summaryMsg, 'info', runToken);
+        this.cleanupRun(summaryMsg, stats, runToken);
+        return { status: 'stopped', message: summaryMsg, stats };
+      }
+      if (isCdpTabClosedError(err)) {
+        logger.info('[DedicatedJobRunner] Autonomous loop exited because runner tab was closed.');
+        const summaryMsg = 'Runner tab was closed. Ending run cleanly.';
+        this.notifyStatus(portToSend, `🛑 ${summaryMsg}`, 'fail', runToken);
+        this.cleanupRun(summaryMsg, stats, runToken);
+        return { status: 'stopped', message: summaryMsg, stats };
       }
       const errMsg = String(err?.message || err);
       logger.error(`[DedicatedJobRunner] Unhandled error in startAutonomousJobLoop:`, err);
-      this.notifyStatus(portToSend, `🛑 Auto Apply encountered an error: ${errMsg}`, 'fail');
+      this.notifyStatus(portToSend, `🛑 Auto Apply encountered an error: ${errMsg}`, 'fail', runToken);
 
-      if (portToSend) {
-        try {
-          portToSend.postMessage({
-            type: 'LINKEDIN_RUN_FINISHED',
-            summary: `Run ended with error: ${errMsg}`,
-            stats,
-          });
-        } catch {}
-      }
-
-      this.cleanupRun();
+      this.cleanupRun(`Run ended with error: ${errMsg}`, stats, runToken);
       return { status: 'error', message: errMsg, stats };
+    } finally {
+      this.isLoopFinished = true;
+      this.loopFinishedResolver?.();
+      this.loopFinishedResolver = null;
+      this.loopFinishedPromise = null;
     }
   }
 
@@ -2412,6 +2575,7 @@ export class DedicatedJobRunner {
     location: string | string[],
     runId: string,
     stats: { totalFound: number; applied: number; modalOpened: number; skipped: number; failed: number },
+    runToken?: string,
   ): Promise<{
     status: 'success' | 'stopped' | 'error';
     message: string;
@@ -2419,18 +2583,6 @@ export class DedicatedJobRunner {
   }> {
     const { portToSend, onLiveActivity } = options;
     const BATCH_CAP = Math.min(options.maxJobs || 40, 40);
-
-    resetLlmCircuitBreaker((msg, type) => {
-      this.notifyStatus(portToSend, `⚠️ ${msg}`, type === 'warn' ? 'info' : 'fail');
-      this.notifyActivity(portToSend, onLiveActivity, {
-        jobId: runId,
-        url: '',
-        title: 'Auto Apply',
-        company: 'Indeed',
-        status: 'running',
-        reason: msg,
-      });
-    });
 
     const targetLocations: string[] = (Array.isArray(location) ? location : [location])
       .map(l => (l || '').trim())
@@ -2444,13 +2596,19 @@ export class DedicatedJobRunner {
       portToSend,
       `🎯 [Naukri.com] Search Criteria: Role="${cleanRole}" | Location(s)="${targetLocations.join(', ') || 'All India'}"`,
       'info',
+      runToken,
     );
 
     const runnerMode: RunnerMode = options.runnerMode || 'tab';
     if (runnerMode === 'tab') {
-      this.notifyStatus(portToSend, `🌐 Opening dedicated runner tab in current window for Naukri...`, 'info');
+      this.notifyStatus(
+        portToSend,
+        `🌐 Opening dedicated runner tab in current window for Naukri...`,
+        'info',
+        runToken,
+      );
     } else {
-      this.notifyStatus(portToSend, `🌐 Opening dedicated runner window for Naukri...`, 'info');
+      this.notifyStatus(portToSend, `🌐 Opening dedicated runner window for Naukri...`, 'info', runToken);
     }
 
     let runnerTarget: { windowId: number; tabId: number; mode?: RunnerMode };
@@ -2462,8 +2620,8 @@ export class DedicatedJobRunner {
     } catch (err: any) {
       const openErrMsg = `🛑 Failed to open runner ${runnerMode}: ${err?.message || 'Unknown error'}. Please check browser permissions and try again.`;
       logger.error('[DedicatedJobRunner]', openErrMsg);
-      this.notifyStatus(portToSend, openErrMsg, 'fail');
-      this.cleanupRun();
+      this.notifyStatus(portToSend, openErrMsg, 'fail', runToken);
+      this.cleanupRun(openErrMsg, stats, runToken);
       return { status: 'stopped', message: openErrMsg, stats };
     }
 
@@ -2472,7 +2630,7 @@ export class DedicatedJobRunner {
 
     // 1. Close listener (handles user closing the tab or window mid-run)
     this.unregisterWindowCloseListener = dedicatedWindowManager.onWindowClosed(async reason => {
-      if (this.isRunning && this.activeRunId === runId) {
+      if (this.isTokenActive(runToken) && this.isRunning && this.activeRunId === runId) {
         logger.warning(
           `Dedicated runner target closed while Naukri auto loop ${runId} was active (reason: ${reason}).`,
         );
@@ -2480,30 +2638,31 @@ export class DedicatedJobRunner {
           reason === 'tab_closed' || runnerMode === 'tab'
             ? '🛑 Runner tab was closed — application stopped.'
             : '🛑 Runner window was closed — application stopped.';
-        this.notifyStatus(portToSend, closeMsg, 'fail');
-        this.stop();
+        this.notifyStatus(portToSend, closeMsg, 'fail', runToken);
+        this.stop(reason === 'tab_closed' ? 'tab_closed' : 'window_closed');
       }
     });
 
     // 2. Navigation boundary listener (handles user manually typing a different URL mid-run)
     this.unregisterNavAwayListener = dedicatedWindowManager.onNavigatedAway(async (newUrl: string) => {
-      if (this.isRunning && this.activeRunId === runId) {
+      if (this.isTokenActive(runToken) && this.isRunning && this.activeRunId === runId) {
         logger.warning(`Runner tab navigated away to ${newUrl} while Naukri auto loop ${runId} was active.`);
         this.notifyStatus(
           portToSend,
           `🛑 Runner tab navigated away from Naukri (${newUrl}) — application stopped cleanly.`,
           'fail',
+          runToken,
         );
-        this.stop();
+        this.stop('navigated_away');
       }
     });
 
     // Wait 4s for navigation
     const navAborted = await this.interruptibleSleep(4000);
-    if (navAborted || !this.isRunning) {
-      this.cleanupRun();
-      return { status: 'stopped', message: 'Stopped by user', stats };
+    if (navAborted || !this.isRunning || this.isStopping) {
+      throw new AbortRunError(this.stopReason || 'Stopped by user');
     }
+    this.checkAbort(runToken, this.abortController?.signal);
 
     const currentPage = await this.browserContext!.getCurrentPage();
     await this.markRunnerTabVisually(currentPage);
@@ -2515,36 +2674,45 @@ export class DedicatedJobRunner {
         portToSend,
         '⚠️ Naukri login required. Please log in to Naukri in the runner window. (Pausing without spending credits...)',
         'info',
+        runToken,
       );
 
-      this.notifyActivity(portToSend, onLiveActivity, {
-        jobId: 'naukri_login',
-        url: searchUrl,
-        title: 'Waiting for login',
-        company: 'Naukri.com',
-        status: 'running',
-        reason: 'Please log in to Naukri in the runner window',
-        creditsUsed: 0,
-      });
+      this.notifyActivity(
+        portToSend,
+        onLiveActivity,
+        {
+          jobId: 'naukri_login',
+          url: searchUrl,
+          title: 'Waiting for login',
+          company: 'Naukri.com',
+          status: 'running',
+          reason: 'Please log in to Naukri in the runner window',
+          creditsUsed: 0,
+        },
+        runToken,
+      );
 
       const loginStart = Date.now();
       let loggedIn = false;
       while (Date.now() - loginStart < 300_000) {
         const waitAborted = await this.interruptibleSleep(3000);
-        if (waitAborted || !this.isRunning) break;
+        if (waitAborted || !this.isRunning || this.isStopping) {
+          throw new AbortRunError(this.stopReason || 'Stopped by user');
+        }
+        this.checkAbort(runToken, this.abortController?.signal);
 
         session = await naukriAdapter.validateSession(currentPage);
         if (!session.isLoginWall && session.isLoggedIn) {
           loggedIn = true;
-          this.notifyStatus(portToSend, '✅ Naukri login detected! Resuming autonomous search...', 'ok');
+          this.notifyStatus(portToSend, '✅ Naukri login detected! Resuming autonomous search...', 'ok', runToken);
           break;
         }
       }
 
       if (!loggedIn && !session.isLoggedIn) {
         const timeoutMsg = 'Login timeout (5 minutes reached). Please log in to Naukri and retry.';
-        this.notifyStatus(portToSend, `🛑 ${timeoutMsg}`, 'fail');
-        this.cleanupRun();
+        this.notifyStatus(portToSend, `🛑 ${timeoutMsg}`, 'fail', runToken);
+        this.cleanupRun(timeoutMsg, stats, runToken);
         return { status: 'error', message: timeoutMsg, stats };
       }
     }
@@ -2552,10 +2720,12 @@ export class DedicatedJobRunner {
     // Scan jobs with retry & progressive auto-scroll to ensure DOM hydration for up to 40 jobs
     let jobs: IJobQueueItem[] = [];
     for (let attempt = 1; attempt <= 4; attempt++) {
+      this.checkAbort(runToken, this.abortController?.signal);
       this.notifyStatus(
         portToSend,
         `🔍 [Naukri.com] Scanning search results for "${role}" (attempt ${attempt}/4)...`,
         'info',
+        runToken,
       );
       // Progressively scroll to trigger lazy loading of search cards
       for (let s = 1; s <= 3; s++) {
@@ -2566,17 +2736,20 @@ export class DedicatedJobRunner {
           .catch(() => {});
         await this.interruptibleSleep(500);
       }
+      this.checkAbort(runToken, this.abortController?.signal);
       jobs = await naukriAdapter.extractJobCards(currentPage);
       if (jobs.length >= BATCH_CAP) break;
       const retryWait = await this.interruptibleSleep(1500);
-      if (retryWait || !this.isRunning) break;
+      if (retryWait || !this.isRunning || this.isStopping) {
+        throw new AbortRunError(this.stopReason || 'Stopped by user');
+      }
     }
     stats.totalFound = jobs.length;
 
     if (jobs.length === 0) {
       const noJobsMsg = `No job listings found on Naukri for role "${role}".`;
-      this.notifyStatus(portToSend, `ℹ️ ${noJobsMsg}`, 'info');
-      this.cleanupRun();
+      this.notifyStatus(portToSend, `ℹ️ ${noJobsMsg}`, 'info', runToken);
+      this.cleanupRun(noJobsMsg, stats, runToken);
       return { status: 'success', message: noJobsMsg, stats };
     }
 
@@ -2586,15 +2759,20 @@ export class DedicatedJobRunner {
       const proc = await processedJobsStore.isJobProcessed(job.jobId);
       if (proc.isProcessed && proc.status === 'applied') {
         stats.skipped++;
-        this.notifyActivity(portToSend, onLiveActivity, {
-          jobId: job.jobId,
-          url: job.url,
-          title: job.title,
-          company: job.company,
-          status: 'skipped',
-          reason: 'Already applied previously',
-          creditsUsed: 0,
-        });
+        this.notifyActivity(
+          portToSend,
+          onLiveActivity,
+          {
+            jobId: job.jobId,
+            url: job.url,
+            title: job.title,
+            company: job.company,
+            status: 'skipped',
+            reason: 'Already applied previously',
+            creditsUsed: 0,
+          },
+          runToken,
+        );
         continue;
       }
       eligibleJobs.push(job);
@@ -2607,12 +2785,14 @@ export class DedicatedJobRunner {
       portToSend,
       `🎯 Queued ${queue.length} eligible Naukri jobs for this run (capped at max ${BATCH_CAP}).`,
       'info',
+      runToken,
     );
 
     // Execution loop
     const config = await linkedInConfigStore.getConfig();
     for (let i = 0; i < queue.length; i++) {
-      if (!this.isRunning) break;
+      if (!this.isRunning || this.isStopping) break;
+      this.checkAbort(runToken, this.abortController?.signal);
 
       const job = queue[i];
       const jobRunId = `${runId}_${job.jobId}`;
@@ -2620,6 +2800,7 @@ export class DedicatedJobRunner {
 
       // Daily quota: hold a server slot for this job (released if it is skipped or fails)
       const quota = await DailyQuotaManager.reserveApplication(applicationKey(job.jobId, job.url), 'runner');
+      this.checkAbort(runToken, this.abortController?.signal);
       if (!quota.allowed) {
         let allowFallback = false;
         if (quota.reason === 'error') {
@@ -2635,26 +2816,28 @@ export class DedicatedJobRunner {
               portToSend,
               `⚠️ Server quota check was slow/unavailable. Continuing with local quota (${applied}/${maxQ} used).`,
               'info',
+              runToken,
             );
             allowFallback = true;
           }
         }
         if (!allowFallback) {
           const quotaMsg = `🛑 ${quotaStopMessage(quota)} Stopping run.`;
-          this.notifyStatus(portToSend, quotaMsg, 'fail');
+          this.notifyStatus(portToSend, quotaMsg, 'fail', runToken);
           break;
         }
       }
 
       // Hard credit budget check (not applied to verified JobForm Automator Premium)
       const balanceRes = await backendApiClient.getCreditsBalance().catch(() => null);
+      this.checkAbort(runToken, this.abortController?.signal);
       if (
         !balanceRes?.data?.premiumCovered &&
         balanceRes?.data?.remainingCredits !== undefined &&
         balanceRes.data.remainingCredits < 1
       ) {
         const creditMsg = `🛑 Insufficient credits (${balanceRes.data.remainingCredits} remaining). Halting run.`;
-        this.notifyStatus(portToSend, creditMsg, 'fail');
+        this.notifyStatus(portToSend, creditMsg, 'fail', runToken);
         break;
       }
 
@@ -2668,9 +2851,9 @@ export class DedicatedJobRunner {
         role,
       );
       if (blacklist.blacklisted) {
-        this.notifyStatus(portToSend, `🚫 [Naukri] Skipped "${job.title}": ${blacklist.reason}.`, 'info');
+        this.notifyStatus(portToSend, `🚫 [Naukri] Skipped "${job.title}": ${blacklist.reason}.`, 'info', runToken);
         stats.skipped++;
-        await processedJobsStore.recordJob({
+        await this.safeRecordJob(runToken, {
           jobId: job.jobId,
           url: job.url,
           title: job.title,
@@ -2693,9 +2876,10 @@ export class DedicatedJobRunner {
           portToSend,
           `ℹ️ Skipped "${job.title}": Match score ${relevance.score}% < threshold ${relevance.threshold}%. (${relevance.reason || 'Skills do not match profile'})`,
           'info',
+          runToken,
         );
         stats.skipped++;
-        await processedJobsStore.recordJob({
+        await this.safeRecordJob(runToken, {
           jobId: job.jobId,
           url: job.url,
           title: job.title,
@@ -2704,15 +2888,20 @@ export class DedicatedJobRunner {
           reason: `Match score ${relevance.score}% < ${relevance.threshold}%: ${relevance.reason || 'Skills do not closely match profile'}`,
           creditsUsed: 0,
         });
-        this.notifyActivity(portToSend, onLiveActivity, {
-          jobId: job.jobId,
-          url: job.url,
-          title: job.title,
-          company: job.company,
-          status: 'skipped',
-          reason: 'Low skill match',
-          creditsUsed: 0,
-        });
+        this.notifyActivity(
+          portToSend,
+          onLiveActivity,
+          {
+            jobId: job.jobId,
+            url: job.url,
+            title: job.title,
+            company: job.company,
+            status: 'skipped',
+            reason: 'Low skill match',
+            creditsUsed: 0,
+          },
+          runToken,
+        );
         continue;
       }
 
@@ -2720,34 +2909,69 @@ export class DedicatedJobRunner {
         portToSend,
         `💼 [Naukri] Applying to job ${i + 1} of ${queue.length}: "${job.title}" (${job.company})`,
         'info',
+        runToken,
       );
 
-      this.notifyActivity(portToSend, onLiveActivity, {
-        jobId: job.jobId,
-        url: job.url,
-        title: job.title,
-        company: job.company,
-        status: 'running',
-        reason: 'Applying on Naukri...',
-        creditsUsed: 0,
-      });
-
-      const scopedLLM = await getJobScopedLLM(jobRunId);
-      const applyResult = await naukriAdapter.applyToJob(job, {
-        page: currentPage,
-        browserContext: this.browserContext!,
-        careerBrain,
+      this.notifyActivity(
         portToSend,
         onLiveActivity,
-        signal: this.abortController?.signal,
-        runId: jobRunId,
-        scopedLLM,
-      });
+        {
+          jobId: job.jobId,
+          url: job.url,
+          title: job.title,
+          company: job.company,
+          status: 'running',
+          reason: 'Applying on Naukri...',
+          creditsUsed: 0,
+        },
+        runToken,
+      );
+
+      const scopedLLM = await getJobScopedLLM(jobRunId);
+      let applyResult: { status: 'applied' | 'skipped' | 'failed'; reason?: string };
+      try {
+        this.checkAbort(runToken, this.abortController?.signal);
+        applyResult = await naukriAdapter.applyToJob(job, {
+          page: currentPage,
+          browserContext: this.browserContext!,
+          careerBrain,
+          portToSend,
+          onLiveActivity,
+          signal: this.abortController?.signal,
+          runId: jobRunId,
+          scopedLLM,
+        });
+        this.checkAbort(runToken, this.abortController?.signal);
+      } catch (applyErr: any) {
+        if (
+          applyErr instanceof AbortRunError ||
+          this.isStopping ||
+          !this.isRunning ||
+          (runToken && this.activeRunToken !== runToken) ||
+          isCdpTabClosedError(applyErr)
+        ) {
+          throw new AbortRunError(this.stopReason || 'Stopped by user');
+        }
+        logger.error(`[DedicatedJobRunner] Unexpected error applying to Naukri job ${job.jobId}:`, applyErr);
+        continue;
+      }
+
+      if (
+        !this.isRunning ||
+        this.isStopping ||
+        this.abortController?.signal?.aborted ||
+        applyResult.reason?.toLowerCase().includes('stopped by user')
+      ) {
+        logger.info('[DedicatedJobRunner] Execution halted by user stop signal.');
+        throw new AbortRunError(this.stopReason || 'Stopped by user');
+      }
 
       if (applyResult.status === 'applied') {
         stats.applied++;
-        await DailyQuotaManager.commitApplication(applicationKey(job.jobId, job.url));
-        await processedJobsStore.recordJob({
+        if (this.isTokenActive(runToken)) {
+          await DailyQuotaManager.commitApplication(applicationKey(job.jobId, job.url));
+        }
+        await this.safeRecordJob(runToken, {
           jobId: job.jobId,
           url: job.url,
           title: job.title,
@@ -2756,29 +2980,37 @@ export class DedicatedJobRunner {
           creditsUsed: 1,
         });
 
-        await this.syncJobApplicationToBackend({
-          jobId: job.jobId,
-          jobTitle: job.title,
-          company: job.company,
-          platform: 'naukri',
-          applicationUrl: job.url,
-          status: 'applied',
-          appliedAt: new Date().toISOString(),
-        });
+        await this.syncJobApplicationToBackend(
+          {
+            jobId: job.jobId,
+            jobTitle: job.title,
+            company: job.company,
+            platform: 'naukri',
+            applicationUrl: job.url,
+            status: 'applied',
+            appliedAt: new Date().toISOString(),
+          },
+          runToken,
+        );
 
-        this.notifyStatus(portToSend, `✅ Successfully applied to "${job.title}" at ${job.company}!`, 'ok');
+        this.notifyStatus(portToSend, `✅ Successfully applied to "${job.title}" at ${job.company}!`, 'ok', runToken);
 
-        this.notifyActivity(portToSend, onLiveActivity, {
-          jobId: job.jobId,
-          url: job.url,
-          title: job.title,
-          company: job.company,
-          status: 'applied',
-          creditsUsed: 1,
-        });
+        this.notifyActivity(
+          portToSend,
+          onLiveActivity,
+          {
+            jobId: job.jobId,
+            url: job.url,
+            title: job.title,
+            company: job.company,
+            status: 'applied',
+            creditsUsed: 1,
+          },
+          runToken,
+        );
       } else if (applyResult.status === 'skipped') {
         stats.skipped++;
-        await processedJobsStore.recordJob({
+        await this.safeRecordJob(runToken, {
           jobId: job.jobId,
           url: job.url,
           title: job.title,
@@ -2787,19 +3019,29 @@ export class DedicatedJobRunner {
           reason: applyResult.reason || 'Skipped',
           creditsUsed: 0,
         });
-        this.notifyStatus(portToSend, `ℹ️ Skipped "${job.title}": ${applyResult.reason || 'Skipped'}`, 'info');
-        this.notifyActivity(portToSend, onLiveActivity, {
-          jobId: job.jobId,
-          url: job.url,
-          title: job.title,
-          company: job.company,
-          status: 'skipped',
-          reason: applyResult.reason,
-          creditsUsed: 0,
-        });
+        this.notifyStatus(
+          portToSend,
+          `ℹ️ Skipped "${job.title}": ${applyResult.reason || 'Skipped'}`,
+          'info',
+          runToken,
+        );
+        this.notifyActivity(
+          portToSend,
+          onLiveActivity,
+          {
+            jobId: job.jobId,
+            url: job.url,
+            title: job.title,
+            company: job.company,
+            status: 'skipped',
+            reason: applyResult.reason,
+            creditsUsed: 0,
+          },
+          runToken,
+        );
       } else {
         stats.failed++;
-        await processedJobsStore.recordJob({
+        await this.safeRecordJob(runToken, {
           jobId: job.jobId,
           url: job.url,
           title: job.title,
@@ -2812,50 +3054,51 @@ export class DedicatedJobRunner {
           portToSend,
           `❌ Failed application for "${job.title}": ${applyResult.reason || 'Failed'}`,
           'fail',
+          runToken,
         );
-        this.notifyActivity(portToSend, onLiveActivity, {
-          jobId: job.jobId,
-          url: job.url,
-          title: job.title,
-          company: job.company,
-          status: 'failed',
-          reason: applyResult.reason,
-          creditsUsed: 0,
-        });
+        this.notifyActivity(
+          portToSend,
+          onLiveActivity,
+          {
+            jobId: job.jobId,
+            url: job.url,
+            title: job.title,
+            company: job.company,
+            status: 'failed',
+            reason: applyResult.reason,
+            creditsUsed: 0,
+          },
+          runToken,
+        );
       }
 
       // Anti-bot pacing delay (5-8s) between Naukri jobs only when applied!
-      if (i < queue.length - 1 && this.isRunning) {
+      if (i < queue.length - 1 && this.isRunning && !this.isStopping) {
         if (applyResult.status === 'applied') {
           const delayMs = 5000 + Math.floor(Math.random() * 3000);
           this.notifyStatus(
             portToSend,
             `⏳ Pacing delay: waiting ${(delayMs / 1000).toFixed(0)}s before next job...`,
             'info',
+            runToken,
           );
           const aborted = await this.interruptibleSleep(delayMs);
-          if (aborted) break;
+          if (aborted || !this.isRunning || this.isStopping) {
+            throw new AbortRunError(this.stopReason || 'Stopped by user');
+          }
         } else {
           // If skipped, quick 1.5s delay to avoid hammer without 20s freeze
-          await this.interruptibleSleep(1500);
+          const aborted = await this.interruptibleSleep(1500);
+          if (aborted || !this.isRunning || this.isStopping) {
+            throw new AbortRunError(this.stopReason || 'Stopped by user');
+          }
         }
       }
     }
 
     const summaryMsg = `Naukri Apply complete: ${stats.applied} applied, ${stats.skipped} skipped, ${stats.failed} failed.`;
-    this.notifyStatus(portToSend, `🏁 ${summaryMsg}`, 'ok');
-
-    if (portToSend) {
-      try {
-        portToSend.postMessage({
-          type: 'LINKEDIN_RUN_FINISHED',
-          summary: summaryMsg,
-          stats,
-        });
-      } catch {}
-    }
-
-    this.cleanupRun();
+    this.notifyStatus(portToSend, `🏁 ${summaryMsg}`, 'ok', runToken);
+    this.cleanupRun(summaryMsg, stats, runToken);
     return { status: 'success', message: summaryMsg, stats };
   }
 
@@ -2869,6 +3112,7 @@ export class DedicatedJobRunner {
     locationInput: string | string[],
     runId: string,
     stats: { totalFound: number; applied: number; modalOpened: number; skipped: number; failed: number },
+    runToken?: string,
   ): Promise<{
     status: 'success' | 'stopped' | 'error';
     message: string;
@@ -2877,32 +3121,25 @@ export class DedicatedJobRunner {
     const { portToSend, onLiveActivity } = options;
     const BATCH_CAP = Math.min(options.maxJobs || 20, 25);
 
-    resetLlmCircuitBreaker((msg, type) => {
-      this.notifyStatus(portToSend, `⚠️ ${msg}`, type === 'warn' ? 'info' : 'fail');
-      this.notifyActivity(portToSend, onLiveActivity, {
-        jobId: runId,
-        url: '',
-        title: 'Auto Apply',
-        company: 'Indeed',
-        status: 'running',
-        reason: msg,
-      });
-    });
-
     // 0. Safety Pause Check: Check if Indeed is already paused for the day
     const pauseCheck = await queueSafetyStore.getPlatformPause('indeed');
     if (pauseCheck.isPaused) {
       const pausedNotice = `🛑 Indeed auto-apply is paused for today (${pauseCheck.reason || 'Verification challenge detected'}). Auto-apply will resume tomorrow.`;
-      this.notifyStatus(portToSend, pausedNotice, 'fail');
-      this.notifyActivity(portToSend, onLiveActivity, {
-        jobId: 'indeed_daily_pause',
-        url: '',
-        title: 'Indeed Paused Today',
-        company: 'Indeed',
-        status: 'skipped',
-        reason: pausedNotice,
-        creditsUsed: 0,
-      });
+      this.notifyStatus(portToSend, pausedNotice, 'fail', runToken);
+      this.notifyActivity(
+        portToSend,
+        onLiveActivity,
+        {
+          jobId: 'indeed_daily_pause',
+          url: '',
+          title: 'Indeed Paused Today',
+          company: 'Indeed',
+          status: 'skipped',
+          reason: pausedNotice,
+          creditsUsed: 0,
+        },
+        runToken,
+      );
       return { status: 'stopped', message: pausedNotice, stats };
     }
 
@@ -2924,13 +3161,19 @@ export class DedicatedJobRunner {
       portToSend,
       `🎯 [Indeed] Search Criteria: Role="${cleanRole}" | Location(s): ${locationsDisplay} | Easily Apply=true`,
       'info',
+      runToken,
     );
 
     const runnerMode: RunnerMode = options.runnerMode || 'tab';
     if (runnerMode === 'tab') {
-      this.notifyStatus(portToSend, `🌐 Opening dedicated runner tab in current window for Indeed...`, 'info');
+      this.notifyStatus(
+        portToSend,
+        `🌐 Opening dedicated runner tab in current window for Indeed...`,
+        'info',
+        runToken,
+      );
     } else {
-      this.notifyStatus(portToSend, `🌐 Opening dedicated runner window for Indeed...`, 'info');
+      this.notifyStatus(portToSend, `🌐 Opening dedicated runner window for Indeed...`, 'info', runToken);
     }
 
     let runnerTarget: { windowId: number; tabId: number; mode?: RunnerMode };
@@ -2942,8 +3185,8 @@ export class DedicatedJobRunner {
     } catch (err: any) {
       const openErrMsg = `🛑 Failed to open runner ${runnerMode}: ${err?.message || 'Unknown error'}. Please check browser permissions and try again.`;
       logger.error('[DedicatedJobRunner]', openErrMsg);
-      this.notifyStatus(portToSend, openErrMsg, 'fail');
-      this.cleanupRun();
+      this.notifyStatus(portToSend, openErrMsg, 'fail', runToken);
+      this.cleanupRun(openErrMsg, stats, runToken);
       return { status: 'stopped', message: openErrMsg, stats };
     }
 
@@ -2952,7 +3195,7 @@ export class DedicatedJobRunner {
 
     // 1. Close listener (handles user closing the tab or window mid-run)
     this.unregisterWindowCloseListener = dedicatedWindowManager.onWindowClosed(async reason => {
-      if (this.isRunning && this.activeRunId === runId) {
+      if (this.isTokenActive(runToken) && this.isRunning && this.activeRunId === runId) {
         logger.warning(
           `Dedicated runner target closed while Indeed auto loop ${runId} was active (reason: ${reason}).`,
         );
@@ -2960,21 +3203,22 @@ export class DedicatedJobRunner {
           reason === 'tab_closed' || runnerMode === 'tab'
             ? '🛑 Runner tab was closed — application stopped.'
             : '🛑 Runner window was closed — application stopped.';
-        this.notifyStatus(portToSend, closeMsg, 'fail');
-        this.stop();
+        this.notifyStatus(portToSend, closeMsg, 'fail', runToken);
+        this.stop(reason === 'tab_closed' ? 'tab_closed' : 'window_closed');
       }
     });
 
     // 2. Navigation boundary listener (handles user manually typing a different URL mid-run)
     this.unregisterNavAwayListener = dedicatedWindowManager.onNavigatedAway(async (newUrl: string) => {
-      if (this.isRunning && this.activeRunId === runId) {
+      if (this.isTokenActive(runToken) && this.isRunning && this.activeRunId === runId) {
         logger.warning(`Runner tab navigated away to ${newUrl} while Indeed auto loop ${runId} was active.`);
         this.notifyStatus(
           portToSend,
           `🛑 Runner tab navigated away from Indeed (${newUrl}) — application stopped cleanly.`,
           'fail',
+          runToken,
         );
-        this.stop();
+        this.stop('navigated_away');
       }
     });
 
@@ -2986,45 +3230,35 @@ export class DedicatedJobRunner {
         `[DedicatedJobRunner] Indeed CAPTCHA detected (${jobTitle || 'search'}). Pausing Indeed for the rest of today.`,
       );
 
-      // 1. Update quota/safety state so Indeed auto-apply won't retry until the next scheduled day
       await queueSafetyStore.pausePlatformForToday('indeed', 'Indeed requested additional verification');
+      this.notifyStatus(portToSend, `🛑 ${captchaMsg}`, 'fail', runToken);
+      this.notifyActivity(
+        portToSend,
+        onLiveActivity,
+        {
+          jobId: this.activeJobId || 'indeed_captcha_pause',
+          url: searchUrl,
+          title: jobTitle || 'Indeed Verification Check',
+          company: 'Indeed',
+          status: 'failed',
+          reason: captchaMsg,
+          creditsUsed: 0,
+        },
+        runToken,
+      );
 
-      // 2. Log clear user-facing message in Live Activity feed
-      this.notifyStatus(portToSend, `🛑 ${captchaMsg}`, 'fail');
-      this.notifyActivity(portToSend, onLiveActivity, {
-        jobId: this.activeJobId || 'indeed_captcha_pause',
-        url: searchUrl,
-        title: jobTitle || 'Indeed Verification Check',
-        company: 'Indeed',
-        status: 'failed',
-        reason: captchaMsg,
-        creditsUsed: 0,
-      });
-
-      // 3. Clean up run state, notify listeners, and close the dedicated runner window cleanly
-      this.isRunning = false;
-      this.notifyStopListeners();
-      if (portToSend) {
-        try {
-          portToSend.postMessage({
-            type: 'LINKEDIN_RUN_FINISHED',
-            summary: captchaMsg,
-            stats,
-          });
-        } catch {}
-      }
+      this.stop('captcha_detected');
       await dedicatedWindowManager.closeRunnerWindow().catch(() => {});
-      this.cleanupRun();
       return { status: 'stopped' as const, message: captchaMsg, stats };
     };
 
     // Wait randomized 4.5s - 7.5s for initial navigation to settle
     const initialWaitMs = 4500 + Math.floor(Math.random() * 3000);
     const navAborted = await this.interruptibleSleep(initialWaitMs);
-    if (navAborted || !this.isRunning) {
-      this.cleanupRun();
-      return { status: 'stopped', message: 'Stopped by user', stats };
+    if (navAborted || !this.isRunning || this.isStopping) {
+      throw new AbortRunError(this.stopReason || 'Stopped by user');
     }
+    this.checkAbort(runToken, this.abortController?.signal);
 
     const currentPage = await this.browserContext!.getCurrentPage();
     await this.markRunnerTabVisually(currentPage);
@@ -3048,14 +3282,13 @@ export class DedicatedJobRunner {
           },
           title,
         );
-        if (waitResult.aborted || !this.isRunning) {
-          this.cleanupRun();
-          return { status: 'stopped' as const, message: 'Stopped by user', stats };
+        if (waitResult.aborted || !this.isRunning || this.isStopping) {
+          throw new AbortRunError(this.stopReason || 'Stopped by user');
         }
         if (!waitResult.solved) {
           return await handleIndeedCaptchaDetected(title);
         }
-        this.notifyStatus(portToSend, '✅ Verification solved — resuming search...', 'ok');
+        this.notifyStatus(portToSend, '✅ Verification solved — resuming search...', 'ok', runToken);
       }
       return null;
     };
@@ -3071,36 +3304,45 @@ export class DedicatedJobRunner {
         portToSend,
         '⚠️ Indeed login required. Please log in to Indeed in the runner window. (Pausing without spending credits...)',
         'info',
+        runToken,
       );
 
-      this.notifyActivity(portToSend, onLiveActivity, {
-        jobId: 'indeed_login',
-        url: searchUrl,
-        title: 'Waiting for login',
-        company: 'Indeed',
-        status: 'running',
-        reason: 'Please log in to Indeed in the runner window',
-        creditsUsed: 0,
-      });
+      this.notifyActivity(
+        portToSend,
+        onLiveActivity,
+        {
+          jobId: 'indeed_login',
+          url: searchUrl,
+          title: 'Waiting for login',
+          company: 'Indeed',
+          status: 'running',
+          reason: 'Please log in to Indeed in the runner window',
+          creditsUsed: 0,
+        },
+        runToken,
+      );
 
       const loginStart = Date.now();
       let loggedIn = false;
       while (Date.now() - loginStart < 300_000) {
         const waitAborted = await this.interruptibleSleep(3000);
-        if (waitAborted || !this.isRunning) break;
+        if (waitAborted || !this.isRunning || this.isStopping) {
+          throw new AbortRunError(this.stopReason || 'Stopped by user');
+        }
+        this.checkAbort(runToken, this.abortController?.signal);
 
         session = await indeedAdapter.validateSession(currentPage);
         if (!session.isLoginWall && session.isLoggedIn) {
           loggedIn = true;
-          this.notifyStatus(portToSend, '✅ Indeed login detected! Resuming autonomous search...', 'ok');
+          this.notifyStatus(portToSend, '✅ Indeed login detected! Resuming autonomous search...', 'ok', runToken);
           break;
         }
       }
 
       if (!loggedIn && !session.isLoggedIn) {
         const timeoutMsg = 'Login timeout (5 minutes reached). Please log in to Indeed and retry.';
-        this.notifyStatus(portToSend, `🛑 ${timeoutMsg}`, 'fail');
-        this.cleanupRun();
+        this.notifyStatus(portToSend, `🛑 ${timeoutMsg}`, 'fail', runToken);
+        this.cleanupRun(timeoutMsg, stats, runToken);
         return { status: 'error', message: timeoutMsg, stats };
       }
     }
@@ -3120,6 +3362,9 @@ export class DedicatedJobRunner {
           await chrome.tabs.update(currentPage.tabId, { url });
         }
       } catch (err) {
+        if (isCdpTabClosedError(err) || this.isStopping || !this.isRunning) {
+          throw new AbortRunError(this.stopReason || 'Runner tab was closed');
+        }
         logger.warning('[DedicatedJobRunner] Navigation error:', err);
       }
     };
@@ -3131,6 +3376,7 @@ export class DedicatedJobRunner {
         portToSend,
         '✨ Activated "Easily apply" filter on Indeed! Refreshing search results...',
         'info',
+        runToken,
       );
       await this.interruptibleSleep(3500 + Math.floor(Math.random() * 1000));
       await this.markRunnerTabVisually(currentPage);
@@ -3143,7 +3389,7 @@ export class DedicatedJobRunner {
     let totalScanned = 0;
 
     for (let locIdx = 0; locIdx < targetLocations.length; locIdx++) {
-      if (queue.length >= BATCH_CAP || !this.isRunning || this.abortController?.signal?.aborted) {
+      if (queue.length >= BATCH_CAP || !this.isRunning || this.isStopping || this.abortController?.signal?.aborted) {
         break;
       }
 
@@ -3154,6 +3400,7 @@ export class DedicatedJobRunner {
         portToSend,
         `📍 [Indeed] Searching Location #${locRank} (${currentLoc}) for "${cleanRole}" (${queue.length}/${BATCH_CAP} Quick Apply jobs gathered so far)...`,
         'info',
+        runToken,
       );
 
       // If switching to Location #2, Location #3, etc., navigate runner tab to that location's search URL
@@ -3161,7 +3408,7 @@ export class DedicatedJobRunner {
         const nextLocUrl = indeedAdapter.buildSearchUrl(cleanRole, currentLoc, 0, candidateNameSources);
         await navigateTab(nextLocUrl);
         const locWaitAborted = await this.interruptibleSleep(3500 + Math.floor(Math.random() * 2000));
-        if (locWaitAborted || !this.isRunning) break;
+        if (locWaitAborted || !this.isRunning || this.isStopping) break;
         await this.markRunnerTabVisually(currentPage);
 
         const locCaptchaExit = await checkAndHandleSearchCaptcha(`Indeed Search (Location #${locRank}: ${currentLoc})`);
@@ -3174,7 +3421,8 @@ export class DedicatedJobRunner {
       }
 
       for (let searchPageIndex = 0; searchPageIndex < maxSearchPagesPerLocation; searchPageIndex++) {
-        if (queue.length >= BATCH_CAP || !this.isRunning || this.abortController?.signal?.aborted) break;
+        if (queue.length >= BATCH_CAP || !this.isRunning || this.isStopping || this.abortController?.signal?.aborted)
+          break;
 
         if (searchPageIndex > 0) {
           const nextPageUrl = indeedAdapter.buildSearchUrl(
@@ -3187,10 +3435,11 @@ export class DedicatedJobRunner {
             portToSend,
             `📄 [Indeed] [${currentLoc}] Loading search page ${searchPageIndex + 1} (${queue.length}/${BATCH_CAP} Quick Apply jobs gathered so far)...`,
             'info',
+            runToken,
           );
           await navigateTab(nextPageUrl);
           const pageWaitAborted = await this.interruptibleSleep(3500 + Math.floor(Math.random() * 2000));
-          if (pageWaitAborted || !this.isRunning) break;
+          if (pageWaitAborted || !this.isRunning || this.isStopping) break;
           await this.markRunnerTabVisually(currentPage);
 
           const pageFilter = await indeedAdapter.ensureEasilyApplyFilterActive(currentPage);
@@ -3201,6 +3450,7 @@ export class DedicatedJobRunner {
 
         let pageJobs: IJobQueueItem[] = [];
         for (let attempt = 1; attempt <= 3; attempt++) {
+          this.checkAbort(runToken, this.abortController?.signal);
           // Check if Cloudflare appeared (zero programmatic interaction)
           const attemptCaptchaExit = await checkAndHandleSearchCaptcha(
             `Indeed Search (${currentLoc} - Page ${searchPageIndex + 1})`,
@@ -3211,12 +3461,13 @@ export class DedicatedJobRunner {
             portToSend,
             `🔍 [Indeed] [${currentLoc}] Scanning search results page ${searchPageIndex + 1} for "${cleanRole}" (attempt ${attempt}/3)...`,
             'info',
+            runToken,
           );
           await currentPage.puppeteerPage
             ?.evaluate(() => window.scrollBy(0, 350 + Math.floor(Math.random() * 300)))
             .catch(() => {});
           const scanWait = await this.interruptibleSleep(2000 + Math.floor(Math.random() * 2000));
-          if (scanWait || !this.isRunning) break;
+          if (scanWait || !this.isRunning || this.isStopping) break;
 
           // Re-check before extraction
           const preExtractCaptchaExit = await checkAndHandleSearchCaptcha(
@@ -3227,7 +3478,7 @@ export class DedicatedJobRunner {
           pageJobs = await indeedAdapter.extractJobCards(currentPage);
           if (pageJobs.length > 0) break;
           const retryWait = await this.interruptibleSleep(2500 + Math.floor(Math.random() * 1500));
-          if (retryWait || !this.isRunning) break;
+          if (retryWait || !this.isRunning || this.isStopping) break;
         }
 
         totalScanned += pageJobs.length;
@@ -3241,15 +3492,20 @@ export class DedicatedJobRunner {
           const proc = await processedJobsStore.isJobProcessed(job.jobId);
           if (proc.isProcessed && proc.status === 'applied') {
             stats.skipped++;
-            this.notifyActivity(portToSend, onLiveActivity, {
-              jobId: job.jobId,
-              url: job.url,
-              title: job.title,
-              company: job.company,
-              status: 'skipped',
-              reason: 'Already applied previously',
-              creditsUsed: 0,
-            });
+            this.notifyActivity(
+              portToSend,
+              onLiveActivity,
+              {
+                jobId: job.jobId,
+                url: job.url,
+                title: job.title,
+                company: job.company,
+                status: 'skipped',
+                reason: 'Already applied previously',
+                creditsUsed: 0,
+              },
+              runToken,
+            );
             continue;
           }
 
@@ -3274,6 +3530,7 @@ export class DedicatedJobRunner {
           portToSend,
           `🎯 [Indeed] Batch cap of ${BATCH_CAP} jobs reached with Location #${locRank} (${currentLoc}). Proceeding to applications...`,
           'ok',
+          runToken,
         );
         break;
       }
@@ -3285,6 +3542,7 @@ export class DedicatedJobRunner {
           portToSend,
           `📍 [Indeed] Location #${locRank} (${currentLoc}) yielded ${queue.length} jobs (< ${BATCH_CAP}). Checking Location #${nextRank} (${nextLoc})...`,
           'info',
+          runToken,
         );
       }
     }
@@ -3302,13 +3560,14 @@ export class DedicatedJobRunner {
     if (
       queue.length < 3 &&
       this.isRunning &&
+      !this.isStopping &&
       !this.abortController?.signal?.aborted &&
       cleanAlternateRole &&
       cleanAlternateRole.toLowerCase() !== cleanRole.toLowerCase()
     ) {
       const fallbackMsg = `Found only ${queue.length} jobs for '${cleanRole}', also checking '${cleanAlternateRole}'...`;
       logger.info(`[DedicatedJobRunner] ${fallbackMsg}`);
-      this.notifyStatus(portToSend, `🔍 ${fallbackMsg}`, 'info');
+      this.notifyStatus(portToSend, `🔍 ${fallbackMsg}`, 'info', runToken);
 
       const fallbackSearchUrl = indeedAdapter.buildSearchUrl(
         cleanAlternateRole,
@@ -3318,7 +3577,7 @@ export class DedicatedJobRunner {
       );
       await navigateTab(fallbackSearchUrl);
       const fbWaitAborted = await this.interruptibleSleep(3500 + Math.floor(Math.random() * 2000));
-      if (!fbWaitAborted && this.isRunning) {
+      if (!fbWaitAborted && this.isRunning && !this.isStopping) {
         await this.markRunnerTabVisually(currentPage);
 
         const fbFilter = await indeedAdapter.ensureEasilyApplyFilterActive(currentPage);
@@ -3328,7 +3587,7 @@ export class DedicatedJobRunner {
 
         // Scan up to 2 pages for fallback role to reach BATCH_CAP
         for (let fbPageIndex = 0; fbPageIndex < 2 && queue.length < BATCH_CAP; fbPageIndex++) {
-          if (!this.isRunning || this.abortController?.signal?.aborted) break;
+          if (!this.isRunning || this.isStopping || this.abortController?.signal?.aborted) break;
 
           if (fbPageIndex > 0) {
             const nextFbUrl = indeedAdapter.buildSearchUrl(
@@ -3339,7 +3598,7 @@ export class DedicatedJobRunner {
             );
             await navigateTab(nextFbUrl);
             const pWait = await this.interruptibleSleep(3500 + Math.floor(Math.random() * 1500));
-            if (pWait || !this.isRunning) break;
+            if (pWait || !this.isRunning || this.isStopping) break;
             await this.markRunnerTabVisually(currentPage);
 
             const fbPageFilter = await indeedAdapter.ensureEasilyApplyFilterActive(currentPage);
@@ -3357,7 +3616,7 @@ export class DedicatedJobRunner {
               ?.evaluate(() => window.scrollBy(0, 350 + Math.floor(Math.random() * 300)))
               .catch(() => {});
             const sWait = await this.interruptibleSleep(2000 + Math.floor(Math.random() * 1500));
-            if (sWait || !this.isRunning) break;
+            if (sWait || !this.isRunning || this.isStopping) break;
 
             fbJobs = await indeedAdapter.extractJobCards(currentPage);
             if (fbJobs.length > 0) break;
@@ -3389,8 +3648,8 @@ export class DedicatedJobRunner {
     if (queue.length === 0) {
       const noQuickMsg = `No direct "Easily apply" jobs found among the ${totalScanned} scanned listings on Indeed (all require external company sites). Concluding run without spending credits.`;
       logger.info(`[DedicatedJobRunner] ${noQuickMsg}`);
-      this.notifyStatus(portToSend, `ℹ️ ${noQuickMsg}`, 'info');
-      this.cleanupRun();
+      this.notifyStatus(portToSend, `ℹ️ ${noQuickMsg}`, 'info', runToken);
+      this.cleanupRun(noQuickMsg, stats, runToken);
       return { status: 'success', message: noQuickMsg, stats };
     }
 
@@ -3398,22 +3657,25 @@ export class DedicatedJobRunner {
       portToSend,
       `🎯 Queued ${queue.length} eligible Indeed "Easily apply" jobs for this run (from ${totalScanned} scanned listings across search pages, capped at ${BATCH_CAP}).`,
       'info',
+      runToken,
     );
 
     // Execution loop
     const config = await linkedInConfigStore.getConfig();
     for (let i = 0; i < queue.length; i++) {
-      if (!this.isRunning || this.abortController?.signal?.aborted) {
+      if (!this.isRunning || this.isStopping || this.abortController?.signal?.aborted) {
         logger.info('[DedicatedJobRunner] Loop stopped by user signal.');
         break;
       }
 
+      this.checkAbort(runToken, this.abortController?.signal);
       const job = queue[i];
       const jobRunId = `${runId}_${job.jobId}`;
       this.activeJobId = job.jobId;
 
       // Daily quota: hold a server slot for this job (released if it is skipped or fails)
       const quota = await DailyQuotaManager.reserveApplication(applicationKey(job.jobId, job.url), 'runner');
+      this.checkAbort(runToken, this.abortController?.signal);
       if (!quota.allowed) {
         let allowFallback = false;
         if (quota.reason === 'error') {
@@ -3429,26 +3691,28 @@ export class DedicatedJobRunner {
               portToSend,
               `⚠️ Server quota check was slow/unavailable. Continuing with local quota (${applied}/${maxQ} used).`,
               'info',
+              runToken,
             );
             allowFallback = true;
           }
         }
         if (!allowFallback) {
           const quotaMsg = `🛑 ${quotaStopMessage(quota)} Stopping run.`;
-          this.notifyStatus(portToSend, quotaMsg, 'fail');
+          this.notifyStatus(portToSend, quotaMsg, 'fail', runToken);
           break;
         }
       }
 
       // Hard credit budget check (not applied to verified JobForm Automator Premium)
       const balanceRes = await backendApiClient.getCreditsBalance().catch(() => null);
+      this.checkAbort(runToken, this.abortController?.signal);
       if (
         !balanceRes?.data?.premiumCovered &&
         balanceRes?.data?.remainingCredits !== undefined &&
         balanceRes.data.remainingCredits < 1
       ) {
         const creditMsg = `🛑 Insufficient credits (${balanceRes.data.remainingCredits} remaining). Halting run.`;
-        this.notifyStatus(portToSend, creditMsg, 'fail');
+        this.notifyStatus(portToSend, creditMsg, 'fail', runToken);
         break;
       }
 
@@ -3462,9 +3726,9 @@ export class DedicatedJobRunner {
         role,
       );
       if (blacklist.blacklisted) {
-        this.notifyStatus(portToSend, `🚫 [Indeed] Skipped "${job.title}": ${blacklist.reason}.`, 'info');
+        this.notifyStatus(portToSend, `🚫 [Indeed] Skipped "${job.title}": ${blacklist.reason}.`, 'info', runToken);
         stats.skipped++;
-        await processedJobsStore.recordJob({
+        await this.safeRecordJob(runToken, {
           jobId: job.jobId,
           url: job.url,
           title: job.title,
@@ -3487,9 +3751,10 @@ export class DedicatedJobRunner {
           portToSend,
           `ℹ️ Skipped "${job.title}": Match score ${relevance.score}% < threshold ${relevance.threshold}%. (${relevance.reason || 'Skills do not match profile'})`,
           'info',
+          runToken,
         );
         stats.skipped++;
-        await processedJobsStore.recordJob({
+        await this.safeRecordJob(runToken, {
           jobId: job.jobId,
           url: job.url,
           title: job.title,
@@ -3498,15 +3763,20 @@ export class DedicatedJobRunner {
           reason: `Match score ${relevance.score}% < ${relevance.threshold}%: ${relevance.reason || 'Skills do not closely match profile'}`,
           creditsUsed: 0,
         });
-        this.notifyActivity(portToSend, onLiveActivity, {
-          jobId: job.jobId,
-          url: job.url,
-          title: job.title,
-          company: job.company,
-          status: 'skipped',
-          reason: `Match: ${relevance.score}% (<${relevance.threshold}%)`,
-          creditsUsed: 0,
-        });
+        this.notifyActivity(
+          portToSend,
+          onLiveActivity,
+          {
+            jobId: job.jobId,
+            url: job.url,
+            title: job.title,
+            company: job.company,
+            status: 'skipped',
+            reason: `Match: ${relevance.score}% (<${relevance.threshold}%)`,
+            creditsUsed: 0,
+          },
+          runToken,
+        );
         continue;
       }
 
@@ -3514,48 +3784,78 @@ export class DedicatedJobRunner {
         portToSend,
         `💼 [Indeed] Applying to job ${i + 1} of ${queue.length}: "${job.title}" (${job.company})`,
         'info',
+        runToken,
       );
 
-      this.notifyActivity(portToSend, onLiveActivity, {
-        jobId: job.jobId,
-        url: job.url,
-        title: job.title,
-        company: job.company,
-        status: 'running',
-        reason: 'Applying on Indeed...',
-        creditsUsed: 0,
-      });
+      this.notifyActivity(
+        portToSend,
+        onLiveActivity,
+        {
+          jobId: job.jobId,
+          url: job.url,
+          title: job.title,
+          company: job.company,
+          status: 'running',
+          reason: 'Applying on Indeed...',
+          creditsUsed: 0,
+        },
+        runToken,
+      );
 
       // Pre-navigation safety jitter (1.5s - 3.5s) to avoid rapid sequential page loads
       const preNavJitter = 1500 + Math.floor(Math.random() * 2000);
       const preNavAborted = await this.interruptibleSleep(preNavJitter);
-      if (preNavAborted || !this.isRunning) break;
+      if (preNavAborted || !this.isRunning || this.isStopping) break;
 
       await indeedAdapter.disableBeforeUnload(currentPage.tabId, currentPage.puppeteerPage);
 
       const scopedLLM = await getJobScopedLLM(jobRunId);
-      const applyResult = await indeedAdapter.applyToJob(job, {
-        page: currentPage,
-        browserContext: this.browserContext!,
-        careerBrain,
-        portToSend,
-        onLiveActivity,
-        signal: this.abortController?.signal,
-        runId: jobRunId,
-        scopedLLM,
-      });
+      let applyResult: { status: 'applied' | 'skipped' | 'failed'; reason?: string; creditsUsed?: number };
+      try {
+        this.checkAbort(runToken, this.abortController?.signal);
+        applyResult = await indeedAdapter.applyToJob(job, {
+          page: currentPage,
+          browserContext: this.browserContext!,
+          careerBrain,
+          portToSend,
+          onLiveActivity,
+          signal: this.abortController?.signal,
+          runId: jobRunId,
+          scopedLLM,
+        });
+        this.checkAbort(runToken, this.abortController?.signal);
+      } catch (applyErr: any) {
+        if (
+          applyErr instanceof AbortRunError ||
+          this.isStopping ||
+          !this.isRunning ||
+          (runToken && this.activeRunToken !== runToken) ||
+          isCdpTabClosedError(applyErr)
+        ) {
+          throw new AbortRunError(this.stopReason || 'Stopped by user');
+        }
+        logger.error(`[DedicatedJobRunner] Unexpected error applying to Indeed job ${job.jobId}:`, applyErr);
+        continue;
+      }
 
       await indeedAdapter.disableBeforeUnload(currentPage.tabId, currentPage.puppeteerPage);
 
-      if (!this.isRunning || this.abortController?.signal?.aborted || applyResult.reason?.includes('stopped by user')) {
+      if (
+        !this.isRunning ||
+        this.isStopping ||
+        this.abortController?.signal?.aborted ||
+        applyResult.reason?.toLowerCase().includes('stopped by user')
+      ) {
         logger.info('[DedicatedJobRunner] Execution halted by user stop signal.');
-        break;
+        throw new AbortRunError(this.stopReason || 'Stopped by user');
       }
 
       if (applyResult.status === 'applied') {
         stats.applied++;
-        await DailyQuotaManager.commitApplication(applicationKey(job.jobId, job.url));
-        await processedJobsStore.recordJob({
+        if (this.isTokenActive(runToken)) {
+          await DailyQuotaManager.commitApplication(applicationKey(job.jobId, job.url));
+        }
+        await this.safeRecordJob(runToken, {
           jobId: job.jobId,
           url: job.url,
           title: job.title,
@@ -3564,29 +3864,37 @@ export class DedicatedJobRunner {
           creditsUsed: 1,
         });
 
-        await this.syncJobApplicationToBackend({
-          jobId: job.jobId,
-          jobTitle: job.title,
-          company: job.company,
-          platform: 'indeed',
-          applicationUrl: job.url,
-          status: 'applied',
-          appliedAt: new Date().toISOString(),
-        });
+        await this.syncJobApplicationToBackend(
+          {
+            jobId: job.jobId,
+            jobTitle: job.title,
+            company: job.company,
+            platform: 'indeed',
+            applicationUrl: job.url,
+            status: 'applied',
+            appliedAt: new Date().toISOString(),
+          },
+          runToken,
+        );
 
-        this.notifyStatus(portToSend, `✅ Successfully applied to "${job.title}" at ${job.company}!`, 'ok');
+        this.notifyStatus(portToSend, `✅ Successfully applied to "${job.title}" at ${job.company}!`, 'ok', runToken);
 
-        this.notifyActivity(portToSend, onLiveActivity, {
-          jobId: job.jobId,
-          url: job.url,
-          title: job.title,
-          company: job.company,
-          status: 'applied',
-          creditsUsed: 1,
-        });
+        this.notifyActivity(
+          portToSend,
+          onLiveActivity,
+          {
+            jobId: job.jobId,
+            url: job.url,
+            title: job.title,
+            company: job.company,
+            status: 'applied',
+            creditsUsed: 1,
+          },
+          runToken,
+        );
       } else if (applyResult.status === 'skipped') {
         stats.skipped++;
-        await processedJobsStore.recordJob({
+        await this.safeRecordJob(runToken, {
           jobId: job.jobId,
           url: job.url,
           title: job.title,
@@ -3595,21 +3903,31 @@ export class DedicatedJobRunner {
           reason: applyResult.reason || 'Skipped',
           creditsUsed: 0,
         });
-        this.notifyStatus(portToSend, `ℹ️ Skipped "${job.title}": ${applyResult.reason || 'Skipped'}`, 'info');
-        this.notifyActivity(portToSend, onLiveActivity, {
-          jobId: job.jobId,
-          url: job.url,
-          title: job.title,
-          company: job.company,
-          status: 'skipped',
-          reason: applyResult.reason,
-          creditsUsed: 0,
-        });
+        this.notifyStatus(
+          portToSend,
+          `ℹ️ Skipped "${job.title}": ${applyResult.reason || 'Skipped'}`,
+          'info',
+          runToken,
+        );
+        this.notifyActivity(
+          portToSend,
+          onLiveActivity,
+          {
+            jobId: job.jobId,
+            url: job.url,
+            title: job.title,
+            company: job.company,
+            status: 'skipped',
+            reason: applyResult.reason,
+            creditsUsed: 0,
+          },
+          runToken,
+        );
       } else {
         // Check if failed due to Cloudflare/Captcha challenge (zero programmatic interaction)
         if (applyResult.reason?.includes('Captcha') || applyResult.reason?.includes('Bot Challenge')) {
           stats.failed++;
-          await processedJobsStore.recordJob({
+          await this.safeRecordJob(runToken, {
             jobId: job.jobId,
             url: job.url,
             title: job.title,
@@ -3622,7 +3940,7 @@ export class DedicatedJobRunner {
         }
 
         stats.failed++;
-        await processedJobsStore.recordJob({
+        await this.safeRecordJob(runToken, {
           jobId: job.jobId,
           url: job.url,
           title: job.title,
@@ -3635,48 +3953,62 @@ export class DedicatedJobRunner {
           portToSend,
           `❌ Failed application for "${job.title}": ${applyResult.reason || 'Failed'}`,
           'fail',
+          runToken,
         );
-        this.notifyActivity(portToSend, onLiveActivity, {
-          jobId: job.jobId,
-          url: job.url,
-          title: job.title,
-          company: job.company,
-          status: 'failed',
-          reason: applyResult.reason,
-          creditsUsed: 0,
-        });
+        this.notifyActivity(
+          portToSend,
+          onLiveActivity,
+          {
+            jobId: job.jobId,
+            url: job.url,
+            title: job.title,
+            company: job.company,
+            status: 'failed',
+            reason: applyResult.reason,
+            creditsUsed: 0,
+          },
+          runToken,
+        );
       }
 
-      if (!this.isRunning) {
+      if (!this.isRunning || this.isStopping) {
         logger.info('[DedicatedJobRunner] Application flow stopped by user.');
         break;
       }
     }
 
     const summaryMsg = `Indeed Apply complete: ${stats.applied} applied, ${stats.skipped} skipped, ${stats.failed} failed.`;
-    this.notifyStatus(portToSend, `🏁 ${summaryMsg}`, 'ok');
-
-    if (portToSend) {
-      try {
-        portToSend.postMessage({
-          type: 'LINKEDIN_RUN_FINISHED',
-          summary: summaryMsg,
-          stats,
-        });
-      } catch {}
-    }
-
-    this.cleanupRun();
+    this.notifyStatus(portToSend, `🏁 ${summaryMsg}`, 'ok', runToken);
+    this.cleanupRun(summaryMsg, stats, runToken);
     return { status: 'success', message: summaryMsg, stats };
   }
 
   /**
    * Stops active runner cleanly, closes dedicated window, and refunds credits.
+   * Safe and idempotent to call any number of times.
    */
-  public async stop(): Promise<void> {
-    logger.info('[DedicatedJobRunner] User triggered stop.');
-    // 1. Immediately flag as not running and trigger abort signal
+  public async stop(reason: string = 'user'): Promise<void> {
+    if (!this.isRunning && !this.isStopping) {
+      return;
+    }
+    if (this.isStopping) {
+      if (this.loopFinishedPromise) {
+        await Promise.race([this.loopFinishedPromise, new Promise(resolve => setTimeout(resolve, 5000))]);
+      }
+      return;
+    }
+
+    this.isStopping = true;
     this.isRunning = false;
+    this.stopReason = reason === 'user' ? 'Stopped by user' : reason;
+
+    if (reason === 'user') {
+      logger.info('[DedicatedJobRunner] Stopped by user');
+    } else {
+      logger.info(`[DedicatedJobRunner] Stopped (${reason})`);
+    }
+
+    // 1. Immediately trigger abort signal
     if (this.abortController) {
       try {
         this.abortController.abort();
@@ -3695,19 +4027,8 @@ export class DedicatedJobRunner {
       try {
         this.activePort.postMessage({
           type: 'LINKEDIN_STATUS_UPDATE',
-          text: '⏹️ Application stopped by user.',
+          text: reason === 'user' ? '⏹️ Application stopped by user.' : `⏹️ Application stopped: ${reason}`,
           status: 'info',
-        });
-        this.activePort.postMessage({
-          type: 'LINKEDIN_RUN_FINISHED',
-          summary: 'Application stopped by user.',
-          stats: {
-            totalFound: 0,
-            applied: 0,
-            modalOpened: 0,
-            skipped: 0,
-            failed: 0,
-          },
         });
       } catch {}
     }
@@ -3715,25 +4036,28 @@ export class DedicatedJobRunner {
     // 4. Immediately close runner window
     await dedicatedWindowManager.closeRunnerWindow().catch(() => {});
 
-    // 5. Background cleanup: refund active job credits and update status
-    if (this.activeRunId) {
-      const runId = this.activeRunId;
-      await backendApiClient.refundCredits(runId).catch(() => {});
-      await runnerStateStore.updateRunStatus('failed', { errorReason: 'Stopped by user' });
-      if (this.activeJobId) {
-        await processedJobsStore.recordJob({
-          jobId: this.activeJobId,
-          url: '',
-          title: 'Stopped',
-          company: '',
-          status: 'failed',
-          reason: 'Stopped by user',
-          creditsUsed: 0,
-        });
-      }
+    // 5. Await the loop finished promise with safety timeout (~5s)
+    if (this.loopFinishedPromise) {
+      await Promise.race([this.loopFinishedPromise, new Promise(resolve => setTimeout(resolve, 5000))]);
     }
 
-    this.cleanupRun();
+    // 6. Background cleanup: refund active job credits exactly once and update status
+    if (this.activeRunId && !this.hasRefundedCurrentRun) {
+      this.hasRefundedCurrentRun = true;
+      const runId = this.activeRunId;
+      await backendApiClient.refundCredits(runId).catch(err => {
+        const errMsg = String(err?.message || err);
+        if (!/no billable usage|run_not_found|already_refunded/i.test(errMsg)) {
+          logger.warning(`[DedicatedJobRunner] Refund on stop for ${runId}: ${errMsg}`);
+        }
+      });
+      await runnerStateStore.updateRunStatus('failed', { errorReason: `Stopped: ${reason}` }).catch(() => {});
+      // Note: Interrupted job is NOT recorded as failed or skipped in processedJobsStore.
+    }
+
+    const summaryMsg = reason === 'user' ? 'Auto Apply stopped by user' : `Auto Apply stopped: ${reason}`;
+    this.cleanupRun(summaryMsg, this.activeStats || undefined);
+    this.isStopping = false;
   }
 
   /**
@@ -3741,53 +4065,8 @@ export class DedicatedJobRunner {
    */
   public async handleDebuggerDetach(_detachedTabId?: number): Promise<void> {
     if (!this.isRunning && !this.activeRunId) return;
-
     logger.warning('[DedicatedJobRunner] Debugger detached while run was active. Failing run cleanly and refunding...');
-    if (this.currentExecutor) {
-      this.currentExecutor.cancel();
-      this.currentExecutor = null;
-    }
-
-    const runId = this.activeRunId;
-    if (runId) {
-      await backendApiClient.refundCredits(runId).catch(err => {
-        const errMsg = String(err?.message || err);
-        if (/no billable usage|run_not_found|already_refunded/i.test(errMsg)) {
-          logger.debug(`[DedicatedJobRunner] No billable usage to refund on detach for ${runId}.`);
-        } else {
-          logger.info(`[DedicatedJobRunner] Refund note on detach for ${runId}: ${errMsg}`);
-        }
-      });
-      await runnerStateStore.updateRunStatus('failed', {
-        errorReason:
-          'Lost control of the tab (DevTools opened on it?). Please close DevTools on the job tab and retry.',
-      });
-      const detachMsg =
-        '🛑 DevTools detected on job tab - this caused a disconnect. Please close DevTools on the job tab and retry.';
-      this.notifyStatus(this.activePort, detachMsg, 'fail');
-      this.notifyActivity(this.activePort, this.activeLiveActivity, {
-        jobId: this.activeJobId || 'detached',
-        url: '',
-        title: 'DevTools Detached',
-        company: 'Runner Tab',
-        status: 'failed',
-        reason: detachMsg,
-        creditsUsed: 0,
-      });
-      if (this.activeJobId) {
-        await processedJobsStore.recordJob({
-          jobId: this.activeJobId,
-          url: '',
-          title: 'Detached',
-          company: '',
-          status: 'failed',
-          reason: 'Lost control of tab (DevTools conflict)',
-          creditsUsed: 0,
-        });
-      }
-    }
-
-    this.cleanupRun();
+    await this.stop('debugger_detached');
   }
 
   /**
@@ -3977,12 +4256,15 @@ export class DedicatedJobRunner {
     },
     candidateIndex?: number,
     batchCap?: number,
+    runToken?: string,
   ): Promise<{ status: 'applied' | 'skipped' | 'failed' | 'halt'; usedDirectFallback?: boolean }> {
+    this.checkAbort(runToken, this.abortController?.signal);
     const jobRunId = `${runId}_${job.jobId}`;
     this.activeJobId = job.jobId;
 
     // Daily quota: hold a server slot for this job (released if it is skipped or fails)
     const quota = await DailyQuotaManager.reserveApplication(applicationKey(job.jobId, job.url), 'runner');
+    this.checkAbort(runToken, this.abortController?.signal);
     if (!quota.allowed) {
       let allowFallback = false;
       if (quota.reason === 'error') {
@@ -3998,26 +4280,28 @@ export class DedicatedJobRunner {
             portToSend,
             `⚠️ Server quota check was slow/unavailable. Continuing with local quota (${applied}/${maxQ} used).`,
             'info',
+            runToken,
           );
           allowFallback = true;
         }
       }
       if (!allowFallback) {
         const quotaMsg = `🛑 ${quotaStopMessage(quota)} Stopping run.`;
-        this.notifyStatus(portToSend, quotaMsg, 'fail');
+        this.notifyStatus(portToSend, quotaMsg, 'fail', runToken);
         return { status: 'halt' };
       }
     }
 
     // Hard credit budget check (minimum 5 credits to ensure balance for form-filling LLM calls).
     const balanceRes = await backendApiClient.getCreditsBalance().catch(() => null);
+    this.checkAbort(runToken, this.abortController?.signal);
     if (
       !balanceRes?.data?.premiumCovered &&
       balanceRes?.data?.remainingCredits !== undefined &&
       balanceRes.data.remainingCredits < 5
     ) {
       const creditMsg = `🛑 Insufficient credit budget (${balanceRes.data.remainingCredits} remaining, minimum 5 required). Halting run.`;
-      this.notifyStatus(portToSend, creditMsg, 'fail');
+      this.notifyStatus(portToSend, creditMsg, 'fail', runToken);
       return { status: 'halt' };
     }
 
@@ -4034,9 +4318,9 @@ export class DedicatedJobRunner {
       role,
     );
     if (earlyBlacklist.blacklisted) {
-      this.notifyStatus(portToSend, `🚫 Skipped "${safeTitle}": ${earlyBlacklist.reason}.`, 'info');
+      this.notifyStatus(portToSend, `🚫 Skipped "${safeTitle}": ${earlyBlacklist.reason}.`, 'info', runToken);
       recordSkip(stats, 'blacklisted (keyword/company)');
-      await processedJobsStore.recordJob({
+      await this.safeRecordJob(runToken, {
         jobId: job.jobId,
         url: job.url,
         title: safeTitle,
@@ -4045,15 +4329,20 @@ export class DedicatedJobRunner {
         reason: `Blacklisted: ${earlyBlacklist.reason}`,
         creditsUsed: 0,
       });
-      this.notifyActivity(portToSend, onLiveActivity, {
-        jobId: job.jobId,
-        url: job.url,
-        title: safeTitle,
-        company: safeCompany,
-        status: 'skipped',
-        reason: earlyBlacklist.reason || 'Blacklisted',
-        creditsUsed: 0,
-      });
+      this.notifyActivity(
+        portToSend,
+        onLiveActivity,
+        {
+          jobId: job.jobId,
+          url: job.url,
+          title: safeTitle,
+          company: safeCompany,
+          status: 'skipped',
+          reason: earlyBlacklist.reason || 'Blacklisted',
+          creditsUsed: 0,
+        },
+        runToken,
+      );
       return { status: 'skipped' };
     }
 
@@ -4063,21 +4352,38 @@ export class DedicatedJobRunner {
       portToSend,
       `💼 Checking candidate job #${candidateNumber} (${stats?.applied || 0}/${maxGoal} applied): "${safeTitle}" (${safeCompany})`,
       'info',
+      runToken,
     );
 
-    this.notifyActivity(portToSend, onLiveActivity, {
-      jobId: job.jobId,
-      url: job.url,
-      title: safeTitle,
-      company: safeCompany,
-      status: 'running',
-      reason: 'Loading details in split-pane...',
-      creditsUsed: 0,
-    });
+    this.notifyActivity(
+      portToSend,
+      onLiveActivity,
+      {
+        jobId: job.jobId,
+        url: job.url,
+        title: safeTitle,
+        company: safeCompany,
+        status: 'running',
+        reason: 'Loading details in split-pane...',
+        creditsUsed: 0,
+      },
+      runToken,
+    );
 
     // 4a. Click Job in Left Pane to Load Details in Right Pane (Split-View)
+    this.checkAbort(runToken, this.abortController?.signal);
     let usedDirectFallback = false;
-    let clicked = await currentPage.clickJobInSearchList(job.jobId);
+    let clicked = false;
+    try {
+      clicked = await currentPage.clickJobInSearchList(job.jobId);
+    } catch (clickErr: any) {
+      if (isCdpTabClosedError(clickErr) || this.isStopping || !this.isRunning) {
+        throw new AbortRunError(this.stopReason || 'Stopped by user');
+      }
+      logger.warning(`[DedicatedJobRunner] clickJobInSearchList error for ${job.jobId}:`, clickErr);
+    }
+    this.checkAbort(runToken, this.abortController?.signal);
+
     if (!clicked) {
       logger.info(
         `[DedicatedJobRunner] Could not select job card for ${job.jobId} in current search list view. Navigating directly to ${job.url}...`,
@@ -4092,8 +4398,12 @@ export class DedicatedJobRunner {
           await (currentPage as any).navigateTo(job.url);
         }
       } catch (navErr) {
+        if (isCdpTabClosedError(navErr) || this.isStopping || !this.isRunning) {
+          throw new AbortRunError(this.stopReason || 'Stopped by user');
+        }
         logger.warning(`[DedicatedJobRunner] Direct navigation to job URL failed:`, navErr);
       }
+      this.checkAbort(runToken, this.abortController?.signal);
       await currentPage.waitForDomSettlement?.(
         '.jobs-unified-top-card, [data-view-name="job-details-top-card"], .jobs-details__main-content',
         { maxWaitMs: 6000 },
@@ -4106,14 +4416,28 @@ export class DedicatedJobRunner {
         );
       } else {
         const waitAborted = await this.interruptibleSleep(1200);
-        if (waitAborted || !this.isRunning) return { status: 'halt' };
+        if (waitAborted || !this.isRunning || this.isStopping) {
+          throw new AbortRunError(this.stopReason || 'Stopped by user');
+        }
       }
     }
+    this.checkAbort(runToken, this.abortController?.signal);
 
     // 4b. Pure DOM Top-Card Extraction + Max-3 Retry Guard
     // (generous budget: slow networks / heavy LinkedIn JS often need >10s to render
     // the job details pane; premature failure here caused false "details unavailable" skips)
-    let topCard = await currentPage.extractJobTopCardContext(8000);
+    this.checkAbort(runToken, this.abortController?.signal);
+    let topCard: any;
+    try {
+      topCard = await currentPage.extractJobTopCardContext(8000);
+    } catch (topErr) {
+      if (isCdpTabClosedError(topErr) || this.isStopping || !this.isRunning) {
+        throw new AbortRunError(this.stopReason || 'Stopped by user');
+      }
+      topCard = {};
+    }
+    this.checkAbort(runToken, this.abortController?.signal);
+
     let retryCount = 0;
     while (
       (!topCard.title || !topCard.company) &&
@@ -4123,10 +4447,26 @@ export class DedicatedJobRunner {
       retryCount < 3
     ) {
       retryCount++;
-      this.notifyStatus(portToSend, `Checking job details for ${job.jobId} (attempt ${retryCount}/3)...`, 'info');
+      this.notifyStatus(
+        portToSend,
+        `Checking job details for ${job.jobId} (attempt ${retryCount}/3)...`,
+        'info',
+        runToken,
+      );
       const retrySleepAborted = await this.interruptibleSleep(900);
-      if (retrySleepAborted || !this.isRunning) return { status: 'halt' };
-      topCard = await currentPage.extractJobTopCardContext(4500);
+      if (retrySleepAborted || !this.isRunning || this.isStopping) {
+        throw new AbortRunError(this.stopReason || 'Stopped by user');
+      }
+      this.checkAbort(runToken, this.abortController?.signal);
+      try {
+        topCard = await currentPage.extractJobTopCardContext(4500);
+      } catch (topErr) {
+        if (isCdpTabClosedError(topErr) || this.isStopping || !this.isRunning) {
+          throw new AbortRunError(this.stopReason || 'Stopped by user');
+        }
+        topCard = {};
+      }
+      this.checkAbort(runToken, this.abortController?.signal);
     }
 
     const isPlaceholderTitle = (t?: string | null) =>
@@ -4155,9 +4495,15 @@ export class DedicatedJobRunner {
       !topCard.isAlreadyApplied &&
       !topCard.isLoginWall
     ) {
-      this.notifyStatus(portToSend, `ℹ️ Skipped "${displayTitle}": Could not load job details from LinkedIn.`, 'info');
+      this.checkAbort(runToken, this.abortController?.signal);
+      this.notifyStatus(
+        portToSend,
+        `ℹ️ Skipped "${displayTitle}": Could not load job details from LinkedIn.`,
+        'info',
+        runToken,
+      );
       recordSkip(stats, 'job details unavailable');
-      await processedJobsStore.recordJob({
+      await this.safeRecordJob(runToken, {
         jobId: job.jobId,
         url: job.url,
         title: displayTitle,
@@ -4166,15 +4512,20 @@ export class DedicatedJobRunner {
         reason: 'Could not load job details from LinkedIn',
         creditsUsed: 0,
       });
-      this.notifyActivity(portToSend, onLiveActivity, {
-        jobId: job.jobId,
-        url: job.url,
-        title: displayTitle,
-        company: displayCompany,
-        status: 'skipped',
-        reason: 'Selector timeout',
-        creditsUsed: 0,
-      });
+      this.notifyActivity(
+        portToSend,
+        onLiveActivity,
+        {
+          jobId: job.jobId,
+          url: job.url,
+          title: displayTitle,
+          company: displayCompany,
+          status: 'skipped',
+          reason: 'Selector timeout',
+          creditsUsed: 0,
+        },
+        runToken,
+      );
       return { status: 'skipped', usedDirectFallback };
     }
 
@@ -4183,7 +4534,9 @@ export class DedicatedJobRunner {
       const checkpointCheck = await currentPage.detectSecurityCheckpoint().catch(() => ({ isCheckpoint: false }));
       if (checkpointCheck.isCheckpoint) {
         const chkRes = await this.waitForManualCheckpointResolution(currentPage, portToSend, onLiveActivity);
-        if (chkRes.aborted || !this.isRunning) return { status: 'halt' };
+        if (chkRes.aborted || !this.isRunning || this.isStopping) {
+          throw new AbortRunError(this.stopReason || 'Stopped by user');
+        }
         if (!chkRes.solved) {
           recordSkip(stats, 'security checkpoint unresolved');
           return { status: 'skipped', usedDirectFallback };
@@ -4193,13 +4546,15 @@ export class DedicatedJobRunner {
 
     // 4b. Pure DOM 0-Credit Skip Checks
     if (topCard.isClosed) {
+      this.checkAbort(runToken, this.abortController?.signal);
       this.notifyStatus(
         portToSend,
         `ℹ️ Skipped "${displayTitle}": This job is closed and no longer accepting applications.`,
         'info',
+        runToken,
       );
       recordSkip(stats, 'job closed');
-      await processedJobsStore.recordJob({
+      await this.safeRecordJob(runToken, {
         jobId: job.jobId,
         url: job.url,
         title: displayTitle,
@@ -4208,26 +4563,33 @@ export class DedicatedJobRunner {
         reason: 'No longer accepting applications',
         creditsUsed: 0,
       });
-      this.notifyActivity(portToSend, onLiveActivity, {
-        jobId: job.jobId,
-        url: job.url,
-        title: displayTitle,
-        company: displayCompany,
-        status: 'skipped',
-        reason: 'Closed listing',
-        creditsUsed: 0,
-      });
+      this.notifyActivity(
+        portToSend,
+        onLiveActivity,
+        {
+          jobId: job.jobId,
+          url: job.url,
+          title: displayTitle,
+          company: displayCompany,
+          status: 'skipped',
+          reason: 'Closed listing',
+          creditsUsed: 0,
+        },
+        runToken,
+      );
       return { status: 'skipped', usedDirectFallback };
     }
 
     if (topCard.isAlreadyApplied) {
+      this.checkAbort(runToken, this.abortController?.signal);
       this.notifyStatus(
         portToSend,
         `ℹ️ Skipped "${displayTitle}": You already applied to this job earlier on LinkedIn.`,
         'info',
+        runToken,
       );
       recordSkip(stats, 'already applied on LinkedIn');
-      await processedJobsStore.recordJob({
+      await this.safeRecordJob(runToken, {
         jobId: job.jobId,
         url: job.url,
         title: displayTitle,
@@ -4236,39 +4598,55 @@ export class DedicatedJobRunner {
         reason: 'Already applied on LinkedIn',
         creditsUsed: 0,
       });
-      this.notifyActivity(portToSend, onLiveActivity, {
-        jobId: job.jobId,
-        url: job.url,
-        title: displayTitle,
-        company: displayCompany,
-        status: 'skipped',
-        reason: 'Already applied on LinkedIn',
-        creditsUsed: 0,
-      });
+      this.notifyActivity(
+        portToSend,
+        onLiveActivity,
+        {
+          jobId: job.jobId,
+          url: job.url,
+          title: displayTitle,
+          company: displayCompany,
+          status: 'skipped',
+          reason: 'Already applied on LinkedIn',
+          creditsUsed: 0,
+        },
+        runToken,
+      );
       return { status: 'skipped', usedDirectFallback };
     }
 
     if (!topCard.hasEasyApply) {
       // Re-verify: details pane often takes 1-2s to finish loading AJAX action buttons
       for (let eaAttempt = 0; eaAttempt < 3; eaAttempt++) {
-        await this.interruptibleSleep(800);
-        if (!this.isRunning) return { status: 'halt' };
-        const recheckTopCard = await currentPage.extractJobTopCardContext(2000).catch(() => null);
-        if (recheckTopCard?.hasEasyApply) {
-          topCard = recheckTopCard;
-          break;
+        const eaSleepAborted = await this.interruptibleSleep(800);
+        if (eaSleepAborted || !this.isRunning || this.isStopping) {
+          throw new AbortRunError(this.stopReason || 'Stopped by user');
+        }
+        this.checkAbort(runToken, this.abortController?.signal);
+        try {
+          const recheckTopCard = await currentPage.extractJobTopCardContext(2000);
+          if (recheckTopCard?.hasEasyApply) {
+            topCard = recheckTopCard;
+            break;
+          }
+        } catch (extractErr) {
+          if (isCdpTabClosedError(extractErr) || this.isStopping || !this.isRunning) {
+            throw new AbortRunError(this.stopReason || 'Stopped by user');
+          }
         }
       }
     }
 
     if (!topCard.hasEasyApply) {
+      this.checkAbort(runToken, this.abortController?.signal);
       this.notifyStatus(
         portToSend,
         `ℹ️ Skipped "${displayTitle}": Requires applying directly on company website (not Easy Apply).`,
         'info',
+        runToken,
       );
       recordSkip(stats, 'no Easy Apply (external site)');
-      await processedJobsStore.recordJob({
+      await this.safeRecordJob(runToken, {
         jobId: job.jobId,
         url: job.url,
         title: displayTitle,
@@ -4277,15 +4655,20 @@ export class DedicatedJobRunner {
         reason: 'External application only (no Easy Apply)',
         creditsUsed: 0,
       });
-      this.notifyActivity(portToSend, onLiveActivity, {
-        jobId: job.jobId,
-        url: job.url,
-        title: displayTitle,
-        company: displayCompany,
-        status: 'skipped',
-        reason: 'External application only',
-        creditsUsed: 0,
-      });
+      this.notifyActivity(
+        portToSend,
+        onLiveActivity,
+        {
+          jobId: job.jobId,
+          url: job.url,
+          title: displayTitle,
+          company: displayCompany,
+          status: 'skipped',
+          reason: 'External application only',
+          creditsUsed: 0,
+        },
+        runToken,
+      );
       return { status: 'skipped', usedDirectFallback };
     }
 
@@ -4299,9 +4682,9 @@ export class DedicatedJobRunner {
       role,
     );
     if (postBlacklist.blacklisted) {
-      this.notifyStatus(portToSend, `🚫 Skipped "${displayTitle}": ${postBlacklist.reason}.`, 'info');
+      this.notifyStatus(portToSend, `🚫 Skipped "${displayTitle}": ${postBlacklist.reason}.`, 'info', runToken);
       recordSkip(stats, 'blacklisted (post-load)');
-      await processedJobsStore.recordJob({
+      await this.safeRecordJob(runToken, {
         jobId: job.jobId,
         url: job.url,
         title: displayTitle,
@@ -4310,15 +4693,20 @@ export class DedicatedJobRunner {
         reason: `Blacklisted: ${postBlacklist.reason}`,
         creditsUsed: 0,
       });
-      this.notifyActivity(portToSend, onLiveActivity, {
-        jobId: job.jobId,
-        url: job.url,
-        title: displayTitle,
-        company: displayCompany,
-        status: 'skipped',
-        reason: postBlacklist.reason || 'Blacklisted',
-        creditsUsed: 0,
-      });
+      this.notifyActivity(
+        portToSend,
+        onLiveActivity,
+        {
+          jobId: job.jobId,
+          url: job.url,
+          title: displayTitle,
+          company: displayCompany,
+          status: 'skipped',
+          reason: postBlacklist.reason || 'Blacklisted',
+          creditsUsed: 0,
+        },
+        runToken,
+      );
       return { status: 'skipped', usedDirectFallback };
     }
 
@@ -4329,9 +4717,10 @@ export class DedicatedJobRunner {
         portToSend,
         `ℹ️ Skipped "${displayTitle}": Required skills do not closely match your profile.`,
         'info',
+        runToken,
       );
       recordSkip(stats, 'low skill match');
-      await processedJobsStore.recordJob({
+      await this.safeRecordJob(runToken, {
         jobId: job.jobId,
         url: job.url,
         title: displayTitle,
@@ -4340,15 +4729,20 @@ export class DedicatedJobRunner {
         reason: 'Skills do not closely match profile',
         creditsUsed: 0,
       });
-      this.notifyActivity(portToSend, onLiveActivity, {
-        jobId: job.jobId,
-        url: job.url,
-        title: displayTitle,
-        company: displayCompany,
-        status: 'skipped',
-        reason: 'Low skill match',
-        creditsUsed: 0,
-      });
+      this.notifyActivity(
+        portToSend,
+        onLiveActivity,
+        {
+          jobId: job.jobId,
+          url: job.url,
+          title: displayTitle,
+          company: displayCompany,
+          status: 'skipped',
+          reason: 'Low skill match',
+          creditsUsed: 0,
+        },
+        runToken,
+      );
       return { status: 'skipped', usedDirectFallback };
     }
 
@@ -4370,6 +4764,7 @@ export class DedicatedJobRunner {
     // we burn the job opportunity on a wrong skip.
     let arbitrationUsed = false;
     if (deepMatch.recommendation === 'skip' && deepMatch.score >= 40 && deepMatch.score <= 60) {
+      this.checkAbort(runToken, this.abortController?.signal);
       const arbitrationLLM = await getJobScopedLLM(jobRunId).catch(() => undefined);
       if (arbitrationLLM) {
         const arbitrated = await arbitrateBorderlineRelevance(
@@ -4404,9 +4799,9 @@ export class DedicatedJobRunner {
         });
       }
       logger.info(`[DedicatedJobRunner] Deep JD evaluation skipped "${displayTitle}": ${deepMatch.reason}`);
-      this.notifyStatus(portToSend, `ℹ️ Skipped "${displayTitle}": ${deepMatch.reason}`, 'info');
+      this.notifyStatus(portToSend, `ℹ️ Skipped "${displayTitle}": ${deepMatch.reason}`, 'info', runToken);
       recordSkip(stats, 'fit score below threshold');
-      await processedJobsStore.recordJob({
+      await this.safeRecordJob(runToken, {
         jobId: job.jobId,
         url: job.url,
         title: displayTitle,
@@ -4418,27 +4813,53 @@ export class DedicatedJobRunner {
         reason: deepMatch.reason,
         creditsUsed: 0,
       });
-      this.notifyActivity(portToSend, onLiveActivity, {
-        jobId: job.jobId,
-        url: job.url,
-        title: displayTitle,
-        company: displayCompany,
-        status: 'skipped',
-        reason: deepMatch.reason.length > 40 ? `Match ${deepMatch.score}% < ${minScoreThreshold}%` : deepMatch.reason,
-        creditsUsed: 0,
-      });
+      this.notifyActivity(
+        portToSend,
+        onLiveActivity,
+        {
+          jobId: job.jobId,
+          url: job.url,
+          title: displayTitle,
+          company: displayCompany,
+          status: 'skipped',
+          reason: deepMatch.reason.length > 40 ? `Match ${deepMatch.score}% < ${minScoreThreshold}%` : deepMatch.reason,
+          creditsUsed: 0,
+        },
+        runToken,
+      );
       return { status: 'skipped', usedDirectFallback };
     }
 
     // 4d. Click Easy Apply & Verify Modal Opens
-    this.notifyStatus(portToSend, `🚀 Opening Easy Apply for "${displayTitle}"...`, 'info');
-    let clickRes = await currentPage.clickEasyApplyButton();
+    this.checkAbort(runToken, this.abortController?.signal);
+    this.notifyStatus(portToSend, `🚀 Opening Easy Apply for "${displayTitle}"...`, 'info', runToken);
+    let clickRes: any;
+    try {
+      clickRes = await currentPage.clickEasyApplyButton();
+    } catch (btnErr) {
+      if (isCdpTabClosedError(btnErr) || this.isStopping || !this.isRunning) {
+        throw new AbortRunError(this.stopReason || 'Stopped by user');
+      }
+      clickRes = { success: false, error: String(btnErr) };
+    }
+    this.checkAbort(runToken, this.abortController?.signal);
     logger.info(`[DedicatedJobRunner] clickEasyApplyButton attempt 1:`, clickRes);
     if (!clickRes.success) {
       logger.warning(`[DedicatedJobRunner] Easy Apply click attempt 1 failed (${clickRes.error}). Retrying...`);
       const clickSleepAborted = await this.interruptibleSleep(1200);
-      if (clickSleepAborted || !this.isRunning) return { status: 'halt' };
-      clickRes = await currentPage.clickEasyApplyButton();
+      if (clickSleepAborted || !this.isRunning || this.isStopping) {
+        throw new AbortRunError(this.stopReason || 'Stopped by user');
+      }
+      this.checkAbort(runToken, this.abortController?.signal);
+      try {
+        clickRes = await currentPage.clickEasyApplyButton();
+      } catch (btnErr) {
+        if (isCdpTabClosedError(btnErr) || this.isStopping || !this.isRunning) {
+          throw new AbortRunError(this.stopReason || 'Stopped by user');
+        }
+        clickRes = { success: false, error: String(btnErr) };
+      }
+      this.checkAbort(runToken, this.abortController?.signal);
       logger.info(`[DedicatedJobRunner] clickEasyApplyButton attempt 2:`, clickRes);
     }
 
@@ -4450,16 +4871,21 @@ export class DedicatedJobRunner {
       if (rateCheck.isLimited) {
         const limitMsg = `🛑 LinkedIn Application Limit Reached: ${rateCheck.reason || 'Maximum Easy Apply limit reached for today/week'}. Pausing auto-apply run cleanly.`;
         logger.error(`[DedicatedJobRunner] ${limitMsg}`);
-        this.notifyStatus(portToSend, limitMsg, 'fail');
-        this.notifyActivity(portToSend, onLiveActivity, {
-          jobId: job.jobId,
-          url: job.url,
-          title: displayTitle,
-          company: displayCompany,
-          status: 'skipped',
-          reason: limitMsg,
-          creditsUsed: 0,
-        });
+        this.notifyStatus(portToSend, limitMsg, 'fail', runToken);
+        this.notifyActivity(
+          portToSend,
+          onLiveActivity,
+          {
+            jobId: job.jobId,
+            url: job.url,
+            title: displayTitle,
+            company: displayCompany,
+            status: 'skipped',
+            reason: limitMsg,
+            creditsUsed: 0,
+          },
+          runToken,
+        );
         this.isRunning = false;
         return { status: 'halt' };
       }
@@ -4467,7 +4893,17 @@ export class DedicatedJobRunner {
 
     // Poll for modal with generous timeout. The 2025 native-<dialog> UI can paint its
     // shell (and accept the click) well before the first step's controls exist.
-    let modalRes = await currentPage.waitForEasyApplyModal(15000, 300);
+    this.checkAbort(runToken, this.abortController?.signal);
+    let modalRes: any;
+    try {
+      modalRes = await currentPage.waitForEasyApplyModal(15000, 300);
+    } catch (mErr) {
+      if (isCdpTabClosedError(mErr) || this.isStopping || !this.isRunning) {
+        throw new AbortRunError(this.stopReason || 'Stopped by user');
+      }
+      modalRes = { opened: false, error: String(mErr) };
+    }
+    this.checkAbort(runToken, this.abortController?.signal);
     logger.info(`[DedicatedJobRunner] waitForEasyApplyModal result:`, modalRes);
     let retryClickRes: { success: boolean; error?: string; diagnostics?: string } | null = null;
     if (!modalRes.opened) {
@@ -4479,16 +4915,21 @@ export class DedicatedJobRunner {
         if (rateCheck.isLimited) {
           const limitMsg = `🛑 LinkedIn Application Limit Reached: ${rateCheck.reason || 'Maximum Easy Apply limit reached for today/week'}. Pausing auto-apply run cleanly.`;
           logger.error(`[DedicatedJobRunner] ${limitMsg}`);
-          this.notifyStatus(portToSend, limitMsg, 'fail');
-          this.notifyActivity(portToSend, onLiveActivity, {
-            jobId: job.jobId,
-            url: job.url,
-            title: displayTitle,
-            company: displayCompany,
-            status: 'skipped',
-            reason: limitMsg,
-            creditsUsed: 0,
-          });
+          this.notifyStatus(portToSend, limitMsg, 'fail', runToken);
+          this.notifyActivity(
+            portToSend,
+            onLiveActivity,
+            {
+              jobId: job.jobId,
+              url: job.url,
+              title: displayTitle,
+              company: displayCompany,
+              status: 'skipped',
+              reason: limitMsg,
+              creditsUsed: 0,
+            },
+            runToken,
+          );
           this.isRunning = false;
           return { status: 'halt' };
         }
@@ -4498,14 +4939,22 @@ export class DedicatedJobRunner {
       // button (click reports success, nothing opens). Drive a real trusted CDP click on
       // the marked button before spending another full wait on a synthetic retry.
       if (typeof currentPage.trustedClickEasyApplyButton === 'function') {
-        const trustedClicked = await currentPage.trustedClickEasyApplyButton().catch(() => false);
+        const trustedClicked = await currentPage.trustedClickEasyApplyButton().catch((err: any) => {
+          if (isCdpTabClosedError(err) || this.isStopping || !this.isRunning) {
+            throw new AbortRunError(this.stopReason || 'Stopped by user');
+          }
+          return false;
+        });
         if (trustedClicked) {
-          this.notifyStatus(portToSend, `🖱️ Form did not open — retrying with a real mouse click...`, 'info');
+          this.notifyStatus(portToSend, `🖱️ Form did not open — retrying with a real mouse click...`, 'info', runToken);
           logger.info(
             `[DedicatedJobRunner] Trusted CDP click dispatched for "${displayTitle}". Re-waiting for form...`,
           );
           const trustedSleep = await this.interruptibleSleep(800);
-          if (trustedSleep || !this.isRunning) return { status: 'halt' };
+          if (trustedSleep || !this.isRunning || this.isStopping) {
+            throw new AbortRunError(this.stopReason || 'Stopped by user');
+          }
+          this.checkAbort(runToken, this.abortController?.signal);
           modalRes = await currentPage.waitForEasyApplyModal(10000, 300);
           logger.info(`[DedicatedJobRunner] waitForEasyApplyModal after trusted click:`, modalRes);
         }
@@ -4515,33 +4964,54 @@ export class DedicatedJobRunner {
       if (!modalRes.opened) {
         logger.warning(`[DedicatedJobRunner] Modal did not open on first attempt. Retrying click...`);
         const modalSleepAborted = await this.interruptibleSleep(1200);
-        if (modalSleepAborted || !this.isRunning) return { status: 'halt' };
-        retryClickRes = await currentPage.clickEasyApplyButton();
+        if (modalSleepAborted || !this.isRunning || this.isStopping) {
+          throw new AbortRunError(this.stopReason || 'Stopped by user');
+        }
+        this.checkAbort(runToken, this.abortController?.signal);
+        try {
+          retryClickRes = await currentPage.clickEasyApplyButton();
+        } catch (btnErr) {
+          if (isCdpTabClosedError(btnErr) || this.isStopping || !this.isRunning) {
+            throw new AbortRunError(this.stopReason || 'Stopped by user');
+          }
+        }
         logger.info(`[DedicatedJobRunner] clickEasyApplyButton retry (after modal miss):`, retryClickRes);
-        modalRes = await currentPage.waitForEasyApplyModal(10000, 300);
+        this.checkAbort(runToken, this.abortController?.signal);
+        try {
+          modalRes = await currentPage.waitForEasyApplyModal(10000, 300);
+        } catch (mErr) {
+          if (isCdpTabClosedError(mErr) || this.isStopping || !this.isRunning) {
+            throw new AbortRunError(this.stopReason || 'Stopped by user');
+          }
+        }
       }
     }
 
     // 4d. Handle Modal Form-Filling & Verified Submission
     if (modalRes.opened) {
+      this.checkAbort(runToken, this.abortController?.signal);
       if (stats) stats.modalOpened++;
-      this.notifyStatus(portToSend, `📝 Application form opened: Filling your details...`, 'info');
+      this.notifyStatus(portToSend, `📝 Application form opened: Filling your details...`, 'info', runToken);
       const fillRes = await this.fillAndSubmitModal(
         currentPage,
         { ...job, title: displayTitle, company: displayCompany },
         jobRunId,
         portToSend,
         onLiveActivity,
+        runToken,
       );
+      this.checkAbort(runToken, this.abortController?.signal);
 
       if (fillRes.success) {
         if (stats) stats.applied++;
-        await DailyQuotaManager.commitApplication(applicationKey(job.jobId, job.url));
-        await queueSafetyStore.setSingleApplyVerified(true);
+        if (this.isTokenActive(runToken)) {
+          await DailyQuotaManager.commitApplication(applicationKey(job.jobId, job.url));
+          await queueSafetyStore.setSingleApplyVerified(true);
+        }
         const successMsg = `Applied to "${displayTitle}"${displayCompany ? ` at ${displayCompany}` : ''} successfully! 🎉`;
-        this.notifyStatus(portToSend, `✅ ${successMsg}`, 'ok');
+        this.notifyStatus(portToSend, `✅ ${successMsg}`, 'ok', runToken);
 
-        await processedJobsStore.recordJob({
+        await this.safeRecordJob(runToken, {
           jobId: job.jobId,
           url: job.url,
           title: displayTitle,
@@ -4554,33 +5024,41 @@ export class DedicatedJobRunner {
           creditsUsed: 0,
         });
 
-        await this.syncJobApplicationToBackend({
-          jobId: job.jobId,
-          jobTitle: displayTitle,
-          company: displayCompany,
-          location: topCard.location,
-          platform: 'linkedin',
-          applicationUrl: job.url,
-          fitScore: deepMatch?.score,
-          status: 'applied',
-          appliedAt: new Date().toISOString(),
-        });
+        await this.syncJobApplicationToBackend(
+          {
+            jobId: job.jobId,
+            jobTitle: displayTitle,
+            company: displayCompany,
+            location: topCard.location,
+            platform: 'linkedin',
+            applicationUrl: job.url,
+            fitScore: deepMatch?.score,
+            status: 'applied',
+            appliedAt: new Date().toISOString(),
+          },
+          runToken,
+        );
 
-        this.notifyActivity(portToSend, onLiveActivity, {
-          jobId: job.jobId,
-          url: job.url,
-          title: displayTitle,
-          company: displayCompany,
-          status: 'applied',
-          reason: 'Application submitted and verified',
-          creditsUsed: 0,
-        });
+        this.notifyActivity(
+          portToSend,
+          onLiveActivity,
+          {
+            jobId: job.jobId,
+            url: job.url,
+            title: displayTitle,
+            company: displayCompany,
+            status: 'applied',
+            reason: 'Application submitted and verified',
+            creditsUsed: 0,
+          },
+          runToken,
+        );
         return { status: 'applied', usedDirectFallback };
       } else {
         const skipReason = fillRes.reason || 'Form filling could not be completed';
         recordSkip(stats, bucketFillFailureReason(skipReason));
         const friendlySkip = formatFriendlySkipReason(skipReason);
-        this.notifyStatus(portToSend, `ℹ️ Skipped "${displayTitle}": ${friendlySkip}`, 'info');
+        this.notifyStatus(portToSend, `ℹ️ Skipped "${displayTitle}": ${friendlySkip}`, 'info', runToken);
 
         await backendApiClient.refundCredits(jobRunId).catch(err => {
           const errMsg = String(err?.message || err);
@@ -4597,7 +5075,7 @@ export class DedicatedJobRunner {
           await currentPage.dismissEasyApplyModal(5000).catch(() => {});
         }
 
-        await processedJobsStore.recordJob({
+        await this.safeRecordJob(runToken, {
           jobId: job.jobId,
           url: job.url,
           title: displayTitle,
@@ -4610,18 +5088,26 @@ export class DedicatedJobRunner {
           creditsUsed: 0,
         });
 
-        this.notifyActivity(portToSend, onLiveActivity, {
-          jobId: job.jobId,
-          url: job.url,
-          title: displayTitle,
-          company: displayCompany,
-          status: 'skipped',
-          reason: skipReason,
-          creditsUsed: 0,
-        });
+        this.notifyActivity(
+          portToSend,
+          onLiveActivity,
+          {
+            jobId: job.jobId,
+            url: job.url,
+            title: displayTitle,
+            company: displayCompany,
+            status: 'skipped',
+            reason: skipReason,
+            creditsUsed: 0,
+          },
+          runToken,
+        );
         return { status: 'skipped', usedDirectFallback };
       }
     } else {
+      if (this.isStopping || !this.isRunning || (runToken && this.activeRunToken !== runToken)) {
+        throw new AbortRunError(this.stopReason || 'Stopped by user');
+      }
       if (stats) stats.failed++;
       const lastClickDiag = retryClickRes?.diagnostics || clickRes?.diagnostics;
       // Capture what the page actually showed at timeout so the next report is not guesswork.
@@ -4656,6 +5142,7 @@ export class DedicatedJobRunner {
         portToSend,
         `⚠️ Could not open Easy Apply for "${displayTitle}".${lastClickDiag ? ' ' + lastClickDiag.slice(0, 240) : ''}`,
         'fail',
+        runToken,
       );
 
       await backendApiClient.refundCredits(jobRunId).catch(() => {});
@@ -4666,7 +5153,7 @@ export class DedicatedJobRunner {
       }
 
       const isTransientModalTimeout = /modal failed to open within timeout/i.test(failReason);
-      await processedJobsStore.recordJob({
+      await this.safeRecordJob(runToken, {
         jobId: job.jobId,
         url: job.url,
         title: displayTitle,
@@ -4679,15 +5166,20 @@ export class DedicatedJobRunner {
         creditsUsed: 0,
       });
 
-      this.notifyActivity(portToSend, onLiveActivity, {
-        jobId: job.jobId,
-        url: job.url,
-        title: displayTitle,
-        company: displayCompany,
-        status: 'modal_failed',
-        reason: failReason,
-        creditsUsed: 0,
-      });
+      this.notifyActivity(
+        portToSend,
+        onLiveActivity,
+        {
+          jobId: job.jobId,
+          url: job.url,
+          title: displayTitle,
+          company: displayCompany,
+          status: 'modal_failed',
+          reason: failReason,
+          creditsUsed: 0,
+        },
+        runToken,
+      );
       return { status: 'failed', usedDirectFallback };
     }
   }
@@ -4698,6 +5190,7 @@ export class DedicatedJobRunner {
     jobRunId: string,
     portToSend?: chrome.runtime.Port | null,
     onLiveActivity?: (activity: any) => void,
+    runToken?: string,
   ): Promise<{ success: boolean; reason?: string }> {
     let careerBrain = await careerBrainStore.getCareerBrain();
     careerBrain = await this.enrichMissingCareerBrainFromPlatform(page, careerBrain);
@@ -4832,9 +5325,13 @@ export class DedicatedJobRunner {
       return true;
     };
 
-    while (step < maxSteps && this.isRunning) {
+    while (step < maxSteps && this.isRunning && !this.isStopping) {
+      if (this.isStopping || !this.isRunning || (runToken && this.activeRunToken !== runToken)) {
+        throw new AbortRunError(this.stopReason || 'Stopped by user');
+      }
+      this.checkAbort(runToken, this.abortController?.signal);
       step++;
-      this.notifyStatus(portToSend, `📄 Reviewing Step ${step} of the application...`, 'info');
+      this.notifyStatus(portToSend, `📄 Reviewing Step ${step} of the application...`, 'info', runToken);
 
       // 0. A leftover "Save this application?" prompt (from an earlier dismiss or a
       //    rejected Next) shadows the real form and contains no fillable controls.
@@ -6153,14 +6650,18 @@ export class DedicatedJobRunner {
     }
   }
 
-  private cleanupRun(summaryMsg?: string, stats?: any): void {
+  private cleanupRun(summaryMsg?: string, stats?: any, runToken?: string): void {
+    if (runToken && this.activeRunToken && runToken !== this.activeRunToken) {
+      return;
+    }
     void DailyQuotaManager.releaseOwner('runner');
-    if (this.activePort) {
+    if (this.activePort && !this.hasSentRunFinished) {
+      this.hasSentRunFinished = true;
       try {
         this.activePort.postMessage({
           type: 'LINKEDIN_RUN_FINISHED',
           summary: summaryMsg || 'Auto Apply session ended',
-          stats: stats || { totalFound: 0, applied: 0, skipped: 0, failed: 0 },
+          stats: stats || this.activeStats || { totalFound: 0, applied: 0, skipped: 0, failed: 0 },
         });
       } catch {}
     }
@@ -6171,10 +6672,17 @@ export class DedicatedJobRunner {
       this.abortController = null;
     }
     this.isRunning = false;
+    this.isStopping = false;
+    this.stopReason = null;
+    this.isLoopFinished = true;
+    this.loopFinishedResolver?.();
+    this.loopFinishedResolver = null;
+    this.loopFinishedPromise = null;
     this.activeRunId = null;
     this.activeJobId = null;
     this.activePort = null;
     this.activeLiveActivity = undefined;
+    this.activeStats = null;
     this.currentExecutor = null;
     this.stopKeepAlive();
     if (this.unregisterWindowCloseListener) {
