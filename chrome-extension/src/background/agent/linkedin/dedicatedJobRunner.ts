@@ -2325,8 +2325,10 @@ export class DedicatedJobRunner {
               BATCH_CAP,
               runToken,
             );
+            this.activeJobId = null;
             this.checkAbort(runToken, this.abortController?.signal);
           } catch (err: any) {
+            this.activeJobId = null;
             if (
               err instanceof AbortRunError ||
               this.isStopping ||
@@ -3071,6 +3073,8 @@ export class DedicatedJobRunner {
           runToken,
         );
       }
+
+      this.activeJobId = null;
 
       // Anti-bot pacing delay (5-8s) between Naukri jobs only when applied!
       if (i < queue.length - 1 && this.isRunning && !this.isStopping) {
@@ -3971,6 +3975,8 @@ export class DedicatedJobRunner {
         );
       }
 
+      this.activeJobId = null;
+
       if (!this.isRunning || this.isStopping) {
         logger.info('[DedicatedJobRunner] Application flow stopped by user.');
         break;
@@ -4045,6 +4051,19 @@ export class DedicatedJobRunner {
     if (this.activeRunId && !this.hasRefundedCurrentRun) {
       this.hasRefundedCurrentRun = true;
       const runId = this.activeRunId;
+      const interruptedJobId = this.activeJobId;
+
+      // If a candidate job was actively in progress when stopped, refund that specific interrupted job run
+      if (interruptedJobId) {
+        const interruptedJobRunId = `${runId}_${interruptedJobId}`;
+        await backendApiClient.refundCredits(interruptedJobRunId).catch(err => {
+          const errMsg = String(err?.message || err);
+          if (!/no billable usage|run_not_found|already_refunded/i.test(errMsg)) {
+            logger.warning(`[DedicatedJobRunner] Refund on stop for interrupted job ${interruptedJobRunId}: ${errMsg}`);
+          }
+        });
+      }
+
       await backendApiClient.refundCredits(runId).catch(err => {
         const errMsg = String(err?.message || err);
         if (!/no billable usage|run_not_found|already_refunded/i.test(errMsg)) {

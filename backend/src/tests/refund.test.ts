@@ -225,4 +225,122 @@ describe('Refund Endpoints & Concurrency Integrity (/api/v1/credits/refund)', ()
       }),
     );
   });
+
+  it('Interrupted job refund vs completed application protection: refunds ONLY interrupted job credits', async () => {
+    const { uid, auth } = await registerViaApi(app, { email: 'interrupted-run@test.com' });
+    const loopRunId = `auto_loop_${Date.now()}`;
+
+    // Job 1: AI form answering deducts 3 credits under per-job id `<loopRunId>_job1`
+    await CreditService.deductCredits({
+      userId: uid,
+      amount: 3,
+      description: 'Job 1 AI answering',
+      metadata: { runId: `${loopRunId}_job1` },
+    });
+
+    // Job 1 successfully applied and recorded in backend job_applications
+    const { JobApplicationRepository } = await import('../services/rtdb/repositories.js');
+    await JobApplicationRepository.save(
+      uid,
+      {
+        appId: 'app_job1_complete',
+        uid,
+        jobId: 'job1',
+        platform: 'linkedin',
+        title: 'Frontend Engineer',
+        company: 'Acme Corp',
+        location: 'Remote',
+        salaryRange: '$120k',
+        fitScore: 85,
+        applicationUrl: 'https://linkedin.com/jobs/view/1',
+        status: 'APPLIED',
+        appliedAt: Date.now(),
+        updatedAt: Date.now(),
+        createdAt: Date.now(),
+      },
+      true,
+    );
+
+    // Job 2: AI form answering deducts 5 credits under per-job id `<loopRunId>_job2`
+    await CreditService.deductCredits({
+      userId: uid,
+      amount: 5,
+      description: 'Job 2 AI answering (interrupted)',
+      metadata: { runId: `${loopRunId}_job2` },
+    });
+
+    // Job 2 is NOT recorded in job_applications as applied because the user pressed STOP mid-apply!
+    const midBalance = await rtdb.balance(uid);
+    expect(midBalance.remainingCredits).toBe(92); // 100 - 3 - 5
+    expect(midBalance.usedCredits).toBe(8);
+
+    // User pressed STOP: stop() requests refund for loop runId
+    const res = await request(app).post('/api/v1/credits/refund').set('Authorization', auth).send({ runId: loopRunId });
+
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    // Crucial: ONLY Job 2's 5 credits are refunded. Job 1's 3 credits are NOT refunded because it was completed!
+    expect(res.body.data.refundedAmount).toBe(5);
+    expect(res.body.data.remainingCredits).toBe(97); // 92 + 5
+    expect(res.body.data.usedCredits).toBe(3); // only Job 1's completed usage remains
+
+    // Idempotency: Second refund call for the same loop runId returns the exact same result and NEVER double-refunds
+    const res2 = await request(app)
+      .post('/api/v1/credits/refund')
+      .set('Authorization', auth)
+      .send({ runId: loopRunId });
+
+    expect(res2.status).toBe(200);
+    expect(res2.body.data.refundedAmount).toBe(5);
+    expect(res2.body.data.remainingCredits).toBe(97);
+
+    const finalBalance = await rtdb.balance(uid);
+    expect(finalBalance.remainingCredits).toBe(97);
+    expect(finalBalance.usedCredits).toBe(3);
+  });
+
+  it('No refund when all loop applications succeeded: completed applications are never refunded', async () => {
+    const { uid, auth } = await registerViaApi(app, { email: 'all-completed-run@test.com' });
+    const loopRunId = `auto_loop_${Date.now()}`;
+
+    // Job A completed
+    await CreditService.deductCredits({
+      userId: uid,
+      amount: 4,
+      description: 'Job A answering',
+      metadata: { runId: `${loopRunId}_jobA` },
+    });
+    const { JobApplicationRepository } = await import('../services/rtdb/repositories.js');
+    await JobApplicationRepository.save(
+      uid,
+      {
+        appId: 'app_jobA',
+        uid,
+        jobId: 'jobA',
+        platform: 'naukri',
+        title: 'Backend Engineer',
+        company: 'Beta Corp',
+        location: 'Remote',
+        salaryRange: '$110k',
+        fitScore: 80,
+        applicationUrl: 'https://naukri.com/jobs/view/A',
+        status: 'APPLIED',
+        appliedAt: Date.now(),
+        updatedAt: Date.now(),
+        createdAt: Date.now(),
+      },
+      true,
+    );
+
+    // Stop called after Job A completed, with no in-progress job
+    const res = await request(app).post('/api/v1/credits/refund').set('Authorization', auth).send({ runId: loopRunId });
+
+    // Completed applications are never refunded
+    expect(res.status).toBe(404);
+    expect(res.body.error.code).toBe('RUN_NOT_FOUND');
+
+    const finalBalance = await rtdb.balance(uid);
+    expect(finalBalance.remainingCredits).toBe(96);
+    expect(finalBalance.usedCredits).toBe(4);
+  });
 });

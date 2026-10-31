@@ -387,7 +387,7 @@ export class CreditService {
 
     let refundSucceeded = false;
     try {
-      const runEntries = await CreditRepository.findLedgerByRunId(userId, cleanRunId);
+      const runEntries = await CreditRepository.findInterruptedRunEntries(userId, cleanRunId);
 
       // Check ledger for existing refund
       const existingRefund = runEntries.find(entry => entry.type === 'REFUND');

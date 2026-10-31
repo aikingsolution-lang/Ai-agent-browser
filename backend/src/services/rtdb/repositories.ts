@@ -394,6 +394,51 @@ export class CreditRepository {
     }
   }
 
+  /** All ledger entries matching runId exactly or starting with `<runId>_`. */
+  static async findLedgerByRunIdPrefix(uid: string, runIdPrefix: string): Promise<CreditLedgerRecord[]> {
+    const all = await this.getAllLedger(uid);
+    return all.filter(
+      entry => entry.runId && (entry.runId === runIdPrefix || entry.runId.startsWith(`${runIdPrefix}_`)),
+    );
+  }
+
+  /**
+   * Finds deductions belonging to an interrupted agent run.
+   * If runId has exact matches, returns those.
+   * If runId is a loop prefix (e.g. `auto_loop_<timestamp>`), returns deductions for jobs under this
+   * loop that were NOT successfully completed (i.e. not recorded as status === 'applied' in job_applications).
+   */
+  static async findInterruptedRunEntries(uid: string, runId: string): Promise<CreditLedgerRecord[]> {
+    const exact = await this.findLedgerByRunId(uid, runId);
+    if (exact.length > 0) return exact;
+
+    // Check prefix
+    const prefixEntries = await this.findLedgerByRunIdPrefix(uid, runId);
+    if (prefixEntries.length === 0) return [];
+
+    // Query completed applications for this user
+    const completedJobIds = new Set<string>();
+    const appSnap = await dbRef(paths.jobApplications(uid)).get();
+    if (appSnap.exists()) {
+      const apps = childrenOf<JobApplicationRecord>(appSnap);
+      for (const app of apps) {
+        const statusUpper = String(app.status || '').toUpperCase();
+        if (statusUpper === 'APPLIED' && app.jobId) {
+          completedJobIds.add(app.jobId);
+        }
+      }
+    }
+
+    return prefixEntries.filter(entry => {
+      if (!entry.runId) return false;
+      if (entry.runId === runId) return true;
+      // Extract jobId suffix after `<runId>_`
+      const suffix = entry.runId.slice(runId.length + 1);
+      if (completedJobIds.has(suffix)) return false;
+      return true;
+    });
+  }
+
   static async listLedger(
     uid: string,
     page: number,
