@@ -364,12 +364,25 @@ export class CreditService {
     const claim = await this.acquireClaim(userId, idempotencyKey);
     if (claim.kind === 'COMPLETED') {
       logger.info(`Run ${cleanRunId} has already been refunded. Idempotent return.`);
-      const { balance, ledgerEntry } = await this.idempotentResult(userId, claim.entryId);
-      return {
-        refundedAmount: ledgerEntry.amount,
-        runId: cleanRunId,
-        balance,
-      };
+      try {
+        const { balance, ledgerEntry } = await this.idempotentResult(userId, claim.entryId);
+        return {
+          refundedAmount: ledgerEntry.amount,
+          runId: cleanRunId,
+          balance,
+        };
+      } catch (err) {
+        // Fallback: If idempotent result entry is missing, look up current balance and return safely
+        const currentBalance = await CreditRepository.getBalance(userId);
+        if (currentBalance) {
+          return {
+            refundedAmount: 0,
+            runId: cleanRunId,
+            balance: toCreditBalanceDto(userId, currentBalance),
+          };
+        }
+        throw err;
+      }
     }
 
     let refundSucceeded = false;
@@ -383,6 +396,9 @@ export class CreditService {
         const currentBalance = await CreditRepository.getBalance(userId);
         if (!currentBalance) throw new AppError('Credit balance not found', 404, 'BALANCE_NOT_FOUND');
         refundSucceeded = true;
+        await applyUpdates(
+          CreditRepository.idempotencyCompleteUpdates(userId, idempotencyKey, existingRefund.entryId, Date.now()),
+        ).catch(() => undefined);
         return {
           refundedAmount: existingRefund.amount,
           runId: cleanRunId,
@@ -398,7 +414,11 @@ export class CreditService {
 
       const totalToRefund = usageEntries.reduce((sum, entry) => sum + Math.abs(entry.amount), 0);
       if (totalToRefund <= 0) {
-        throw new AppError(`No credits were deducted for runId: ${cleanRunId}`, 400, 'NOTHING_TO_REFUND');
+        throw new AppError(
+          `Nothing to refund: no credits were deducted for runId: ${cleanRunId}`,
+          400,
+          'NOTHING_TO_REFUND',
+        );
       }
 
       // Enforce per-user daily refund cap (default 50 credits / 24 hours) across all refunds

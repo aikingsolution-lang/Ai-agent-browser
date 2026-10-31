@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import { hasVerifiedJobformPremium } from '../middleware/entitlement.middleware.js';
 import type { Request, Response, NextFunction } from 'express';
 import { CreditService } from '../services/credit.service.js';
@@ -5,6 +6,7 @@ import { creditHistoryQuerySchema } from '../schemas/credit.schema.js';
 import { sendSuccess } from '../utils/apiResponse.js';
 import { AppError } from '../middleware/errorHandler.js';
 import { env } from '../config/env.js';
+import { logger } from '../utils/logger.js';
 
 export const ALLOWED_FAILED_REFUND_REASONS = [
   'max_attempts_exceeded',
@@ -106,20 +108,33 @@ export class CreditController {
    * Server calculates the refund amount from the CreditLedger for the given runId.
    */
   public static async refundCredits(req: Request, res: Response, next: NextFunction): Promise<void> {
+    const requestId =
+      (req.headers['x-request-id'] as string) || (req.headers['x-correlation-id'] as string) || crypto.randomUUID();
+    const userId = req.user?._id?.toString() || req.user?.uid;
+    const rawRunId = req.body?.runId;
+    const runId = typeof rawRunId === 'string' ? rawRunId.trim() : undefined;
+
     try {
-      const userId = req.user?._id?.toString();
       if (!userId) {
         throw new AppError('Authentication required', 401, 'UNAUTHORIZED');
       }
 
-      const { runId } = req.body;
-      if (!runId || typeof runId !== 'string') {
+      if (!runId || typeof rawRunId !== 'string' || runId === '') {
         throw new AppError('runId is required for refund', 400, 'INVALID_RUN_ID');
       }
 
       const result = await CreditService.refundRunCredits({
         userId,
         runId,
+      });
+
+      logger.info('[CreditController.refundCredits] Refund processed', {
+        requestId,
+        userId,
+        runId,
+        outcome: 'SUCCESS',
+        refundedAmount: result.refundedAmount,
+        remainingCredits: result.balance.remainingCredits,
       });
 
       sendSuccess(
@@ -133,7 +148,21 @@ export class CreditController {
         },
         'Credits refunded successfully',
       );
-    } catch (error) {
+    } catch (error: any) {
+      const statusCode = error instanceof AppError ? error.statusCode : 500;
+      const errorCode = error instanceof AppError ? error.code : 'INTERNAL_SERVER_ERROR';
+
+      logger.error('[CreditController.refundCredits] Refund failed', {
+        requestId,
+        userId: userId || 'anonymous',
+        runId: runId || (typeof rawRunId === 'string' ? rawRunId : 'invalid'),
+        outcome: 'FAILED',
+        statusCode,
+        errorCode,
+        errorMessage: error?.message || 'Unknown error',
+        stack: statusCode === 500 ? error?.stack : undefined,
+      });
+
       next(error);
     }
   }
