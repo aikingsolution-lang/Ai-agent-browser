@@ -14,6 +14,7 @@ import { sanitizeRoleSearchQuery } from '@extension/storage';
 import { createLogger } from '@src/background/log';
 import { solveQuestionAutonomousWithLLM } from '../../linkedin/formQuestionResolver';
 import { getActiveChatModel } from '../../activeModelHelper';
+import { AbortRunError, isCdpTabClosedError } from '../../../utils';
 
 const logger = createLogger('NaukriAdapter');
 
@@ -300,6 +301,10 @@ export class NaukriAdapter implements IPlatformAdapter {
 
   public async applyToJob(job: IJobQueueItem, context: IPlatformExecutionContext): Promise<IApplicationResult> {
     const { page, careerBrain, portToSend, onLiveActivity, runId } = context;
+
+    if (context.signal?.aborted) {
+      throw new AbortRunError('Stopped by user');
+    }
 
     try {
       const puppeteerPage = page.puppeteerPage;
@@ -661,6 +666,9 @@ export class NaukriAdapter implements IPlatformAdapter {
 
       return { status: 'failed', reason: 'Application could not be confirmed after clicking apply button.' };
     } catch (err: any) {
+      if (err instanceof AbortRunError || context.signal?.aborted || isCdpTabClosedError(err)) {
+        throw err;
+      }
       logger.error('[NaukriAdapter] Error applying to job:', err);
       return { status: 'failed', reason: err?.message || 'Unexpected application error' };
     }
@@ -677,6 +685,9 @@ export class NaukriAdapter implements IPlatformAdapter {
       let consecutiveRepeats = 0;
 
       for (let step = 1; step <= MAX_STEPS; step++) {
+        if (context?.signal?.aborted) {
+          throw new AbortRunError('Stopped by user');
+        }
         logger.info(`[NaukriAdapter] Handling questionnaire step ${step}/${MAX_STEPS}...`);
 
         // 1. Check if modal is still open or application is complete
@@ -2325,6 +2336,9 @@ export class NaukriAdapter implements IPlatformAdapter {
         reason: `Questionnaire remained open after maximum steps. Last question: "${lastQuestionHandled}"`,
       };
     } catch (err: any) {
+      if (err instanceof AbortRunError || context?.signal?.aborted || isCdpTabClosedError(err)) {
+        throw err;
+      }
       logger.warning('[NaukriAdapter] Failed filling questionnaire:', err);
       return { success: false, reason: err.message };
     }

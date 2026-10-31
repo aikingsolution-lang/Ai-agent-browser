@@ -1240,7 +1240,7 @@ ${resumeSnippet}
     if (currentExecutor) {
       currentExecutor.cancel();
     }
-    dedicatedJobRunner.stop().catch(() => {});
+    dedicatedJobRunner.stop('user').catch(() => {});
     queueManager.stopQueue().then(() => {
       sendResponse({ status: 'stopped' });
     });
@@ -1386,7 +1386,7 @@ chrome.runtime.onConnect.addListener(port => {
             if (currentExecutor) {
               currentExecutor.cancel();
             }
-            dedicatedJobRunner.stop().catch(err => {
+            dedicatedJobRunner.stop('user').catch(err => {
               logger.error('Failed to stop dedicated runner:', err);
             });
             queueManager.stopQueue().catch(err => {
@@ -1630,6 +1630,7 @@ chrome.runtime.onConnect.addListener(port => {
       userQuestionManager.setPort(null);
       currentPort = null;
       currentExecutor?.cancel();
+      dedicatedJobRunner.stop('port_disconnected').catch(() => {});
     });
   }
 });

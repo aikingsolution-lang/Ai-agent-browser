@@ -21,6 +21,7 @@ import { type BrowserContextConfig, DEFAULT_BROWSER_CONTEXT_CONFIG, type PageSta
 import { createLogger } from '@src/background/log';
 import { ClickableElementProcessor } from './dom/clickable/service';
 import { isUrlAllowed } from './util';
+import { isCdpTabClosedError } from '../utils';
 
 const logger = createLogger('Page');
 
@@ -593,6 +594,9 @@ export default class Page {
         await this.navigateTo(url);
       }
     } catch (err) {
+      if (isCdpTabClosedError(err)) {
+        throw err;
+      }
       logger.warning(`[navigateToDirect] Direct navigation to ${url} failed:`, err);
     }
   }
@@ -6234,6 +6238,7 @@ export default class Page {
           try {
             info = await this._puppeteerPage.evaluate(extractTopCardInPage);
           } catch (pErr) {
+            if (isCdpTabClosedError(pErr)) throw pErr;
             logger.debug(
               '[extractJobTopCardContext] Puppeteer evaluate threw, trying chrome.scripting fallback:',
               pErr,
@@ -6249,6 +6254,7 @@ export default class Page {
             });
             info = (results?.[0]?.result as JobTopCardContext) || null;
           } catch (sErr) {
+            if (isCdpTabClosedError(sErr)) throw sErr;
             logger.debug('[extractJobTopCardContext] chrome.scripting fallback error:', sErr);
           }
         }
@@ -6890,6 +6896,7 @@ export default class Page {
       try {
         clicked = Boolean(await this._puppeteerPage.evaluate(clickInPage, jobId));
       } catch (err) {
+        if (isCdpTabClosedError(err)) throw err;
         logger.warning('[clickJobInSearchList] Puppeteer click failed, trying chrome.scripting fallback:', err);
       }
     }
@@ -6903,6 +6910,7 @@ export default class Page {
         });
         clicked = Boolean(results?.[0]?.result);
       } catch (scriptErr) {
+        if (isCdpTabClosedError(scriptErr)) throw scriptErr;
         logger.warning('[clickJobInSearchList] chrome.scripting click fallback error:', scriptErr);
       }
     }
@@ -9773,7 +9781,10 @@ export default class Page {
 
           return { hasSpinner: false, targetFound: true };
         }, targetSelector)
-        .catch(() => ({ hasSpinner: false, targetFound: false }));
+        .catch((err: any) => {
+          if (isCdpTabClosedError(err)) throw err;
+          return { hasSpinner: false, targetFound: false };
+        });
 
       if (!check.hasSpinner && check.targetFound) {
         // Allow quietPeriodMs to guarantee layout stability

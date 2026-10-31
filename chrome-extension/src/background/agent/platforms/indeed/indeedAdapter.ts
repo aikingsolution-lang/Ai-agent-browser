@@ -14,12 +14,7 @@ import { resolveIndeedQuestion, type IIndeedAnswerResult } from './indeedResolve
 import { solveQuestionAutonomousWithLLM } from '../../linkedin/formQuestionResolver';
 import { getActiveChatModel } from '../../activeModelHelper';
 import { validateAnswerForField } from '../../intelligence';
-import {
-  isLlmAvailable,
-  tripLlmCircuitBreaker,
-  isCircuitBreakerError,
-  resetLlmCircuitBreaker,
-} from '../../llmCircuitBreaker';
+import { isLlmAvailable, tripLlmCircuitBreaker, isCircuitBreakerError } from '../../llmCircuitBreaker';
 
 const logger = createLogger('IndeedAdapter');
 
@@ -1357,18 +1352,6 @@ export class IndeedAdapter implements IPlatformAdapter {
     if (context.signal?.aborted) {
       return { status: 'skipped', reason: 'Stopped by user' };
     }
-
-    // Reset circuit breaker at start of job run
-    resetLlmCircuitBreaker((msg, type) => {
-      context.onLiveActivity?.({
-        jobId: job.jobId,
-        url: job.url || '',
-        title: job.title || '',
-        company: job.company || '',
-        status: 'running',
-        reason: msg,
-      });
-    });
 
     const page = context.page;
     const puppeteerPage = page?.puppeteerPage;
