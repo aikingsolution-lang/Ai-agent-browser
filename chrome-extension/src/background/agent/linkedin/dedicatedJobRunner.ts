@@ -2174,7 +2174,7 @@ export class DedicatedJobRunner {
         };
       };
 
-      // Bounded wait function for LinkedIn search results list settlement (card count stable for ~2s)
+      // Bounded wait function for LinkedIn search results list settlement (card count stable for ~1.5s - 2s)
       const waitForSearchSettled = async (
         maxWaitMs: number,
       ): Promise<{ settled: boolean; lastStatus: ReturnType<typeof inspectSearchListSettlement> }> => {
@@ -2214,7 +2214,7 @@ export class DedicatedJobRunner {
                       isLoginWall: false,
                       isCheckpoint: false,
                     }),
-                  2000,
+                  6000,
                 ),
               ),
             ]);
@@ -2233,9 +2233,16 @@ export class DedicatedJobRunner {
               if (status.cardCount !== lastCount) {
                 lastCount = status.cardCount;
                 countStableSince = Date.now();
-              } else if (Date.now() - countStableSince >= 2000) {
+              } else if (Date.now() - countStableSince >= 1500) {
                 logger.info(
-                  `[DedicatedJobRunner] [${new Date().toISOString()}] Search results list settled with ${status.cardCount} job cards (count stable for 2s). Details pane state did not block settlement.`,
+                  `[DedicatedJobRunner] [${new Date().toISOString()}] Search results list settled with ${status.cardCount} job cards (count stable for ~1.5s). Details pane state did not block settlement.`,
+                );
+                return { settled: true, lastStatus };
+              }
+              // If cards have been present for >= 4s, proceed immediately
+              if (Date.now() - start >= 4000) {
+                logger.info(
+                  `[DedicatedJobRunner] [${new Date().toISOString()}] Search results list confirmed present with ${status.cardCount} job cards. Details pane state did not block settlement.`,
                 );
                 return { settled: true, lastStatus };
               }
@@ -2244,7 +2251,8 @@ export class DedicatedJobRunner {
               countStableSince = 0;
             }
           } catch (evalErr) {
-            if (isCdpTabClosedError(evalErr)) throw evalErr;
+            // Transient CDP / navigation errors during page load are caught and logged; do not crash the wait loop
+            logger.debug('[DedicatedJobRunner] Transient error during search settlement inspection:', evalErr);
           }
 
           const sleepAborted = await this.interruptibleSleep(400);
@@ -2274,6 +2282,23 @@ export class DedicatedJobRunner {
 
       let settleResult = await waitForSearchSettled(20000);
 
+      // Fast active probe before considering reload: if readJobListFromSearchPane already finds cards, don't reload!
+      if (!settleResult.settled && this.isRunning && !this.isStopping && !settleResult.lastStatus.isLoginWall) {
+        const directProbe = await currentPage.readJobListFromSearchPane?.(1).catch(() => []);
+        if (directProbe && directProbe.length > 0) {
+          logger.info(
+            `[DedicatedJobRunner] [${new Date().toISOString()}] Search results active probe found ${directProbe.length} job cards. Skipping reload and proceeding with scan.`,
+          );
+          settleResult = {
+            settled: true,
+            lastStatus: {
+              ...settleResult.lastStatus,
+              cardCount: directProbe.length,
+            },
+          };
+        }
+      }
+
       // If no cards found within 20s: reload once and wait again
       if (!settleResult.settled && this.isRunning && !this.isStopping && !settleResult.lastStatus.isLoginWall) {
         const reloadNotice = 'No job cards settled in 20s, reloading once...';
@@ -2302,6 +2327,12 @@ export class DedicatedJobRunner {
           }
         } catch (reloadErr) {
           logger.warning('[DedicatedJobRunner] Tab reload failed or timed out:', reloadErr);
+        }
+
+        // Paced wait after reload for navigation commit (matching initial wait)
+        const postReloadAborted = await this.interruptibleSleep(3500);
+        if (postReloadAborted || !this.isRunning || this.isStopping) {
+          throw new AbortRunError(this.stopReason || 'Stopped by user');
         }
 
         // Retry wait up to 20s after reload
