@@ -96,6 +96,11 @@ export const paths = {
     `${RTDB_ROOT}/llm_usage/${uidSeg(uid)}/${keySeg(usageId, 'usage id')}`,
   llmUsageCount: (uid: string) => `${RTDB_ROOT}/llm_usage_meta/${uidSeg(uid)}/count`,
 
+  premiumAiTaskCount: (uid: string, month: string) =>
+    `${RTDB_ROOT}/premium_ai_tasks/${uidSeg(uid)}/${keySeg(month, 'month')}/count`,
+  premiumAiTask: (uid: string, month: string, taskKey: string) =>
+    `${RTDB_ROOT}/premium_ai_tasks/${uidSeg(uid)}/${keySeg(month, 'month')}/tasks/${keySeg(taskKey, 'task key')}`,
+
   webhook: (eventKey: string) => `${RTDB_ROOT}/processed_webhooks/${keySeg(eventKey, 'webhook event key')}`,
 
   migrationRun: (runId: string) => `${RTDB_ROOT}/_migrations/mongo_to_rtdb/runs/${keySeg(runId, 'migration run id')}`,

@@ -1,5 +1,6 @@
 // chrome-extension/src/background/agent/linkedin/dedicatedJobRunner.ts
 import { createLogger } from '@src/background/log';
+import { outcomeForFailure, reportApplication } from '@src/background/services/applicationHistory';
 import type BrowserContext from '@src/background/browser/context';
 import type { Executor } from '@src/background/agent/executor';
 import { backendApiClient, BACKEND_LLM_URL, MINIMUM_RUN_CREDITS } from '@extension/shared';
@@ -904,42 +905,9 @@ export class DedicatedJobRunner {
   private abortController: AbortController | null = null;
   private onStopCallbacks: Set<() => void> = new Set();
 
-  private async syncJobApplicationToBackend(record: {
-    jobId: string;
-    jobTitle: string;
-    company: string;
-    platform?: string;
-    applicationUrl?: string;
-    location?: string;
-    salaryRange?: string;
-    fitScore?: number;
-    status?: string;
-    appliedAt?: string;
-  }): Promise<void> {
-    try {
-      const session = await authStorage.getSession();
-      if (!session?.token) {
-        return;
-      }
-      await backendApiClient.recordJobApplication({
-        jobId: record.jobId,
-        jobTitle: record.jobTitle,
-        company: record.company,
-        platform: record.platform || 'linkedin',
-        applicationUrl: record.applicationUrl,
-        location: record.location,
-        salaryRange: record.salaryRange,
-        fitScore: record.fitScore,
-        status: record.status || 'applied',
-        appliedAt: record.appliedAt || new Date().toISOString(),
-      });
-      logger.info(
-        `[DedicatedJobRunner] Successfully synced application to backend: ${record.jobTitle} at ${record.company}`,
-      );
-    } catch (syncErr) {
-      // Non-blocking: application submission already succeeded locally
-      logger.warning(`[DedicatedJobRunner] Failed to sync job application to backend (non-blocking):`, syncErr);
-    }
+  /** A user stop is not a failed application, so attempts cut short by Stop are not reported. */
+  private stoppedByUser(): boolean {
+    return !this.isRunning || Boolean(this.abortController?.signal?.aborted);
   }
 
   public static getInstance(): DedicatedJobRunner {
@@ -1546,6 +1514,20 @@ export class DedicatedJobRunner {
           creditsUsed: 0,
         });
 
+        if (!this.stoppedByUser()) {
+          await reportApplication({
+            platform: 'linkedin',
+            jobId,
+            title: jobTitle,
+            company: companyName,
+            url: canonicalUrl,
+            location,
+            description: topCard.descriptionSnippet,
+            status: outcomeForFailure(failReason),
+            reason: failReason,
+          });
+        }
+
         if (onLiveActivity) {
           onLiveActivity({
             jobId,
@@ -1575,14 +1557,15 @@ export class DedicatedJobRunner {
         creditsUsed: 1,
       });
 
-      await this.syncJobApplicationToBackend({
-        jobId,
-        jobTitle,
-        company: companyName,
+      await reportApplication({
         platform: 'linkedin',
-        applicationUrl: canonicalUrl,
-        status: 'applied',
-        appliedAt: new Date().toISOString(),
+        jobId,
+        title: jobTitle,
+        company: companyName,
+        url: canonicalUrl,
+        location,
+        description: topCard.descriptionSnippet,
+        status: 'APPLIED',
       });
 
       await runnerStateStore.updateRunStatus('completed');
@@ -2646,14 +2629,16 @@ export class DedicatedJobRunner {
           creditsUsed: 1,
         });
 
-        await this.syncJobApplicationToBackend({
-          jobId: job.jobId,
-          jobTitle: job.title,
-          company: job.company,
+        await reportApplication({
           platform: 'naukri',
-          applicationUrl: job.url,
-          status: 'applied',
-          appliedAt: new Date().toISOString(),
+          jobId: job.jobId,
+          title: job.title,
+          company: job.company,
+          url: job.url,
+          location: job.location,
+          salary: job.salary,
+          description: job.descriptionSnippet,
+          status: 'APPLIED',
         });
 
         this.notifyStatus(portToSend, `✅ Successfully applied to "${job.title}" at ${job.company}!`, 'ok');
@@ -2698,6 +2683,20 @@ export class DedicatedJobRunner {
           reason: applyResult.reason || 'Failed',
           creditsUsed: 0,
         });
+        if (!this.stoppedByUser()) {
+          await reportApplication({
+            platform: 'naukri',
+            jobId: job.jobId,
+            title: job.title,
+            company: job.company,
+            url: job.url,
+            location: job.location,
+            salary: job.salary,
+            description: job.descriptionSnippet,
+            status: outcomeForFailure(applyResult.reason),
+            reason: applyResult.reason || 'Failed',
+          });
+        }
         this.notifyStatus(
           portToSend,
           `❌ Failed application for "${job.title}": ${applyResult.reason || 'Failed'}`,
@@ -3442,14 +3441,16 @@ export class DedicatedJobRunner {
           creditsUsed: 1,
         });
 
-        await this.syncJobApplicationToBackend({
-          jobId: job.jobId,
-          jobTitle: job.title,
-          company: job.company,
+        await reportApplication({
           platform: 'indeed',
-          applicationUrl: job.url,
-          status: 'applied',
-          appliedAt: new Date().toISOString(),
+          jobId: job.jobId,
+          title: job.title,
+          company: job.company,
+          url: job.url,
+          location: job.location,
+          salary: job.salary,
+          description: job.descriptionSnippet,
+          status: 'APPLIED',
         });
 
         this.notifyStatus(portToSend, `✅ Successfully applied to "${job.title}" at ${job.company}!`, 'ok');
@@ -3508,6 +3509,18 @@ export class DedicatedJobRunner {
           status: 'failed',
           reason: applyResult.reason || 'Failed',
           creditsUsed: 0,
+        });
+        await reportApplication({
+          platform: 'indeed',
+          jobId: job.jobId,
+          title: job.title,
+          company: job.company,
+          url: job.url,
+          location: job.location,
+          salary: job.salary,
+          description: job.descriptionSnippet,
+          status: outcomeForFailure(applyResult.reason),
+          reason: applyResult.reason || 'Failed',
         });
         this.notifyStatus(
           portToSend,
@@ -4414,16 +4427,16 @@ export class DedicatedJobRunner {
           creditsUsed: 0,
         });
 
-        await this.syncJobApplicationToBackend({
-          jobId: job.jobId,
-          jobTitle: displayTitle,
-          company: displayCompany,
-          location: topCard.location,
+        await reportApplication({
           platform: 'linkedin',
-          applicationUrl: job.url,
+          jobId: job.jobId,
+          title: displayTitle,
+          company: displayCompany,
+          url: job.url,
+          location: topCard.location,
+          description: topCard.descriptionSnippet,
           fitScore: deepMatch?.score,
-          status: 'applied',
-          appliedAt: new Date().toISOString(),
+          status: 'APPLIED',
         });
 
         this.notifyActivity(portToSend, onLiveActivity, {
@@ -4465,6 +4478,23 @@ export class DedicatedJobRunner {
           reason: skipReason,
           creditsUsed: 0,
         });
+
+        // The form was opened and worked on, so this was an application attempt (unlike the
+        // zero-credit skips above); the dashboard shows it as failed or needing review.
+        if (!this.stoppedByUser()) {
+          await reportApplication({
+            platform: 'linkedin',
+            jobId: job.jobId,
+            title: displayTitle,
+            company: displayCompany,
+            url: job.url,
+            location: topCard.location,
+            description: topCard.descriptionSnippet,
+            fitScore: deepMatch?.score,
+            status: outcomeForFailure(skipReason),
+            reason: skipReason,
+          });
+        }
 
         this.notifyActivity(portToSend, onLiveActivity, {
           jobId: job.jobId,
@@ -6027,6 +6057,15 @@ export class DedicatedJobRunner {
           status: 'applied',
           reason: 'Verified applied upon service worker restart',
           creditsUsed: 1,
+        });
+        await reportApplication({
+          platform: 'linkedin',
+          jobId: activeRun.jobId,
+          title: activeRun.jobTitle ?? '',
+          company: activeRun.company ?? '',
+          url: activeRun.canonicalUrl,
+          status: 'APPLIED',
+          at: activeRun.lastUpdated,
         });
       } else {
         logger.info(`[DedicatedRunner] Refunding interrupted run ${activeRun.runId}`);

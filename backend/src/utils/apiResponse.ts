@@ -6,6 +6,8 @@ export interface ApiResponsePayload<T = any> {
   data?: T;
   error?: {
     code?: string;
+    /** Same as the top-level message: OpenAI-compatible clients (the extension's AI gateway client) read it here. */
+    message?: string;
     details?: any;
   };
   timestamp: string;
@@ -27,6 +29,7 @@ export function sendError(res: Response, message: string, statusCode = 500, code
     message,
     error: {
       code,
+      message,
       details,
     },
     timestamp: new Date().toISOString(),

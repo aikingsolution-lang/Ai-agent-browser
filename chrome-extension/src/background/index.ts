@@ -21,6 +21,7 @@ import {
   validateAndSanitizeSkillExperience,
   cleanLocationForCityField,
   BACKEND_LLM_URL,
+  newAiTaskId,
 } from '@extension/shared';
 import BrowserContext from './browser/context';
 import { Executor } from './agent/executor';
@@ -50,6 +51,12 @@ import { registerWebsiteSessionSync } from './services/websiteSessionSync';
 import { registerWebsiteAutoEmail } from './services/autoEmailWebsite';
 import { fetchHrEmailForCompany } from './services/emailExtractor';
 import { runAutoEmailWorkflow, stopAutoEmail, isAutoEmailRunning } from './services/autoEmail';
+import {
+  APPLICATION_REPORT_RETRY_ALARM,
+  outcomeForFailure,
+  reportApplication,
+  retryPendingApplicationReports,
+} from './services/applicationHistory';
 
 const logger = createLogger('background');
 
@@ -91,10 +98,14 @@ let isJobApplyInProgress = false;
 let activeJobTaskId: string | null = null;
 const SIDE_PANEL_URL = chrome.runtime.getURL('side-panel/index.html');
 
+/** Run id of the Auto Apply queue's model (an Auto Apply run: not counted as a Premium AI task). */
+const autoApplyQueueRunId = () => `auto_loop_queue_${Date.now()}`;
+
 /**
- * Resolves active LLM (Backend Bedrock Gateway or Local Provider)
+ * Resolves active LLM (Backend Bedrock Gateway or Local Provider). `runId` is sent as `x-run-id`:
+ * an Auto Apply run, or by default a new AI task for this model.
  */
-async function getActiveChatModel(): Promise<BaseChatModel | undefined> {
+async function getActiveChatModel(runId: string = newAiTaskId()): Promise<BaseChatModel | undefined> {
   try {
     // Refreshed first: the model keeps this token for its lifetime
     const token = await backendApiClient.getFreshToken();
@@ -106,6 +117,7 @@ async function getActiveChatModel(): Promise<BaseChatModel | undefined> {
           baseURL: BACKEND_LLM_URL,
           defaultHeaders: {
             Authorization: `Bearer ${token}`,
+            'x-run-id': runId,
           },
         },
         temperature: 0.1,
@@ -134,7 +146,7 @@ async function getActiveChatModel(): Promise<BaseChatModel | undefined> {
 }
 
 // Wire active LLM model to QueueManager on background startup
-getActiveChatModel().then(llm => {
+getActiveChatModel(autoApplyQueueRunId()).then(llm => {
   if (llm) {
     queueManager.setModels({ llm });
     logger.info('QueueManager initialized with active LLM model');
@@ -145,6 +157,15 @@ getActiveChatModel().then(llm => {
 backendApiClient.retryPendingRefunds().catch(e => {
   logger.warning('Pending refunds retry failed:', e);
 });
+
+// Application-history reports that could not reach the backend earlier (Automation Hub dashboard)
+void retryPendingApplicationReports();
+if (typeof chrome !== 'undefined' && chrome?.alarms) {
+  chrome.alarms.create(APPLICATION_REPORT_RETRY_ALARM, { periodInMinutes: 15 });
+  chrome.alarms.onAlarm.addListener(alarm => {
+    if (alarm.name === APPLICATION_REPORT_RETRY_ALARM) void retryPendingApplicationReports();
+  });
+}
 
 // Periodic retry for pending credit refunds via chrome.alarms (every 15 min)
 const REFUND_RETRY_ALARM = 'nanobrowser_refund_retry_alarm';
@@ -399,6 +420,21 @@ async function applyToCurrentActiveJob(
         creditsUsed: 0,
       });
 
+      // Stop clears isJobApplyInProgress; a run the user cancelled is not a failed application
+      if (isJobApplyInProgress) {
+        await reportApplication({
+          platform: 'linkedin',
+          jobId,
+          title: jobTitle,
+          company,
+          url: canonicalUrl,
+          location,
+          description: topCard?.descriptionSnippet,
+          status: outcomeForFailure(failReason),
+          reason: failReason,
+        });
+      }
+
       // Refund credits via server computing amount from ledger for this taskId
       logger.info(`[Credits] Requesting server-computed refund for runId: ${taskId}`);
       await backendApiClient.refundCredits(taskId).catch(e => {
@@ -415,6 +451,16 @@ async function applyToCurrentActiveJob(
       company,
       status: 'applied',
       creditsUsed: 0,
+    });
+    await reportApplication({
+      platform: 'linkedin',
+      jobId,
+      title: jobTitle,
+      company,
+      url: canonicalUrl,
+      location,
+      description: topCard?.descriptionSnippet,
+      status: 'APPLIED',
     });
 
     // Only a verified success is counted toward the daily quota
@@ -1119,7 +1165,7 @@ ${resumeSnippet}
 
         const queue = await queueManager.getQueueStatus();
         if (queue.pendingJobs && queue.pendingJobs.length > 0) {
-          const llm = await getActiveChatModel();
+          const llm = await getActiveChatModel(autoApplyQueueRunId());
           if (llm) queueManager.setModels({ llm });
           await queueManager.startQueueProcessing();
           sendResponse({ status: 'Queue Started' });
@@ -1204,7 +1250,7 @@ ${resumeSnippet}
 
       if (jobsCount > 0 || result.totalPending > 0) {
         // 4. Ab asli apply process start karo!
-        getActiveChatModel()
+        getActiveChatModel(autoApplyQueueRunId())
           .then(llm => {
             if (llm) queueManager.setModels({ llm });
             return queueManager.startQueueProcessing();

@@ -149,6 +149,18 @@ Base URL: `http://localhost:5000/api/v1`
   }
   ```
 - **Response**: Standard OpenAI-compatible chat completion object + `creditsDeducted` field.
+- **Header `x-run-id`**: the task the request belongs to. Verified JobForm Automator Premium / Diamond
+  accounts use the built-in models (`amazon.nova-lite-v1:0`, `amazon.nova-micro-v1:0`) without
+  credits, within `PREMIUM_MONTHLY_AI_TASK_LIMIT` AI tasks per UTC month (default 1,000): every request
+  of one run id counts once, Auto Apply runs (`easy_apply_*`, `auto_loop_*`) are not counted, a request
+  without a run id is a task of its own. Other models draw credits. When the month's tasks are used up,
+  an account with a credit plan falls back to credits; otherwise **402 `PREMIUM_AI_TASK_LIMIT_REACHED`**.
+- **Errors** carry the message in `error.message` too (OpenAI-compatible clients read it there).
+
+### GET `/api/v1/llm/premium-allowance`
+- **Auth**: Bearer JWT
+- **Response**: `{ tier, included, month, limit, used, remaining, resetsAt, coveredModels }` — this month's
+  built-in Cloud API ("Premium Mode") allowance, counted by the server.
 
 ### GET `/api/v1/llm/usage`
 - **Auth**: Bearer JWT
@@ -174,22 +186,38 @@ Base URL: `http://localhost:5000/api/v1`
 
 ## 8. Job Application Tracking (`/api/v1/job-applications`)
 
+The extension reports every application attempt it makes on LinkedIn, Naukri or Indeed
+(`chrome-extension/src/background/services/applicationHistory.ts`). Records are stored at
+`nanobrowser/job_applications/{uid}/{appId}`; the JobForm Automator website reads that node server
+side for Automation Hub → Auto Apply, so its field names are a contract with the dashboard.
+
 ### POST `/api/v1/job-applications`
 - **Auth**: Bearer JWT
 - **Request Body**:
   ```json
   {
-    "jobId": "urn:li:fsd_jobPosting:12345",
-    "platform": "linkedin",
-    "title": "Senior Frontend Engineer",
-    "company": "Tech Corp",
-    "location": "Bengaluru, India",
+    "jobId": "250925012345",
+    "platform": "naukri",
+    "jobTitle": "Node.js Developer",
+    "company": "TCS",
+    "location": "Noida",
+    "salaryRange": "6-9 Lacs PA",
+    "applicationUrl": "https://www.naukri.com/job-listings-...-250925012345",
     "status": "APPLIED",
-    "fitScore": 88
+    "appliedAt": "2026-11-01T10:30:00.000Z",
+    "jobDescription": "optional, capped at 2000 chars",
+    "companyWebsite": "optional http(s) URL",
+    "failureReason": "optional, kept only for FAILED / NEEDS_MANUAL_REVIEW"
   }
   ```
-- **Response**: Created application record. Deduplicates on `{ userId, jobId }`.
+- **Status**: `APPLIED` (platform confirmed the submission), `NEEDS_MANUAL_REVIEW` (submit clicked,
+  confirmation not readable), `FAILED` (attempted, not completed), plus the older queue statuses.
+- **Platform**: lower-cased; inferred from `applicationUrl` when omitted (LinkedIn otherwise).
+- **Response**: the application record. One record per `{ userId, platform, jobId }` — reporting the
+  same job again updates it (a failed attempt followed by a success becomes one `APPLIED` record),
+  and an `APPLIED` record is never downgraded by a later attempt (it keeps its first `appliedAt`).
 
-### GET `/api/v1/job-applications/check/:jobId`
+### GET `/api/v1/job-applications/check/:jobId[?platform=naukri|indeed]`
 - **Auth**: Bearer JWT
-- **Response**: `{ "applied": true | false }`
+- **Response**: `{ "exists": true | false, "application": {...} | null }` — `exists` is false for a
+  `FAILED` attempt so it can be retried. LinkedIn when `platform` is omitted.

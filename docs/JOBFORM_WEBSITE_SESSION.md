@@ -18,7 +18,7 @@ jobformautomator.com page ── DOM event ──▶ content script ──▶ ba
 |---|---|
 | `userLoggedIn` (sign-in page, Google sign-in) | backend verifies the ID token (an expired one is refreshed first) and its uid must equal the announced uid → session stored (`source: 'website'`), then subscription, premium status and credits are read from the backend |
 | `onLogout` (settings, account deletion) | extension session cleared |
-| `paymentSuccessfull` | subscription / premium status re-read from the backend at 0, 3, 7, 15 and 30 s; the event's `uid` / `plan` are ignored |
+| `paymentSuccessfull` `{ uid, plan }` | plan re-read from the backend until it covers `plan` (0, 3, 7, 15, 30 … 120 s), then credits and quota; a `uid` other than the signed-in account changes nothing (see "Buying Premium / Diamond") |
 | *(any website page loads)* | the website's stored state is reported: `IsLogin` = "true" plus its Firebase candidate session (`firebase:authUser:<apiKey>:[DEFAULT]` in localStorage) → same verified sign-in as `userLoggedIn` (an existing session of the same account is kept as is); neither present → signed out |
 
 The page-load report exists because the website does not announce everything: a session that
@@ -80,18 +80,69 @@ are dropped.
   grants nothing and it is overwritten by the next check (sign-in, payment event, plans modal,
   every 5 minutes while the side panel is open). An end date that passes locally only turns it off.
 
-**Not decided yet (product):** a JobForm Automator Premium/Diamond plan is recognised and shown, but
-it does **not** change NanoBrowser credits, daily limits or entitlement — those still come from
-NanoBrowser's own plans. Mapping JobForm Automator plans onto NanoBrowser limits is a pricing
-decision; once made, it belongs in the backend (e.g. `ProfileService.getDailyLimitForUser`,
-`checkEntitlement`), using `JobformPremiumService.getStatus()`.
+**What the plan gives in the extension** (backend, from `JobformPremiumService`), the same for Premium
+and Diamond, all enforced by the backend:
+
+- up to 300 applications a day instead of 10 (`ApplicationQuotaService`);
+- **Premium Mode (built-in Cloud API)**: AI through the backend gateway without drawing credits
+  (`premiumCovered`), on the built-in Nova models, within 1,000 AI tasks per UTC month
+  (`PremiumAiAllowanceService`, env `PREMIUM_MONTHLY_AI_TASK_LIMIT`). A task is one `x-run-id`; the
+  extension sends one for every gateway model (`newAiTaskId()`), Auto Apply runs keep their
+  `easy_apply_` / `auto_loop_` ids and are limited by the daily quota instead. The options page's
+  "API Mode" unlocks Premium Mode for a verified Premium / Diamond plan and shows the server's count
+  (`GET /llm/premium-allowance`); there is no local counter any more. A modified client could avoid
+  the task count (by reusing or relabelling run ids); the gateway's 60 requests/minute limit stays.
+
+## Buying Premium / Diamond (as the JobForm Automator extension does)
+
+The extension takes no payment itself, exactly like the JobForm Automator extension (noah-master):
+the website runs the purchase and the extension follows the account. Side panel "Plans & credits"
+and options "Premium Plans" (`useJobformPayment` → `packages/shared/lib/jobformPayment.ts`):
+
+1. **Plans and prices** are read from the website's own configuration,
+   `settings/subscription_configs/candidates` (public read; what the pricing page shows): Basic (Free),
+   Premium (`priceINR` / `priceUSD`, "1 Month"), Diamond ("Until Hired"). A plan without a configured
+   price is not shown; no price is built into the extension.
+2. **"Choose Premium / Diamond"** opens the website's checkout page in a new tab, with the same link
+   its pricing page builds: `/payment?plan=Diamond&price=₹5,999&currency=INR&for=candidate`. The
+   currency follows the checkout page's own rule (geolocation-db.com: India → INR, else USD), because
+   that page charges the link's amount in the currency it detects; if the lookup fails, the pricing
+   page opens instead and the website chooses. Nothing is requested when the button is clicked, so it
+   cannot hang (the old Starter / Pro / Power buttons waited for a backend checkout that never
+   returned a payment link; see below).
+3. **Payment** happens on the website: its server creates the Razorpay order at the configured price
+   (`/api/payment/order`; the `price` in the link is only displayed, never charged), Razorpay
+   Checkout runs, then `/api/payment/confirm` verifies the signature and the payment (order, account,
+   currency, amount), captures it if it is only authorized, and writes `user/{uid}/Payment` once
+   (`processed_payments`). The Razorpay webhook does the same if the tab is closed first. The website
+   fires `paymentSuccessfull` only after that (website branch `feature/extension-payments`, see
+   `E:\in progress\automator_payments`).
+4. **Unlock:** the website fires `paymentSuccessfull` `{ uid, plan }` (the event the JobForm
+   Automator extension forwards as `paymentProcessed`). The background re-reads the plan from the
+   backend at 0, 3, 7, 15, 30 … 120 s until it covers the paid plan (an upgrade from Premium waits for
+   Diamond), then refreshes credits and today's quota. The event's `uid` must be the account signed in
+   here (otherwise "paid with a different account" is shown and nothing is re-checked); its `plan` is
+   only what to wait for. The plans views also re-check every 15 s and on window focus while waiting
+   (20 minutes), in case the event was missed.
+
+**Differences from noah-master, on purpose:** noah-master sets `userStatus` to the event's plan and
+writes `user/{uid}/Payment` from the extension on `paymentProcessed`. Its content script runs on every
+site, so any page could fire the event, and the database rules now reject browser writes to
+`Payment` anyway. Here the event only triggers a re-check; the plan comes from the record the
+website's server wrote. noah-master's "Upgrade" opens `/payment` without `for=candidate`, which
+skips the website's server-side activation; the link here is the pricing page's full link.
 
 ## NanoBrowser's own plans (Razorpay)
 
-Unchanged: checkout, signature verification and webhooks run on the backend
-(`/subscription/checkout`, `/subscription/verify-payment`, `/webhooks/razorpay`). The side panel
-and options page no longer mark a plan as active in local storage when checkout *starts*; the local
-plan mirror used by the options page's "Premium Mode" now follows `GET /subscription/me`.
+The Starter / Pro / Power credit plans are **no longer sold** in the extension UI. Why their buttons
+never opened a payment page: the production backend has `plan_rzp_mock_pro` / `plan_rzp_mock_power`
+as the Razorpay plan ids (the `RAZORPAY_PLAN_ID_PRO` / `_POWER` defaults);
+`RazorpayService.createRazorpaySubscription` treats those as mock mode and returns a subscription
+without `short_url`, so the window had nothing to open ("Subscription order generated…"), and the
+call had no timeout. The backend keeps its checkout, verification and webhooks
+(`/subscription/checkout`, `/subscription/verify-payment`, `/webhooks/razorpay`) so existing
+subscriptions keep working, and the plans window still shows an active credit plan. The local plan
+mirror used by the options page's "Premium Mode" follows `GET /subscription/me`.
 
 ## Configuration
 
@@ -106,4 +157,7 @@ plan mirror used by the options page's "Premium Mode" now follows `GET /subscrip
 - `backend/src/tests/websiteSession.test.ts` — premium rule, `/subscription/me` premium status
   (expiry, revocation, isolation, read-only), `/auth/me` token checks, `/auth/refresh`.
 - `chrome-extension/src/background/services/__tests__/websiteSessionSync.test.ts` — sender checks,
-  website sign-in / sign-out, token refresh and expiry, account switching, payment re-checks.
+  website sign-in / sign-out, token refresh and expiry, account switching, payment re-checks
+  (upgrade waits for Diamond, another account's payment, quota after payment).
+- `chrome-extension/src/background/services/__tests__/jobformPayment.test.ts` — plans from the
+  website configuration, the checkout link (same as the pricing page's), currency rule, timeouts.

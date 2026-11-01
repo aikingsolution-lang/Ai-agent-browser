@@ -3,7 +3,7 @@ import { ChatOpenAI } from '@langchain/openai';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { createChatModel } from './helper';
 import { createLogger } from '../log';
-import { BACKEND_LLM_URL } from '@extension/shared';
+import { BACKEND_LLM_URL, newAiTaskId } from '@extension/shared';
 
 const logger = createLogger('ActiveModelHelper');
 
@@ -43,10 +43,9 @@ export async function getActiveChatModel(jobRunId?: string): Promise<BaseChatMod
     if (session?.token) {
       const headers: Record<string, string> = {
         Authorization: `Bearer ${session.token}`,
+        // The Auto Apply run, or one AI task per model (the backend counts Premium AI tasks by it)
+        'x-run-id': jobRunId || newAiTaskId(),
       };
-      if (jobRunId) {
-        headers['x-run-id'] = jobRunId;
-      }
       return new ChatOpenAI({
         modelName: 'amazon.nova-lite-v1:0',
         apiKey: session.token,

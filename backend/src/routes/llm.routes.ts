@@ -20,3 +20,4 @@ llmRouter.post('/chat', ...chatHandlers);
 llmRouter.post('/chat/completions', ...chatHandlers);
 
 llmRouter.get('/usage', authenticate, LlmController.getUsageHistory);
+llmRouter.get('/premium-allowance', authenticate, LlmController.getPremiumAllowance);

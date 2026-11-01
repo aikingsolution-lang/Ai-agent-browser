@@ -1,5 +1,13 @@
 import React, { useState, useEffect } from 'react';
-import { cloudApiSettingsStore, type CloudApiSettingsConfig, type ApiMode, type CloudConfig } from '@extension/storage';
+import {
+  authStorage,
+  cloudApiSettingsStore,
+  type CloudApiSettingsConfig,
+  type ApiMode,
+  type CloudConfig,
+  type PremiumStatus,
+} from '@extension/storage';
+import { backendApiClient, isPremiumActive, refreshAccountStatus, type PremiumAiAllowance } from '@extension/shared';
 import {
   cloudApiClient,
   type SecretManagerPayload,
@@ -36,6 +44,10 @@ export const APIModeSelector: React.FC<APIModeSelectorProps> = ({ isDarkMode, on
   const [isSavingCloud, setIsSavingCloud] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [showSubscriptionPrompt, setShowSubscriptionPrompt] = useState(false);
+  // JobForm Automator plan as verified by the backend (Premium / Diamond include Premium Mode)
+  const [jobformPremium, setJobformPremium] = useState<PremiumStatus | null>(null);
+  // This month's built-in Cloud API allowance, counted and enforced by the backend
+  const [allowance, setAllowance] = useState<PremiumAiAllowance | null>(null);
 
   // Secret Manager test states
   const [isTestingConnection, setIsTestingConnection] = useState(false);
@@ -71,12 +83,38 @@ export const APIModeSelector: React.FC<APIModeSelectorProps> = ({ isDarkMode, on
     };
   }, []);
 
+  useEffect(() => {
+    let active = true;
+    const loadPlan = async () => {
+      const session = await authStorage.getSession().catch(() => null);
+      if (active) setJobformPremium(session?.premium ?? null);
+    };
+    const loadAllowance = async () => {
+      const res = await backendApiClient.getPremiumAiAllowance().catch(() => null);
+      if (active) setAllowance(res?.data ?? null);
+    };
+    // The plan is re-read from the backend (it also updates the stored session)
+    refreshAccountStatus()
+      .catch(() => null)
+      .finally(() => {
+        void loadPlan();
+        void loadAllowance();
+      });
+    const unsubscribe = authStorage.subscribe(() => void loadPlan());
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, []);
+
+  const jobformPlanActive = isPremiumActive(jobformPremium);
+  const legacyPaidPlan = settings?.subscription.planId === 'pro' || settings?.subscription.planId === 'enterprise';
+
   const handleModeChange = async (mode: ApiMode) => {
     if (!settings) return;
 
     if (mode === 'premium') {
-      const isSubscribed = settings.subscription.planId === 'pro' || settings.subscription.planId === 'enterprise';
-      if (!isSubscribed) {
+      if (!jobformPlanActive && !legacyPaidPlan) {
         setShowSubscriptionPrompt(true);
         return;
       }
@@ -141,8 +179,13 @@ export const APIModeSelector: React.FC<APIModeSelectorProps> = ({ isDarkMode, on
 
   if (!settings) return null;
 
-  const usagePercent = Math.min(100, Math.round((settings.usage.taskCount / (settings.usage.taskLimit || 1000)) * 100));
-  const isPaidUser = settings.subscription.planId === 'pro' || settings.subscription.planId === 'enterprise';
+  const isPaidUser = jobformPlanActive || legacyPaidPlan;
+  const taskLimit = allowance?.limit ?? 1000;
+  const usagePercent = allowance?.limit
+    ? Math.min(100, Math.round((allowance.used / allowance.limit) * 100))
+    : allowance
+      ? 100
+      : 0;
 
   return (
     <section className="space-y-6">
@@ -246,7 +289,9 @@ export const APIModeSelector: React.FC<APIModeSelectorProps> = ({ isDarkMode, on
                     {!isPaidUser && <FiLock className="size-4 text-amber-500" title="Subscription required" />}
                   </div>
                   <p className={`text-xs ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>
-                    Zero setup required — subscribe for built-in high speed API access
+                    {jobformPlanActive
+                      ? `Included with your JobForm Automator ${jobformPremium?.tier} plan`
+                      : 'Zero setup required — included with JobForm Automator Premium and Diamond'}
                   </p>
                 </div>
               </div>
@@ -255,7 +300,7 @@ export const APIModeSelector: React.FC<APIModeSelectorProps> = ({ isDarkMode, on
             <ul className={`mt-4 space-y-2 text-xs ${isDarkMode ? 'text-gray-300' : 'text-gray-600'}`}>
               <li className="flex items-center space-x-2">
                 <span className="text-indigo-500">•</span>
-                <span>1,000 tasks per month included</span>
+                <span>{taskLimit.toLocaleString()} AI tasks per month included with Premium and Diamond</span>
               </li>
               <li className="flex items-center space-x-2">
                 <span className="text-indigo-500">•</span>
@@ -279,7 +324,8 @@ export const APIModeSelector: React.FC<APIModeSelectorProps> = ({ isDarkMode, on
                   Subscription Required for Premium Mode
                 </h4>
                 <p className={`text-[11px] ${isDarkMode ? 'text-amber-200/70' : 'text-amber-700'}`}>
-                  Subscribe to a paid plan (Starter ₹299/mo or Pro ₹699/mo) to unlock built-in Cloud API access.
+                  Built-in Cloud API access is included with JobForm Automator Premium and Diamond (
+                  {taskLimit.toLocaleString()} AI tasks a month, no credits used).
                 </p>
               </div>
             </div>
@@ -294,29 +340,41 @@ export const APIModeSelector: React.FC<APIModeSelectorProps> = ({ isDarkMode, on
           </div>
         )}
 
-        {/* Premium Usage Meter */}
-        {settings.apiMode === 'premium' && (
+        {/* Premium Usage Meter (counted and enforced by the server) */}
+        {settings.apiMode === 'premium' && allowance?.included && (
           <div
             className={`mt-6 rounded-lg border p-4 ${
               isDarkMode ? 'border-slate-700 bg-slate-700/50' : 'border-indigo-100 bg-indigo-50/50'
             }`}>
-            <div className="mb-2 flex items-center justify-between">
+            <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
               <span className={`text-sm font-medium ${isDarkMode ? 'text-gray-200' : 'text-gray-700'}`}>
                 Monthly Premium Quota Usage
               </span>
               <span className="text-xs font-semibold text-indigo-600 dark:text-indigo-400">
-                {settings.usage.taskCount} / {settings.usage.taskLimit || 1000} tasks used ({usagePercent}%)
+                {allowance.used.toLocaleString()} / {allowance.limit.toLocaleString()} AI tasks used ({usagePercent}%)
               </span>
             </div>
-            <div className={`h-2.5 w-full overflow-hidden rounded-full ${isDarkMode ? 'bg-slate-600' : 'bg-gray-200'}`}>
+            <div
+              className={`h-2.5 w-full overflow-hidden rounded-full ${isDarkMode ? 'bg-slate-600' : 'bg-gray-200'}`}
+              role="progressbar"
+              aria-label="AI tasks used this month"
+              aria-valuemin={0}
+              aria-valuemax={allowance.limit}
+              aria-valuenow={allowance.used}>
               <div
                 className="h-full bg-gradient-to-r from-sky-500 to-indigo-500 transition-all duration-300"
                 style={{ width: `${usagePercent}%` }}></div>
             </div>
             <p className={`mt-2 text-xs ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>
-              Resets on {new Date(settings.usage.resetTimestamp).toLocaleDateString()}
+              Renews on {new Date(allowance.resetsAt).toLocaleDateString()}. Auto Apply runs don&apos;t count (they use
+              the daily application limit).
             </p>
           </div>
+        )}
+        {settings.apiMode === 'premium' && !jobformPlanActive && legacyPaidPlan && (
+          <p className={`mt-6 text-xs ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>
+            AI use in Premium Mode draws credits from your credit plan.
+          </p>
         )}
 
         {/* Cloud Secret Manager & Key Integration Form */}
@@ -480,10 +538,10 @@ export const APIModeSelector: React.FC<APIModeSelectorProps> = ({ isDarkMode, on
             <div className="mx-auto mb-3 flex size-12 items-center justify-center rounded-full bg-amber-500/20 text-amber-500">
               <FiLock className="size-6" />
             </div>
-            <h3 className="text-lg font-bold">Pro Subscription Required</h3>
+            <h3 className="text-lg font-bold">Premium or Diamond Required</h3>
             <p className="mt-2 text-xs text-gray-400">
-              Built-in Cloud API access is a Premium feature. Please subscribe to Pro ($19/mo) to unlock built-in keys
-              with 1,000 tasks/month.
+              Built-in Cloud API access is included with JobForm Automator Premium and Diamond:{' '}
+              {taskLimit.toLocaleString()} AI tasks a month without using credits.
             </p>
             <div className="mt-6 flex space-x-3">
               <button

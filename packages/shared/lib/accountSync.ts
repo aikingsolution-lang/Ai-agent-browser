@@ -89,8 +89,13 @@ export function isPremiumActive(premium: PremiumStatus | null | undefined, now =
 /**
  * Keeps the local plan mirror used by the options page's "Premium Mode" in line with the backend:
  * a paid plan only once the backend reports it ACTIVE (it used to be set when checkout started).
+ * Premium Mode stays selectable while either a paid credit plan or a verified JobForm Automator
+ * Premium / Diamond plan is active (its AI allowance is enforced by the backend).
  */
-export async function mirrorPlanToLocalSettings(subscription: BackendSubscription | null | undefined): Promise<void> {
+export async function mirrorPlanToLocalSettings(
+  subscription: BackendSubscription | null | undefined,
+  premium?: PremiumStatus | null,
+): Promise<void> {
   const planCode = subscription?.planCodeSnapshot ?? subscription?.planCode;
   const paidActive = subscription?.status === 'ACTIVE' && typeof planCode === 'string' && planCode !== 'free-trial';
   const settings = await cloudApiSettingsStore.getSettings();
@@ -104,7 +109,7 @@ export async function mirrorPlanToLocalSettings(subscription: BackendSubscriptio
   if (settings.subscription.planId !== 'free') {
     await cloudApiSettingsStore.updateSubscription({ planId: 'free', status: 'active' });
   }
-  if (settings.apiMode === 'premium') {
+  if (settings.apiMode === 'premium' && !isPremiumActive(premium)) {
     await cloudApiSettingsStore.setApiMode('free');
   }
 }
@@ -130,7 +135,7 @@ export async function refreshAccountStatus(): Promise<{
   const premium = toPremiumStatus(res.data?.premium);
   const subscription = toSessionSubscription(res.data?.subscription);
   await authStorage.setSession({ premium, subscription });
-  await mirrorPlanToLocalSettings(res.data?.subscription).catch(() => undefined);
+  await mirrorPlanToLocalSettings(res.data?.subscription, premium).catch(() => undefined);
   return { premium, subscription: res.data?.subscription ?? null };
 }
 

@@ -1,5 +1,6 @@
 import type { Request, Response, NextFunction } from 'express';
 import { LlmService } from '../services/llm.service.js';
+import { PremiumAiAllowanceService } from '../services/premiumAiAllowance.service.js';
 import { sendSuccess, sendError } from '../utils/apiResponse.js';
 import { env } from '../config/env.js';
 
@@ -27,6 +28,15 @@ export class LlmController {
       const idempotencyKey = (req.headers['x-idempotency-key'] as string) || body.idempotencyKey;
       const runId = (req.headers['x-run-id'] as string) || body.runId;
 
+      // Premium / Diamond: built-in models within the monthly AI task allowance, without credits
+      const premiumCovered = await PremiumAiAllowanceService.coverRequest({
+        uid: String(userId),
+        premiumCovered: req.premiumCovered === true,
+        subscriptionStatus: req.subscription?.status,
+        model,
+        runId,
+      });
+
       if (stream) {
         // SSE Header setup
         res.setHeader('Content-Type', 'text/event-stream');
@@ -49,7 +59,7 @@ export class LlmController {
             maxTokens,
             idempotencyKey,
             runId,
-            premiumCovered: req.premiumCovered === true,
+            premiumCovered,
             onChunk: (chunk: string) => {
               if (!res.writableEnded) {
                 res.write(`data: ${JSON.stringify({ chunk })}\n\n`);
@@ -85,7 +95,7 @@ export class LlmController {
         maxTokens,
         idempotencyKey,
         runId,
-        premiumCovered: req.premiumCovered === true,
+        premiumCovered,
       });
 
       if (req.path.endsWith('/completions')) {
@@ -114,6 +124,23 @@ export class LlmController {
       }
 
       sendSuccess(res, result, 'LLM chat completion successful', 200);
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  /**
+   * GET /api/v1/llm/premium-allowance
+   * The built-in Cloud API allowance of the authenticated user's JobForm Automator plan this month.
+   */
+  public static async getPremiumAllowance(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const userId = req.user?._id;
+      if (!userId) {
+        sendError(res, 'Authentication required', 401, 'UNAUTHORIZED');
+        return;
+      }
+      sendSuccess(res, await PremiumAiAllowanceService.getView(String(userId)), 'Premium AI allowance', 200);
     } catch (error) {
       next(error);
     }

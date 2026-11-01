@@ -34,6 +34,13 @@ const getEnvBackendUrl = (): string => {
 export const BACKEND_BASE_URL: string = getEnvBackendUrl();
 export const BACKEND_API_URL: string = `${BACKEND_BASE_URL}/api/v1`;
 export const BACKEND_LLM_URL: string = `${BACKEND_BASE_URL}/api/v1/llm`;
+
+/**
+ * Id of one AI task, sent to the AI gateway as `x-run-id`. The backend counts JobForm Automator
+ * Premium / Diamond AI tasks by it (every request of a task counts once); Auto Apply runs use their
+ * own `easy_apply_` / `auto_loop_` run ids and are limited by the daily application quota instead.
+ */
+export const newAiTaskId = (): string => `ai_${crypto.randomUUID()}`;
 export const MINIMUM_RUN_CREDITS: number = 5;
 export const ENABLE_CREDITS_RECONCILE: boolean = false;
 
@@ -89,6 +96,11 @@ export const JOBFORM_SIGN_IN_URL = `${JOBFORM_WEBSITE_URL}/sign-in`;
 export const JOBFORM_PRICING_URL = `${JOBFORM_WEBSITE_URL}/pricing`;
 export const JOBFORM_PRIVACY_URL = `${JOBFORM_WEBSITE_URL}/privacy`;
 export const JOBFORM_SUPPORT_URL = `${JOBFORM_WEBSITE_URL}/contactUs`;
+/**
+ * JobForm Automator's Firebase Realtime Database. The extension reads only the public plan prices
+ * there (`settings/subscription_configs`, readable by anyone, as on the website's pricing page).
+ */
+export const JOBFORM_DATABASE_URL = 'https://jobform-automator-website-default-rtdb.firebaseio.com';
 
 /** Only these origins may hand a session to the extension (exact origin match, HTTPS only). */
 export const JOBFORM_WEBSITE_ORIGINS: readonly string[] = [

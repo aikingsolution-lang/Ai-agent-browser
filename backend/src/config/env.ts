@@ -63,6 +63,11 @@ const envSchema = z.object({
     .union([z.number(), z.string()])
     .transform(val => (typeof val === 'number' ? val : parseInt(val || '50', 10)))
     .default(50),
+  /** AI tasks a month included with JobForm Automator Premium / Diamond (built-in Cloud API). */
+  PREMIUM_MONTHLY_AI_TASK_LIMIT: z
+    .union([z.number(), z.string()])
+    .transform(val => (typeof val === 'number' ? val : parseInt(val || '1000', 10)))
+    .default(1000),
 });
 
 const parsedEnv = envSchema.safeParse(process.env);
@@ -94,6 +99,7 @@ const baseEnv = parsedEnv.success
       ENABLE_CREDITS_RECONCILE:
         process.env.ENABLE_CREDITS_RECONCILE === 'true' || process.env.ENABLE_CREDITS_RECONCILE === '1',
       MAX_DAILY_REFUND_CAP: parseInt(process.env.MAX_DAILY_REFUND_CAP || '50', 10),
+      PREMIUM_MONTHLY_AI_TASK_LIMIT: parseInt(process.env.PREMIUM_MONTHLY_AI_TASK_LIMIT || '1000', 10),
     };
 
 /**

@@ -2,17 +2,20 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import request from 'supertest';
 import { createApp } from '../app.js';
 import { PlanSeedService } from '../services/planSeed.service.js';
+import { premiumMonthlyAiTaskLimit } from '../services/premiumAiAllowance.service.js';
 import { isLiveRtdb, memoryDb, resetFirebase } from './helpers/firebaseTestEnv.js';
 import { registerViaApi, rtdb } from './helpers/testApi.js';
 
 const app = createApp();
 
 const premiumPayment = { Status: 'Premium', SubscriptionType: 'Premium', End_Date: '2099-01-01 00:00:00' };
-const chat = (auth: string) =>
+// The built-in Cloud API model (what the extension uses); other models draw credits even with Premium
+const chat = (auth: string, model = 'amazon.nova-lite-v1:0') =>
   request(app)
     .post('/api/v1/llm/chat')
     .set('Authorization', auth)
-    .send({ model: 'anthropic.claude-3-haiku-20240307-v1:0', messages: [{ role: 'user', content: 'Hello' }] });
+    .set('x-run-id', 'agent-task-1')
+    .send({ model, messages: [{ role: 'user', content: 'Hello' }] });
 
 /** A user whose free trial is over and whose credits are used up. */
 async function lapsedUser(email: string) {
@@ -28,6 +31,10 @@ describe.skipIf(isLiveRtdb)('Verified JobForm Automator Premium includes AI Auto
   beforeEach(async () => {
     await resetFirebase();
     await PlanSeedService.seedDefaultPlans();
+  });
+
+  it('Premium and Diamond include 1,000 AI tasks a month by default', () => {
+    expect(premiumMonthlyAiTaskLimit()).toBe(1000);
   });
 
   it('without Premium, an expired trial blocks AI access', async () => {
@@ -83,5 +90,19 @@ describe.skipIf(isLiveRtdb)('Verified JobForm Automator Premium includes AI Auto
     await memoryDb.ref(`user/${paid.uid}/Payment`).set(premiumPayment);
     expect((await chat(paid.auth)).status).toBe(200);
     expect((await chat(other.auth)).status).toBe(403);
+  });
+
+  it('only the built-in models are included: another model draws credits (none left → 402)', async () => {
+    const { uid, auth } = await lapsedUser('othermodel@premium.test');
+    await memoryDb.ref(`user/${uid}/Payment`).set(premiumPayment);
+    const res = await chat(auth, 'anthropic.claude-3-5-sonnet-20240620-v1:0');
+    expect(res.status).toBe(402);
+    expect(res.body.error.code).toBe('INSUFFICIENT_CREDITS');
+
+    const withCredits = await registerViaApi(app, { email: 'othermodel-credits@premium.test' });
+    await memoryDb.ref(`user/${withCredits.uid}/Payment`).set(premiumPayment);
+    const before = (await rtdb.balance(withCredits.uid)).remainingCredits;
+    expect((await chat(withCredits.auth, 'anthropic.claude-3-haiku-20240307-v1:0')).status).toBe(200);
+    expect((await rtdb.balance(withCredits.uid)).remainingCredits).toBeLessThan(before);
   });
 });

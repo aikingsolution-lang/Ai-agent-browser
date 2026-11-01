@@ -190,13 +190,24 @@ export const JOB_APPLICATION_STATUSES = [
   'PENDING_RESUME_APPROVAL',
   'SKIPPED_JOB_REMOVED',
   'SKIPPED_MISSING_RESUME',
+  /** The extension attempted the application but could not complete it. Retryable. */
+  'FAILED',
 ] as const;
 
 export type JobApplicationStatus = (typeof JOB_APPLICATION_STATUSES)[number];
 
+/** Platforms the extension applies on; any other value is stored as given (sanitised). */
+export const JOB_APPLICATION_PLATFORMS = ['linkedin', 'naukri', 'indeed'] as const;
+
 /**
  * nanobrowser/job_applications/{uid}/{appId}
- * nanobrowser/job_application_keys/{uid}/{sha256(jobId)} -> appId   (unique {uid, jobId})
+ * nanobrowser/job_application_keys/{uid}/{jobKey} -> appId   (unique {uid, platform, jobId})
+ *   jobKey = sha256(jobId) for LinkedIn (the original key, kept so existing records still match),
+ *            sha256("<platform>:<jobId>") for every other platform, so ids from different job
+ *            boards can never collide.
+ *
+ * The JobForm Automator website reads this node (server side) for the Automation Hub's per-platform
+ * application history, so field names here are a contract with that dashboard.
  */
 export interface JobApplicationRecord {
   appId: string;
@@ -210,7 +221,14 @@ export interface JobApplicationRecord {
   platform: string;
   applicationUrl: string;
   status: JobApplicationStatus;
+  /** Time of the verified submission (APPLIED) or of the latest attempt (any other status). */
   appliedAt: number | null;
+  /** Job posting text, when the extension could read it (capped). */
+  jobDescription?: string;
+  /** Employer website, when the job page exposes one. */
+  companyWebsite?: string;
+  /** Why the latest attempt failed or could not be confirmed (never kept on APPLIED). */
+  failureReason?: string;
   createdAt: number;
   updatedAt: number;
 }

@@ -539,31 +539,34 @@ export class CareerBrainRepository {
 // ── Job applications ──────────────────────────────────────────────────────────
 
 export class JobApplicationRepository {
-  static jobKey(jobId: string): string {
-    return hashKey(jobId);
+  /** LinkedIn (and calls without a platform) keep the original bare-jobId key. */
+  static jobKey(jobId: string, platform?: string): string {
+    return platform && platform !== 'linkedin' ? hashKey(`${platform}:${jobId}`) : hashKey(jobId);
   }
 
   /**
-   * Claims the {uid, jobId} pair (the Mongo unique index). Returns the application id that owns
-   * the pair and whether this call created the claim.
+   * Claims the {uid, platform, jobId} triple (the Mongo unique index). Returns the application id
+   * that owns it and whether this call created the claim.
    */
   static async claimJobKey(
     uid: string,
     jobId: string,
+    platform: string | undefined,
     candidateAppId: string,
   ): Promise<{ appId: string; isNew: boolean }> {
-    const result = await dbRef(paths.jobApplicationKey(uid, this.jobKey(jobId))).transaction(
-      (current: string | null) => (current === null ? candidateAppId : undefined),
+    const keyPath = paths.jobApplicationKey(uid, this.jobKey(jobId, platform));
+    const result = await dbRef(keyPath).transaction((current: string | null) =>
+      current === null ? candidateAppId : undefined,
     );
     if (result.committed) return { appId: candidateAppId, isNew: true };
     const existing = result.snapshot.val() as string | null;
     if (existing) return { appId: existing, isNew: false };
-    const fresh = await readVal<string>(paths.jobApplicationKey(uid, this.jobKey(jobId)));
+    const fresh = await readVal<string>(keyPath);
     return { appId: fresh ?? candidateAppId, isNew: !fresh };
   }
 
-  static getAppIdForJob(uid: string, jobId: string): Promise<string | null> {
-    return readVal<string>(paths.jobApplicationKey(uid, this.jobKey(jobId)));
+  static getAppIdForJob(uid: string, jobId: string, platform?: string): Promise<string | null> {
+    return readVal<string>(paths.jobApplicationKey(uid, this.jobKey(jobId, platform)));
   }
 
   static get(uid: string, appId: string): Promise<JobApplicationRecord | null> {

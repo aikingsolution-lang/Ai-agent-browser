@@ -4,8 +4,10 @@
  *   JOBFORM_WEBSITE_LOGIN              → verify the ID token with the backend, then start that session
  *                                        (another account's local data is wiped first)
  *   JOBFORM_WEBSITE_LOGOUT             → sign the extension out
- *   JOBFORM_WEBSITE_PAYMENT_COMPLETED  → re-read subscription / premium status from the backend for a
- *                                        while; the event itself never grants anything
+ *   JOBFORM_WEBSITE_PAYMENT_COMPLETED  → the website's `paymentSuccessfull` { uid, plan } (the JobForm
+ *                                        Automator extension's `paymentProcessed`): re-read the plan
+ *                                        from the backend until it reports the paid plan, then credits
+ *                                        and today's quota; the event itself never grants anything
  *
  * `trigger: 'event'` — the website announced it (sign-in pages, settings sign-out).
  * `trigger: 'page-load'` — the website's stored sign-in state when one of its pages loaded (covers a
@@ -23,7 +25,13 @@ import {
   acceptWebsiteSession,
   isJobformWebsiteOrigin,
   originOf,
+  planCovers,
+  refreshAccountCredits,
+  refreshAccountQuota,
   refreshAccountStatus,
+  saveJobformPaymentEvent,
+  type JobformPaymentOutcome,
+  type JobformPlanId,
   type WebsiteSessionResult,
 } from '@extension/shared';
 import {
@@ -48,8 +56,12 @@ export const JOBFORM_WEBSITE_MESSAGES = {
 
 const HANDLED_TYPES = new Set<string>(Object.values(JOBFORM_WEBSITE_MESSAGES));
 
-/** After a payment the website confirms it server-side; premium shows up within these delays (ms). */
-export const PAYMENT_RECHECK_DELAYS_MS = [0, 3_000, 7_000, 15_000, 30_000];
+/**
+ * The website fires `paymentSuccessfull` before its server has verified the payment
+ * (/api/payment/confirm), so the plan is re-read at these delays (ms). No gap is longer than 20 s,
+ * so the service worker stays alive between checks; the plans views keep checking after that.
+ */
+export const PAYMENT_RECHECK_DELAYS_MS = [0, 3_000, 7_000, 15_000, 30_000, 45_000, 60_000, 80_000, 100_000, 120_000];
 
 const MAX_TOKEN_LENGTH = 8192;
 const JWT_PATTERN = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*$/;
@@ -85,22 +97,70 @@ function enqueue<T>(task: () => Promise<T>): Promise<T> {
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
+/**
+ * The website's payment event: `paymentSuccessfull` { uid, plan }, forwarded as is (the JobForm
+ * Automator extension's `paymentProcessed`). Both fields are only hints: `uid` says which account
+ * paid, `plan` which plan to wait for (as there, no plan means Premium).
+ */
+export function parsePaymentMessage(message: unknown): { uid: string | null; plan: JobformPlanId } {
+  const { uid, plan } = (message && typeof message === 'object' ? message : {}) as Record<string, unknown>;
+  return {
+    uid: typeof uid === 'string' && UID_PATTERN.test(uid) ? uid : null,
+    plan: typeof plan === 'string' && plan.trim().toLowerCase() === 'diamond' ? 'Diamond' : 'Premium',
+  };
+}
+
 let paymentRecheckRun = 0;
 
-async function recheckPremiumAfterPayment(delays: number[]): Promise<boolean> {
+type PaymentRecheckOutcome = Exclude<JobformPaymentOutcome, 'checking'> | 'superseded';
+
+/**
+ * Re-reads the plan from the backend until it covers the paid plan (an upgrade from Premium waits
+ * for Diamond), then refreshes credits and today's quota — the unlock the JobForm Automator extension
+ * does locally on `paymentProcessed`, here only once the backend confirms it. A payment by another
+ * account than the one signed in here changes nothing.
+ */
+async function recheckPremiumAfterPayment(
+  payment: { uid: string | null; plan: JobformPlanId },
+  delays: number[],
+): Promise<{ outcome: PaymentRecheckOutcome; premium: boolean }> {
   const run = ++paymentRecheckRun;
+  let premium = false;
+  let signedIn = false;
   for (const delay of delays) {
     if (delay > 0) await sleep(delay);
-    if (run !== paymentRecheckRun) return false; // superseded by a newer payment event
+    if (run !== paymentRecheckRun) return { outcome: 'superseded', premium }; // a newer payment event
+    const current = await authStorage.getSession();
+    const uid = current.token ? sessionUserId(current.user) : null;
+    if (!uid) continue; // the website's sign-in may still be on its way
+    signedIn = true;
+    if (payment.uid && payment.uid !== uid) return { outcome: 'other-account', premium: false };
     try {
       const status = await refreshAccountStatus();
-      if (!status) return false; // signed out or the account changed
-      if (status.premium?.isPremium) return true;
+      if (!status) continue; // the account changed meanwhile: checked again next round
+      premium = status.premium?.isPremium === true;
+      if (planCovers(status.premium, payment.plan)) {
+        await refreshAccountCredits().catch(() => undefined);
+        await refreshAccountQuota().catch(() => undefined);
+        return { outcome: 'active', premium };
+      }
     } catch (error) {
       logger.warning('Premium re-check after payment failed:', error);
     }
   }
-  return false;
+  return { outcome: signedIn ? 'pending' : 'signed-out', premium };
+}
+
+async function handlePaymentEvent(message: unknown, delays: number[]): Promise<Record<string, unknown>> {
+  const payment = parsePaymentMessage(message);
+  const record = (outcome: JobformPaymentOutcome) =>
+    saveJobformPaymentEvent({ plan: payment.plan, outcome, at: Date.now() }).catch(() => undefined);
+  await record('checking');
+  const result = await recheckPremiumAfterPayment(payment, delays);
+  if (result.outcome !== 'superseded') await record(result.outcome);
+  if (result.outcome === 'active') logger.info(`JobForm Automator ${payment.plan} confirmed after the website payment`);
+  else if (result.outcome === 'other-account') logger.warning('Website payment was made by another account');
+  return { ok: true, ...result };
 }
 
 /**
@@ -172,10 +232,8 @@ export async function handleWebsiteMessage(
       if (signedOut) logger.info('Signed out: JobForm Automator website sign-out');
       return { ok: true };
     }
-    case JOBFORM_WEBSITE_MESSAGES.paymentCompleted: {
-      const premium = await recheckPremiumAfterPayment(options.paymentRecheckDelaysMs ?? PAYMENT_RECHECK_DELAYS_MS);
-      return { ok: true, premium };
-    }
+    case JOBFORM_WEBSITE_MESSAGES.paymentCompleted:
+      return handlePaymentEvent(message, options.paymentRecheckDelaysMs ?? PAYMENT_RECHECK_DELAYS_MS);
     default:
       return { ok: false, reason: 'unknown' };
   }

@@ -10,7 +10,6 @@ import {
   chatHistoryStore,
   agentModelStore,
   generalSettingsStore,
-  cloudApiSettingsStore,
   type CloudApiSettingsConfig,
   authStorage,
   endAccountSession,
@@ -1092,16 +1091,8 @@ const SidePanel = () => {
       return;
     }
 
-    // Check Premium monthly task usage quota
-    const usageStatus = await cloudApiSettingsStore.checkUsageLimit();
-    if (!usageStatus.allowed) {
-      appendMessage({
-        actor: Actors.SYSTEM,
-        content: `Monthly Premium task limit reached (${usageStatus.count}/${usageStatus.limit} tasks). Please switch to Free Mode or upgrade your plan in Settings.`,
-        timestamp: Date.now(),
-      });
-      return;
-    }
+    // The monthly AI task allowance of Premium / Diamond is counted and enforced by the backend
+    // (AI gateway: PREMIUM_AI_TASK_LIMIT_REACHED); nothing is counted locally.
 
     // Check if the input is a command (starts with /)
     if (trimmedText.startsWith('/')) {
@@ -1115,9 +1106,6 @@ const SidePanel = () => {
       console.log('Cannot send messages in historical sessions');
       return;
     }
-
-    // Increment usage for premium tasks
-    await cloudApiSettingsStore.incrementUsage();
 
     try {
       const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
