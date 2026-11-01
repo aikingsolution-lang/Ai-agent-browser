@@ -223,10 +223,30 @@ export default class Page {
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   async evaluate<R = any>(pageFunction: any, ...args: any[]): Promise<R> {
-    if (!this._puppeteerPage) {
-      throw new Error('Puppeteer page not attached');
+    if (this._puppeteerPage) {
+      try {
+        return await this._puppeteerPage.evaluate(pageFunction, ...args);
+      } catch (pErr) {
+        if (isCdpTabClosedError(pErr)) throw pErr;
+        logger.debug('[Page.evaluate] Puppeteer evaluate threw, trying chrome.scripting fallback:', pErr);
+      }
     }
-    return this._puppeteerPage.evaluate(pageFunction, ...args);
+
+    if (this._tabId && typeof chrome !== 'undefined' && chrome.scripting?.executeScript) {
+      try {
+        const results = await chrome.scripting.executeScript({
+          target: { tabId: this._tabId },
+          func: pageFunction,
+          args: args.length > 0 ? args : undefined,
+        });
+        return results?.[0]?.result as R;
+      } catch (sErr) {
+        if (isCdpTabClosedError(sErr)) throw sErr;
+        throw sErr;
+      }
+    }
+
+    throw new Error('Neither Puppeteer nor chrome.scripting available for evaluate');
   }
 
   async removeHighlight(): Promise<void> {

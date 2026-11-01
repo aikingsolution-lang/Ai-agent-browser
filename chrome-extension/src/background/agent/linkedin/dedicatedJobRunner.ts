@@ -2071,6 +2071,13 @@ export class DedicatedJobRunner {
         }
       });
 
+      // Paced initial wait for tab creation and navigation commit (matching Naukri & Indeed)
+      const navAborted = await this.interruptibleSleep(3500);
+      if (navAborted || !this.isRunning || this.isStopping) {
+        throw new AbortRunError(this.stopReason || 'Stopped by user');
+      }
+      this.checkAbort(runToken, this.abortController?.signal);
+
       logger.info(
         `[DedicatedJobRunner] [${new Date().toISOString()}] [Stage 3/5] Attaching browser page context for tab ${tabId}...`,
       );
@@ -2085,6 +2092,9 @@ export class DedicatedJobRunner {
               `[DedicatedJobRunner] [${new Date().toISOString()}] Runner tab ${tabId} is in background (active=false). Activating tab in window ${tabInfo.windowId} to avoid rendering throttle...`,
             );
             await chrome.tabs.update(tabId, { active: true });
+          }
+          if (tabInfo.windowId && chrome.windows?.update) {
+            await chrome.windows.update(tabInfo.windowId, { focused: true }).catch(() => {});
           }
         } catch (tabErr) {
           logger.debug('[DedicatedJobRunner] Could not check/update tab active state:', tabErr);
@@ -2121,11 +2131,18 @@ export class DedicatedJobRunner {
           document.querySelectorAll('[data-view-name="job-card"], [data-view-name*="job-card"]'),
         ).filter(el => !isInsideDetailsPane(el));
 
+        const extraCards = Array.from(
+          document.querySelectorAll(
+            'li.scaffold-layout__list-item, div.job-card-container, div.base-card, .jobs-search-results__list-item',
+          ),
+        ).filter(el => !isInsideDetailsPane(el));
+
         const distinctElements = new Set([
           ...componentKeyCards,
           ...occludableCards,
           ...dataJobIdCards,
           ...dataViewNameCards,
+          ...extraCards,
         ]);
 
         const pathname = window.location.pathname.toLowerCase();
@@ -2258,7 +2275,7 @@ export class DedicatedJobRunner {
       let settleResult = await waitForSearchSettled(20000);
 
       // If no cards found within 20s: reload once and wait again
-      if (!settleResult.settled && this.isRunning && !this.isStopping) {
+      if (!settleResult.settled && this.isRunning && !this.isStopping && !settleResult.lastStatus.isLoginWall) {
         const reloadNotice = 'No job cards settled in 20s, reloading once...';
         logger.warning(`[DedicatedJobRunner] [${new Date().toISOString()}] ⚠️ ${reloadNotice}`);
         this.notifyStatus(portToSend, `⚠️ ${reloadNotice}`, 'info', runToken);
@@ -2291,29 +2308,42 @@ export class DedicatedJobRunner {
         settleResult = await waitForSearchSettled(20000);
       }
 
-      // If still no cards found: stop with a precise message that includes the URL path, whether a login wall
-      // or checkpoint is shown, document.visibilityState, and the number of elements for each card selector. Do not say "details pane".
+      // If still no cards found:
       if (!settleResult.settled && this.isRunning && !this.isStopping) {
         const diag = settleResult.lastStatus;
-        const failMsg = `🛑 No LinkedIn job cards found after reload. Path: "${diag.urlPath}", loginWall: ${diag.isLoginWall}, checkpoint: ${diag.isCheckpoint}, visibility: "${diag.visibilityState}", card selectors: [componentkey: ${diag.componentKeyCount}, occludable: ${diag.occludableCount}, data-job-id: ${diag.dataJobIdCount}, data-view-name: ${diag.dataViewNameCount}].`;
-        logger.error(`[DedicatedJobRunner] [${new Date().toISOString()}] ${failMsg}`);
-        this.notifyStatus(portToSend, failMsg, 'fail', runToken);
-        this.notifyActivity(
-          portToSend,
-          onLiveActivity,
-          {
-            jobId: 'page_load_failed',
-            url: searchUrl,
-            title: 'Search Results Unavailable',
-            company: 'LinkedIn Runner',
-            status: 'failed',
-            reason: failMsg,
-            creditsUsed: 0,
-          },
-          runToken,
-        );
-        this.cleanupRun(failMsg, stats, runToken);
-        return { status: 'error', message: failMsg, stats };
+        if (diag.isLoginWall || diag.isCheckpoint) {
+          logger.info(
+            '[DedicatedJobRunner] Auth checkpoint detected during settlement wait. Proceeding to auth handler.',
+          );
+        } else {
+          // Double-check: can readJobListFromSearchPane find cards directly?
+          const fallbackCheck = await currentPage.readJobListFromSearchPane?.(2).catch(() => []);
+          if (fallbackCheck && fallbackCheck.length > 0) {
+            logger.info(
+              `[DedicatedJobRunner] readJobListFromSearchPane found ${fallbackCheck.length} job cards despite settlement timeout. Proceeding with scan.`,
+            );
+          } else {
+            const failMsg = `🛑 No LinkedIn job cards found after reload. Path: "${diag.urlPath}", loginWall: ${diag.isLoginWall}, checkpoint: ${diag.isCheckpoint}, visibility: "${diag.visibilityState}", card selectors: [componentkey: ${diag.componentKeyCount}, occludable: ${diag.occludableCount}, data-job-id: ${diag.dataJobIdCount}, data-view-name: ${diag.dataViewNameCount}].`;
+            logger.error(`[DedicatedJobRunner] [${new Date().toISOString()}] ${failMsg}`);
+            this.notifyStatus(portToSend, failMsg, 'fail', runToken);
+            this.notifyActivity(
+              portToSend,
+              onLiveActivity,
+              {
+                jobId: 'page_load_failed',
+                url: searchUrl,
+                title: 'Search Results Unavailable',
+                company: 'LinkedIn Runner',
+                status: 'failed',
+                reason: failMsg,
+                creditsUsed: 0,
+              },
+              runToken,
+            );
+            this.cleanupRun(failMsg, stats, runToken);
+            return { status: 'error', message: failMsg, stats };
+          }
+        }
       }
 
       this.checkAbort(runToken, this.abortController?.signal);
