@@ -6919,39 +6919,53 @@ export default class Page {
 
     if (!clicked) {
       logger.info(
-        `[clickJobInSearchList] Card for ${jobId} could not be clicked in search list. Navigating directly to ${jobUrl}...`,
+        `[${new Date().toISOString()}] [clickJobInSearchList] Card for ${jobId} could not be clicked in search list. Navigating directly to ${jobUrl}...`,
       );
       await this.navigateToDirect(jobUrl);
+      logger.info(`[${new Date().toISOString()}] [clickJobInSearchList] Direct navigation to ${jobUrl} completed.`);
       return true;
     }
 
-    // Check if details pane shows this job within ~3.5s
-    const checkDetailsShown = (targetId: string): boolean => {
-      const href = window.location.href || '';
-      if (href.includes(`/jobs/view/${targetId}`) || href.includes(`currentJobId=${targetId}`)) {
-        return true;
-      }
+    // When card was clicked, check if details pane heading appears (wait up to about 8s).
+    // If details pane is still a skeleton, fall back to direct navigation once.
+    logger.info(
+      `[${new Date().toISOString()}] [clickJobInSearchList] Card for ${jobId} clicked. Waiting up to 8s for details pane heading...`,
+    );
+
+    const checkDetailsPaneHeading = (
+      targetId: string,
+    ): { hasHeading: boolean; isSkeleton: boolean; headingText: string } => {
       const detailsContainer = document.querySelector(
-        '.scaffold-layout__detail, [data-view-name="job-details"], .jobs-search__job-details--container, .jobs-details__main-content, [data-view-name="job-details-top-card"]',
+        '.scaffold-layout__detail, [data-view-name="job-details"], .jobs-search__job-details, .jobs-search__job-details--container, .jobs-details__main-content, [data-view-name="job-details-top-card"]',
       );
-      if (detailsContainer) {
-        if (
-          detailsContainer.querySelector(
-            `[href*="${targetId}"], [data-job-id="${targetId}"], [componentkey*="${targetId}"]`,
-          ) !== null
-        ) {
-          return true;
-        }
+      if (!detailsContainer) {
+        return { hasHeading: false, isSkeleton: true, headingText: '' };
       }
-      return false;
+
+      // Check for active skeletons or spinners in details pane
+      const isSkeleton = Boolean(
+        detailsContainer.querySelector(
+          '.artdeco-loader, .loading-spinner, [data-test-loading-indicator], .artdeco-inline-feedback--loading, [aria-busy="true"], .jobs-details__skeleton',
+        ),
+      );
+
+      // Check for the pane heading
+      const headingEl = detailsContainer.querySelector<HTMLElement>(
+        'h1, h2.job-details-jobs-unified-top-card__job-title, .jobs-unified-top-card__job-title, [data-view-name="job-details-top-card"] h1, [data-view-name="job-details-top-card"] h2, .jobs-details__main-content h1',
+      );
+
+      const headingText = (headingEl?.textContent || '').trim();
+      const hasHeading = headingText.length > 0 && !isSkeleton;
+
+      return { hasHeading, isSkeleton, headingText };
     };
 
-    let detailsShown = false;
-    const startTime = Date.now();
-    while (Date.now() - startTime < 3500) {
+    let headingStatus = { hasHeading: false, isSkeleton: true, headingText: '' };
+    const headingWaitStart = Date.now();
+    while (Date.now() - headingWaitStart < 8000) {
       if (this._puppeteerPage) {
         try {
-          detailsShown = Boolean(await this._puppeteerPage.evaluate(checkDetailsShown, jobId));
+          headingStatus = (await this._puppeteerPage.evaluate(checkDetailsPaneHeading, jobId)) as any;
         } catch {
           // ignore
         }
@@ -6959,25 +6973,31 @@ export default class Page {
         try {
           const res = await chrome.scripting.executeScript({
             target: { tabId: this._tabId },
-            func: checkDetailsShown,
+            func: checkDetailsPaneHeading,
             args: [jobId],
           });
-          detailsShown = Boolean(res?.[0]?.result);
+          headingStatus = (res?.[0]?.result as any) || headingStatus;
         } catch {
           // ignore
         }
       }
-      if (detailsShown) break;
+
+      if (headingStatus.hasHeading) {
+        logger.info(
+          `[${new Date().toISOString()}] [clickJobInSearchList] Details pane heading loaded for job ${jobId} after ${((Date.now() - headingWaitStart) / 1000).toFixed(1)}s: "${headingStatus.headingText}".`,
+        );
+        return true;
+      }
+
       await new Promise(r => setTimeout(r, 400));
     }
 
-    if (!detailsShown) {
-      logger.info(
-        `[clickJobInSearchList] Details pane did not show job ${jobId} within 3.5s (single-column layout or delayed). Navigating directly to ${jobUrl}...`,
-      );
-      await this.navigateToDirect(jobUrl);
-    }
-
+    // Details pane is still a skeleton or missing heading after 8s: fall back to direct navigation once
+    logger.warning(
+      `[${new Date().toISOString()}] [clickJobInSearchList] Details pane for job ${jobId} is still a skeleton after 8s (isSkeleton=${headingStatus.isSkeleton}, heading="${headingStatus.headingText}"). Falling back to direct navigation to ${jobUrl}...`,
+    );
+    await this.navigateToDirect(jobUrl);
+    logger.info(`[${new Date().toISOString()}] [clickJobInSearchList] Direct navigation to ${jobUrl} completed.`);
     return true;
   }
 

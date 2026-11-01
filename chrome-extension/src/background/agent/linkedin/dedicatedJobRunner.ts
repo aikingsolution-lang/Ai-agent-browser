@@ -2076,38 +2076,169 @@ export class DedicatedJobRunner {
       );
       const currentPage = await this.browserContext.getCurrentPage();
 
-      // Bounded wait function for LinkedIn search results container
-      const waitForSearchReady = async (maxMs: number): Promise<boolean> => {
+      // Ensure the runner tab is active in its window before scanning (document.visibilityState must be "visible")
+      if (tabId && typeof chrome !== 'undefined' && chrome.tabs?.get && chrome.tabs?.update) {
+        try {
+          const tabInfo = await chrome.tabs.get(tabId);
+          if (!tabInfo.active) {
+            logger.info(
+              `[DedicatedJobRunner] [${new Date().toISOString()}] Runner tab ${tabId} is in background (active=false). Activating tab in window ${tabInfo.windowId} to avoid rendering throttle...`,
+            );
+            await chrome.tabs.update(tabId, { active: true });
+          }
+        } catch (tabErr) {
+          logger.debug('[DedicatedJobRunner] Could not check/update tab active state:', tabErr);
+        }
+      }
+
+      // Pure in-page evaluation helper for search results list settlement & card count
+      const inspectSearchListSettlement = () => {
+        function isInsideDetailsPane(el: Element | null): boolean {
+          if (!el) return false;
+          return Boolean(
+            el.closest(
+              '.scaffold-layout__detail, [data-view-name="job-details"], .jobs-search__job-details, .jobs-search__job-details--container, [data-view-name="job-details-top-card"], .jobs-details__main-content',
+            ),
+          );
+        }
+
+        // Structural card selectors matching readJobListFromSearchPane
+        const componentKeyCards = Array.from(
+          document.querySelectorAll(
+            '[componentkey^="job-card-component-ref-"], [componentkey*="job-card-component-ref"]',
+          ),
+        ).filter(el => !isInsideDetailsPane(el));
+
+        const occludableCards = Array.from(document.querySelectorAll('[data-occludable-job-id]')).filter(
+          el => !isInsideDetailsPane(el),
+        );
+
+        const dataJobIdCards = Array.from(document.querySelectorAll('[data-job-id]')).filter(
+          el => !isInsideDetailsPane(el),
+        );
+
+        const dataViewNameCards = Array.from(
+          document.querySelectorAll('[data-view-name="job-card"], [data-view-name*="job-card"]'),
+        ).filter(el => !isInsideDetailsPane(el));
+
+        const distinctElements = new Set([
+          ...componentKeyCards,
+          ...occludableCards,
+          ...dataJobIdCards,
+          ...dataViewNameCards,
+        ]);
+
+        const pathname = window.location.pathname.toLowerCase();
+        const urlPath = window.location.pathname + window.location.search;
+        const isAuthUrl =
+          pathname.includes('/login') ||
+          pathname.includes('/authwall') ||
+          pathname.includes('/checkpoint') ||
+          window.location.href.toLowerCase().includes('linkedin.com/uas/login');
+        const hasLoginForm = Boolean(
+          document.querySelector(
+            'form.login__form, #username, input[name="session_key"], .authwall-join-form, form[data-id="sign-in-form"]',
+          ),
+        );
+        const isCheckpoint = Boolean(
+          pathname.includes('/checkpoint') || document.querySelector('#checkpointProvider, .checkpoint-challenge'),
+        );
+
+        return {
+          cardCount: distinctElements.size,
+          componentKeyCount: componentKeyCards.length,
+          occludableCount: occludableCards.length,
+          dataJobIdCount: dataJobIdCards.length,
+          dataViewNameCount: dataViewNameCards.length,
+          urlPath,
+          visibilityState: (document.visibilityState || 'unknown') as string,
+          isLoginWall: isAuthUrl || hasLoginForm,
+          isCheckpoint,
+        };
+      };
+
+      // Bounded wait function for LinkedIn search results list settlement (card count stable for ~2s)
+      const waitForSearchSettled = async (
+        maxWaitMs: number,
+      ): Promise<{ settled: boolean; lastStatus: ReturnType<typeof inspectSearchListSettlement> }> => {
         const start = Date.now();
-        while (Date.now() - start < maxMs) {
-          if (!this.isRunning || this.isStopping) return false;
+        let lastCount = 0;
+        let countStableSince = 0;
+        let lastStatus: ReturnType<typeof inspectSearchListSettlement> = {
+          cardCount: 0,
+          componentKeyCount: 0,
+          occludableCount: 0,
+          dataJobIdCount: 0,
+          dataViewNameCount: 0,
+          urlPath: '',
+          visibilityState: 'unknown',
+          isLoginWall: false,
+          isCheckpoint: false,
+        };
+
+        while (Date.now() - start < maxWaitMs) {
+          if (!this.isRunning || this.isStopping) return { settled: false, lastStatus };
           this.checkAbort(runToken, this.abortController?.signal);
 
           try {
-            const isReady = await Promise.race([
-              currentPage.evaluate(() => {
-                const resultsContainer = document.querySelector(
-                  '.jobs-search-results-list, .scaffold-layout__list, [data-view-name="job-card"], [componentkey*="job-card"]',
-                );
-                const hasCards =
-                  document.querySelectorAll('[data-job-id], [componentkey*="job-card-component-ref"]').length > 0;
-                return Boolean(resultsContainer || hasCards);
-              }),
-              new Promise<boolean>(r => setTimeout(() => r(false), 2000)),
+            const status = await Promise.race([
+              currentPage.evaluate(inspectSearchListSettlement),
+              new Promise<ReturnType<typeof inspectSearchListSettlement>>(r =>
+                setTimeout(
+                  () =>
+                    r({
+                      cardCount: 0,
+                      componentKeyCount: 0,
+                      occludableCount: 0,
+                      dataJobIdCount: 0,
+                      dataViewNameCount: 0,
+                      urlPath: '',
+                      visibilityState: 'timeout',
+                      isLoginWall: false,
+                      isCheckpoint: false,
+                    }),
+                  2000,
+                ),
+              ),
             ]);
-            if (isReady) return true;
+
+            lastStatus = status;
+
+            // If backgrounded, activate tab and log
+            if (status.visibilityState === 'hidden' && tabId && typeof chrome !== 'undefined' && chrome.tabs?.update) {
+              logger.info(
+                `[DedicatedJobRunner] [${new Date().toISOString()}] Runner tab ${tabId} has document.visibilityState="hidden". Activating tab to avoid background rendering throttle...`,
+              );
+              await chrome.tabs.update(tabId, { active: true }).catch(() => {});
+            }
+
+            if (status.cardCount >= 1) {
+              if (status.cardCount !== lastCount) {
+                lastCount = status.cardCount;
+                countStableSince = Date.now();
+              } else if (Date.now() - countStableSince >= 2000) {
+                logger.info(
+                  `[DedicatedJobRunner] [${new Date().toISOString()}] Search results list settled with ${status.cardCount} job cards (count stable for 2s). Details pane state did not block settlement.`,
+                );
+                return { settled: true, lastStatus };
+              }
+            } else {
+              lastCount = 0;
+              countStableSince = 0;
+            }
           } catch (evalErr) {
             if (isCdpTabClosedError(evalErr)) throw evalErr;
           }
 
-          const sleepAborted = await this.interruptibleSleep(800);
-          if (sleepAborted || !this.isRunning || this.isStopping) return false;
+          const sleepAborted = await this.interruptibleSleep(400);
+          if (sleepAborted || !this.isRunning || this.isStopping) return { settled: false, lastStatus };
         }
-        return false;
+
+        return { settled: false, lastStatus };
       };
 
       logger.info(
-        `[DedicatedJobRunner] [${new Date().toISOString()}] [Stage 4/5] Waiting for LinkedIn search page settlement (max 20s)...`,
+        `[DedicatedJobRunner] [${new Date().toISOString()}] [Stage 4/5] Waiting for LinkedIn search results list settlement (max 20s)...`,
       );
       this.notifyActivity(
         portToSend,
@@ -2118,17 +2249,17 @@ export class DedicatedJobRunner {
           title: 'Loading Search Page',
           company: 'LinkedIn Runner',
           status: 'running',
-          reason: 'Waiting for search results layout (max 20s)...',
+          reason: 'Waiting for search results list layout (max 20s)...',
           creditsUsed: 0,
         },
         runToken,
       );
 
-      let searchSettled = await waitForSearchReady(20000);
+      let settleResult = await waitForSearchSettled(20000);
 
-      // If page did not settle in 20s (e.g. stuck in skeleton state), reload once and retry
-      if (!searchSettled && this.isRunning && !this.isStopping) {
-        const reloadNotice = 'LinkedIn page did not finish loading in 20s, reloading once...';
+      // If no cards found within 20s: reload once and wait again
+      if (!settleResult.settled && this.isRunning && !this.isStopping) {
+        const reloadNotice = 'No job cards settled in 20s, reloading once...';
         logger.warning(`[DedicatedJobRunner] [${new Date().toISOString()}] ⚠️ ${reloadNotice}`);
         this.notifyStatus(portToSend, `⚠️ ${reloadNotice}`, 'info', runToken);
         this.notifyActivity(
@@ -2156,13 +2287,15 @@ export class DedicatedJobRunner {
           logger.warning('[DedicatedJobRunner] Tab reload failed or timed out:', reloadErr);
         }
 
-        // Retry wait for up to 15s after reload
-        searchSettled = await waitForSearchReady(15000);
+        // Retry wait up to 20s after reload
+        settleResult = await waitForSearchSettled(20000);
       }
 
-      if (!searchSettled && this.isRunning && !this.isStopping) {
-        const failMsg =
-          '🛑 LinkedIn search page failed to finish loading after reload (details pane stayed in skeleton state). Halting run cleanly.';
+      // If still no cards found: stop with a precise message that includes the URL path, whether a login wall
+      // or checkpoint is shown, document.visibilityState, and the number of elements for each card selector. Do not say "details pane".
+      if (!settleResult.settled && this.isRunning && !this.isStopping) {
+        const diag = settleResult.lastStatus;
+        const failMsg = `🛑 No LinkedIn job cards found after reload. Path: "${diag.urlPath}", loginWall: ${diag.isLoginWall}, checkpoint: ${diag.isCheckpoint}, visibility: "${diag.visibilityState}", card selectors: [componentkey: ${diag.componentKeyCount}, occludable: ${diag.occludableCount}, data-job-id: ${diag.dataJobIdCount}, data-view-name: ${diag.dataViewNameCount}].`;
         logger.error(`[DedicatedJobRunner] [${new Date().toISOString()}] ${failMsg}`);
         this.notifyStatus(portToSend, failMsg, 'fail', runToken);
         this.notifyActivity(
@@ -2171,10 +2304,10 @@ export class DedicatedJobRunner {
           {
             jobId: 'page_load_failed',
             url: searchUrl,
-            title: 'Search Page Unavailable',
+            title: 'Search Results Unavailable',
             company: 'LinkedIn Runner',
             status: 'failed',
-            reason: 'LinkedIn search page did not finish loading (timed out)',
+            reason: failMsg,
             creditsUsed: 0,
           },
           runToken,
@@ -4645,6 +4778,11 @@ export class DedicatedJobRunner {
     }
     this.checkAbort(runToken, this.abortController?.signal);
 
+    const currentUrl = (currentPage.url ? currentPage.url() : '').toLowerCase();
+    if (currentUrl.includes(`/jobs/view/${job.jobId}`)) {
+      usedDirectFallback = true;
+    }
+
     // 4b. Pure DOM Top-Card Extraction + Max-3 Retry Guard
     // (generous budget: slow networks / heavy LinkedIn JS often need >10s to render
     // the job details pane; premature failure here caused false "details unavailable" skips)
@@ -4659,6 +4797,37 @@ export class DedicatedJobRunner {
       topCard = {};
     }
     this.checkAbort(runToken, this.abortController?.signal);
+
+    // If details pane was still a skeleton or missing heading in split view, fall back to direct navigation once
+    if (
+      (!topCard.title || !topCard.company) &&
+      !usedDirectFallback &&
+      !topCard.isClosed &&
+      !topCard.isAlreadyApplied &&
+      !topCard.isLoginWall
+    ) {
+      const directJobUrl = `https://www.linkedin.com/jobs/view/${job.jobId}/`;
+      logger.warning(
+        `[DedicatedJobRunner] [${new Date().toISOString()}] Details pane for job ${job.jobId} is still a skeleton/unpopulated. Falling back to direct navigation to ${directJobUrl}...`,
+      );
+      usedDirectFallback = true;
+      try {
+        if (currentPage.puppeteerPage) {
+          await currentPage.puppeteerPage.goto(directJobUrl, { waitUntil: 'domcontentloaded', timeout: 35000 });
+        } else if ((currentPage as any).navigateToDirect) {
+          await (currentPage as any).navigateToDirect(directJobUrl);
+        }
+        logger.info(
+          `[DedicatedJobRunner] [${new Date().toISOString()}] Direct navigation to ${directJobUrl} completed.`,
+        );
+        topCard = await currentPage.extractJobTopCardContext(8000).catch(() => ({}));
+      } catch (navErr) {
+        logger.warning(
+          `[DedicatedJobRunner] [${new Date().toISOString()}] Direct navigation to ${directJobUrl} failed:`,
+          navErr,
+        );
+      }
+    }
 
     let retryCount = 0;
     while (
