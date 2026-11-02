@@ -2,6 +2,7 @@
 import { createLogger } from '@src/background/log';
 import { outcomeForFailure, reportApplication } from '@src/background/services/applicationHistory';
 import type BrowserContext from '@src/background/browser/context';
+import type Page from '@src/background/browser/page';
 import type { Executor } from '@src/background/agent/executor';
 import { backendApiClient, BACKEND_LLM_URL, MINIMUM_RUN_CREDITS } from '@extension/shared';
 import {
@@ -43,6 +44,60 @@ import {
 } from '../llmCircuitBreaker';
 import { AbortRunError, isCdpTabClosedError } from '../../utils';
 export { AbortRunError, isCdpTabClosedError };
+
+export class TimeoutError extends Error {
+  readonly label: string;
+  readonly timeoutMs: number;
+
+  constructor(label: string, timeoutMs: number) {
+    super(`[TimeoutError] ${label} timed out after ${timeoutMs}ms`);
+    this.name = 'TimeoutError';
+    this.label = label;
+    this.timeoutMs = timeoutMs;
+  }
+}
+
+export class StartupBudgetExceededError extends Error {
+  readonly lastStep: string;
+  readonly elapsedMs: number;
+  readonly urlPath: string;
+
+  constructor(lastStep: string, elapsedMs: number, urlPath: string = '') {
+    super(
+      `[StartupBudgetExceededError] Startup budget (90s) exceeded at step "${lastStep}" (${Math.round(elapsedMs / 1000)}s) on path "${urlPath}"`,
+    );
+    this.name = 'StartupBudgetExceededError';
+    this.lastStep = lastStep;
+    this.elapsedMs = elapsedMs;
+    this.urlPath = urlPath;
+  }
+}
+
+export function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      logger.warning(
+        `[DedicatedJobRunner] [${new Date().toISOString()}] [STARTUP TIMEOUT FIRED] ${label} timed out after ${ms}ms`,
+      );
+      reject(new TimeoutError(label, ms));
+    }, ms);
+  });
+
+  return Promise.race([
+    promise.then(
+      res => {
+        if (timer) clearTimeout(timer);
+        return res;
+      },
+      err => {
+        if (timer) clearTimeout(timer);
+        throw err;
+      },
+    ),
+    timeoutPromise,
+  ]);
+}
 import { ChatOpenAI } from '@langchain/openai';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import {
@@ -947,6 +1002,37 @@ export class DedicatedJobRunner {
   private unregisterNavAwayListener: (() => void) | null = null;
   private abortController: AbortController | null = null;
   private onStopCallbacks: Set<() => void> = new Set();
+  private activeStartupWatchdogCleanup: (() => void) | null = null;
+
+  /**
+   * Recovers a wedged Puppeteer/CDP page connection by detaching the debugger and re-attaching a fresh Page.
+   */
+  public async recoverWedgedPage(tabId?: number): Promise<Page> {
+    const targetTabId =
+      tabId || (this.browserContext as any)?._currentTabId || (this.browserContext as any)?.currentTabId;
+    logger.warning(
+      `[DedicatedJobRunner] [${new Date().toISOString()}] Puppeteer/CDP connection wedged on tab ${targetTabId}. Detaching debugger and re-attaching fresh Page...`,
+    );
+
+    if (targetTabId && typeof chrome !== 'undefined' && chrome.debugger?.detach) {
+      await chrome.debugger.detach({ tabId: targetTabId }).catch(() => {});
+    }
+
+    if (targetTabId && this.browserContext) {
+      if (typeof (this.browserContext as any).detachPage === 'function') {
+        await (this.browserContext as any).detachPage(targetTabId).catch(() => {});
+      } else if (typeof (this.browserContext as any).removeAttachedPage === 'function') {
+        (this.browserContext as any).removeAttachedPage(targetTabId);
+      }
+    }
+
+    const freshPage = await withTimeout(
+      this.browserContext!.getCurrentPage(),
+      15000,
+      'recoverWedgedPage getCurrentPage',
+    );
+    return freshPage;
+  }
 
   public isTokenActive(token?: string | null): boolean {
     if (!token) return this.isRunning && !this.isStopping;
@@ -2030,6 +2116,75 @@ export class DedicatedJobRunner {
       logger.info(
         `[DedicatedJobRunner] [${new Date().toISOString()}] [Stage 1/5] Opening/acquiring runner ${runnerMode} (searchUrl: ${searchUrl})...`,
       );
+
+      let currentStartupStep = 'Opening runner tab';
+      let isStartupFinished = false;
+      const startupStartTime = Date.now();
+      const STARTUP_BUDGET_MS = (options as any)?.startupBudgetMs || 90_000;
+      const HEARTBEAT_INTERVAL_MS = (options as any)?.heartbeatIntervalMs || 10_000;
+      let startupTimer: ReturnType<typeof setTimeout> | undefined;
+
+      const logStepStart = (step: string) => {
+        currentStartupStep = step;
+        logger.info(`[DedicatedJobRunner] [${new Date().toISOString()}] [STARTUP STEP START] ${step}`);
+      };
+
+      const logStepExit = (step: string) => {
+        logger.info(
+          `[DedicatedJobRunner] [${new Date().toISOString()}] [STARTUP STEP EXIT] ${step} (${Date.now() - startupStartTime}ms elapsed)`,
+        );
+      };
+
+      const heartbeatTimer = setInterval(() => {
+        if (isStartupFinished || !this.isRunning || this.isStopping) {
+          clearInterval(heartbeatTimer);
+          return;
+        }
+        const elapsedSec = Math.round((Date.now() - startupStartTime) / 1000);
+        const heartbeatMsg = `Still working: ${currentStartupStep} (${elapsedSec}s)`;
+        logger.info(`[DedicatedJobRunner] [${new Date().toISOString()}] [Heartbeat] ${heartbeatMsg}`);
+        this.notifyStatus(portToSend, heartbeatMsg, 'info', runToken);
+        this.notifyActivity(
+          portToSend,
+          onLiveActivity,
+          {
+            jobId: 'startup_heartbeat',
+            url: searchUrl,
+            title: 'LinkedIn Autonomous Loop',
+            company: 'LinkedIn Runner',
+            status: 'running',
+            reason: heartbeatMsg,
+            creditsUsed: 0,
+          },
+          runToken,
+        );
+      }, HEARTBEAT_INTERVAL_MS);
+
+      this.activeStartupWatchdogCleanup = () => {
+        isStartupFinished = true;
+        if (startupTimer) clearTimeout(startupTimer);
+        clearInterval(heartbeatTimer);
+      };
+
+      let currentPage: any;
+      const startupBudgetPromise = new Promise<never>((_, reject) => {
+        startupTimer = setTimeout(() => {
+          const elapsedMs = Date.now() - startupStartTime;
+          let currentUrlPath = '';
+          try {
+            currentUrlPath = typeof currentPage?.url === 'function' ? currentPage.url() : searchUrl;
+          } catch {
+            currentUrlPath = searchUrl;
+          }
+          reject(new StartupBudgetExceededError(currentStartupStep, elapsedMs, currentUrlPath));
+        }, STARTUP_BUDGET_MS);
+      });
+
+      const awaitStartupStep = async <T>(stepPromise: Promise<T>): Promise<T> => {
+        if (isStartupFinished) return stepPromise;
+        return await Promise.race([stepPromise, startupBudgetPromise]);
+      };
+
       if (runnerMode === 'tab') {
         this.notifyStatus(
           portToSend,
@@ -2043,11 +2198,22 @@ export class DedicatedJobRunner {
 
       let runnerTarget: { windowId: number; tabId: number; mode?: RunnerMode };
       try {
-        runnerTarget = await dedicatedWindowManager.getOrCreateRunnerWindow(searchUrl, {
-          mode: runnerMode,
-          allowedDomains: [/linkedin\.com/i, /^about:blank$/i],
-        });
+        logStepStart('acquiring runner target');
+        runnerTarget = await awaitStartupStep(
+          withTimeout(
+            dedicatedWindowManager.getOrCreateRunnerWindow(searchUrl, {
+              mode: runnerMode,
+              allowedDomains: [/linkedin\.com/i, /^about:blank$/i],
+            }),
+            15000,
+            'getOrCreateRunnerWindow',
+          ),
+        );
+        logStepExit('acquiring runner target');
       } catch (err: any) {
+        if (err instanceof StartupBudgetExceededError || err?.name === 'StartupBudgetExceededError') {
+          throw err;
+        }
         const openErrMsg = `🛑 Failed to open runner ${runnerMode}: ${err?.message || 'Unknown error'}. Please check browser permissions and try again.`;
         logger.error(`[DedicatedJobRunner] [${new Date().toISOString()}] ${openErrMsg}`);
         this.notifyStatus(portToSend, openErrMsg, 'fail', runToken);
@@ -2102,21 +2268,44 @@ export class DedicatedJobRunner {
       logger.info(
         `[DedicatedJobRunner] [${new Date().toISOString()}] [Stage 3/5] Attaching browser page context for tab ${tabId}...`,
       );
-      const currentPage = await this.browserContext.getCurrentPage();
+      logStepStart('attaching page context');
+      try {
+        currentPage = await awaitStartupStep(
+          withTimeout(this.browserContext!.getCurrentPage(), 15000, 'getCurrentPage'),
+        );
+        logStepExit('attaching page context');
+      } catch (attachErr: any) {
+        if (attachErr instanceof StartupBudgetExceededError || attachErr?.name === 'StartupBudgetExceededError') {
+          throw attachErr;
+        }
+        if (attachErr instanceof TimeoutError || attachErr?.name === 'TimeoutError') {
+          logger.warning(`[DedicatedJobRunner] Attaching page context timed out. Recovering wedged page connection...`);
+          currentPage = await awaitStartupStep(this.recoverWedgedPage(tabId));
+          logStepExit('attaching page context (recovered)');
+        } else {
+          throw attachErr;
+        }
+      }
 
       // Ensure the runner tab is active in its window before scanning (document.visibilityState must be "visible")
       if (tabId && typeof chrome !== 'undefined' && chrome.tabs?.get && chrome.tabs?.update) {
+        logStepStart('activating runner tab');
         try {
-          const tabInfo = await chrome.tabs.get(tabId);
+          const tabInfo = await awaitStartupStep(withTimeout(chrome.tabs.get(tabId), 8000, 'chrome.tabs.get'));
           if (!tabInfo.active) {
             logger.info(
               `[DedicatedJobRunner] [${new Date().toISOString()}] Runner tab ${tabId} is in background (active=false). Activating tab in window ${tabInfo.windowId} to avoid rendering throttle...`,
             );
-            await chrome.tabs.update(tabId, { active: true });
+            await awaitStartupStep(
+              withTimeout(chrome.tabs.update(tabId, { active: true }), 8000, 'chrome.tabs.update'),
+            );
           }
           if (tabInfo.windowId && chrome.windows?.update) {
-            await chrome.windows.update(tabInfo.windowId, { focused: true }).catch(() => {});
+            await awaitStartupStep(
+              withTimeout(chrome.windows.update(tabInfo.windowId, { focused: true }), 8000, 'chrome.windows.update'),
+            ).catch(() => {});
           }
+          logStepExit('activating runner tab');
         } catch (tabErr) {
           logger.debug('[DedicatedJobRunner] Could not check/update tab active state:', tabErr);
         }
@@ -2219,26 +2408,37 @@ export class DedicatedJobRunner {
           this.checkAbort(runToken, this.abortController?.signal);
 
           try {
-            const status = await Promise.race([
-              currentPage.evaluate(inspectSearchListSettlement),
-              new Promise<ReturnType<typeof inspectSearchListSettlement>>(r =>
-                setTimeout(
-                  () =>
-                    r({
-                      cardCount: 0,
-                      componentKeyCount: 0,
-                      occludableCount: 0,
-                      dataJobIdCount: 0,
-                      dataViewNameCount: 0,
-                      urlPath: '',
-                      visibilityState: 'timeout',
-                      isLoginWall: false,
-                      isCheckpoint: false,
-                    }),
-                  6000,
+            const evaluateCall =
+              typeof currentPage?.evaluate === 'function'
+                ? currentPage.evaluate(inspectSearchListSettlement)
+                : typeof currentPage?.puppeteerPage?.evaluate === 'function'
+                  ? currentPage.puppeteerPage.evaluate(inspectSearchListSettlement)
+                  : Promise.resolve(lastStatus);
+
+            const status = await withTimeout(
+              Promise.race([
+                evaluateCall,
+                new Promise<ReturnType<typeof inspectSearchListSettlement>>(r =>
+                  setTimeout(
+                    () =>
+                      r({
+                        cardCount: 0,
+                        componentKeyCount: 0,
+                        occludableCount: 0,
+                        dataJobIdCount: 0,
+                        dataViewNameCount: 0,
+                        urlPath: '',
+                        visibilityState: 'timeout',
+                        isLoginWall: false,
+                        isCheckpoint: false,
+                      }),
+                    6000,
+                  ),
                 ),
-              ),
-            ]);
+              ]),
+              8000,
+              'waitForSearchSettled evaluate',
+            );
 
             lastStatus = status;
 
@@ -2247,7 +2447,7 @@ export class DedicatedJobRunner {
               logger.info(
                 `[DedicatedJobRunner] [${new Date().toISOString()}] Runner tab ${tabId} has document.visibilityState="hidden". Activating tab to avoid background rendering throttle...`,
               );
-              await chrome.tabs.update(tabId, { active: true }).catch(() => {});
+              await withTimeout(chrome.tabs.update(tabId, { active: true }), 8000, 'activate tab').catch(() => {});
             }
 
             if (status.cardCount >= 1) {
@@ -2271,9 +2471,18 @@ export class DedicatedJobRunner {
               lastCount = 0;
               countStableSince = 0;
             }
-          } catch (evalErr) {
-            // Transient CDP / navigation errors during page load are caught and logged; do not crash the wait loop
-            logger.debug('[DedicatedJobRunner] Transient error during search settlement inspection:', evalErr);
+          } catch (evalErr: any) {
+            if (evalErr instanceof TimeoutError || evalErr?.name === 'TimeoutError') {
+              logger.warning(`[DedicatedJobRunner] inspectSearchListSettlement evaluate timed out:`, evalErr);
+              try {
+                currentPage = await this.recoverWedgedPage(tabId);
+              } catch (recErr) {
+                logger.warning(`[DedicatedJobRunner] Page recovery during settlement wait failed:`, recErr);
+              }
+            } else {
+              // Transient CDP / navigation errors during page load are caught and logged; do not crash the wait loop
+              logger.debug('[DedicatedJobRunner] Transient error during search settlement inspection:', evalErr);
+            }
           }
 
           const sleepAborted = await this.interruptibleSleep(400);
@@ -2301,11 +2510,46 @@ export class DedicatedJobRunner {
         runToken,
       );
 
-      let settleResult = await waitForSearchSettled(20000);
+      logStepStart('waiting for search results list settlement');
+      let settleResult = await awaitStartupStep(waitForSearchSettled(20000));
+      logStepExit('waiting for search results list settlement');
 
       // Fast active probe before considering reload: if readJobListFromSearchPane already finds cards, don't reload!
       if (!settleResult.settled && this.isRunning && !this.isStopping && !settleResult.lastStatus.isLoginWall) {
-        const directProbe = await currentPage.readJobListFromSearchPane?.(1).catch(() => []);
+        logStepStart('running active search results probe');
+        let directProbe: any[] = [];
+        try {
+          directProbe = await awaitStartupStep(
+            withTimeout(
+              currentPage.readJobListFromSearchPane?.(1) || Promise.resolve([]),
+              12000,
+              'direct probe readJobListFromSearchPane',
+            ),
+          );
+          logStepExit('running active search results probe');
+        } catch (probeErr: any) {
+          if (probeErr instanceof StartupBudgetExceededError || probeErr?.name === 'StartupBudgetExceededError') {
+            throw probeErr;
+          }
+          if (probeErr instanceof TimeoutError || probeErr?.name === 'TimeoutError') {
+            logger.warning(
+              `[DedicatedJobRunner] direct probe timed out. Detaching wedged debugger and retrying once...`,
+            );
+            currentPage = await awaitStartupStep(this.recoverWedgedPage(tabId));
+            try {
+              directProbe = await awaitStartupStep(
+                withTimeout(
+                  currentPage.readJobListFromSearchPane?.(1) || Promise.resolve([]),
+                  12000,
+                  'direct probe readJobListFromSearchPane retry',
+                ),
+              );
+              logStepExit('running active search results probe (retry)');
+            } catch (retryErr) {
+              logger.warning(`[DedicatedJobRunner] direct probe retry also failed:`, retryErr);
+            }
+          }
+        }
         if (directProbe && directProbe.length > 0) {
           logger.info(
             `[DedicatedJobRunner] [${new Date().toISOString()}] Search results active probe found ${directProbe.length} job cards. Skipping reload and proceeding with scan.`,
@@ -2340,12 +2584,20 @@ export class DedicatedJobRunner {
           runToken,
         );
 
+        logStepStart('reloading runner tab');
         try {
           if (currentPage.tabId && typeof chrome !== 'undefined' && chrome.tabs?.reload) {
-            await chrome.tabs.reload(currentPage.tabId);
+            await awaitStartupStep(withTimeout(chrome.tabs.reload(currentPage.tabId), 10000, 'chrome.tabs.reload'));
           } else if (currentPage.puppeteerPage) {
-            await currentPage.puppeteerPage.reload({ waitUntil: 'domcontentloaded', timeout: 20000 });
+            await awaitStartupStep(
+              withTimeout(
+                currentPage.puppeteerPage.reload({ waitUntil: 'domcontentloaded', timeout: 15000 }),
+                15000,
+                'puppeteerPage.reload',
+              ),
+            );
           }
+          logStepExit('reloading runner tab');
         } catch (reloadErr) {
           logger.warning('[DedicatedJobRunner] Tab reload failed or timed out:', reloadErr);
         }
@@ -2357,7 +2609,9 @@ export class DedicatedJobRunner {
         }
 
         // Retry wait up to 20s after reload
-        settleResult = await waitForSearchSettled(20000);
+        logStepStart('waiting for search results settlement after reload');
+        settleResult = await awaitStartupStep(waitForSearchSettled(20000));
+        logStepExit('waiting for search results settlement after reload');
       }
 
       // If still no cards found:
@@ -2369,7 +2623,44 @@ export class DedicatedJobRunner {
           );
         } else {
           // Double-check: can readJobListFromSearchPane find cards directly?
-          const fallbackCheck = await currentPage.readJobListFromSearchPane?.(2).catch(() => []);
+          logStepStart('fallback search results probe');
+          let fallbackCheck: any[] = [];
+          try {
+            fallbackCheck = await awaitStartupStep(
+              withTimeout(
+                currentPage.readJobListFromSearchPane?.(2) || Promise.resolve([]),
+                12000,
+                'fallback probe readJobListFromSearchPane',
+              ),
+            );
+            logStepExit('fallback search results probe');
+          } catch (fallbackErr: any) {
+            if (
+              fallbackErr instanceof StartupBudgetExceededError ||
+              fallbackErr?.name === 'StartupBudgetExceededError'
+            ) {
+              throw fallbackErr;
+            }
+            if (fallbackErr instanceof TimeoutError || fallbackErr?.name === 'TimeoutError') {
+              logger.warning(
+                `[DedicatedJobRunner] fallback probe timed out. Detaching wedged debugger and retrying once...`,
+              );
+              currentPage = await awaitStartupStep(this.recoverWedgedPage(tabId));
+              try {
+                fallbackCheck = await awaitStartupStep(
+                  withTimeout(
+                    currentPage.readJobListFromSearchPane?.(2) || Promise.resolve([]),
+                    12000,
+                    'fallback probe readJobListFromSearchPane retry',
+                  ),
+                );
+                logStepExit('fallback search results probe (retry)');
+              } catch (retryErr) {
+                logger.warning(`[DedicatedJobRunner] fallback probe retry also failed:`, retryErr);
+              }
+            }
+          }
+
           if (fallbackCheck && fallbackCheck.length > 0) {
             logger.info(
               `[DedicatedJobRunner] readJobListFromSearchPane found ${fallbackCheck.length} job cards despite settlement timeout. Proceeding with scan.`,
@@ -2401,7 +2692,13 @@ export class DedicatedJobRunner {
       this.checkAbort(runToken, this.abortController?.signal);
 
       // Fast, bounded visual runner marker
-      await this.markRunnerTabVisually(currentPage);
+      logStepStart('marking runner tab visually');
+      await awaitStartupStep(withTimeout(this.markRunnerTabVisually(currentPage), 8000, 'markRunnerTabVisually')).catch(
+        mErr => {
+          logger.warning('[DedicatedJobRunner] markRunnerTabVisually timed out or failed (non-blocking):', mErr);
+        },
+      );
+      logStepExit('marking runner tab visually');
 
       const devtoolsNotice =
         '⚠️ DevTools detected on job tab - this may cause a disconnect if DevTools is kept open or toggled.';
@@ -2425,29 +2722,37 @@ export class DedicatedJobRunner {
       logger.info(
         `[DedicatedJobRunner] [${new Date().toISOString()}] [Stage 5/5] Checking login-wall status (bounded)...`,
       );
-      const isLoginWall = await Promise.race([
-        currentPage.evaluate(() => {
-          const url = window.location.href.toLowerCase();
-          const pathname = window.location.pathname.toLowerCase();
-          const isAuthUrl =
-            pathname.includes('/login') ||
-            pathname.includes('/authwall') ||
-            pathname.includes('/checkpoint') ||
-            url.includes('linkedin.com/uas/login');
-          const hasLoginForm = !!(
-            document.querySelector('form.login__form') ||
-            document.querySelector('#username') ||
-            document.querySelector('input[name="session_key"]') ||
-            document.querySelector('.authwall-join-form') ||
-            document.querySelector('form[data-id="sign-in-form"]')
-          );
-          const hasJobContent = !!document.querySelector(
-            '.jobs-unified-top-card, .jobs-search__job-details--container, div[data-job-id], h1.job-details-jobs-unified-top-card__job-title, .topcard',
-          );
-          return isAuthUrl || (hasLoginForm && !hasJobContent);
-        }),
-        new Promise<boolean>(r => setTimeout(() => r(false), 3000)),
-      ]).catch(() => false);
+      logStepStart('checking login-wall status');
+      const isLoginWall = await awaitStartupStep(
+        withTimeout(
+          Promise.race([
+            currentPage.evaluate(() => {
+              const url = window.location.href.toLowerCase();
+              const pathname = window.location.pathname.toLowerCase();
+              const isAuthUrl =
+                pathname.includes('/login') ||
+                pathname.includes('/authwall') ||
+                pathname.includes('/checkpoint') ||
+                url.includes('linkedin.com/uas/login');
+              const hasLoginForm = !!(
+                document.querySelector('form.login__form') ||
+                document.querySelector('#username') ||
+                document.querySelector('input[name="session_key"]') ||
+                document.querySelector('.authwall-join-form') ||
+                document.querySelector('form[data-id="sign-in-form"]')
+              );
+              const hasJobContent = !!document.querySelector(
+                '.jobs-unified-top-card, .jobs-search__job-details--container, div[data-job-id], h1.job-details-jobs-unified-top-card__job-title, .topcard',
+              );
+              return isAuthUrl || (hasLoginForm && !hasJobContent);
+            }),
+            new Promise<boolean>(r => setTimeout(() => r(false), 3000)),
+          ]),
+          8000,
+          'login-wall check',
+        ),
+      ).catch(() => false);
+      logStepExit('checking login-wall status');
 
       if (isLoginWall) {
         this.notifyStatus(
@@ -2502,8 +2807,17 @@ export class DedicatedJobRunner {
       }
 
       // 4.1 Check if runner tab is already on an active LinkedIn search page
+      logStepStart('inspecting runner tab url');
       try {
-        const currentUrl = (await currentPage.url?.()) || '';
+        const currentUrl =
+          (await awaitStartupStep(
+            withTimeout(
+              Promise.resolve(typeof currentPage?.url === 'function' ? currentPage.url() : ''),
+              8000,
+              'currentPage.url',
+            ),
+          )) || '';
+        logStepExit('inspecting runner tab url');
         if (currentUrl.includes('/jobs/search')) {
           const parsedUrl = new URL(currentUrl);
           const activeLocation = parsedUrl.searchParams.get('location');
@@ -2589,7 +2903,56 @@ export class DedicatedJobRunner {
             `🔍 Scanning LinkedIn job search results ${searchLabel} (attempt ${readAttempts}/3)...`,
             'info',
           );
-          jobCards = await currentPage.readJobListFromSearchPane(Math.max(readAttempts + 2, 4));
+          currentStartupStep = `scanning search results (attempt ${readAttempts}/3)`;
+          logStepStart(currentStartupStep);
+          try {
+            const scanPromise = withTimeout<any[]>(
+              currentPage.readJobListFromSearchPane(Math.max(readAttempts + 2, 4)),
+              15000,
+              `scan readJobListFromSearchPane attempt ${readAttempts}`,
+            );
+            jobCards = (!isStartupFinished ? await awaitStartupStep(scanPromise) : await scanPromise) || [];
+            logStepExit(currentStartupStep);
+          } catch (scanErr: any) {
+            if (scanErr instanceof StartupBudgetExceededError || scanErr?.name === 'StartupBudgetExceededError') {
+              throw scanErr;
+            }
+            if (scanErr instanceof TimeoutError || scanErr?.name === 'TimeoutError') {
+              logger.warning(
+                `[DedicatedJobRunner] [${new Date().toISOString()}] Scan readJobListFromSearchPane attempt ${readAttempts} timed out. Treating connection as wedged: detaching and retrying once...`,
+              );
+              try {
+                currentPage = await this.recoverWedgedPage(currentPage?.tabId);
+                const retryPromise = withTimeout<any[]>(
+                  currentPage.readJobListFromSearchPane(Math.max(readAttempts + 2, 4)),
+                  15000,
+                  `scan readJobListFromSearchPane retry attempt ${readAttempts}`,
+                );
+                jobCards = (!isStartupFinished ? await awaitStartupStep(retryPromise) : await retryPromise) || [];
+                logStepExit(`${currentStartupStep} retry`);
+              } catch (retryErr: any) {
+                logger.warning(
+                  `[DedicatedJobRunner] Scan readJobListFromSearchPane retry attempt ${readAttempts} also failed:`,
+                  retryErr,
+                );
+                if (retryErr instanceof StartupBudgetExceededError || retryErr?.name === 'StartupBudgetExceededError') {
+                  throw retryErr;
+                }
+              }
+            } else {
+              logger.warning(`[DedicatedJobRunner] Scan readJobListFromSearchPane error:`, scanErr);
+            }
+          }
+
+          if (!isStartupFinished) {
+            isStartupFinished = true;
+            if (startupTimer) clearTimeout(startupTimer);
+            if (heartbeatTimer) clearInterval(heartbeatTimer);
+            logger.info(
+              `[DedicatedJobRunner] [${new Date().toISOString()}] [Startup Watchdog] First scan completed in ${Date.now() - startupStartTime}ms. Startup watchdog deactivated.`,
+            );
+          }
+
           if (jobCards.length === 0 && readAttempts < 3) {
             const sleepAborted = await this.interruptibleSleep(2500);
             if (sleepAborted || !this.isRunning) break;
@@ -2907,6 +3270,31 @@ export class DedicatedJobRunner {
       this.cleanupRun(summaryMsg, stats, runToken);
       return { status: 'success', message: summaryMsg, stats };
     } catch (err: any) {
+      if (err instanceof StartupBudgetExceededError || err?.name === 'StartupBudgetExceededError') {
+        const startupErr = err as StartupBudgetExceededError;
+        const elapsedSec = Math.round((startupErr.elapsedMs || 90000) / 1000);
+        const currentUrlPath = startupErr.urlPath || '';
+        const budgetErrMsg = `🛑 LinkedIn startup watchdog exceeded 90s budget at step "${startupErr.lastStep || 'startup'}" (${elapsedSec}s) on path "${currentUrlPath}". Application stopped cleanly. Please retry.`;
+        logger.error(`[DedicatedJobRunner] [${new Date().toISOString()}] ${budgetErrMsg}`);
+        this.notifyActivity(
+          portToSend,
+          onLiveActivity,
+          {
+            jobId: 'startup_timeout',
+            url: currentUrlPath,
+            title: 'Startup Timeout',
+            company: 'LinkedIn Runner',
+            status: 'failed',
+            reason: budgetErrMsg,
+            creditsUsed: 0,
+          },
+          runToken,
+        );
+        this.notifyStatus(portToSend, budgetErrMsg, 'fail', runToken);
+        await DailyQuotaManager.releaseOwner('runner');
+        this.cleanupRun(budgetErrMsg, stats, runToken);
+        return { status: 'error', message: budgetErrMsg, stats };
+      }
       if (
         err instanceof AbortRunError ||
         this.isStopping ||
@@ -2933,6 +3321,12 @@ export class DedicatedJobRunner {
       this.cleanupRun(`Run ended with error: ${errMsg}`, stats, runToken);
       return { status: 'error', message: errMsg, stats };
     } finally {
+      if (this.activeStartupWatchdogCleanup) {
+        try {
+          this.activeStartupWatchdogCleanup();
+        } catch {}
+        this.activeStartupWatchdogCleanup = null;
+      }
       this.isLoopFinished = true;
       this.loopFinishedResolver?.();
       this.loopFinishedResolver = null;
@@ -7126,36 +7520,40 @@ export class DedicatedJobRunner {
             : null;
       if (!evaluateFn) return;
 
-      await evaluateFn(() => {
-        if (!document.title.startsWith('🤖 [Runner]')) {
-          document.title = `🤖 [Runner] ${document.title}`;
-        }
-        if (!document.getElementById('nanobrowser-runner-indicator') && document.body) {
-          const pill = document.createElement('div');
-          pill.id = 'nanobrowser-runner-indicator';
-          pill.innerHTML = `
-            <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#22c55e;box-shadow:0 0 6px #22c55e;"></span>
-            <span style="color:#e2e8f0;font-weight:600;font-size:11px;font-family:system-ui,-apple-system,sans-serif;letter-spacing:0.3px;">JobForm Automator Runner Active</span>
-          `;
-          Object.assign(pill.style, {
-            position: 'fixed',
-            top: '10px',
-            right: '16px',
-            zIndex: '2147483647',
-            background: 'rgba(15, 23, 42, 0.92)',
-            border: '1px solid rgba(56, 189, 248, 0.5)',
-            borderRadius: '9999px',
-            padding: '4px 12px',
-            display: 'flex',
-            alignItems: 'center',
-            gap: '8px',
-            boxShadow: '0 4px 12px rgba(0, 0, 0, 0.3)',
-            pointerEvents: 'none',
-            userSelect: 'none',
-          });
-          document.body.appendChild(pill);
-        }
-      });
+      await withTimeout(
+        evaluateFn(() => {
+          if (!document.title.startsWith('🤖 [Runner]')) {
+            document.title = `🤖 [Runner] ${document.title}`;
+          }
+          if (!document.getElementById('nanobrowser-runner-indicator') && document.body) {
+            const pill = document.createElement('div');
+            pill.id = 'nanobrowser-runner-indicator';
+            pill.innerHTML = `
+              <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#22c55e;box-shadow:0 0 6px #22c55e;"></span>
+              <span style="color:#e2e8f0;font-weight:600;font-size:11px;font-family:system-ui,-apple-system,sans-serif;letter-spacing:0.3px;">JobForm Automator Runner Active</span>
+            `;
+            Object.assign(pill.style, {
+              position: 'fixed',
+              top: '10px',
+              right: '16px',
+              zIndex: '2147483647',
+              background: 'rgba(15, 23, 42, 0.92)',
+              border: '1px solid rgba(56, 189, 248, 0.5)',
+              borderRadius: '9999px',
+              padding: '4px 12px',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '8px',
+              boxShadow: '0 4px 12px rgba(0, 0, 0, 0.3)',
+              pointerEvents: 'none',
+              userSelect: 'none',
+            });
+            document.body.appendChild(pill);
+          }
+        }),
+        6000,
+        'markRunnerTabVisually evaluate',
+      );
     } catch {
       // Non-fatal if page navigation is currently in flight
     }
@@ -7164,6 +7562,12 @@ export class DedicatedJobRunner {
   private cleanupRun(summaryMsg?: string, stats?: any, runToken?: string): void {
     if (runToken && this.activeRunToken && runToken !== this.activeRunToken) {
       return;
+    }
+    if (this.activeStartupWatchdogCleanup) {
+      try {
+        this.activeStartupWatchdogCleanup();
+      } catch {}
+      this.activeStartupWatchdogCleanup = null;
     }
     void DailyQuotaManager.releaseOwner('runner');
     if (this.activePort && !this.hasSentRunFinished) {

@@ -211,9 +211,19 @@ export default class Page {
     `);
   }
 
+  // In-flight guard to prevent piling up evaluates on wedged connections
+  private _isEvaluating = false;
+
+  get isEvaluating(): boolean {
+    return this._isEvaluating;
+  }
+
   async detachPuppeteer(): Promise<void> {
+    this._isEvaluating = false;
     if (this._browser) {
-      await this._browser.disconnect();
+      try {
+        await Promise.race([this._browser.disconnect(), new Promise(r => setTimeout(r, 2000))]);
+      } catch {}
       this._browser = null;
       this._puppeteerPage = null;
       // reset the state
@@ -223,30 +233,62 @@ export default class Page {
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   async evaluate<R = any>(pageFunction: any, ...args: any[]): Promise<R> {
-    if (this._puppeteerPage) {
-      try {
-        return await this._puppeteerPage.evaluate(pageFunction, ...args);
-      } catch (pErr) {
-        if (isCdpTabClosedError(pErr)) throw pErr;
-        logger.debug('[Page.evaluate] Puppeteer evaluate threw, trying chrome.scripting fallback:', pErr);
-      }
+    if (this._isEvaluating) {
+      throw new Error('[Page.evaluate] An evaluate call is already in flight on this page');
     }
-
-    if (this._tabId && typeof chrome !== 'undefined' && chrome.scripting?.executeScript) {
-      try {
-        const results = await chrome.scripting.executeScript({
-          target: { tabId: this._tabId },
-          func: pageFunction,
-          args: args.length > 0 ? args : undefined,
-        });
-        return results?.[0]?.result as R;
-      } catch (sErr) {
-        if (isCdpTabClosedError(sErr)) throw sErr;
-        throw sErr;
+    this._isEvaluating = true;
+    try {
+      if (this._puppeteerPage) {
+        try {
+          let evalTimer: any;
+          const puppeteerTimeout = new Promise<never>((_, reject) => {
+            evalTimer = setTimeout(() => reject(new Error('Puppeteer evaluate timed out after 10000ms')), 10000);
+          });
+          const result = await Promise.race([
+            this._puppeteerPage.evaluate(pageFunction, ...args).finally(() => {
+              if (evalTimer) clearTimeout(evalTimer);
+            }),
+            puppeteerTimeout,
+          ]);
+          return result;
+        } catch (pErr) {
+          if (isCdpTabClosedError(pErr)) throw pErr;
+          logger.debug(
+            '[Page.evaluate] Puppeteer evaluate threw or timed out, trying chrome.scripting fallback:',
+            pErr,
+          );
+        }
       }
-    }
 
-    throw new Error('Neither Puppeteer nor chrome.scripting available for evaluate');
+      if (this._tabId && typeof chrome !== 'undefined' && chrome.scripting?.executeScript) {
+        try {
+          let scriptTimer: any;
+          const scriptTimeout = new Promise<never>((_, reject) => {
+            scriptTimer = setTimeout(() => reject(new Error('chrome.scripting timed out after 10000ms')), 10000);
+          });
+          const results = await Promise.race([
+            chrome.scripting
+              .executeScript({
+                target: { tabId: this._tabId },
+                func: pageFunction,
+                args: args.length > 0 ? args : undefined,
+              })
+              .finally(() => {
+                if (scriptTimer) clearTimeout(scriptTimer);
+              }),
+            scriptTimeout,
+          ]);
+          return (results as any)?.[0]?.result as R;
+        } catch (sErr) {
+          if (isCdpTabClosedError(sErr)) throw sErr;
+          throw sErr;
+        }
+      }
+
+      throw new Error('Neither Puppeteer nor chrome.scripting available for evaluate');
+    } finally {
+      this._isEvaluating = false;
+    }
   }
 
   async removeHighlight(): Promise<void> {
@@ -6739,7 +6781,19 @@ export default class Page {
 
     if (this._puppeteerPage) {
       try {
-        const res = (await this._puppeteerPage.evaluate(extractCardsInPage, scrollAttempts)) as any;
+        let evalTimer: any;
+        const puppeteerTimeout = new Promise<never>((_, reject) => {
+          evalTimer = setTimeout(
+            () => reject(new Error('Puppeteer evaluate timed out in readJobListFromSearchPane')),
+            10000,
+          );
+        });
+        const res = (await Promise.race([
+          this._puppeteerPage.evaluate(extractCardsInPage, scrollAttempts).finally(() => {
+            if (evalTimer) clearTimeout(evalTimer);
+          }),
+          puppeteerTimeout,
+        ])) as any;
         if (res && typeof res === 'object') {
           if ('diagnostic' in res && typeof res.diagnostic === 'string') {
             this.lastScanDiagnostic = res.diagnostic;
@@ -6750,7 +6804,7 @@ export default class Page {
         }
       } catch (err) {
         logger.warning(
-          '[readJobListFromSearchPane] Puppeteer evaluation failed, trying chrome.scripting fallback:',
+          '[readJobListFromSearchPane] Puppeteer evaluation failed or timed out, trying chrome.scripting fallback:',
           err,
         );
       }
@@ -6758,12 +6812,26 @@ export default class Page {
 
     if (this._tabId && typeof chrome !== 'undefined' && chrome.scripting?.executeScript) {
       try {
-        const results = await chrome.scripting.executeScript({
-          target: { tabId: this._tabId },
-          func: extractCardsInPage,
-          args: [scrollAttempts],
+        let scriptTimer: any;
+        const scriptTimeout = new Promise<never>((_, reject) => {
+          scriptTimer = setTimeout(
+            () => reject(new Error('chrome.scripting timed out in readJobListFromSearchPane')),
+            10000,
+          );
         });
-        const res = results?.[0]?.result as any;
+        const results = await Promise.race([
+          chrome.scripting
+            .executeScript({
+              target: { tabId: this._tabId },
+              func: extractCardsInPage,
+              args: [scrollAttempts],
+            })
+            .finally(() => {
+              if (scriptTimer) clearTimeout(scriptTimer);
+            }),
+          scriptTimeout,
+        ]);
+        const res = (results as any)?.[0]?.result as any;
         if (res && typeof res === 'object') {
           if ('diagnostic' in res && typeof res.diagnostic === 'string') {
             this.lastScanDiagnostic = res.diagnostic;
