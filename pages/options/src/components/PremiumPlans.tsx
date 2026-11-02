@@ -1,393 +1,288 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { cloudApiSettingsStore, type CloudApiSettingsConfig } from '@extension/storage';
-import { backendApiClient, waitForCheckoutActivation } from '@extension/shared';
+import React from 'react';
 import {
-  FiCheck,
-  FiZap,
-  FiShield,
-  FiCpu,
-  FiTrendingUp,
-  FiCreditCard,
-  FiCheckCircle,
-  FiLock,
-  FiClock,
-} from 'react-icons/fi';
+  isPremiumActive,
+  JOBFORM_PRICING_URL,
+  openJobformPricing,
+  openJobformSignIn,
+  useJobformPayment,
+  type JobformPlan,
+} from '@extension/shared';
+import type { PremiumStatus } from '@extension/storage';
+import { FiCheck, FiShield, FiExternalLink, FiRefreshCw, FiAlertTriangle, FiCheckCircle } from 'react-icons/fi';
+import { AiOutlineLoading3Quarters } from 'react-icons/ai';
 
 interface PremiumPlansProps {
   isDarkMode: boolean;
 }
 
+/** What Premium / Diamond give in the extension (enforced by the backend). */
+const EXTENSION_BENEFITS = [
+  'Up to 300 applications a day',
+  'AI Auto Apply included, no credits used',
+  'Premium Mode: 1,000 AI tasks a month',
+];
+const FREE_DAILY_APPLICATIONS = 10;
+/** The free plan, as the website's pricing page names and describes it. */
+const BASIC_PLAN = { name: 'Basic', description: 'Essential Tools to Kickstart Your Job Search' };
+
+const formatDate = (iso?: string | null) =>
+  iso && !Number.isNaN(Date.parse(iso))
+    ? new Date(iso).toLocaleDateString([], { day: 'numeric', month: 'short', year: 'numeric' })
+    : null;
+
+function planAction(plan: JobformPlan, premium: PremiumStatus | null): 'buy' | 'upgrade' | 'current' | 'included' {
+  const tier = isPremiumActive(premium) ? premium!.tier : 'Free';
+  if (tier === plan.id) return 'current';
+  if (tier === 'Diamond') return 'included';
+  return tier === 'Premium' ? 'upgrade' : 'buy';
+}
+
+/**
+ * JobForm Automator Premium / Diamond — the same plans and prices as jobformautomator.com. Choosing a
+ * plan opens the website's checkout page; the plan unlocks here once the website has verified the
+ * payment (its `paymentSuccessfull` event, then the backend confirms the plan).
+ */
 export const PremiumPlans: React.FC<PremiumPlansProps> = ({ isDarkMode }) => {
-  const [settings, setSettings] = useState<CloudApiSettingsConfig | null>(null);
-  const [billingInterval, setBillingInterval] = useState<'monthly' | 'yearly'>('monthly');
-  const [isProcessingPayment, setIsProcessingPayment] = useState(false);
-  const [livePlans, setLivePlans] = useState<
-    Array<{ code: string; name: string; amount: number; creditsPerBillingPeriod: number }>
-  >([
-    { code: 'starter', name: 'Starter Plan', amount: 49900, creditsPerBillingPeriod: 1000 },
-    { code: 'pro', name: 'Pro Automation Plan', amount: 149900, creditsPerBillingPeriod: 5000 },
-    { code: 'power', name: 'Power Enterprise Plan', amount: 499900, creditsPerBillingPeriod: 25000 },
-  ]);
-  const activationRef = useRef<AbortController | null>(null);
-
-  useEffect(() => () => activationRef.current?.abort(), []);
-
-  useEffect(() => {
-    const loadSettings = async () => {
-      try {
-        const currentSettings = await cloudApiSettingsStore.getSettings();
-        setSettings(currentSettings);
-        if (currentSettings.subscription.billingInterval) {
-          setBillingInterval(currentSettings.subscription.billingInterval);
-        }
-      } catch (error) {
-        console.error('Failed to load subscription settings:', error);
-      }
-    };
-
-    const loadLivePlans = async () => {
-      try {
-        const res = await backendApiClient.getSubscriptionPlans();
-        if (res.data?.plans && res.data.plans.length > 0) {
-          const paidPlans = res.data.plans.filter((p: any) => p.code !== 'free-trial');
-          if (paidPlans.length > 0) {
-            setLivePlans(paidPlans);
-          }
-        }
-      } catch (err) {
-        console.log('Using default plan pricing fallback:', err);
-      }
-    };
-
-    loadSettings();
-    loadLivePlans();
-    const unsubscribe = cloudApiSettingsStore.subscribe(loadSettings);
-    return () => {
-      unsubscribe();
-    };
-  }, []);
-
-  const handleOpenCheckout = async (planCode: 'starter' | 'pro' | 'power') => {
-    setIsProcessingPayment(true);
-    try {
-      const idempotencyKey = `checkout_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
-      const res = await backendApiClient.createCheckoutSession(planCode, idempotencyKey);
-
-      // Nothing is unlocked here: the plan becomes active only after the backend has verified the
-      // payment (Razorpay signature check / webhook); the local plan mirror follows the backend,
-      // which is re-read until it confirms this checkout.
-      if (res.data?.shortUrl && res.data.subscriptionId) {
-        window.open(res.data.shortUrl, '_blank');
-        activationRef.current?.abort();
-        activationRef.current = new AbortController();
-        void waitForCheckoutActivation(res.data.subscriptionId, { signal: activationRef.current.signal });
-      }
-    } catch (error: any) {
-      console.error('Failed to create Razorpay checkout session:', error);
-      alert(error.message || 'Checkout failed. Please ensure you are logged in and backend is running.');
-    } finally {
-      setIsProcessingPayment(false);
-    }
-  };
-
-  const currentPlan = (settings?.subscription.planId || 'free') as string;
-
-  const getPlanDetails = (code: string, defaultPrice: number, defaultCredits: number) => {
-    const found = livePlans.find(p => p.code === code);
-    return {
-      price: found ? found.amount / 100 : defaultPrice,
-      credits: found ? found.creditsPerBillingPeriod : defaultCredits,
-    };
-  };
-
-  const starter = getPlanDetails('starter', 499, 1000);
-  const pro = getPlanDetails('pro', 1499, 5000);
-  const power = getPlanDetails('power', 4999, 25000);
+  const billing = useJobformPayment(true);
+  const { plans, plansError, premium, purchase, currency } = billing;
+  const premiumActive = isPremiumActive(premium);
+  const busy = billing.opening !== null || purchase?.phase === 'waiting';
+  const tone = (dark: string, light: string) => (isDarkMode ? dark : light);
+  const outlineButton = 'rounded-lg border border-current px-3 py-1.5 text-xs font-semibold cursor-pointer';
+  const primaryButton =
+    'rounded-lg bg-sky-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-sky-700 cursor-pointer';
 
   return (
     <section className="space-y-6">
       <div
-        className={`rounded-2xl border p-8 text-left shadow-xs ${
-          isDarkMode ? 'border-slate-800 bg-slate-900' : 'border-slate-200 bg-white'
-        }`}>
-        {/* Header & Toggle */}
-        <div className="mx-auto mb-10 max-w-2xl text-center">
-          <div className="mb-2.5 inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/40 border border-indigo-200 dark:border-indigo-800">
-            <span>✦</span>
-            <span>COMMERCIAL SUBSCRIPTION</span>
-          </div>
-
-          <h2 className="text-2xl font-bold text-slate-900 dark:text-slate-100 sm:text-3xl">
-            Choose Your AI Automation Capacity
+        className={`rounded-2xl border p-8 text-left shadow-xs ${tone('border-slate-800 bg-slate-900', 'border-slate-200 bg-white')}`}>
+        <div className="mx-auto mb-8 max-w-2xl text-center">
+          <h2 className={`text-2xl font-bold sm:text-3xl ${tone('text-slate-100', 'text-slate-900')}`}>
+            JobForm Automator plans
           </h2>
-          <p className="mt-2 text-sm text-slate-600 dark:text-slate-400">
-            Managed AWS Bedrock LLM proxy access, automatic credit allocation, and seamless LinkedIn/Indeed auto-apply.
+          <p className={`mt-2 text-sm ${tone('text-slate-400', 'text-slate-600')}`}>
+            One plan for the website and the extension, with the same prices as jobformautomator.com.
           </p>
-
-          {/* Billing Switcher */}
-          <div className="mt-6 inline-flex items-center p-1 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-100 dark:bg-slate-800/80">
-            <button
-              onClick={() => setBillingInterval('monthly')}
-              className={`rounded-md px-4 py-1.5 text-xs font-semibold transition-all cursor-pointer ${
-                billingInterval === 'monthly'
-                  ? 'bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100 shadow-xs'
-                  : 'text-slate-500 dark:text-slate-400 hover:text-slate-900'
-              }`}>
-              Monthly Billing
-            </button>
-            <button
-              onClick={() => setBillingInterval('yearly')}
-              className={`rounded-md px-4 py-1.5 text-xs font-semibold transition-all cursor-pointer flex items-center gap-1.5 ${
-                billingInterval === 'yearly'
-                  ? 'bg-white dark:bg-slate-700 text-slate-900 dark:text-slate-100 shadow-xs'
-                  : 'text-slate-500 dark:text-slate-400 hover:text-slate-900'
-              }`}>
-              <span>Annual Billing</span>
-              <span className="text-[10px] font-bold text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/40 px-1.5 py-0.2 rounded-full border border-emerald-200 dark:border-emerald-800">
-                Save 20%
-              </span>
-            </button>
-          </div>
+          <p className={`mt-3 text-sm font-medium ${tone('text-slate-300', 'text-slate-700')}`}>
+            {!billing.statusLoaded
+              ? 'Checking your plan…'
+              : premiumActive
+                ? `Your plan: ${premium?.tier}${premium?.endDate && premium.tier !== 'Diamond' ? `, active until ${formatDate(premium.endDate)}` : ''}`
+                : `Your plan: ${BASIC_PLAN.name} (Free, up to ${FREE_DAILY_APPLICATIONS} applications a day)`}
+          </p>
         </div>
 
-        {/* Pricing Cards Grid */}
-        <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
-          {/* 1. Starter Plan */}
+        {purchase && (
           <div
-            className={`relative flex flex-col justify-between rounded-xl border p-6 transition-all ${
-              currentPlan === 'starter'
-                ? 'border-emerald-500 bg-emerald-50/20 dark:bg-emerald-950/20 ring-1 ring-emerald-500'
-                : isDarkMode
-                  ? 'border-slate-800 bg-slate-900/60'
-                  : 'border-slate-200 bg-white shadow-xs'
+            role={purchase.phase === 'other-account' ? 'alert' : 'status'}
+            className={`mx-auto mb-6 max-w-3xl rounded-xl border px-4 py-3 text-sm ${
+              purchase.phase === 'active'
+                ? tone(
+                    'border-emerald-800 bg-emerald-950/30 text-emerald-200',
+                    'border-emerald-200 bg-emerald-50 text-emerald-800',
+                  )
+                : purchase.phase === 'other-account'
+                  ? tone('border-red-900 bg-red-950/30 text-red-300', 'border-red-200 bg-red-50 text-red-700')
+                  : tone('border-sky-900 bg-sky-950/30 text-sky-200', 'border-sky-200 bg-sky-50 text-sky-900')
             }`}>
-            <div>
-              <div className="flex items-center justify-between">
-                <h3 className="text-base font-semibold text-slate-900 dark:text-slate-100">Starter</h3>
-                {currentPlan === 'starter' && (
-                  <span className="rounded-full bg-emerald-50 dark:bg-emerald-950/50 px-2.5 py-0.5 text-xs font-semibold text-emerald-600 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-800">
-                    Active Plan
+            {purchase.phase === 'waiting' && (
+              <div className="flex flex-wrap items-center gap-3">
+                <AiOutlineLoading3Quarters className="size-4 shrink-0 animate-spin" />
+                <span className="flex-1">
+                  {purchase.received
+                    ? `Payment received by JobForm Automator. Confirming your ${purchase.plan} plan…`
+                    : purchase.url === JOBFORM_PRICING_URL
+                      ? `Choose ${purchase.plan} on the JobForm Automator pricing page. It unlocks here automatically once the payment is confirmed.`
+                      : `Finish the payment in the JobForm Automator tab. ${purchase.plan} unlocks here automatically once the payment is confirmed.`}
+                </span>
+                <button type="button" onClick={billing.reopen} className={primaryButton}>
+                  Open payment page
+                </button>
+                <button type="button" onClick={billing.stopWaiting} className={outlineButton}>
+                  Stop waiting
+                </button>
+              </div>
+            )}
+            {purchase.phase === 'active' && (
+              <p className="flex items-center gap-2">
+                <FiCheckCircle className="size-4 shrink-0" />
+                Payment confirmed. {purchase.premium.tier} is active here and on jobformautomator.com.
+              </p>
+            )}
+            {purchase.phase === 'timeout' && (
+              <p>We haven&apos;t seen the payment yet. If you completed it, your plan unlocks within a few minutes.</p>
+            )}
+            {purchase.phase === 'other-account' && (
+              <div className="flex flex-wrap items-center gap-3">
+                <FiAlertTriangle className="size-4 shrink-0" />
+                <span className="flex-1">
+                  This payment was made with a different JobForm Automator account than the one signed in here. Sign in
+                  with that account to use {purchase.plan} in the extension.
+                </span>
+                <button type="button" onClick={() => void openJobformSignIn()} className={primaryButton}>
+                  Sign in with that account
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+
+        {!plans && !plansError && (
+          <p
+            className={`flex items-center justify-center gap-2 py-10 text-sm ${tone('text-slate-400', 'text-slate-500')}`}>
+            <AiOutlineLoading3Quarters className="size-4 animate-spin" />
+            Loading plans…
+          </p>
+        )}
+
+        {plansError && (
+          <div className="flex flex-col items-center gap-3 py-8 text-sm">
+            <p className={tone('text-amber-300', 'text-amber-700')}>{plansError}</p>
+            <div className="flex gap-3">
+              <button
+                type="button"
+                onClick={() => void billing.loadPlans()}
+                className={`flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold cursor-pointer ${tone(
+                  'border-slate-700 text-slate-200 hover:bg-slate-800',
+                  'border-slate-300 text-slate-700 hover:bg-slate-50',
+                )}`}>
+                <FiRefreshCw className="size-3.5" />
+                Try again
+              </button>
+              <button
+                type="button"
+                onClick={openJobformPricing}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-sky-600 hover:underline cursor-pointer">
+                <FiExternalLink className="size-3.5" />
+                Open pricing page
+              </button>
+            </div>
+          </div>
+        )}
+
+        {plans && (
+          <div className="mx-auto grid max-w-5xl grid-cols-1 gap-6 lg:grid-cols-3">
+            <div
+              className={`flex flex-col rounded-xl border p-6 ${
+                premiumActive
+                  ? tone('border-slate-800', 'border-slate-200')
+                  : 'border-emerald-500 ring-1 ring-emerald-500'
+              } ${tone('bg-slate-900/60', 'bg-white')}`}>
+              <div className="flex items-center justify-between gap-2">
+                <h3 className={`text-base font-semibold ${tone('text-slate-100', 'text-slate-900')}`}>
+                  {BASIC_PLAN.name}
+                </h3>
+                {!premiumActive && (
+                  <span className="rounded-full border border-emerald-300 px-2.5 py-0.5 text-xs font-semibold text-emerald-600">
+                    Active plan
                   </span>
                 )}
               </div>
-              <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-                Ideal for active job seekers & daily applications
-              </p>
-
-              <div className="mt-4 flex items-baseline gap-1">
-                <span className="text-3xl font-bold text-slate-900 dark:text-slate-100">₹{starter.price}</span>
-                <span className="text-xs text-slate-500 dark:text-slate-400">/ month</span>
-              </div>
-
-              <div className="mt-4 flex items-center gap-1.5 text-xs font-medium text-slate-700 dark:text-slate-300">
-                <span className="inline-flex items-center gap-1 rounded-md border border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-slate-800 px-2 py-0.5">
-                  <FiZap className="size-3 text-indigo-500" />
-                  <span>{starter.credits.toLocaleString()} Credits / mo</span>
-                </span>
-                <span className="inline-flex items-center gap-1 rounded-md border border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-slate-800 px-2 py-0.5">
-                  <FiClock className="size-3 text-slate-400" />
-                  <span>120 req/min</span>
-                </span>
-              </div>
-
-              <ul className="mt-6 space-y-3 text-xs text-slate-600 dark:text-slate-300 border-t border-slate-100 dark:border-slate-800 pt-4">
-                <li className="flex items-center gap-2">
-                  <FiCheck className="size-4 shrink-0 text-emerald-600 dark:text-emerald-500" />
-                  <span>Autonomous LinkedIn, Indeed & Naukri apply</span>
-                </li>
-                <li className="flex items-center gap-2">
-                  <FiCheck className="size-4 shrink-0 text-emerald-600 dark:text-emerald-500" />
-                  <span>Smart AI CareerBrain profile parser</span>
-                </li>
-                <li className="flex items-center gap-2">
-                  <FiCheck className="size-4 shrink-0 text-emerald-600 dark:text-emerald-500" />
-                  <span>Screening question auto-solver</span>
-                </li>
-                <li className="flex items-center gap-2">
-                  <FiCheck className="size-4 shrink-0 text-emerald-600 dark:text-emerald-500" />
-                  <span>Standard email & community support</span>
-                </li>
-              </ul>
-            </div>
-
-            <button
-              onClick={() => handleOpenCheckout('starter')}
-              disabled={isProcessingPayment || currentPlan === 'starter'}
-              className="mt-8 w-full cursor-pointer rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 py-2.5 text-xs font-semibold text-slate-800 dark:text-slate-200 shadow-xs transition-colors hover:bg-slate-50 dark:hover:bg-slate-700 disabled:opacity-50">
-              {currentPlan === 'starter' ? 'Current Active Plan' : 'Select Starter Plan'}
-            </button>
-          </div>
-
-          {/* 2. Pro Automation Plan (Recommended CTA) */}
-          <div
-            className={`relative flex flex-col justify-between rounded-xl border p-6 transition-all ${
-              currentPlan === 'pro'
-                ? 'border-emerald-500 bg-emerald-50/20 dark:bg-emerald-950/20 ring-1 ring-emerald-500'
-                : isDarkMode
-                  ? 'border-blue-500/80 bg-blue-950/10 shadow-xs ring-1 ring-blue-500/50'
-                  : 'border-blue-600 bg-blue-50/20 shadow-xs ring-1 ring-blue-600'
-            }`}>
-            <span className="absolute -top-3 left-1/2 -translate-x-1/2 rounded-full bg-blue-600 px-3 py-0.5 text-[10px] font-semibold text-white shadow-xs">
-              ✦ RECOMMENDED
-            </span>
-
-            <div>
-              <div className="flex items-center justify-between">
-                <h3 className="text-base font-semibold text-slate-900 dark:text-slate-100">Pro Automation</h3>
-                {currentPlan === 'pro' && (
-                  <span className="rounded-full bg-emerald-50 dark:bg-emerald-950/50 px-2.5 py-0.5 text-xs font-semibold text-emerald-600 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-800">
-                    Active Plan
-                  </span>
+              <p className={`mt-1 text-xs ${tone('text-slate-400', 'text-slate-500')}`}>{BASIC_PLAN.description}</p>
+              <p className={`mt-4 text-3xl font-bold ${tone('text-slate-100', 'text-slate-900')}`}>Free</p>
+              <ul
+                className={`mt-5 space-y-2.5 border-t pt-4 text-xs ${tone(
+                  'border-slate-800 text-slate-300',
+                  'border-slate-100 text-slate-600',
+                )}`}>
+                {[`Up to ${FREE_DAILY_APPLICATIONS} applications a day`, 'AI Auto Apply uses AI credits'].map(
+                  feature => (
+                    <li key={feature} className="flex items-start gap-2">
+                      <FiCheck className="mt-0.5 size-4 shrink-0 text-slate-400" />
+                      <span>{feature}</span>
+                    </li>
+                  ),
                 )}
-              </div>
-              <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-                High-volume applications & multiple target roles
-              </p>
-
-              <div className="mt-4 flex items-baseline gap-1">
-                <span className="text-3xl font-bold text-slate-900 dark:text-slate-100">₹{pro.price}</span>
-                <span className="text-xs text-slate-500 dark:text-slate-400">/ month</span>
-              </div>
-
-              <div className="mt-4 flex items-center gap-1.5 text-xs font-medium text-slate-700 dark:text-slate-300">
-                <span className="inline-flex items-center gap-1 rounded-md border border-blue-200 dark:border-blue-800 bg-blue-50 dark:bg-blue-950/40 px-2 py-0.5 text-blue-700 dark:text-blue-300">
-                  <FiZap className="size-3 text-indigo-500" />
-                  <span>{pro.credits.toLocaleString()} Credits / mo</span>
-                </span>
-                <span className="inline-flex items-center gap-1 rounded-md border border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-slate-800 px-2 py-0.5">
-                  <FiClock className="size-3 text-slate-400" />
-                  <span>300 req/min</span>
-                </span>
-              </div>
-
-              <ul className="mt-6 space-y-3 text-xs text-slate-600 dark:text-slate-300 border-t border-slate-100 dark:border-slate-800 pt-4">
-                <li className="flex items-center gap-2">
-                  <FiCheck className="size-4 shrink-0 text-emerald-600 dark:text-emerald-500" />
-                  <span>All AI Models: Claude 3.5 Sonnet & Nova</span>
-                </li>
-                <li className="flex items-center gap-2">
-                  <FiCheck className="size-4 shrink-0 text-emerald-600 dark:text-emerald-500" />
-                  <span>Priority screening question solver</span>
-                </li>
-                <li className="flex items-center gap-2">
-                  <FiCheck className="size-4 shrink-0 text-emerald-600 dark:text-emerald-500" />
-                  <span>Deep keyword matching & JD analysis</span>
-                </li>
-                <li className="flex items-center gap-2">
-                  <FiCheck className="size-4 shrink-0 text-emerald-600 dark:text-emerald-500" />
-                  <span>Batch multi-job background processing</span>
-                </li>
-                <li className="flex items-center gap-2">
-                  <FiCheck className="size-4 shrink-0 text-emerald-600 dark:text-emerald-500" />
-                  <span>Priority chat & email support</span>
-                </li>
               </ul>
             </div>
-
-            <button
-              onClick={() => handleOpenCheckout('pro')}
-              disabled={isProcessingPayment || currentPlan === 'pro'}
-              className="mt-8 w-full cursor-pointer rounded-lg bg-blue-600 py-2.5 text-xs font-semibold text-white shadow-xs transition-colors hover:bg-blue-700 disabled:opacity-50">
-              {currentPlan === 'pro' ? 'Current Active Plan' : 'Upgrade to Pro Plan'}
-            </button>
+            {plans.map(plan => {
+              const action = planAction(plan, premium);
+              const isDiamond = plan.id === 'Diamond';
+              const loading = billing.opening === plan.id;
+              return (
+                <div
+                  key={plan.id}
+                  className={`flex flex-col justify-between rounded-xl border p-6 ${
+                    action === 'current'
+                      ? 'border-emerald-500 ring-1 ring-emerald-500'
+                      : isDiamond
+                        ? tone('border-blue-500/80 ring-1 ring-blue-500/50', 'border-blue-600 ring-1 ring-blue-600')
+                        : tone('border-slate-800', 'border-slate-200')
+                  } ${tone('bg-slate-900/60', 'bg-white')}`}>
+                  <div>
+                    <div className="flex items-center justify-between gap-2">
+                      <h3 className={`text-base font-semibold ${tone('text-slate-100', 'text-slate-900')}`}>
+                        {plan.id}
+                      </h3>
+                      {action === 'current' && (
+                        <span className="rounded-full border border-emerald-300 px-2.5 py-0.5 text-xs font-semibold text-emerald-600">
+                          Active plan
+                        </span>
+                      )}
+                    </div>
+                    <p className={`mt-1 text-xs ${tone('text-slate-400', 'text-slate-500')}`}>{plan.description}</p>
+                    <div className="mt-4 flex items-baseline gap-1">
+                      <span className={`text-3xl font-bold ${tone('text-slate-100', 'text-slate-900')}`}>
+                        {plan.prices[currency ?? 'INR']}
+                      </span>
+                      <span className={`text-xs ${tone('text-slate-400', 'text-slate-500')}`}>
+                        / {plan.durationLabel}
+                      </span>
+                    </div>
+                    <p className={`text-[11px] ${tone('text-slate-500', 'text-slate-400')}`}>
+                      {currency === 'USD' ? `${plan.prices.INR} in India` : `${plan.prices.USD} outside India`}
+                    </p>
+                    <ul
+                      className={`mt-5 space-y-2.5 border-t pt-4 text-xs ${tone(
+                        'border-slate-800 text-slate-300',
+                        'border-slate-100 text-slate-600',
+                      )}`}>
+                      {EXTENSION_BENEFITS.map(feature => (
+                        <li key={feature} className="flex items-start gap-2">
+                          <FiCheck className="mt-0.5 size-4 shrink-0 text-emerald-600" />
+                          <span>{feature}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                  {action === 'current' || action === 'included' ? (
+                    <p className="mt-6 w-full rounded-lg bg-emerald-50 py-2.5 text-center text-xs font-semibold text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300">
+                      {action === 'current' ? 'Your current plan' : 'Included in Diamond'}
+                    </p>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => void billing.buy(plan.id)}
+                      disabled={busy}
+                      className={`mt-6 flex w-full items-center justify-center gap-2 rounded-lg py-2.5 text-xs font-semibold transition-colors cursor-pointer disabled:cursor-not-allowed disabled:opacity-50 ${
+                        isDiamond
+                          ? 'bg-blue-600 text-white hover:bg-blue-700'
+                          : tone(
+                              'border border-slate-700 bg-slate-800 text-slate-200 hover:bg-slate-700',
+                              'border border-slate-300 bg-white text-slate-800 hover:bg-slate-50',
+                            )
+                      }`}>
+                      {loading && <AiOutlineLoading3Quarters className="size-3.5 animate-spin" />}
+                      {loading
+                        ? 'Opening checkout…'
+                        : action === 'upgrade'
+                          ? `Upgrade to ${plan.id}`
+                          : `Choose ${plan.id}`}
+                    </button>
+                  )}
+                </div>
+              );
+            })}
           </div>
+        )}
 
-          {/* 3. Power Enterprise Plan */}
-          <div
-            className={`relative flex flex-col justify-between rounded-xl border p-6 transition-all ${
-              currentPlan === 'power'
-                ? 'border-emerald-500 bg-emerald-50/20 dark:bg-emerald-950/20 ring-1 ring-emerald-500'
-                : isDarkMode
-                  ? 'border-slate-800 bg-slate-900/60'
-                  : 'border-slate-200 bg-white shadow-xs'
-            }`}>
-            <div>
-              <div className="flex items-center justify-between">
-                <h3 className="text-base font-semibold text-slate-900 dark:text-slate-100">Power Enterprise</h3>
-                {currentPlan === 'power' && (
-                  <span className="rounded-full bg-emerald-50 dark:bg-emerald-950/50 px-2.5 py-0.5 text-xs font-semibold text-emerald-600 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-800">
-                    Active Plan
-                  </span>
-                )}
-              </div>
-              <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-                Ultra-fast throughput for power job seekers & teams
-              </p>
-
-              <div className="mt-4 flex items-baseline gap-1">
-                <span className="text-3xl font-bold text-slate-900 dark:text-slate-100">₹{power.price}</span>
-                <span className="text-xs text-slate-500 dark:text-slate-400">/ month</span>
-              </div>
-
-              <div className="mt-4 flex items-center gap-1.5 text-xs font-medium text-slate-700 dark:text-slate-300">
-                <span className="inline-flex items-center gap-1 rounded-md border border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-slate-800 px-2 py-0.5">
-                  <FiZap className="size-3 text-indigo-500" />
-                  <span>{power.credits.toLocaleString()} Credits / mo</span>
-                </span>
-                <span className="inline-flex items-center gap-1 rounded-md border border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-slate-800 px-2 py-0.5">
-                  <FiClock className="size-3 text-slate-400" />
-                  <span>600 req/min</span>
-                </span>
-              </div>
-
-              <ul className="mt-6 space-y-3 text-xs text-slate-600 dark:text-slate-300 border-t border-slate-100 dark:border-slate-800 pt-4">
-                <li className="flex items-center gap-2">
-                  <FiCheck className="size-4 shrink-0 text-emerald-600 dark:text-emerald-500" />
-                  <span>Unlimited concurrent background apply loops</span>
-                </li>
-                <li className="flex items-center gap-2">
-                  <FiCheck className="size-4 shrink-0 text-emerald-600 dark:text-emerald-500" />
-                  <span>Custom screening answers & rules engine</span>
-                </li>
-                <li className="flex items-center gap-2">
-                  <FiCheck className="size-4 shrink-0 text-emerald-600 dark:text-emerald-500" />
-                  <span>Instant credit top-ups without cooldowns</span>
-                </li>
-                <li className="flex items-center gap-2">
-                  <FiCheck className="size-4 shrink-0 text-emerald-600 dark:text-emerald-500" />
-                  <span>Dedicated 24/7 priority SLA support</span>
-                </li>
-              </ul>
-            </div>
-
-            <button
-              onClick={() => handleOpenCheckout('power')}
-              disabled={isProcessingPayment || currentPlan === 'power'}
-              className="mt-8 w-full cursor-pointer rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 py-2.5 text-xs font-semibold text-slate-800 dark:text-slate-200 shadow-xs transition-colors hover:bg-slate-50 dark:hover:bg-slate-700 disabled:opacity-50">
-              {currentPlan === 'power' ? 'Current Active Plan' : 'Select Power Plan'}
-            </button>
-          </div>
-        </div>
-
-        {/* Reassurance & Value Props Footer */}
-        <div className="mt-12 grid grid-cols-1 gap-4 border-t border-slate-100 dark:border-slate-800 pt-6 md:grid-cols-3">
-          <div className="flex items-center gap-3">
-            <FiShield className="size-5 shrink-0 text-blue-600 dark:text-blue-500" />
-            <div>
-              <h4 className="text-xs font-semibold text-slate-900 dark:text-slate-100">Secure Razorpay Checkout</h4>
-              <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                256-bit encrypted transactions via UPI, Cards, NetBanking
-              </p>
-            </div>
-          </div>
-          <div className="flex items-center gap-3">
-            <FiCpu className="size-5 shrink-0 text-indigo-500" />
-            <div>
-              <h4 className="text-xs font-semibold text-slate-900 dark:text-slate-100">Direct Managed AI</h4>
-              <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                Zero API keys setup required — powered by cloud runtime
-              </p>
-            </div>
-          </div>
-          <div className="flex items-center gap-3">
-            <FiTrendingUp className="size-5 shrink-0 text-emerald-600 dark:text-emerald-500" />
-            <div>
-              <h4 className="text-xs font-semibold text-slate-900 dark:text-slate-100">Cancel or Switch Anytime</h4>
-              <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                No locked-in contracts. Upgrade, downgrade, or pause anytime
-              </p>
-            </div>
-          </div>
+        <div
+          className={`mx-auto mt-8 flex max-w-3xl items-center gap-3 border-t pt-6 ${tone('border-slate-800', 'border-slate-100')}`}>
+          <FiShield className="size-5 shrink-0 text-blue-600" />
+          <p className={`text-[11px] ${tone('text-slate-400', 'text-slate-500')}`}>
+            Secure Razorpay checkout on jobformautomator.com (UPI, cards, net banking). Your plan unlocks after the
+            payment is verified, on the website and in the extension.
+          </p>
         </div>
       </div>
     </section>

@@ -3,7 +3,8 @@
  *
  * Besides the auth session, chrome.storage.local holds data that belongs to the signed-in account:
  * the Career Brain (resume profile), job queue / processed jobs / runner state, tailored-resume
- * approvals, dry-run records, LinkedIn search settings, chat history and pending credit refunds.
+ * approvals, dry-run records, LinkedIn search settings, chat history, pending credit refunds and
+ * application-history reports waiting to be sent.
  * The Career Brain is also synced to the backend under the signed-in uid, so one account's local
  * data must never be shown to, or uploaded as, another account.
  *
@@ -30,6 +31,7 @@ export const ACCOUNT_DATA_STORAGE_KEYS: readonly string[] = [
   'linkedin_pending_quota_commits',
   'linkedin_automation_config',
   'nanobrowser_pending_refunds',
+  'jobform_pending_application_reports',
   'chat_sessions_meta',
 ];
 

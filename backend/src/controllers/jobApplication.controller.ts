@@ -1,6 +1,45 @@
 import type { Request, Response, NextFunction } from 'express';
-import { JobApplicationService, JOB_APPLICATION_STATUSES } from '../services/jobApplication.service.js';
+import {
+  JobApplicationService,
+  JOB_APPLICATION_PLATFORMS,
+  JOB_APPLICATION_STATUSES,
+} from '../services/jobApplication.service.js';
 import type { JobApplicationStatus } from '../services/jobApplication.service.js';
+
+/** Single-line text, whitespace collapsed, capped at `max` characters ('' when absent). */
+function text(value: unknown, max: number): string {
+  if (value === null || value === undefined) return '';
+  return String(value).replace(/\s+/g, ' ').trim().slice(0, max);
+}
+
+/** An absolute http(s) URL, or '' — never a javascript:/data: link the dashboard would render. */
+function httpUrl(value: unknown, max: number): string {
+  const raw = text(value, max);
+  try {
+    return /^https?:$/.test(new URL(raw).protocol) ? raw : '';
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * The job board an application belongs to: the posted platform (lower-cased; anything that isn't a
+ * simple id becomes "other"), else the one in the application URL, else LinkedIn (the original
+ * default, from when LinkedIn was the only platform).
+ */
+export function normalizePlatform(platform: unknown, applicationUrl: string): string {
+  const posted = text(platform, 64).toLowerCase();
+  if (posted) return /^[a-z0-9_-]{1,32}$/.test(posted) ? posted : 'other';
+  let host = '';
+  try {
+    host = new URL(applicationUrl).hostname.toLowerCase();
+  } catch {
+    // not a URL
+  }
+  if (host.endsWith('naukri.com')) return 'naukri';
+  if (/(^|\.)indeed\./.test(host)) return 'indeed';
+  return JOB_APPLICATION_PLATFORMS[0];
+}
 
 export class JobApplicationController {
   /**
@@ -22,11 +61,18 @@ export class JobApplicationController {
         appliedAt,
         platform,
         applicationUrl,
+        jobDescription,
+        companyWebsite,
+        failureReason,
       } = req.body;
 
-      const finalTitle = String(jobTitle || title || 'Unknown Title').trim();
-      const finalCompany = String(company || 'Unknown Company').trim();
-      const finalJobId = String(jobId || applicationUrl || `${finalCompany}-${finalTitle}`).trim();
+      const finalTitle = text(jobTitle || title, 300);
+      const finalCompany = text(company, 300);
+      const finalUrl = text(applicationUrl, 2000);
+      const finalJobId = text(
+        jobId || finalUrl || `${finalCompany || 'Unknown Company'}-${finalTitle || 'Unknown Title'}`,
+        500,
+      );
 
       let finalStatus: JobApplicationStatus = 'APPLIED';
       if (status) {
@@ -42,13 +88,16 @@ export class JobApplicationController {
         jobId: finalJobId,
         title: finalTitle,
         company: finalCompany,
-        location: String(location || '').trim(),
-        salaryRange: String(salaryRange || '').trim(),
-        fitScore: typeof fitScore === 'number' ? fitScore : 0,
-        platform: String(platform || 'linkedin').trim(),
-        applicationUrl: String(applicationUrl || '').trim(),
+        location: text(location, 300),
+        salaryRange: text(salaryRange, 200),
+        fitScore: typeof fitScore === 'number' && Number.isFinite(fitScore) ? fitScore : 0,
+        platform: normalizePlatform(platform, finalUrl),
+        applicationUrl: finalUrl,
         status: finalStatus,
         appliedAt: Number.isFinite(parsedAppliedAt) ? parsedAppliedAt : Date.now(),
+        jobDescription: text(jobDescription, 2000),
+        companyWebsite: httpUrl(companyWebsite, 500),
+        failureReason: text(failureReason, 300),
       });
 
       res.status(200).json({
@@ -62,18 +111,20 @@ export class JobApplicationController {
 
   /**
    * Checks if a user has already applied to a specific job.
-   * GET /api/v1/job-applications/check/:jobId
+   * GET /api/v1/job-applications/check/:jobId[?platform=naukri|indeed] (LinkedIn when omitted)
+   * A FAILED attempt is not an application, so it never blocks a retry.
    */
   static async checkDuplicate(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
       const userId = req.user!._id;
       const jobId = req.params.jobId || req.params.userId;
+      const platform = req.query.platform ? normalizePlatform(req.query.platform, '') : undefined;
 
-      const existing = await JobApplicationService.findByJobId(userId, jobId);
+      const existing = await JobApplicationService.findByJobId(userId, jobId, platform);
 
       res.status(200).json({
         success: true,
-        exists: Boolean(existing),
+        exists: existing !== null && existing.status !== 'FAILED',
         application: existing || null,
       });
     } catch (error) {

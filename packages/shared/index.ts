@@ -4,3 +4,4 @@ export * from './lib/utils';
 export * from './lib/config';
 export * from './lib/backend-api-client';
 export * from './lib/accountSync';
+export * from './lib/jobformPayment';

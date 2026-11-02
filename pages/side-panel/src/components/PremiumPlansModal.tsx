@@ -1,7 +1,15 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { backendApiClient, isPremiumActive, refreshAccountStatus, waitForCheckoutActivation } from '@extension/shared';
+import React, { useEffect } from 'react';
+import {
+  isPremiumActive,
+  JOBFORM_PRICING_URL,
+  openJobformPricing,
+  openJobformSignIn,
+  useJobformPayment,
+  type JobformPaymentState,
+  type JobformPlan,
+} from '@extension/shared';
 import type { PremiumStatus } from '@extension/storage';
-import { FiCheck, FiX, FiLock, FiStar, FiZap, FiChevronDown, FiChevronUp, FiAlertTriangle } from 'react-icons/fi';
+import { FiCheck, FiX, FiLock, FiStar, FiZap, FiAlertTriangle, FiExternalLink, FiRefreshCw } from 'react-icons/fi';
 import { AiOutlineLoading3Quarters } from 'react-icons/ai';
 
 interface PremiumPlansModalProps {
@@ -11,47 +19,19 @@ interface PremiumPlansModalProps {
   userCredits?: { remainingCredits: number; allocatedCredits: number } | null;
 }
 
-type PlanCode = 'starter' | 'pro' | 'power';
-
 /**
- * Credit plans as configured on the backend (monthly billing only; credits and daily application
- * limits match PlanSeedService and ApplicationQuotaService).
+ * What JobForm Automator Premium / Diamond give in the extension, as enforced by the backend
+ * (ApplicationQuotaService: free 10 a day, Premium/Diamond 300; PremiumAiAllowanceService: AI
+ * without credits, 1,000 AI tasks a month in Premium Mode).
  */
-const PLANS: ReadonlyArray<{
-  code: PlanCode;
-  name: string;
-  price: string;
-  credits: string;
-  dailyApplications: number;
-  support: string;
-  popular?: boolean;
-}> = [
-  {
-    code: 'starter',
-    name: 'Starter',
-    price: '₹499',
-    credits: '1,000',
-    dailyApplications: 50,
-    support: 'Email support',
-  },
-  {
-    code: 'pro',
-    name: 'Pro',
-    price: '₹1,499',
-    credits: '5,000',
-    dailyApplications: 100,
-    support: 'Priority support',
-    popular: true,
-  },
-  {
-    code: 'power',
-    name: 'Power',
-    price: '₹4,999',
-    credits: '25,000',
-    dailyApplications: 500,
-    support: 'Dedicated support',
-  },
+const EXTENSION_BENEFITS = [
+  'Up to 300 applications a day',
+  'AI Auto Apply included, no credits used',
+  'Premium Mode: 1,000 AI tasks a month',
 ];
+const FREE_DAILY_APPLICATIONS = 10;
+/** The free plan, as the website's pricing page names and describes it. */
+const BASIC_PLAN = { name: 'Basic', description: 'Essential Tools to Kickstart Your Job Search' };
 
 const PLAN_NAMES: Record<string, string> = { starter: 'Starter', pro: 'Pro', power: 'Power' };
 
@@ -72,38 +52,67 @@ interface SubscriptionSummary {
   cancelAtPeriodEnd?: boolean;
 }
 
-/** Title and one line of detail for the credit-plan subscription returned by the backend. */
-function describeSubscription(sub: SubscriptionSummary | null): {
-  title: string;
-  detail: string | null;
-  state: 'active' | 'warning' | 'ended';
-} {
-  if (!sub) return { title: 'Free', detail: null, state: 'ended' };
+/**
+ * Credit plans (Starter / Pro / Power) are no longer sold in the extension; accounts that bought one
+ * still see it until it ends. Null when the account has none worth showing.
+ */
+function describeCreditPlan(sub: SubscriptionSummary | null): { title: string; detail: string | null } | null {
+  if (!sub || !['ACTIVE', 'TRIALING', 'PAST_DUE'].includes(sub.status ?? '')) return null;
   const isTrial = Boolean(sub.isTrial) || sub.planCodeSnapshot === 'free-trial';
-  const planName = (sub.planCodeSnapshot && PLAN_NAMES[sub.planCodeSnapshot]) || sub.planNameSnapshot || 'Paid';
-  const name = isTrial ? 'Free trial' : `${planName} plan`;
-  const periodEnd = formatDate(sub.currentPeriodEnd);
-  switch (sub.status) {
-    case 'TRIALING': {
-      const ends = formatDate(sub.trialEndDate) ?? periodEnd;
-      return { title: 'Free trial', detail: ends ? `Ends ${ends}` : null, state: 'active' };
-    }
-    case 'ACTIVE':
-      if (isTrial) return { title: 'Free trial', detail: periodEnd ? `Ends ${periodEnd}` : null, state: 'active' };
+  const ends = formatDate(isTrial ? (sub.trialEndDate ?? sub.currentPeriodEnd) : sub.currentPeriodEnd);
+  if (isTrial) return { title: 'Free trial', detail: ends ? `Ends ${ends}` : null };
+  const name = `${(sub.planCodeSnapshot && PLAN_NAMES[sub.planCodeSnapshot]) || sub.planNameSnapshot || 'Paid'} credit plan`;
+  if (sub.status === 'PAST_DUE') return { title: name, detail: 'Payment failed. Razorpay will retry the charge.' };
+  return { title: name, detail: ends ? (sub.cancelAtPeriodEnd ? `Ends ${ends}` : `Renews ${ends}`) : null };
+}
+
+/** The action a plan card offers for the account's current plan (as on the website's pricing page). */
+function planAction(plan: JobformPlan, premium: PremiumStatus | null): 'buy' | 'upgrade' | 'current' | 'included' {
+  const tier = isPremiumActive(premium) ? premium!.tier : 'Free';
+  if (tier === plan.id) return 'current';
+  if (tier === 'Diamond') return 'included';
+  return tier === 'Premium' ? 'upgrade' : 'buy';
+}
+
+function purchaseMessage(purchase: JobformPaymentState): {
+  tone: 'info' | 'success' | 'error';
+  title: string;
+  detail?: string;
+} {
+  switch (purchase.phase) {
+    case 'waiting':
+      return purchase.received
+        ? {
+            tone: 'info',
+            title: 'Payment received by JobForm Automator',
+            detail: `Confirming your ${purchase.plan} plan…`,
+          }
+        : {
+            tone: 'info',
+            title:
+              purchase.url === JOBFORM_PRICING_URL
+                ? `Choose ${purchase.plan} on the JobForm Automator pricing page`
+                : 'Finish the payment in the JobForm Automator tab',
+            detail: `${purchase.plan} unlocks here automatically once JobForm Automator confirms the payment.`,
+          };
+    case 'active':
       return {
-        title: name,
-        detail: periodEnd ? (sub.cancelAtPeriodEnd ? `Ends ${periodEnd}` : `Renews ${periodEnd}`) : null,
-        state: 'active',
+        tone: 'success',
+        title: `Payment confirmed. ${purchase.premium.tier} is active.`,
+        detail: 'Premium features are unlocked here and on jobformautomator.com.',
       };
-    case 'PAST_DUE':
-      return { title: name, detail: 'Payment failed. Razorpay will retry the charge.', state: 'warning' };
-    case 'EXPIRED':
-    case 'CANCELLED': {
-      const ended = formatDate(sub.endedAt) ?? periodEnd;
-      return { title: `${name} ended`, detail: ended ? `Ended ${ended}` : null, state: 'ended' };
-    }
-    default:
-      return { title: 'Free', detail: null, state: 'ended' };
+    case 'other-account':
+      return {
+        tone: 'error',
+        title: 'This payment was made with a different JobForm Automator account.',
+        detail: `jobformautomator.com is signed in with another account than the extension. Sign in here with that account to use ${purchase.plan}.`,
+      };
+    case 'timeout':
+      return {
+        tone: 'info',
+        title: "We haven't seen the payment yet.",
+        detail: 'If you completed it, your plan unlocks within a few minutes; reopen this window to check.',
+      };
   }
 }
 
@@ -113,40 +122,10 @@ export const PremiumPlansModal: React.FC<PremiumPlansModalProps> = ({
   isDarkMode = false,
   userCredits,
 }) => {
-  const [currentSubscription, setCurrentSubscription] = useState<any | null>(null);
-  const [jobformPremium, setJobformPremium] = useState<PremiumStatus | null>(null);
-  const [loadingPlanCode, setLoadingPlanCode] = useState<string | null>(null);
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [successMessage, setSuccessMessage] = useState<string | null>(null);
-  const [showPlans, setShowPlans] = useState(false);
-  // Waiting for the backend to confirm the last checkout (kept while the side panel is open, so a
-  // payment finished after closing this window still refreshes the plan and credits)
-  const activationRef = useRef<AbortController | null>(null);
-
-  useEffect(() => () => activationRef.current?.abort(), []);
-
-  useEffect(() => {
-    if (!isOpen) return;
-
-    let isMounted = true;
-    async function loadSubscription() {
-      try {
-        // Status always comes from the backend (also updates the stored session)
-        const status = await refreshAccountStatus();
-        if (isMounted && status) {
-          setJobformPremium(status.premium);
-          setCurrentSubscription(status.subscription ?? null);
-        }
-      } catch {
-        // Keep what is shown; the next open retries
-      }
-    }
-    loadSubscription();
-
-    return () => {
-      isMounted = false;
-    };
-  }, [isOpen]);
+  // Mounted for the whole side panel session, so a payment finished after closing this window still
+  // unlocks the plan and refreshes credits.
+  const billing = useJobformPayment(isOpen);
+  const { plans, plansError, premium, purchase, currency } = billing;
 
   // Escape closes the dialog (separate effect: onClose may change on every parent render)
   useEffect(() => {
@@ -159,86 +138,33 @@ export const PremiumPlansModal: React.FC<PremiumPlansModalProps> = ({
   if (!isOpen) return null;
 
   const tone = (dark: string, light: string) => (isDarkMode ? dark : light);
-
-  const watchActivation = async (providerSubscriptionId: string, planName: string) => {
-    activationRef.current?.abort();
-    const controller = new AbortController();
-    activationRef.current = controller;
-
-    const result = await waitForCheckoutActivation(providerSubscriptionId, { signal: controller.signal });
-    if (activationRef.current !== controller) return; // superseded by a newer checkout
-    activationRef.current = null;
-
-    if (result.outcome === 'active') {
-      setCurrentSubscription(result.subscription);
-      setErrorMessage(null);
-      setSuccessMessage(`Payment confirmed. ${result.subscription.planNameSnapshot || planName} is now active.`);
-    } else if (result.outcome === 'timeout') {
-      setSuccessMessage(
-        'Payment confirmation has not arrived yet. If you completed the payment, your plan activates within a few minutes; reopen this window to check.',
-      );
-    } else if (result.outcome === 'account-changed') {
-      // The checkout belonged to the previous account: show nothing about it
-      setCurrentSubscription(null);
-      setJobformPremium(null);
-      setSuccessMessage(null);
-    }
-  };
-
-  const handleCheckout = async (planCode: string) => {
-    setLoadingPlanCode(planCode);
-    setErrorMessage(null);
-    setSuccessMessage(null);
-
-    try {
-      const idempotencyKey = `checkout_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
-      const res = await backendApiClient.createCheckoutSession(planCode, idempotencyKey);
-      const planName = res.data?.planName || planCode.toUpperCase();
-
-      // The plan becomes active only when the backend has verified the payment (Razorpay signature
-      // check / webhook); nothing is unlocked here. The backend status is re-read until it confirms.
-      if (res.data?.shortUrl && res.data.subscriptionId) {
-        window.open(res.data.shortUrl, '_blank');
-        setSuccessMessage(`Razorpay checkout opened. ${planName} activates as soon as the payment is confirmed.`);
-        void watchActivation(res.data.subscriptionId, planName);
-      } else {
-        setSuccessMessage(`Subscription order generated for ${planName}. Complete the payment to activate it.`);
-      }
-    } catch (err: any) {
-      if (err?.code === 'ALREADY_SUBSCRIBED') {
-        setSuccessMessage(err.message || 'You are already subscribed to this plan.');
-        const status = await refreshAccountStatus().catch(() => null);
-        if (status?.subscription) setCurrentSubscription(status.subscription);
-      } else {
-        setErrorMessage(err.message || 'Could not start checkout. Check your connection and try again.');
-      }
-    } finally {
-      setLoadingPlanCode(null);
-    }
-  };
-
-  const premiumActive = isPremiumActive(jobformPremium);
-  const subscription = describeSubscription(currentSubscription);
-  const subscriptionEntitled = ['ACTIVE', 'TRIALING', 'PAST_DUE'].includes(currentSubscription?.status);
-  const activePaidPlan =
-    currentSubscription?.status === 'ACTIVE' && !currentSubscription?.isTrial
-      ? (currentSubscription?.planCodeSnapshot as string | undefined)
-      : undefined;
-  const plansVisible = !premiumActive || showPlans;
+  const premiumActive = isPremiumActive(premium);
+  const creditPlan = describeCreditPlan(billing.subscription as SubscriptionSummary | null);
+  const busy = billing.opening !== null || purchase?.phase === 'waiting';
+  const message = purchase ? purchaseMessage(purchase) : null;
 
   const remaining = Math.max(0, userCredits?.remainingCredits ?? 0);
   const allocated = Math.max(userCredits?.allocatedCredits ?? 0, remaining, 1);
   const creditPercent = Math.min(100, Math.round((remaining / allocated) * 100));
   const creditNote = premiumActive
     ? 'Not used while Premium is active.'
-    : !subscriptionEntitled
-      ? 'Choose a plan to use AI credits again.'
-      : remaining === 0
-        ? 'No credits left this period.'
-        : null;
+    : remaining === 0
+      ? 'No credits left. Premium and Diamond include AI without credits.'
+      : null;
 
   const card = `rounded-xl border ${tone('border-slate-700 bg-slate-800/70', 'border-slate-200 bg-white')}`;
   const muted = tone('text-slate-400', 'text-slate-500');
+  const badge = (classes: string) => `rounded px-1.5 text-[10px] font-bold uppercase tracking-wide border ${classes}`;
+  const activeBadge = badge(
+    tone(
+      'border-emerald-500/30 bg-emerald-500/15 text-emerald-300',
+      'border-emerald-200 bg-emerald-50 text-emerald-700',
+    ),
+  );
+  const secondaryButton = `rounded-md border px-2.5 py-1 text-[11px] font-semibold cursor-pointer ${tone(
+    'border-slate-600 text-slate-200 hover:bg-slate-800',
+    'border-slate-300 text-slate-700 hover:bg-white',
+  )}`;
 
   return (
     <div
@@ -263,7 +189,7 @@ export const PremiumPlansModal: React.FC<PremiumPlansModalProps> = ({
             <h2 id="plans-dialog-title" className="text-base font-bold">
               Plans & credits
             </h2>
-            <p className={`text-xs ${muted}`}>Your plan, AI credits and upgrades</p>
+            <p className={`text-xs ${muted}`}>Your JobForm Automator plan and upgrades</p>
           </div>
           <button
             type="button"
@@ -278,196 +204,256 @@ export const PremiumPlansModal: React.FC<PremiumPlansModalProps> = ({
         </div>
 
         <div className="flex-1 space-y-3 overflow-y-auto p-4">
-          {/* Messages */}
-          {errorMessage && (
+          {/* Purchase in progress / result */}
+          {message && purchase && (
             <div
-              role="alert"
-              className={`flex items-start gap-2 rounded-lg border px-3 py-2 text-xs ${tone(
-                'border-red-900/50 bg-red-950/30 text-red-300',
-                'border-red-200 bg-red-50 text-red-700',
-              )}`}>
-              <FiAlertTriangle className="mt-0.5 size-3.5 shrink-0" />
-              <span>{errorMessage}</span>
-            </div>
-          )}
-          {successMessage && (
-            <div
-              role="status"
-              className={`flex items-start gap-2 rounded-lg border px-3 py-2 text-xs ${tone(
-                'border-emerald-900/50 bg-emerald-950/30 text-emerald-300',
-                'border-emerald-200 bg-emerald-50 text-emerald-800',
-              )}`}>
-              <FiCheck className="mt-0.5 size-3.5 shrink-0" />
-              <span>{successMessage}</span>
+              role={message.tone === 'error' ? 'alert' : 'status'}
+              className={`rounded-lg border px-3 py-2.5 text-xs ${
+                message.tone === 'error'
+                  ? tone('border-red-900/50 bg-red-950/30 text-red-300', 'border-red-200 bg-red-50 text-red-700')
+                  : message.tone === 'success'
+                    ? tone(
+                        'border-emerald-900/50 bg-emerald-950/30 text-emerald-300',
+                        'border-emerald-200 bg-emerald-50 text-emerald-800',
+                      )
+                    : tone('border-sky-900/50 bg-sky-950/30 text-sky-200', 'border-sky-200 bg-sky-50 text-sky-900')
+              }`}>
+              <div className="flex items-start gap-2">
+                {message.tone === 'error' ? (
+                  <FiAlertTriangle className="mt-0.5 size-3.5 shrink-0" />
+                ) : message.tone === 'success' ? (
+                  <FiCheck className="mt-0.5 size-3.5 shrink-0" />
+                ) : (
+                  <AiOutlineLoading3Quarters
+                    className={`mt-0.5 size-3.5 shrink-0 ${purchase.phase === 'waiting' ? 'animate-spin' : ''}`}
+                  />
+                )}
+                <div className="min-w-0 flex-1">
+                  <p className="font-semibold">{message.title}</p>
+                  {message.detail && <p className="mt-0.5">{message.detail}</p>}
+                </div>
+                {purchase.phase !== 'waiting' && (
+                  <button
+                    type="button"
+                    onClick={billing.dismiss}
+                    className="shrink-0 rounded p-0.5 opacity-70 hover:opacity-100 cursor-pointer"
+                    aria-label="Dismiss">
+                    <FiX className="size-3.5" />
+                  </button>
+                )}
+              </div>
+              {purchase.phase === 'waiting' && (
+                <div className="mt-2 flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={billing.reopen}
+                    className="flex items-center gap-1 rounded-md bg-sky-600 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-sky-700 cursor-pointer">
+                    <FiExternalLink className="size-3" />
+                    Open payment page
+                  </button>
+                  <button type="button" onClick={billing.stopWaiting} className={secondaryButton}>
+                    Stop waiting
+                  </button>
+                </div>
+              )}
+              {purchase.phase === 'other-account' && (
+                <div className="mt-2 flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={() => void openJobformSignIn()}
+                    className="flex items-center gap-1 rounded-md bg-sky-600 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-sky-700 cursor-pointer">
+                    <FiExternalLink className="size-3" />
+                    Sign in with that account
+                  </button>
+                </div>
+              )}
             </div>
           )}
 
           {/* Your plan */}
           <section className={`${card} divide-y ${tone('divide-slate-700', 'divide-slate-100')}`}>
-            {premiumActive && (
-              <div className="flex items-start gap-2.5 p-3">
-                <span
-                  className={`flex size-8 shrink-0 items-center justify-center rounded-lg ${tone(
-                    'bg-violet-500/20 text-violet-300',
-                    'bg-violet-100 text-violet-700',
-                  )}`}>
-                  <FiStar className="size-4" />
-                </span>
-                <div className="min-w-0 flex-1">
-                  <div className="flex flex-wrap items-center gap-1.5">
-                    <span className="text-sm font-bold">JobForm Automator {jobformPremium?.tier}</span>
-                    <span
-                      className={`rounded px-1.5 text-[10px] font-bold uppercase tracking-wide border ${tone(
-                        'border-emerald-500/30 bg-emerald-500/15 text-emerald-300',
-                        'border-emerald-200 bg-emerald-50 text-emerald-700',
-                      )}`}>
-                      Active
-                    </span>
+            <div className="flex items-start gap-2.5 p-3">
+              <span
+                className={`flex size-8 shrink-0 items-center justify-center rounded-lg ${
+                  premiumActive
+                    ? tone('bg-violet-500/20 text-violet-300', 'bg-violet-100 text-violet-700')
+                    : tone('bg-slate-700 text-slate-300', 'bg-slate-100 text-slate-500')
+                }`}>
+                <FiStar className="size-4" />
+              </span>
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span className="text-sm font-bold">
+                    {premiumActive ? `JobForm Automator ${premium?.tier}` : `${BASIC_PLAN.name} (Free)`}
+                  </span>
+                  {premiumActive && <span className={activeBadge}>Active</span>}
+                  {!billing.statusLoaded && (
+                    <AiOutlineLoading3Quarters className="size-3 animate-spin opacity-60" aria-label="Checking plan" />
+                  )}
+                </div>
+                <ul className={`mt-1 space-y-0.5 text-[11px] ${tone('text-slate-300', 'text-slate-600')}`}>
+                  {premiumActive ? (
+                    <>
+                      {EXTENSION_BENEFITS.map(benefit => (
+                        <li key={benefit}>{benefit}</li>
+                      ))}
+                      {premium?.endDate && premium.tier !== 'Diamond' && (
+                        <li>Active until {formatDate(premium.endDate)}</li>
+                      )}
+                    </>
+                  ) : (
+                    <li>Up to {FREE_DAILY_APPLICATIONS} applications a day</li>
+                  )}
+                </ul>
+              </div>
+            </div>
+
+            {(creditPlan || userCredits) && (
+              <div className="p-3">
+                {creditPlan && (
+                  <div className="mb-2">
+                    <p className={`text-[11px] font-medium ${muted}`}>Credit plan</p>
+                    <p className="text-sm font-semibold">{creditPlan.title}</p>
+                    {creditPlan.detail && <p className={`text-[11px] ${muted}`}>{creditPlan.detail}</p>}
                   </div>
-                  <ul className={`mt-1 space-y-0.5 text-[11px] ${tone('text-slate-300', 'text-slate-600')}`}>
-                    <li>AI Auto Apply included, no credits used</li>
-                    <li>Up to 300 applications a day</li>
-                    {jobformPremium?.endDate && jobformPremium.tier !== 'Diamond' && (
-                      <li>Active until {formatDate(jobformPremium.endDate)}</li>
+                )}
+                {userCredits && (
+                  <div>
+                    <div className="flex items-baseline justify-between text-[11px]">
+                      <span
+                        className={`flex items-center gap-1 font-medium ${tone('text-slate-300', 'text-slate-700')}`}>
+                        <FiZap className="size-3" />
+                        AI credits
+                      </span>
+                      <span className={tone('text-slate-300', 'text-slate-600')}>
+                        <span className="font-semibold">{remaining.toLocaleString()}</span> of{' '}
+                        {allocated.toLocaleString()} left
+                      </span>
+                    </div>
+                    <div
+                      className={`mt-1.5 h-1.5 w-full overflow-hidden rounded-full ${tone('bg-slate-700', 'bg-slate-200')}`}
+                      role="progressbar"
+                      aria-label="AI credits left"
+                      aria-valuemin={0}
+                      aria-valuemax={allocated}
+                      aria-valuenow={remaining}>
+                      <div
+                        className={`h-full rounded-full ${creditPercent < 20 ? 'bg-amber-500' : 'bg-sky-600'}`}
+                        style={{ width: `${creditPercent}%` }}
+                      />
+                    </div>
+                    {creditNote && <p className={`mt-1 text-[11px] ${muted}`}>{creditNote}</p>}
+                  </div>
+                )}
+              </div>
+            )}
+          </section>
+
+          {/* JobForm Automator plans (same plans, prices and checkout as the website) */}
+          <section>
+            <div className="px-1">
+              <h3 className="text-xs font-semibold">JobForm Automator plans</h3>
+              <p className={`text-[11px] ${muted}`}>
+                Same plans and prices as jobformautomator.com. One plan for both.
+              </p>
+            </div>
+
+            {!plans && !plansError && (
+              <div className={`mt-2 flex items-center justify-center gap-2 p-6 text-xs ${card} ${muted}`}>
+                <AiOutlineLoading3Quarters className="size-3.5 animate-spin" />
+                Loading plans…
+              </div>
+            )}
+
+            {plansError && (
+              <div className={`mt-2 p-3 text-xs ${card}`}>
+                <p className={tone('text-amber-300', 'text-amber-700')}>{plansError}</p>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={() => void billing.loadPlans()}
+                    className={`flex items-center gap-1 ${secondaryButton}`}>
+                    <FiRefreshCw className="size-3" />
+                    Try again
+                  </button>
+                  <button
+                    type="button"
+                    onClick={openJobformPricing}
+                    className="flex items-center gap-1 rounded-md px-2.5 py-1 text-[11px] font-semibold text-sky-600 hover:underline cursor-pointer">
+                    <FiExternalLink className="size-3" />
+                    Open pricing page
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {plans && (
+              <div className="mt-2 space-y-2">
+                <div
+                  className={`rounded-xl border p-3 ${
+                    premiumActive
+                      ? tone('border-slate-700 bg-slate-800/70', 'border-slate-200 bg-white')
+                      : tone('border-emerald-500/60 bg-emerald-950/20', 'border-emerald-300 bg-emerald-50/50')
+                  }`}>
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-1.5">
+                        <h4 className="text-sm font-bold">{BASIC_PLAN.name}</h4>
+                        {!premiumActive && <span className={activeBadge}>Current</span>}
+                      </div>
+                      <p className={`text-[11px] ${muted}`}>{BASIC_PLAN.description}</p>
+                    </div>
+                    <p className="shrink-0 text-base font-bold">Free</p>
+                  </div>
+                  <ul className={`mt-2 space-y-1 text-xs ${tone('text-slate-300', 'text-slate-700')}`}>
+                    {[`Up to ${FREE_DAILY_APPLICATIONS} applications a day`, 'AI Auto Apply uses AI credits'].map(
+                      feature => (
+                        <li key={feature} className="flex items-start gap-2">
+                          <FiCheck className={`mt-0.5 size-3.5 shrink-0 ${muted}`} aria-hidden="true" />
+                          <span>{feature}</span>
+                        </li>
+                      ),
                     )}
                   </ul>
                 </div>
-              </div>
-            )}
-
-            <div className="p-3">
-              <div className="flex items-center justify-between gap-2">
-                <div className="min-w-0">
-                  <p className={`text-[11px] font-medium ${muted}`}>{premiumActive ? 'Credit plan' : 'Current plan'}</p>
-                  <p className="flex items-center gap-1.5 text-sm font-semibold">
-                    <span
-                      className={`size-2 shrink-0 rounded-full ${
-                        subscription.state === 'active'
-                          ? 'bg-emerald-500'
-                          : subscription.state === 'warning'
-                            ? 'bg-amber-500'
-                            : 'bg-slate-400'
-                      }`}
-                    />
-                    {subscription.title}
-                  </p>
-                  {subscription.detail && <p className={`text-[11px] ${muted}`}>{subscription.detail}</p>}
-                </div>
-              </div>
-
-              {userCredits && (
-                <div className="mt-3">
-                  <div className="flex items-baseline justify-between text-[11px]">
-                    <span className={`flex items-center gap-1 font-medium ${tone('text-slate-300', 'text-slate-700')}`}>
-                      <FiZap className="size-3" />
-                      AI credits
-                    </span>
-                    <span className={tone('text-slate-300', 'text-slate-600')}>
-                      <span className="font-semibold">{remaining.toLocaleString()}</span> of{' '}
-                      {allocated.toLocaleString()} left
-                    </span>
-                  </div>
-                  <div
-                    className={`mt-1.5 h-1.5 w-full overflow-hidden rounded-full ${tone('bg-slate-700', 'bg-slate-200')}`}
-                    role="progressbar"
-                    aria-label="AI credits left"
-                    aria-valuemin={0}
-                    aria-valuemax={allocated}
-                    aria-valuenow={remaining}>
-                    <div
-                      className={`h-full rounded-full ${creditPercent < 20 ? 'bg-amber-500' : 'bg-sky-600'}`}
-                      style={{ width: `${creditPercent}%` }}
-                    />
-                  </div>
-                  {creditNote && <p className={`mt-1 text-[11px] ${muted}`}>{creditNote}</p>}
-                </div>
-              )}
-            </div>
-          </section>
-
-          {/* Credit plans */}
-          <section>
-            {premiumActive ? (
-              <button
-                type="button"
-                onClick={() => setShowPlans(v => !v)}
-                aria-expanded={showPlans}
-                className={`flex w-full items-center justify-between rounded-lg px-1 py-1 text-left text-xs font-semibold cursor-pointer ${tone(
-                  'text-slate-300 hover:text-white',
-                  'text-slate-700 hover:text-slate-900',
-                )}`}>
-                <span>
-                  Credit plans
-                  <span className={`block text-[11px] font-normal ${muted}`}>
-                    Premium already includes AI. Plans add credits and higher daily limits.
-                  </span>
-                </span>
-                {showPlans ? (
-                  <FiChevronUp className="size-4 shrink-0" />
-                ) : (
-                  <FiChevronDown className="size-4 shrink-0" />
-                )}
-              </button>
-            ) : (
-              <div className="px-1">
-                <h3 className="text-xs font-semibold">Choose a plan</h3>
-                <p className={`text-[11px] ${muted}`}>Billed monthly. Credits refill each billing period.</p>
-              </div>
-            )}
-
-            {plansVisible && (
-              <div className="mt-2 space-y-2">
-                {PLANS.map(plan => {
-                  const isCurrent = activePaidPlan === plan.code;
-                  const isLoading = loadingPlanCode === plan.code;
+                {plans.map(plan => {
+                  const action = planAction(plan, premium);
+                  const isDiamond = plan.id === 'Diamond';
+                  const otherPrice =
+                    currency === 'USD' ? `${plan.prices.INR} in India` : `${plan.prices.USD} outside India`;
+                  const loading = billing.opening === plan.id;
                   return (
                     <div
-                      key={plan.code}
+                      key={plan.id}
                       className={`rounded-xl border p-3 ${
-                        isCurrent
+                        action === 'current'
                           ? tone('border-emerald-500/60 bg-emerald-950/20', 'border-emerald-300 bg-emerald-50/50')
-                          : plan.popular
+                          : isDiamond
                             ? tone('border-sky-500/60 bg-slate-800/70', 'border-sky-300 bg-white ring-1 ring-sky-200')
                             : tone('border-slate-700 bg-slate-800/70', 'border-slate-200 bg-white')
                       }`}>
                       <div className="flex items-start justify-between gap-2">
-                        <div className="flex items-center gap-1.5">
-                          <h4 className="text-sm font-bold">{plan.name}</h4>
-                          {isCurrent ? (
-                            <span
-                              className={`rounded px-1.5 text-[10px] font-bold uppercase tracking-wide border ${tone(
-                                'border-emerald-500/30 bg-emerald-500/15 text-emerald-300',
-                                'border-emerald-200 bg-emerald-50 text-emerald-700',
-                              )}`}>
-                              Current
-                            </span>
-                          ) : (
-                            plan.popular && (
-                              <span
-                                className={`rounded px-1.5 text-[10px] font-bold uppercase tracking-wide border ${tone(
-                                  'border-sky-500/30 bg-sky-500/15 text-sky-300',
-                                  'border-sky-200 bg-sky-50 text-sky-700',
-                                )}`}>
-                                Most popular
-                              </span>
-                            )
-                          )}
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-1.5">
+                            <h4 className="text-sm font-bold">{plan.id}</h4>
+                            {action === 'current' && <span className={activeBadge}>Current</span>}
+                          </div>
+                          <p className={`text-[11px] ${muted}`}>{plan.description}</p>
                         </div>
-                        <p className="whitespace-nowrap">
-                          <span className="text-base font-bold">{plan.price}</span>
-                          <span className={`text-[11px] ${muted}`}> / month</span>
-                        </p>
+                        <div className="shrink-0 text-right">
+                          <p className="whitespace-nowrap">
+                            <span className="text-base font-bold">{plan.prices[currency ?? 'INR']}</span>
+                            <span className={`text-[11px] ${muted}`}> / {plan.durationLabel}</span>
+                          </p>
+                          <p className={`text-[10px] ${muted}`}>{otherPrice}</p>
+                        </div>
                       </div>
 
                       <ul className={`mt-2 space-y-1 text-xs ${tone('text-slate-300', 'text-slate-700')}`}>
-                        {[
-                          `${plan.credits} AI credits a month`,
-                          `Up to ${plan.dailyApplications} applications a day`,
-                          plan.support,
-                        ].map(feature => (
-                          <li key={feature} className="flex items-center gap-2">
+                        {EXTENSION_BENEFITS.map(feature => (
+                          <li key={feature} className="flex items-start gap-2">
                             <FiCheck
-                              className={`size-3.5 shrink-0 ${tone('text-emerald-400', 'text-emerald-600')}`}
+                              className={`mt-0.5 size-3.5 shrink-0 ${tone('text-emerald-400', 'text-emerald-600')}`}
                               aria-hidden="true"
                             />
                             <span>{feature}</span>
@@ -475,37 +461,35 @@ export const PremiumPlansModal: React.FC<PremiumPlansModalProps> = ({
                         ))}
                       </ul>
 
-                      {isCurrent ? (
+                      {action === 'current' || action === 'included' ? (
                         <p
                           className={`mt-2.5 flex items-center justify-center gap-1.5 rounded-lg py-1.5 text-xs font-semibold ${tone(
                             'bg-emerald-500/10 text-emerald-300',
                             'bg-emerald-100/70 text-emerald-800',
                           )}`}>
                           <FiCheck className="size-3.5" />
-                          Your current plan
+                          {action === 'current' ? 'Your current plan' : 'Included in Diamond'}
                         </p>
                       ) : (
                         <button
                           type="button"
-                          onClick={() => handleCheckout(plan.code)}
-                          disabled={loadingPlanCode !== null}
+                          onClick={() => void billing.buy(plan.id)}
+                          disabled={busy}
                           className={`mt-2.5 flex w-full items-center justify-center gap-1.5 rounded-lg py-1.5 text-xs font-semibold transition-colors cursor-pointer disabled:cursor-not-allowed disabled:opacity-60 ${
-                            plan.popular
+                            isDiamond
                               ? 'bg-sky-600 text-white hover:bg-sky-700'
                               : tone(
                                   'border border-slate-600 text-slate-100 hover:bg-slate-700',
                                   'border border-slate-300 text-slate-800 hover:bg-slate-50',
                                 )
                           }`}>
-                          {isLoading ? (
+                          {loading ? (
                             <>
                               <AiOutlineLoading3Quarters className="size-3.5 animate-spin" />
                               <span>Opening checkout…</span>
                             </>
                           ) : (
-                            <span>
-                              {activePaidPlan ? 'Switch to' : 'Choose'} {plan.name}
-                            </span>
+                            <span>{action === 'upgrade' ? `Upgrade to ${plan.id}` : `Choose ${plan.id}`}</span>
                           )}
                         </button>
                       )}
@@ -523,8 +507,11 @@ export const PremiumPlansModal: React.FC<PremiumPlansModalProps> = ({
             'border-slate-800 bg-slate-900 text-slate-400',
             'border-slate-200 bg-white text-slate-500',
           )}`}>
-          <FiLock className={`size-3.5 ${tone('text-emerald-400', 'text-emerald-600')}`} />
-          <span>Secure checkout by Razorpay. Plans activate once the payment is confirmed.</span>
+          <FiLock className={`size-3.5 shrink-0 ${tone('text-emerald-400', 'text-emerald-600')}`} />
+          <span>
+            Secure Razorpay checkout on jobformautomator.com. Your plan unlocks after JobForm Automator verifies the
+            payment.
+          </span>
         </div>
       </div>
     </div>

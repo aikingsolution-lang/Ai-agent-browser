@@ -3,7 +3,7 @@ import { ChatOpenAI } from '@langchain/openai';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { createChatModel } from './helper';
 import { createLogger } from '../log';
-import { BACKEND_LLM_URL, DEFAULT_LLM_MODEL } from '@extension/shared';
+import { BACKEND_LLM_URL, DEFAULT_LLM_MODEL, newAiTaskId } from '@extension/shared';
 import { isLlmAvailable, wrapChatModelWithCircuitBreaker } from './llmCircuitBreaker';
 
 const logger = createLogger('ActiveModelHelper');
@@ -54,10 +54,9 @@ export async function getActiveChatModel(jobRunId?: string): Promise<BaseChatMod
     if (session?.token) {
       const headers: Record<string, string> = {
         Authorization: `Bearer ${session.token}`,
+        // The Auto Apply run, or one AI task per model (the backend counts Premium AI tasks by it)
+        'x-run-id': jobRunId || newAiTaskId(),
       };
-      if (jobRunId) {
-        headers['x-run-id'] = jobRunId;
-      }
       const model = new ChatOpenAI({
         modelName: DEFAULT_LLM_MODEL,
         apiKey: session.token,

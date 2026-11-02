@@ -13,7 +13,8 @@
  *
  * Everything is reported only from the top frame of the website's own origins to the background,
  * which checks the sender again, verifies the session with the backend and reads premium status from
- * the backend (the payment event is only a hint to re-check; its contents are ignored).
+ * the backend (the payment event is only a hint to re-check: its uid and plan say which account paid
+ * and which plan to wait for, never what to unlock).
  *
  * The Automation Hub's "Extract Emails" fires `startEmailExtraction`: the bridge shows the "Find HR
  * emails" dialog and starts the extension's Auto Email run (see autoEmailDialog.ts). The website
@@ -189,8 +190,15 @@ export function initJobformWebsiteBridge(): void {
     send({ type: JOBFORM_WEBSITE_MESSAGES.logout, trigger: 'event' });
   });
 
-  document.addEventListener('paymentSuccessfull', () => {
-    send({ type: JOBFORM_WEBSITE_MESSAGES.paymentCompleted });
+  // Forwarded with the website's payload, as the JobForm Automator extension's `paymentProcessed`
+  document.addEventListener('paymentSuccessfull', event => {
+    const detail = (event as CustomEvent).detail;
+    const { uid, plan } = (detail && typeof detail === 'object' ? detail : {}) as Record<string, unknown>;
+    send({
+      type: JOBFORM_WEBSITE_MESSAGES.paymentCompleted,
+      uid: typeof uid === 'string' ? uid : undefined,
+      plan: typeof plan === 'string' ? plan : undefined,
+    });
   });
 
   // "Extract Emails" on the Automation Hub (candidate pages only; HR pages have their own extension)

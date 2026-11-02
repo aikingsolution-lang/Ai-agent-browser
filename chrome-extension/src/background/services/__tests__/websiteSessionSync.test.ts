@@ -54,6 +54,7 @@ const fake = vi.hoisted(() => {
 import {
   BACKEND_API_URL,
   backendApiClient,
+  getJobformPaymentEvent,
   isPremiumActive,
   openJobformSignIn,
   refreshAccountQuota,
@@ -81,6 +82,7 @@ import {
   isTrustedWebsiteSender,
   JOBFORM_WEBSITE_MESSAGES,
   parseLoginMessage,
+  parsePaymentMessage,
   readCandidateFirebaseSession,
   syncSessionFromOpenJobformTabs,
 } from '../websiteSessionSync';
@@ -528,48 +530,91 @@ describe('scenario 9: switching accounts never leaks data', () => {
 });
 
 describe('scenarios 6–8: premium comes only from the backend', () => {
-  it('a payment event re-checks the backend; premium appears once the website has verified the payment', async () => {
-    await login('userA');
-    expect((await session()).premium?.isPremium).toBe(false);
+  const paymentEvent = (detail: Record<string, unknown>, delays: number[]) =>
+    handleWebsiteMessage(
+      { type: JOBFORM_WEBSITE_MESSAGES.paymentCompleted, ...detail },
+      { paymentRecheckDelaysMs: delays },
+    );
+  const verifyPaymentLater = (uid: string, tier: 'Premium' | 'Diamond', ms = 15) =>
     // JobForm Automator's /api/payment/confirm writes user/{uid}/Payment a moment after the event
     setTimeout(
-      () =>
-        backend.payments.set('userA', {
-          tier: 'Premium',
-          endDate: new Date(Date.now() + 30 * 86_400_000).toISOString(),
-        }),
-      15,
+      () => backend.payments.set(uid, { tier, endDate: new Date(Date.now() + 30 * 86_400_000).toISOString() }),
+      ms,
     );
-    const result = await handleWebsiteMessage(
-      { type: JOBFORM_WEBSITE_MESSAGES.paymentCompleted, uid: 'userA', plan: 'Diamond' },
-      {
-        paymentRecheckDelaysMs: [0, 30, 60],
-      },
-    );
-    expect(result).toMatchObject({ ok: true, premium: true });
-    expect((await session()).premium).toMatchObject({ tier: 'Premium', isPremium: true }); // not the event's "Diamond"
+
+  it('paymentSuccessfull re-checks the backend; the plan, credits and quota update once the website has verified the payment', async () => {
+    await login('userA');
+    await refreshAccountQuota();
+    expect((await session()).premium?.isPremium).toBe(false);
+    verifyPaymentLater('userA', 'Premium');
+    const result = await paymentEvent({ uid: 'userA', plan: 'Premium' }, [0, 30, 60]);
+    expect(result).toMatchObject({ ok: true, outcome: 'active', premium: true });
+    const s = await session();
+    expect(s.premium).toMatchObject({ tier: 'Premium', isPremium: true });
+    expect(s.credits).not.toBeNull();
+    // Today's quota is re-read right away (the free 10 a day is not shown any more)
+    expect(
+      getQuotaDisplay(await dailyQuotaStore.getQuotaData(), {
+        uid: 'userA',
+        premiumActive: true,
+        premiumCheckedAt: Date.parse(s.premium!.checkedAt),
+      }),
+    ).toMatchObject({ status: 'ready', limit: 300, isPaid: true });
+    expect(await getJobformPaymentEvent()).toMatchObject({ plan: 'Premium', outcome: 'active' });
+  });
+
+  it("the event's plan is only what to wait for: an event saying Diamond does not make a Premium payment Diamond", async () => {
+    await login('userA');
+    verifyPaymentLater('userA', 'Premium');
+    const result = await paymentEvent({ uid: 'userA', plan: 'Diamond' }, [0, 30, 60]);
+    expect(result).toMatchObject({ ok: true, outcome: 'pending', premium: true });
+    expect((await session()).premium).toMatchObject({ tier: 'Premium', isPremium: true });
+  });
+
+  it('an upgrade from Premium waits for Diamond (it does not stop at the Premium it already had)', async () => {
+    backend.payments.set('userA', { tier: 'Premium', endDate: new Date(Date.now() + 86_400_000).toISOString() });
+    await login('userA');
+    verifyPaymentLater('userA', 'Diamond', 40);
+    const result = await paymentEvent({ uid: 'userA', plan: 'Diamond' }, [0, 20, 40, 60]);
+    expect(result).toMatchObject({ outcome: 'active' });
+    expect((await session()).premium).toMatchObject({ tier: 'Diamond', isPremium: true });
   });
 
   it('a payment event without a verified payment grants nothing', async () => {
     await login('userA');
-    const result = await handleWebsiteMessage(
-      { type: JOBFORM_WEBSITE_MESSAGES.paymentCompleted, uid: 'userA', plan: 'Diamond' },
-      {
-        paymentRecheckDelaysMs: [0, 5, 5],
-      },
-    );
-    expect(result).toMatchObject({ ok: true, premium: false });
+    const pending = paymentEvent({ uid: 'userA', plan: 'Diamond' }, [0, 30, 30]);
+    await new Promise(resolve => setTimeout(resolve, 10));
+    expect(await getJobformPaymentEvent()).toMatchObject({ plan: 'Diamond', outcome: 'checking' });
+    expect(await pending).toMatchObject({ ok: true, outcome: 'pending', premium: false });
     expect((await session()).premium?.isPremium).toBe(false);
     expect(backend.subscriptionMeCalls).toBeGreaterThanOrEqual(3);
+    expect(await getJobformPaymentEvent()).toMatchObject({ outcome: 'pending' });
+  });
+
+  it("a payment made by another account on the website unlocks nothing here (and isn't re-checked)", async () => {
+    await login('userA');
+    backend.payments.set('userB', { tier: 'Diamond', endDate: new Date(Date.now() + 86_400_000).toISOString() });
+    const calls = backend.subscriptionMeCalls;
+    const result = await paymentEvent({ uid: 'userB', plan: 'Diamond' }, [0, 5]);
+    expect(result).toMatchObject({ ok: true, outcome: 'other-account', premium: false });
+    expect(backend.subscriptionMeCalls).toBe(calls);
+    expect((await session()).premium?.isPremium).toBe(false);
+    expect(uidOf(await session())).toBe('userA');
+    expect(await getJobformPaymentEvent()).toMatchObject({ outcome: 'other-account' });
   });
 
   it('a payment event while signed out does nothing', async () => {
-    const result = await handleWebsiteMessage(
-      { type: JOBFORM_WEBSITE_MESSAGES.paymentCompleted },
-      { paymentRecheckDelaysMs: [0] },
-    );
-    expect(result).toMatchObject({ ok: true, premium: false });
+    const result = await paymentEvent({}, [0]);
+    expect(result).toMatchObject({ ok: true, outcome: 'signed-out', premium: false });
     expect(backend.subscriptionMeCalls).toBe(0);
+  });
+
+  it('reads the website payload like the JobForm Automator extension (no plan → Premium)', () => {
+    expect(parsePaymentMessage({ uid: 'userA', plan: 'Diamond' })).toEqual({ uid: 'userA', plan: 'Diamond' });
+    expect(parsePaymentMessage({ uid: 'userA', plan: 'diamond' })).toEqual({ uid: 'userA', plan: 'Diamond' });
+    expect(parsePaymentMessage({ uid: 'userA' })).toEqual({ uid: 'userA', plan: 'Premium' });
+    expect(parsePaymentMessage({ uid: 'a/b', plan: 'Gold' })).toEqual({ uid: null, plan: 'Premium' });
+    expect(parsePaymentMessage(null)).toEqual({ uid: null, plan: 'Premium' });
   });
 
   it('expiry: a lapsed period shows as not premium locally and from the backend', async () => {
@@ -601,6 +646,18 @@ describe('scenarios 6–8: premium comes only from the backend', () => {
     const settings = await cloudApiSettingsStore.getSettings();
     expect(settings.subscription.planId).toBe('free');
     expect(settings.apiMode).toBe('free');
+  });
+
+  it('JobForm Premium / Diamond keep "Premium Mode" selected; it turns off when the plan ends', async () => {
+    backend.payments.set('userA', { tier: 'Diamond', endDate: new Date(Date.now() + 86_400_000).toISOString() });
+    await login('userA');
+    await cloudApiSettingsStore.setApiMode('premium');
+    await refreshAccountStatus();
+    expect((await cloudApiSettingsStore.getSettings()).apiMode).toBe('premium');
+
+    backend.payments.set('userA', { tier: 'Diamond', endDate: new Date(Date.now() - 1000).toISOString() });
+    await refreshAccountStatus();
+    expect((await cloudApiSettingsStore.getSettings()).apiMode).toBe('free');
   });
 });
 

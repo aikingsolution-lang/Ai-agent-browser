@@ -872,6 +872,11 @@ export class BackendApiClient {
     );
   }
 
+  /** Built-in Cloud API allowance of the account's JobForm Automator plan this month (counted by the server). */
+  public async getPremiumAiAllowance() {
+    return this.request<PremiumAiAllowance>('/llm/premium-allowance', { method: 'GET' });
+  }
+
   /**
    * Uploads raw resume file (PDF/DOCX) to backend, extracts structured data via Bedrock AI,
    * and saves/syncs the updated CareerBrain.
@@ -916,6 +921,9 @@ export class BackendApiClient {
     fitScore?: number;
     status?: string;
     appliedAt?: string;
+    jobDescription?: string;
+    companyWebsite?: string;
+    failureReason?: string;
   }) {
     return this.request<{ application: any }>('/job-applications', {
       method: 'POST',
@@ -1100,6 +1108,19 @@ export interface JobformPremiumStatus {
   endDate: string | null;
   expired: boolean;
   checkedAt: string;
+}
+
+/** GET /llm/premium-allowance: AI tasks this month included with JobForm Automator Premium / Diamond. */
+export interface PremiumAiAllowance {
+  tier: 'Free' | 'Premium' | 'Diamond';
+  /** Whether the built-in Cloud API is included (verified Premium or Diamond). */
+  included: boolean;
+  month: string;
+  limit: number;
+  used: number;
+  remaining: number;
+  resetsAt: string;
+  coveredModels: string[];
 }
 
 export interface BackendResumeResponse {

@@ -16,6 +16,7 @@
 
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { createLogger } from '@src/background/log';
+import { reportApplication } from '@src/background/services/applicationHistory';
 import type BrowserContext from '@src/background/browser/context';
 import type Page from '@src/background/browser/page';
 import { careerBrainStore, type ICareerBrain } from '@extension/storage';
@@ -1557,14 +1558,15 @@ export class ApplicationEngine {
       this.state.completedAt = Date.now();
       if (!this.config.dryRun) {
         await DailyQuotaManager.commitApplication(quotaKey);
-        await backendApiClient.recordJobApplication({
-          jobId: jobData.jobId,
-          jobTitle: jobData.title,
-          company: jobData.company,
+        await reportApplication({
           platform: 'linkedin',
-          applicationUrl: jobData.url,
+          jobId: jobData.jobId,
+          title: jobData.title,
+          company: jobData.company,
+          url: jobData.url,
           location: jobData.location,
-          salaryRange: jobData.salaryRange,
+          salary: jobData.salaryRange,
+          description: jobData.description,
           fitScore: fitScoreValue,
           status: 'APPLIED',
         });

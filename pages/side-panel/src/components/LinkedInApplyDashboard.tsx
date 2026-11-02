@@ -658,7 +658,7 @@ export function LinkedInApplyDashboard({
           {!quotaView.isPaid && (
             <button
               type="button"
-              onClick={() => openJobformPricing()}
+              onClick={() => (onOpenPlansModal ? onOpenPlansModal() : openJobformPricing())}
               className="mt-1.5 rounded-md bg-gradient-to-r from-amber-500 to-orange-500 px-3 py-1 text-[11px] font-bold text-white hover:from-amber-600 hover:to-orange-600 cursor-pointer">
               Get Premium
             </button>
