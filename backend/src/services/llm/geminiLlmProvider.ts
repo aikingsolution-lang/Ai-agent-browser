@@ -75,7 +75,8 @@ export class GeminiLlmProvider implements ILlmProvider {
   }
 
   public async generateCompletion(request: LlmCompletionRequest): Promise<LlmCompletionResponse> {
-    const primaryModel = request.model || this.defaultModel;
+    const isGeminiModel = request.model && (request.model.startsWith('gemini-') || request.model.startsWith('models/'));
+    const primaryModel = isGeminiModel ? request.model : this.defaultModel;
     try {
       return await this.executeChatCompletion(primaryModel, request);
     } catch (err: any) {
@@ -315,7 +316,8 @@ export class GeminiLlmProvider implements ILlmProvider {
       signal.addEventListener('abort', onAbort);
     }
 
-    const effectiveModel = request.model || this.defaultModel;
+    const isGeminiModel = request.model && (request.model.startsWith('gemini-') || request.model.startsWith('models/'));
+    const effectiveModel = isGeminiModel ? request.model : this.defaultModel;
     const endpoint = `${this.baseUrl}/chat/completions`;
 
     const requestPayload: Record<string, any> = {

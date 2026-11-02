@@ -507,7 +507,7 @@ async function getJobScopedLLM(jobRunId: string): Promise<BaseChatModel | undefi
     const session = await authStorage.getSession();
     if (session?.token) {
       return new ChatOpenAI({
-        modelName: 'amazon.nova-lite-v1:0',
+        modelName: 'gemini-3.5-flash',
         apiKey: session.token,
         configuration: {
           baseURL: BACKEND_LLM_URL,
@@ -5966,9 +5966,36 @@ export class DedicatedJobRunner {
       return { status: 'skipped', usedDirectFallback };
     }
 
-    // 4c. Pre-Apply Skill Relevance Check (0 LLM credits)
+    // 4c. Pre-Apply Skill Relevance Check (with LLM arbitration)
     const relevance = checkJobSkillRelevance(displayTitle, topCard.descriptionSnippet, careerBrain, role);
-    if (!relevance.relevant) {
+    let isRelevanceApproved = relevance.relevant;
+
+    if (!isRelevanceApproved) {
+      this.checkAbort(runToken, this.abortController?.signal);
+      const scopedLLM = await getJobScopedLLM(jobRunId).catch(() => undefined);
+      if (scopedLLM && isLlmAvailable()) {
+        const arbitrated = await arbitrateBorderlineRelevance(
+          scopedLLM,
+          displayTitle,
+          topCard.descriptionSnippet || '',
+          careerBrain,
+        ).catch(() => null);
+        if (arbitrated && arbitrated.recommendation === 'apply') {
+          isRelevanceApproved = true;
+          logger.info(
+            `[DedicatedJobRunner] LLM approved skill relevance for "${displayTitle}" (was score ${relevance.score}%). Proceeding...`,
+          );
+        }
+      } else {
+        const unrelated = UNRELATED_DOMAINS.some(dom => displayTitle.toLowerCase().includes(dom));
+        if (!unrelated) {
+          isRelevanceApproved = true;
+          logger.info(`[DedicatedJobRunner] Title "${displayTitle}" matches domain — allowing Easy Apply attempt.`);
+        }
+      }
+    }
+
+    if (!isRelevanceApproved) {
       this.notifyStatus(
         portToSend,
         `ℹ️ Skipped "${displayTitle}": Required skills do not closely match your profile.`,
@@ -6152,7 +6179,7 @@ export class DedicatedJobRunner {
     this.checkAbort(runToken, this.abortController?.signal);
     let modalRes: any;
     try {
-      modalRes = await currentPage.waitForEasyApplyModal(15000, 300);
+      modalRes = await currentPage.waitForEasyApplyModal(3500, 250);
     } catch (mErr) {
       if (isCdpTabClosedError(mErr) || this.isStopping || !this.isRunning) {
         throw new AbortRunError(this.stopReason || 'Stopped by user');

@@ -2304,9 +2304,13 @@ export default class Page {
         }
         if (
           btn.classList.contains('jobs-apply-button') ||
+          btn.closest('.jobs-apply-button, .jobs-apply-button--top-card, .jobs-s-apply') ||
           /\beasy\s*apply\b/i.test(text) ||
           /\beasy\s*apply\b/i.test(aria) ||
-          btn.querySelector('svg[data-test-icon*="easy-apply"], .jobs-apply-button__label') !== null
+          btn.querySelector('svg[data-test-icon*="easy-apply"], .jobs-apply-button__label') !== null ||
+          ((text === 'apply' || text === 'apply now') &&
+            !/\bcompany\b/i.test(text) &&
+            btn.querySelector('svg, [class*="icon"]') !== null)
         ) {
           return { ok: true, why: 'match' };
         }
@@ -2364,6 +2368,7 @@ export default class Page {
         document.querySelector('.jobs-details__main-content') ||
         document.querySelector('.scaffold-layout__detail') ||
         document.querySelector('[data-view-name="job-details-top-card"]') ||
+        document.querySelector('[data-view-name="job-details"]') ||
         document.querySelector('.jobs-unified-top-card') ||
         document.querySelector('.job-details-jobs-unified-top-card__container--two-pane') ||
         document.querySelector('.job-view-layout');
@@ -2374,7 +2379,11 @@ export default class Page {
         '.jobs-s-apply button',
         'button.jobs-apply-button--top-card',
         '[data-view-name="job-details-top-card"] button',
+        '[data-view-name*="apply-button"]',
+        '[data-view-name*="apply"] button',
         'button[data-control-name="jobdetails_topcard_inapply"]',
+        'button[data-control-name="jobdetails_topcard_easy_apply"]',
+        'button[data-control-name*="apply"]',
         'button[data-live-test-easy-apply-button]',
         'button[data-job-id]',
         'button[aria-label*="Easy Apply" i]',
