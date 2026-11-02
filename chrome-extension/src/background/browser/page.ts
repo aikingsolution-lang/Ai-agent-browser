@@ -85,6 +85,8 @@ export default class Page {
   private _state: PageState;
   private _cachedState: PageState | null = null;
   private _cachedStateClickableElementsHashes: CachedStateClickableElementsHashes | null = null;
+  private _attachPromise: Promise<boolean> | null = null;
+  private _isDestroyed = false;
   public lastScanDiagnostic: string = '';
 
   constructor(tabId: number, url: string, title: string, config: Partial<BrowserContextConfig> = {}) {
@@ -101,13 +103,19 @@ export default class Page {
     const currentUrl = (this._puppeteerPage?.url() || this._state.url || '').trim().toLowerCase();
     return (
       Boolean(this._tabId) &&
-      currentUrl.startsWith('http') &&
-      !currentUrl.startsWith('https://chromewebstore.google.com')
+      (currentUrl.startsWith('http') || currentUrl === 'about:blank' || currentUrl === '') &&
+      !currentUrl.startsWith('https://chromewebstore.google.com') &&
+      !currentUrl.startsWith('chrome://') &&
+      !currentUrl.startsWith('chrome-extension://')
     );
   }
 
   get attached(): boolean {
-    return this.validWebPage && this._puppeteerPage !== null;
+    return !this._isDestroyed && this.validWebPage && this._puppeteerPage !== null;
+  }
+
+  get isDestroyed(): boolean {
+    return this._isDestroyed;
   }
 
   get puppeteerPage(): PuppeteerPage | null {
@@ -115,57 +123,90 @@ export default class Page {
   }
 
   async attachPuppeteer(): Promise<boolean> {
-    try {
-      const tab = await chrome.tabs.get(this._tabId);
-      const targetUrl = tab?.url || (tab as any)?.pendingUrl;
-      if (targetUrl) {
-        this._state.url = targetUrl;
-        this._state.title = tab?.title || '';
-      }
-    } catch {
-      // Tab may not be available yet
-    }
-
-    if (!this.validWebPage) {
+    if (this._isDestroyed) {
       return false;
     }
 
-    if (this._puppeteerPage) {
+    if (this._puppeteerPage && this.attached) {
       return true;
     }
 
-    try {
-      logger.info('attaching puppeteer', this._tabId);
-      const browser = await connect({
-        transport: await ExtensionTransport.connectTab(this._tabId),
-        defaultViewport: null,
-        protocol: 'cdp' as ProtocolType,
-      });
-      this._browser = browser;
+    if (this._attachPromise) {
+      return this._attachPromise;
+    }
 
-      const allPages = await browser.pages();
-      let targetPage = allPages[0];
-      for (const p of allPages) {
-        const pUrl = p.url();
-        if (!pUrl || pUrl.startsWith('chrome-extension://')) continue;
-        if (
-          this._state.url &&
-          (pUrl === this._state.url || this._state.url.includes(pUrl) || pUrl.includes(this._state.url))
-        ) {
-          targetPage = p;
-          break;
+    this._attachPromise = (async () => {
+      try {
+        const tab = await chrome.tabs.get(this._tabId);
+        const targetUrl = tab?.url || (tab as any)?.pendingUrl;
+        if (targetUrl) {
+          this._state.url = targetUrl;
+          this._state.title = tab?.title || '';
         }
-        targetPage = p;
+      } catch {
+        // Tab may not be available yet
       }
-      this._puppeteerPage = targetPage;
 
-      // Add anti-detection scripts
-      await this._addAntiDetectionScripts();
+      if (!this.validWebPage) {
+        return false;
+      }
 
-      return true;
-    } catch (err) {
-      logger.warning(`Failed to attach puppeteer to tab ${this._tabId} (DevTools or CDP conflict?):`, err);
-      return false;
+      if (this._puppeteerPage) {
+        return true;
+      }
+
+      let browser: Browser | null = null;
+      try {
+        logger.info('attaching puppeteer', this._tabId);
+        browser = await connect({
+          transport: await ExtensionTransport.connectTab(this._tabId),
+          defaultViewport: null,
+          protocol: 'cdp' as ProtocolType,
+        });
+        this._browser = browser;
+
+        const allPages = await browser.pages();
+        let targetPage = allPages[0];
+        for (const p of allPages) {
+          const pUrl = p.url();
+          if (!pUrl || pUrl.startsWith('chrome-extension://')) continue;
+          if (
+            this._state.url &&
+            (pUrl === this._state.url || this._state.url.includes(pUrl) || pUrl.includes(this._state.url))
+          ) {
+            targetPage = p;
+            break;
+          }
+          targetPage = p;
+        }
+
+        if (!targetPage) {
+          throw new Error('No valid target page found after connecting debugger');
+        }
+
+        this._puppeteerPage = targetPage;
+
+        // Add anti-detection scripts
+        await this._addAntiDetectionScripts();
+
+        return true;
+      } catch (err) {
+        logger.warning(`Failed to attach puppeteer to tab ${this._tabId} (DevTools or CDP conflict?):`, err);
+        if (browser) {
+          try {
+            await Promise.race([browser.disconnect(), new Promise(r => setTimeout(r, 1000))]);
+          } catch {}
+        }
+        this._browser = null;
+        this._puppeteerPage = null;
+        return false;
+      }
+    })();
+
+    try {
+      return await this._attachPromise;
+    } finally {
+      this._attachPromise = null;
     }
   }
 
@@ -219,16 +260,27 @@ export default class Page {
   }
 
   async detachPuppeteer(): Promise<void> {
+    this._isDestroyed = true;
     this._isEvaluating = false;
+    this._attachPromise = null;
     if (this._browser) {
-      try {
-        await Promise.race([this._browser.disconnect(), new Promise(r => setTimeout(r, 2000))]);
-      } catch {}
+      const b = this._browser;
       this._browser = null;
       this._puppeteerPage = null;
+      try {
+        await Promise.race([b.disconnect(), new Promise(r => setTimeout(r, 2000))]);
+      } catch {}
       // reset the state
       this._state = build_initial_state(this._tabId, this._state.url, this._state.title);
     }
+  }
+
+  public handleDetached(): void {
+    this._isDestroyed = true;
+    this._isEvaluating = false;
+    this._attachPromise = null;
+    this._browser = null;
+    this._puppeteerPage = null;
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -3063,6 +3115,8 @@ export default class Page {
           /\bapplied to\b/i,
           /\bapplication delivered\b/i,
           /\bapplied successfully\b/i,
+          /\byour application is on its way\b/i,
+          /\bapplication is on its way\b/i,
         ];
 
         // 1. Check headings, alerts, feedback banners
@@ -3097,6 +3151,22 @@ export default class Page {
           for (const pattern of confirmationPatterns) {
             if (pattern.test(dialogText)) {
               return dialogText.slice(0, 150);
+            }
+          }
+        }
+
+        // 3. Check for "Done" or "Got it" button in modal footer indicating post-apply confirmation screen
+        const modalButtons = root.querySelectorAll
+          ? (Array.from(root.querySelectorAll('button, [role="button"], .artdeco-button')) as HTMLElement[])
+          : [];
+        for (const b of modalButtons) {
+          const bt = (b.textContent || b.getAttribute('aria-label') || '').trim().toLowerCase();
+          if (/^done$/i.test(bt) || /^got it$/i.test(bt)) {
+            const bDialog = b.closest(
+              'div[role="dialog"], dialog[open], [aria-modal="true"], .artdeco-modal, .jobs-easy-apply-modal',
+            );
+            if (bDialog && !/save this application|discard draft/i.test((bDialog.textContent || '').slice(0, 200))) {
+              return 'Confirmed via post-apply Done button';
             }
           }
         }
@@ -3284,7 +3354,7 @@ export default class Page {
 
       function cleanDuplicateText(rawText: string): string {
         if (!rawText) return '';
-        let text = rawText
+        const text = rawText
           .replace(/[\n\r\t]+/g, ' ')
           .replace(/\s+/g, ' ')
           .trim();
@@ -4491,7 +4561,7 @@ export default class Page {
     const fillInPage = async (ident: { id?: string; label?: string }, val: string) => {
       function cleanDuplicateText(rawText: string): string {
         if (!rawText) return '';
-        let text = rawText
+        const text = rawText
           .replace(/[\n\r\t]+/g, ' ')
           .replace(/\s+/g, ' ')
           .trim();
@@ -4686,6 +4756,26 @@ export default class Page {
             (modal.querySelector ? modal.querySelector(`[id="${CSS.escape(ident.id)}"]`) : null);
         } catch {
           targetEl = document.getElementById(ident.id);
+        }
+        // If ident.id resolved to a container/wrapper (e.g. div or fieldset), resolve to the inner interactive input
+        if (
+          targetEl &&
+          !(
+            targetEl instanceof HTMLInputElement ||
+            targetEl instanceof HTMLSelectElement ||
+            targetEl instanceof HTMLTextAreaElement ||
+            targetEl.isContentEditable === true ||
+            targetEl.getAttribute('contenteditable') === 'true' ||
+            targetEl.getAttribute('role') === 'combobox' ||
+            targetEl.getAttribute('aria-haspopup') === 'listbox'
+          )
+        ) {
+          const inner = targetEl.querySelector(
+            'input:not([type="hidden"]):not([type="file"]), select, textarea, [contenteditable="true"], [role="combobox"], [aria-haspopup="listbox"]',
+          ) as HTMLElement | null;
+          if (inner) {
+            targetEl = inner;
+          }
         }
       }
 
@@ -6206,7 +6296,7 @@ export default class Page {
       const locationEl = document.querySelector(
         '.job-details-jobs-unified-top-card__bullet, .jobs-unified-top-card__bullet, .topcard__flavor--bullet, .jobs-unified-top-card__workplace-type, .jobs-unified-top-card__primary-description span:nth-of-type(2)',
       );
-      let location = (locationEl?.textContent || '').trim().replace(/^·\s*/, '');
+      const location = (locationEl?.textContent || '').trim().replace(/^·\s*/, '');
 
       // 5. Closed check: "No longer accepting applications"
       const fullText = document.body ? document.body.innerText || '' : '';
@@ -7608,7 +7698,7 @@ export default class Page {
           return { clickedClose: true };
         }
         const anySaveOrDiscard = Array.from(od.querySelectorAll('button')).find(b =>
-          /save|discard|close|dismiss|ok|got it/i.test((b.textContent || '').trim()),
+          /save|discard|close|dismiss|ok|got it|done/i.test((b.textContent || '').trim()),
         );
         if (anySaveOrDiscard) {
           anySaveOrDiscard.click();
@@ -7795,7 +7885,7 @@ export default class Page {
 
       function cleanDuplicateText(rawText: string): string {
         if (!rawText) return '';
-        let text = rawText
+        const text = rawText
           .replace(/[\n\r\t]+/g, ' ')
           .replace(/\s+/g, ' ')
           .trim();
@@ -8949,7 +9039,26 @@ export default class Page {
       const title =
         (titleEl?.textContent || modal.getAttribute('aria-label') || '').trim().slice(0, 120) ||
         textSnippet.slice(0, 80);
-      const buttonTexts = (Array.from(modal.querySelectorAll('button, [role="button"]')) as HTMLElement[])
+      const buttons = Array.from(modal.querySelectorAll('button, [role="button"]')) as HTMLElement[];
+      const primaryBtns = Array.from(
+        document.querySelectorAll(
+          '.jobs-easy-apply-modal__footer button, .artdeco-modal__actionbar button, button[data-easy-apply-next-button]',
+        ),
+      ) as HTMLElement[];
+      for (const pb of primaryBtns) {
+        if (pb.closest('footer, #footer, .artdeco-footer, [data-view-name="footer"]')) continue;
+        const pbDialog = pb.closest(
+          'div[role="dialog"], div.artdeco-modal, dialog[open], [aria-modal="true"]',
+        ) as HTMLElement | null;
+        if (
+          pbDialog &&
+          /save this application|save application|discard draft/i.test(pbDialog.innerText || pbDialog.textContent || '')
+        ) {
+          continue;
+        }
+        if (!buttons.includes(pb)) buttons.push(pb);
+      }
+      const buttonTexts = buttons
         .map(b => (b.textContent || b.getAttribute('aria-label') || '').trim().slice(0, 40))
         .filter(t => t.length > 0)
         .slice(0, 8);
@@ -9329,6 +9438,12 @@ export default class Page {
           el.setAttribute('aria-disabled', 'false');
           el.classList.remove('artdeco-button--disabled');
         } catch {}
+        try {
+          document
+            .querySelectorAll('[data-qoder-forward-target]')
+            .forEach(e => e.removeAttribute('data-qoder-forward-target'));
+          el.setAttribute('data-qoder-forward-target', '1');
+        } catch {}
         el.scrollIntoView({ behavior: 'instant', block: 'center' });
         el.focus();
         const opts = { bubbles: true, cancelable: true, view: window };
@@ -9425,24 +9540,52 @@ export default class Page {
       await this.attachPuppeteer().catch(() => false);
     }
 
+    let res: { clicked: boolean; type?: 'next' | 'review' } = { clicked: false };
+
     if (this._puppeteerPage) {
       try {
-        return await this._puppeteerPage.evaluate(clickInPage);
+        res = (await this._puppeteerPage.evaluate(clickInPage)) || { clicked: false };
       } catch {}
-    }
-
-    if (this._tabId && typeof chrome !== 'undefined' && chrome.scripting?.executeScript) {
+    } else if (this._tabId && typeof chrome !== 'undefined' && chrome.scripting?.executeScript) {
       try {
         const results = await chrome.scripting.executeScript({
           target: { tabId: this._tabId },
           func: clickInPage,
         });
-        const res = results?.[0]?.result;
-        if (res) return res;
+        const r = results?.[0]?.result;
+        if (r) res = r;
       } catch {}
     }
 
-    return { clicked: false };
+    // CDP TRUSTED CLICK ESCALATION:
+    // If the forward button was marked, execute a real trusted CDP mouse click.
+    // React 18+ on LinkedIn can silently ignore synthetic clicks on Next / Review buttons.
+    const forwardMarkerSel = '[data-qoder-forward-target]';
+    if (res.clicked && this._puppeteerPage) {
+      try {
+        const hasMarker = await this._puppeteerPage.evaluate((sel: string) => {
+          const el = document.querySelector(sel) as HTMLElement | null;
+          if (!el) return false;
+          el.scrollIntoView({ behavior: 'instant', block: 'center' });
+          return el.isConnected;
+        }, forwardMarkerSel);
+
+        if (hasMarker) {
+          await this._puppeteerPage.click(forwardMarkerSel);
+          logger.info(`[clickModalForwardButton] Trusted CDP click dispatched on ${res.type || 'forward'} button.`);
+        }
+      } catch (cdpErr) {
+        logger.warning('[clickModalForwardButton] Trusted CDP click escalation error:', cdpErr);
+      } finally {
+        try {
+          await this._puppeteerPage.evaluate((sel: string) => {
+            document.querySelectorAll(sel).forEach(el => el.removeAttribute('data-qoder-forward-target'));
+          }, forwardMarkerSel);
+        } catch {}
+      }
+    }
+
+    return res;
   }
 
   /**
@@ -9577,18 +9720,38 @@ export default class Page {
       ) as HTMLInputElement[];
       for (const cb of checkboxes) {
         if (!cb.checked) {
-          const txt = (cb.closest('label, div')?.textContent || cb.getAttribute('aria-label') || '').toLowerCase();
-          if (/agree|confirm|acknowledge|consent|certify|terms|policy/i.test(txt)) {
-            cb.click();
-            cb.checked = true;
-            cb.dispatchEvent(new Event('change', { bubbles: true }));
+          const txt = (
+            cb.closest('label, div, p, fieldset')?.textContent ||
+            cb.getAttribute('aria-label') ||
+            ''
+          ).toLowerCase();
+          const isConsent =
+            cb.required ||
+            cb.getAttribute('aria-required') === 'true' ||
+            /agree|confirm|acknowledge|consent|certify|terms|policy|background\s*check|authoriz/i.test(txt);
+          if (isConsent) {
+            const clickable = cb.closest('label') || cb.parentElement || cb;
+            clickable.click();
+            if (!cb.checked) {
+              const proto = (cb as any).constructor?.prototype || HTMLInputElement.prototype;
+              const setter = Object.getOwnPropertyDescriptor(proto, 'checked')?.set;
+              if (setter) {
+                setter.call(cb, true);
+              } else {
+                cb.checked = true;
+              }
+              cb.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+              cb.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+            }
           }
         }
       }
 
       const buttons = Array.from(modal.querySelectorAll('button, [role="button"]')) as HTMLElement[];
       const primaryBtns = Array.from(
-        document.querySelectorAll('.jobs-easy-apply-modal__footer button, .artdeco-modal__actionbar button'),
+        document.querySelectorAll(
+          '.jobs-easy-apply-modal__footer button, .artdeco-modal__actionbar button, button[data-easy-apply-next-button]',
+        ),
       ) as HTMLElement[];
       for (const pb of primaryBtns) {
         if (pb.closest('footer, #footer, .artdeco-footer, [data-view-name="footer"]')) continue;
@@ -9610,6 +9773,12 @@ export default class Page {
           el.removeAttribute('disabled');
           el.setAttribute('aria-disabled', 'false');
           el.classList.remove('artdeco-button--disabled');
+        } catch {}
+        try {
+          document
+            .querySelectorAll('[data-qoder-submit-target]')
+            .forEach(e => e.removeAttribute('data-qoder-submit-target'));
+          el.setAttribute('data-qoder-submit-target', '1');
         } catch {}
         el.scrollIntoView({ behavior: 'instant', block: 'center' });
         el.focus();
@@ -9676,24 +9845,60 @@ export default class Page {
       await this.attachPuppeteer().catch(() => false);
     }
 
+    let res: { clicked: boolean; error?: string } = { clicked: false, error: 'Initialization error' };
+
     if (this._puppeteerPage) {
       try {
-        return await this._puppeteerPage.evaluate(submitInPage);
-      } catch {}
-    }
-
-    if (this._tabId && typeof chrome !== 'undefined' && chrome.scripting?.executeScript) {
+        res = (await this._puppeteerPage.evaluate(submitInPage)) || {
+          clicked: false,
+          error: 'Empty evaluation result',
+        };
+      } catch (err: any) {
+        res = { clicked: false, error: String(err?.message || err) };
+      }
+    } else if (this._tabId && typeof chrome !== 'undefined' && chrome.scripting?.executeScript) {
       try {
         const results = await chrome.scripting.executeScript({
           target: { tabId: this._tabId },
           func: submitInPage,
         });
-        const res = results?.[0]?.result;
-        if (res) return res;
-      } catch {}
+        const r = results?.[0]?.result;
+        if (r) res = r;
+      } catch (err: any) {
+        res = { clicked: false, error: String(err?.message || err) };
+      }
     }
 
-    return { clicked: false, error: 'Failed to execute submitApplication via Puppeteer or chrome.scripting' };
+    // CDP TRUSTED CLICK ESCALATION:
+    // Driving a real mouse click through DevTools Protocol generates isTrusted: true input events.
+    // This ensures React 18 and LinkedIn's submit handler actually register the submission.
+    const submitMarkerSel = '[data-qoder-submit-target]';
+    if (res.clicked && this._puppeteerPage) {
+      try {
+        const hasMarker = await this._puppeteerPage.evaluate((sel: string) => {
+          const el = document.querySelector(sel) as HTMLElement | null;
+          if (!el) return false;
+          el.scrollIntoView({ behavior: 'instant', block: 'center' });
+          return el.isConnected;
+        }, submitMarkerSel);
+
+        if (hasMarker) {
+          logger.info('[submitApplication] Firing trusted CDP click on marked Submit button...');
+          await this._puppeteerPage.click(submitMarkerSel);
+          logger.info('[submitApplication] Trusted CDP click dispatched on Submit button.');
+        }
+      } catch (cdpErr) {
+        logger.warning('[submitApplication] Trusted CDP click escalation error:', cdpErr);
+      } finally {
+        try {
+          await this._puppeteerPage.evaluate((sel: string) => {
+            document.querySelectorAll(sel).forEach(el => el.removeAttribute('data-qoder-submit-target'));
+          }, submitMarkerSel);
+        } catch {}
+      }
+    }
+
+    return res;
   }
 
   /**

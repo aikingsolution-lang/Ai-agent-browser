@@ -970,6 +970,84 @@ export function formatSkipBreakdown(skipReasons: Record<string, number> | undefi
   return `📊 Skip breakdown: ${entries.map(([reason, count]) => `${reason} ×${count}`).join(' | ')}`;
 }
 
+export interface TargetDiagnostics {
+  runnerTargetFound: boolean;
+  runnerAttached: boolean;
+  runnerExtensionId?: string;
+  runnerTitle?: string;
+  foreignAttachedTargets: Array<{ type: string; host: string; extensionId?: string; tabId?: number }>;
+  ourStaleAttachedTabs: number[];
+}
+
+export async function inspectDebuggerTargets(runnerTabId?: number): Promise<TargetDiagnostics> {
+  const result: TargetDiagnostics = {
+    runnerTargetFound: false,
+    runnerAttached: false,
+    foreignAttachedTargets: [],
+    ourStaleAttachedTabs: [],
+  };
+
+  if (typeof chrome === 'undefined' || !chrome.debugger?.getTargets) {
+    return result;
+  }
+
+  try {
+    const targets = await chrome.debugger.getTargets();
+    const ourExtId = typeof chrome.runtime !== 'undefined' && chrome.runtime ? chrome.runtime.id : undefined;
+
+    for (const t of targets) {
+      const isRunnerTab = runnerTabId !== undefined && t.tabId === runnerTabId;
+      if (isRunnerTab) {
+        result.runnerTargetFound = true;
+        result.runnerAttached = Boolean(t.attached);
+        result.runnerExtensionId = t.extensionId;
+        result.runnerTitle = t.title;
+      }
+
+      if (t.attached) {
+        if (ourExtId && t.extensionId === ourExtId) {
+          if (t.tabId && (!runnerTabId || t.tabId !== runnerTabId)) {
+            result.ourStaleAttachedTabs.push(t.tabId);
+          }
+        } else if (!ourExtId || t.extensionId !== ourExtId) {
+          let host = '';
+          try {
+            if (t.url) host = new URL(t.url).host;
+          } catch {}
+          result.foreignAttachedTargets.push({
+            type: t.type,
+            host,
+            extensionId: t.extensionId,
+            tabId: t.tabId,
+          });
+        }
+      }
+    }
+  } catch (err) {
+    logger.warning('[DedicatedJobRunner] Failed to inspect debugger targets:', err);
+  }
+
+  return result;
+}
+
+export function formatTargetDiagnostics(diag: TargetDiagnostics, runnerTabId?: number): string {
+  const runnerInfo = diag.runnerTargetFound
+    ? `runnerTabId=${runnerTabId} (exists=true, attached=${diag.runnerAttached}, extensionId=${diag.runnerExtensionId || 'none'}, title="${diag.runnerTitle || ''}")`
+    : `runnerTabId=${runnerTabId} (exists=false)`;
+
+  const foreignInfo =
+    diag.foreignAttachedTargets.length > 0
+      ? diag.foreignAttachedTargets
+          .map(
+            f =>
+              `[type=${f.type}, host=${f.host || 'unknown'}, extId=${f.extensionId || 'DevTools'}, tabId=${f.tabId}]`,
+          )
+          .join(', ')
+      : 'none';
+
+  return `${runnerInfo} | Foreign attached targets: ${foreignInfo}`;
+}
+
 export class DedicatedJobRunner {
   private static instance: DedicatedJobRunner | null = null;
   private browserContext: BrowserContext | null = null;
@@ -1003,35 +1081,335 @@ export class DedicatedJobRunner {
   private abortController: AbortController | null = null;
   private onStopCallbacks: Set<() => void> = new Set();
   private activeStartupWatchdogCleanup: (() => void) | null = null;
+  private recoveringTabIds: Set<number> = new Set();
+  private inFlightRecoveryPromises: Map<number, Promise<Page>> = new Map();
+  private pendingAttachPromise: Promise<Page> | null = null;
+  private attachingTabId: number | null = null;
+  private activeRunnerTabId: number | null = null;
+
+  public isTabRecovering(tabId?: number): boolean {
+    if (!tabId) return this.recoveringTabIds.size > 0;
+    return this.recoveringTabIds.has(tabId);
+  }
+
+  public getPendingAttachPromise(): Promise<Page> | null {
+    return this.pendingAttachPromise;
+  }
 
   /**
-   * Recovers a wedged Puppeteer/CDP page connection by detaching the debugger and re-attaching a fresh Page.
+   * Recovers a wedged Puppeteer/CDP page connection:
+   * 1. Awaits any pending attach for this tab (up to 20s hard cap) before detaching.
+   * 2. Detaches the debugger and BrowserContext page.
+   * 3. Waits about 1s for detachment to settle.
+   * 4. Re-attaches a fresh Page.
    */
   public async recoverWedgedPage(tabId?: number): Promise<Page> {
     const targetTabId =
-      tabId || (this.browserContext as any)?._currentTabId || (this.browserContext as any)?.currentTabId;
-    logger.warning(
-      `[DedicatedJobRunner] [${new Date().toISOString()}] Puppeteer/CDP connection wedged on tab ${targetTabId}. Detaching debugger and re-attaching fresh Page...`,
-    );
+      tabId ||
+      this.activeRunnerTabId ||
+      (this.browserContext as any)?._currentTabId ||
+      (this.browserContext as any)?.currentTabId;
 
-    if (targetTabId && typeof chrome !== 'undefined' && chrome.debugger?.detach) {
-      await chrome.debugger.detach({ tabId: targetTabId }).catch(() => {});
+    if (!targetTabId) {
+      throw new Error('[DedicatedJobRunner] Cannot recover wedged page: no valid tabId provided or found in context');
     }
 
-    if (targetTabId && this.browserContext) {
-      if (typeof (this.browserContext as any).detachPage === 'function') {
-        await (this.browserContext as any).detachPage(targetTabId).catch(() => {});
-      } else if (typeof (this.browserContext as any).removeAttachedPage === 'function') {
-        (this.browserContext as any).removeAttachedPage(targetTabId);
+    // Deduplicate concurrent recovery attempts on the same tab
+    const inFlightRecovery = this.inFlightRecoveryPromises.get(targetTabId);
+    if (inFlightRecovery) {
+      logger.info(
+        `[DedicatedJobRunner] Recovery already in flight for tab ${targetTabId}, awaiting existing recovery...`,
+      );
+      return inFlightRecovery;
+    }
+
+    const recoveryPromise = (async () => {
+      this.recoveringTabIds.add(targetTabId);
+      logger.warning(
+        `[DedicatedJobRunner] [${new Date().toISOString()}] Puppeteer/CDP connection wedged on tab ${targetTabId}. Preparing recovery...`,
+      );
+
+      try {
+        // 1. Single in-flight attach with lock: NEVER call chrome.debugger.detach while an attach
+        // for the same tab is still pending. Wait for the pending attach to settle (max 20s).
+        if (this.pendingAttachPromise && this.attachingTabId === targetTabId) {
+          logger.info(
+            `[DedicatedJobRunner] Waiting for pending attach on tab ${targetTabId} to settle before detaching (max 20s)...`,
+          );
+          await Promise.race([
+            this.pendingAttachPromise.catch(() => {}),
+            new Promise(resolve => setTimeout(resolve, 20000)),
+          ]);
+        }
+
+        // 2. Explicitly detach debugger if attached
+        if (typeof chrome !== 'undefined' && chrome.debugger?.detach) {
+          await chrome.debugger.detach({ tabId: targetTabId }).catch(() => {});
+        }
+
+        // 3. Cleanly detach and discard existing page from BrowserContext
+        if (this.browserContext) {
+          if (typeof (this.browserContext as any).detachPage === 'function') {
+            await (this.browserContext as any).detachPage(targetTabId).catch(() => {});
+          } else if (typeof (this.browserContext as any).removeAttachedPage === 'function') {
+            (this.browserContext as any).removeAttachedPage(targetTabId);
+          }
+        }
+
+        // 4. Wait about 1 s (1000ms) for Chrome's native detachment to settle before attaching again
+        await new Promise(resolve => setTimeout(resolve, 1000));
+
+        // 5. Verify tab still exists (did not close during recovery)
+        if (typeof chrome !== 'undefined' && chrome.tabs?.get) {
+          try {
+            const tab = await chrome.tabs.get(targetTabId);
+            if (!tab || !tab.id) {
+              throw new Error(`Tab ${targetTabId} was closed during recovery`);
+            }
+          } catch (tabErr: any) {
+            throw new Error(`Tab ${targetTabId} was closed or unavailable during recovery: ${tabErr?.message || ''}`);
+          }
+        }
+
+        // 6. Reaffirm currentTabId on browser context
+        this.browserContext?.updateCurrentTabId(targetTabId);
+
+        // 7. Attach fresh Page with bounded timeout (10s)
+        const freshPage = await withTimeout(
+          this.browserContext!.getCurrentPage(),
+          10000,
+          'recoverWedgedPage getCurrentPage',
+        );
+
+        if (!freshPage || (typeof freshPage.attached === 'boolean' && !freshPage.attached)) {
+          throw new Error(`Failed to attach fresh Page to tab ${targetTabId} during recovery`);
+        }
+
+        return freshPage;
+      } finally {
+        this.recoveringTabIds.delete(targetTabId);
+        this.inFlightRecoveryPromises.delete(targetTabId);
+      }
+    })();
+
+    this.inFlightRecoveryPromises.set(targetTabId, recoveryPromise);
+    return recoveryPromise;
+  }
+
+  /**
+   * Clears any stale attachments left from a previous run at the start of a run.
+   * Detaches any tab whose target is attached by this extension and is not the current run's tab.
+   */
+  public async clearStaleDebuggerAttachments(currentTabId?: number): Promise<void> {
+    if (typeof chrome === 'undefined' || !chrome.debugger?.getTargets || !chrome.debugger?.detach) {
+      return;
+    }
+    try {
+      const targets = await chrome.debugger.getTargets();
+      const ourExtId = typeof chrome.runtime !== 'undefined' ? chrome.runtime.id : undefined;
+      for (const t of targets) {
+        if (t.attached && t.tabId && (!currentTabId || t.tabId !== currentTabId)) {
+          if (!ourExtId || t.extensionId === ourExtId) {
+            logger.info(`[DedicatedJobRunner] Detaching stale debugger session on tab ${t.tabId} from previous run...`);
+            await chrome.debugger.detach({ tabId: t.tabId }).catch(() => {});
+          }
+        }
+      }
+    } catch (err) {
+      logger.debug('[DedicatedJobRunner] Could not clear stale debugger attachments:', err);
+    }
+  }
+
+  /**
+   * Stage 1-3 implementation:
+   * 1. Inspects debugger targets before attaching (evidence first).
+   * 2. Checks if tab is already attached by another client (stops cleanly).
+   * 3. Creates the runner tab with about:blank (calm page).
+   * 4. Attaches debugger to about:blank with 10s attempt timeout and single in-flight lock.
+   * 5. Retries up to 2 times with a fresh blank tab (total under 45s).
+   * 6. Once calm attach succeeds, navigates to searchUrl.
+   */
+  private async acquireAndAttachCalmRunnerTab(
+    searchUrl: string,
+    runnerMode: RunnerMode,
+    portToSend: chrome.runtime.Port | null | undefined,
+    runToken: string,
+    onLiveActivity?: (activity: any) => void,
+    logStepStart?: (step: string) => void,
+    logStepExit?: (step: string) => void,
+  ): Promise<{ page: Page; tabId: number; windowId: number }> {
+    const ATTACH_ATTEMPT_TIMEOUT_MS = 10_000;
+    const ATTACH_TOTAL_BUDGET_MS = 45_000;
+    const MAX_RETRIES = 2; // Up to 3 attempts total (initial + 2 retries)
+    const attachStartTime = Date.now();
+
+    let attempt = 0;
+    let lastDiag: TargetDiagnostics | null = null;
+
+    while (attempt <= MAX_RETRIES) {
+      attempt++;
+      const isRetry = attempt > 1;
+      const stepName = isRetry
+        ? `attaching page context on calm page (attempt ${attempt}/${MAX_RETRIES + 1})`
+        : 'attaching page context on calm page';
+
+      if (Date.now() - attachStartTime >= ATTACH_TOTAL_BUDGET_MS) {
+        break;
+      }
+
+      logStepStart?.(stepName);
+
+      let runnerTarget: { windowId: number; tabId: number; mode?: RunnerMode } | null = null;
+      try {
+        // Step A: Create runner tab with about:blank (or wait for complete)
+        runnerTarget = await dedicatedWindowManager.getOrCreateRunnerWindow('about:blank', {
+          mode: runnerMode,
+          allowedDomains: [/linkedin\.com/i, /^about:blank$/i],
+        });
+
+        const { tabId, windowId } = runnerTarget;
+        this.activeRunnerTabId = tabId;
+        this.browserContext?.updateCurrentTabId(tabId);
+
+        // Keep runner tab active and focused
+        if (typeof chrome !== 'undefined' && chrome.tabs?.update) {
+          await chrome.tabs.update(tabId, { active: true }).catch(() => {});
+        }
+        if (windowId && typeof chrome !== 'undefined' && chrome.windows?.update) {
+          await chrome.windows.update(windowId, { focused: true }).catch(() => {});
+        }
+
+        // Step B: Evidence first: Inspect debugger targets BEFORE attach
+        const diagBefore = await inspectDebuggerTargets(tabId);
+        lastDiag = diagBefore;
+        logger.info(
+          `[DedicatedJobRunner] [${new Date().toISOString()}] [DebuggerTargets:before-attach] ${formatTargetDiagnostics(diagBefore, tabId)}`,
+        );
+
+        // Step C: Check if tab is already attached by another client (DevTools or foreign extension)
+        if (diagBefore.runnerTargetFound && diagBefore.runnerAttached) {
+          const ourExtId = typeof chrome !== 'undefined' && chrome.runtime ? chrome.runtime.id : undefined;
+          if (diagBefore.runnerExtensionId && ourExtId && diagBefore.runnerExtensionId !== ourExtId) {
+            const conflictMsg = `Another extension or DevTools is debugging this tab (id ${tabId}). Close DevTools / disable other automation extensions and retry.`;
+            logger.error(`[DedicatedJobRunner] ${conflictMsg}`);
+            this.notifyStatus(portToSend, `🛑 ${conflictMsg}`, 'fail', runToken);
+            this.notifyActivity(
+              portToSend,
+              onLiveActivity,
+              {
+                jobId: 'debugger_conflict',
+                url: searchUrl,
+                title: 'Debugger Conflict',
+                company: 'LinkedIn Runner',
+                status: 'failed',
+                reason: conflictMsg,
+                creditsUsed: 0,
+              },
+              runToken,
+            );
+            throw new Error(conflictMsg);
+          }
+
+          // If our own stale session exists, detach it first and continue
+          logger.info(
+            `[DedicatedJobRunner] Tab ${tabId} already attached by this extension. Detaching stale session first...`,
+          );
+          await chrome.debugger.detach({ tabId }).catch(() => {});
+          await new Promise(r => setTimeout(r, 500));
+        }
+
+        // Step D: Attach debugger on calm page with single in-flight lock and 10s attempt timeout
+        this.attachingTabId = tabId;
+        const attachPromise = this.browserContext!.getCurrentPage();
+        this.pendingAttachPromise = attachPromise;
+
+        const page = await withTimeout(attachPromise, ATTACH_ATTEMPT_TIMEOUT_MS, 'attachPuppeteer');
+        this.pendingAttachPromise = null;
+        this.attachingTabId = null;
+
+        if (!page || (typeof page.attached === 'boolean' && !page.attached)) {
+          throw new Error(`Page object returned but not attached to tab ${tabId}`);
+        }
+
+        logStepExit?.(stepName);
+
+        // Step E: Calm attach succeeded! Now navigate to searchUrl
+        logStepStart?.('navigating to search url');
+        logger.info(
+          `[DedicatedJobRunner] [${new Date().toISOString()}] Calm attach succeeded on tab ${tabId}. Navigating to searchUrl: ${searchUrl}`,
+        );
+        if (typeof (page as any).navigateToDirect === 'function') {
+          await (page as any).navigateToDirect(searchUrl);
+        } else if (typeof (page as any).goto === 'function') {
+          await (page as any).goto(searchUrl);
+        } else if (typeof chrome !== 'undefined' && chrome.tabs?.update) {
+          await chrome.tabs.update(tabId, { url: searchUrl });
+        }
+        logStepExit?.('navigating to search url');
+
+        return { page, tabId, windowId };
+      } catch (attachErr: any) {
+        this.pendingAttachPromise = null;
+        this.attachingTabId = null;
+
+        // If another extension / DevTools was holding it, do NOT retry, halt immediately
+        if (attachErr?.message?.includes('Another extension or DevTools is debugging this tab')) {
+          throw attachErr;
+        }
+
+        const currentTabId = runnerTarget?.tabId || this.activeRunnerTabId;
+
+        // Evidence right after timeout / failure
+        const diagAfter = await inspectDebuggerTargets(currentTabId || undefined);
+        lastDiag = diagAfter;
+        logger.warning(
+          `[DedicatedJobRunner] [${new Date().toISOString()}] [DebuggerTargets:after-timeout] (Attempt ${attempt}/${MAX_RETRIES + 1}): ${formatTargetDiagnostics(diagAfter, currentTabId || undefined)} | Error: ${attachErr?.message}`,
+        );
+
+        // If under retry budget, close the wedged tab, detach, wait 1s, and retry with fresh blank tab
+        if (attempt <= MAX_RETRIES && Date.now() - attachStartTime < ATTACH_TOTAL_BUDGET_MS) {
+          logger.warning(
+            `[DedicatedJobRunner] Attach attempt ${attempt} failed on tab ${currentTabId}. Retrying with fresh blank tab (${attempt}/${MAX_RETRIES} retries)...`,
+          );
+          if (currentTabId && typeof chrome !== 'undefined' && chrome.debugger?.detach) {
+            await chrome.debugger.detach({ tabId: currentTabId }).catch(() => {});
+          }
+          if (currentTabId && this.browserContext) {
+            await this.browserContext.detachPage(currentTabId).catch(() => {});
+          }
+          await dedicatedWindowManager.closeRunnerWindow().catch(() => {});
+          await new Promise(r => setTimeout(r, 1000));
+          continue;
+        }
+
+        break;
       }
     }
 
-    const freshPage = await withTimeout(
-      this.browserContext!.getCurrentPage(),
-      15000,
-      'recoverWedgedPage getCurrentPage',
+    // All retries failed or total budget exceeded (Task 6 & Task 7: Report clearly and stop; do not scan with chrome.scripting)
+    const elapsedSec = Math.round((Date.now() - attachStartTime) / 1000);
+    const diagSummary = lastDiag
+      ? formatTargetDiagnostics(lastDiag, this.activeRunnerTabId || undefined)
+      : 'no diagnostics';
+    const finalErrMsg = `🛑 Failed to attach debugger to runner tab after ${attempt} attempts (${elapsedSec}s). Diagnostics: ${diagSummary}. Please check DevTools or browser permissions and try again.`;
+    logger.error(`[DedicatedJobRunner] ${finalErrMsg}`);
+    this.notifyStatus(portToSend, finalErrMsg, 'fail', runToken);
+    this.notifyActivity(
+      portToSend,
+      onLiveActivity,
+      {
+        jobId: 'attach_failed',
+        url: searchUrl,
+        title: 'Debugger Attachment Failed',
+        company: 'LinkedIn Runner',
+        status: 'failed',
+        reason: finalErrMsg,
+        creditsUsed: 0,
+      },
+      runToken,
     );
-    return freshPage;
+
+    throw new Error(finalErrMsg);
   }
 
   public isTokenActive(token?: string | null): boolean {
@@ -2196,35 +2574,38 @@ export class DedicatedJobRunner {
         this.notifyStatus(portToSend, `🌐 Opening dedicated runner window for LinkedIn...`, 'info', runToken);
       }
 
-      let runnerTarget: { windowId: number; tabId: number; mode?: RunnerMode };
+      // Task 5: Clear any stale attachment left from a previous run at start of run
+      await this.clearStaleDebuggerAttachments();
+
+      let runnerResult: { page: Page; tabId: number; windowId: number };
       try {
-        logStepStart('acquiring runner target');
-        runnerTarget = await awaitStartupStep(
-          withTimeout(
-            dedicatedWindowManager.getOrCreateRunnerWindow(searchUrl, {
-              mode: runnerMode,
-              allowedDomains: [/linkedin\.com/i, /^about:blank$/i],
-            }),
-            15000,
-            'getOrCreateRunnerWindow',
+        runnerResult = await awaitStartupStep(
+          this.acquireAndAttachCalmRunnerTab(
+            searchUrl,
+            runnerMode,
+            portToSend,
+            runToken,
+            onLiveActivity,
+            logStepStart,
+            logStepExit,
           ),
         );
-        logStepExit('acquiring runner target');
       } catch (err: any) {
         if (err instanceof StartupBudgetExceededError || err?.name === 'StartupBudgetExceededError') {
           throw err;
         }
-        const openErrMsg = `🛑 Failed to open runner ${runnerMode}: ${err?.message || 'Unknown error'}. Please check browser permissions and try again.`;
+        const openErrMsg = err?.message || `Failed to open and attach runner ${runnerMode}`;
         logger.error(`[DedicatedJobRunner] [${new Date().toISOString()}] ${openErrMsg}`);
-        this.notifyStatus(portToSend, openErrMsg, 'fail', runToken);
         this.cleanupRun(openErrMsg, stats, runToken);
         return { status: 'stopped', message: openErrMsg, stats };
       }
 
-      const { windowId, tabId } = runnerTarget;
+      const { page, tabId, windowId } = runnerResult;
+      currentPage = page;
+      this.activeRunnerTabId = tabId;
       this.browserContext.updateCurrentTabId(tabId);
       logger.info(
-        `[DedicatedJobRunner] [${new Date().toISOString()}] [Stage 2/5] Runner target acquired (tabId=${tabId}, windowId=${windowId}). Registering lifecycle listeners...`,
+        `[DedicatedJobRunner] [${new Date().toISOString()}] [Stage 2/5] Runner target acquired and attached on calm page (tabId=${tabId}, windowId=${windowId}). Registering lifecycle listeners...`,
       );
 
       // 1. Close listener (handles user closing the tab or window mid-run)
@@ -2258,34 +2639,12 @@ export class DedicatedJobRunner {
         }
       });
 
-      // Paced initial wait for tab creation and navigation commit (matching Naukri & Indeed)
-      const navAborted = await this.interruptibleSleep(3500);
+      // Paced initial wait for navigation commit after calm attach (matching Naukri & Indeed)
+      const navAborted = await this.interruptibleSleep(2500);
       if (navAborted || !this.isRunning || this.isStopping) {
         throw new AbortRunError(this.stopReason || 'Stopped by user');
       }
       this.checkAbort(runToken, this.abortController?.signal);
-
-      logger.info(
-        `[DedicatedJobRunner] [${new Date().toISOString()}] [Stage 3/5] Attaching browser page context for tab ${tabId}...`,
-      );
-      logStepStart('attaching page context');
-      try {
-        currentPage = await awaitStartupStep(
-          withTimeout(this.browserContext!.getCurrentPage(), 15000, 'getCurrentPage'),
-        );
-        logStepExit('attaching page context');
-      } catch (attachErr: any) {
-        if (attachErr instanceof StartupBudgetExceededError || attachErr?.name === 'StartupBudgetExceededError') {
-          throw attachErr;
-        }
-        if (attachErr instanceof TimeoutError || attachErr?.name === 'TimeoutError') {
-          logger.warning(`[DedicatedJobRunner] Attaching page context timed out. Recovering wedged page connection...`);
-          currentPage = await awaitStartupStep(this.recoverWedgedPage(tabId));
-          logStepExit('attaching page context (recovered)');
-        } else {
-          throw attachErr;
-        }
-      }
 
       // Ensure the runner tab is active in its window before scanning (document.visibilityState must be "visible")
       if (tabId && typeof chrome !== 'undefined' && chrome.tabs?.get && chrome.tabs?.update) {
@@ -4920,6 +5279,12 @@ export class DedicatedJobRunner {
    */
   public async handleDebuggerDetach(_detachedTabId?: number): Promise<void> {
     if (!this.isRunning && !this.activeRunId) return;
+    if (_detachedTabId && this.isTabRecovering(_detachedTabId)) {
+      logger.info(
+        `[DedicatedJobRunner] Debugger detached for tab ${_detachedTabId} during intentional recovery. Preserving run context.`,
+      );
+      return;
+    }
     logger.warning('[DedicatedJobRunner] Debugger detached while run was active. Failing run cleanly and refunding...');
     await this.stop('debugger_detached');
   }
@@ -6354,6 +6719,9 @@ export class DedicatedJobRunner {
           }
         }
       }
+      logger.info(
+        `[DedicatedJobRunner] [STAGE: FORM_FIELD_DISCOVERY] Platform: linkedin | Step: ${step} | Detected fields: ${fields.length} (${fields.map((f: any) => `${f.label} [${f.fieldType || 'text'}]`).join(', ') || 'none'})`,
+      );
       if (fields.length > 0) {
         fieldsZeroStreak = 0;
         this.notifyStatus(
@@ -6366,6 +6734,9 @@ export class DedicatedJobRunner {
         // Phase A: Auto-resolve with skipAskUser to fill all known/inferred fields first
         for (const field of fields) {
           if (!this.isRunning) break;
+          logger.info(
+            `[DedicatedJobRunner] [STAGE: FIELD_FILLING] Platform: linkedin | Step: ${step} | Field: "${field.label}" [${field.fieldType || 'text'}] | CurrentValue: "${field.currentValue || ''}"`,
+          );
           if (!checkFieldRepeat(field)) {
             return {
               success: false,
@@ -6468,6 +6839,9 @@ export class DedicatedJobRunner {
 
       // 3. Pre-advance validation check (checks required empty fields & aria-invalid)
       let validation = await page.validateModalFormState();
+      logger.info(
+        `[DedicatedJobRunner] [STAGE: FIELD_VALIDATION] Platform: linkedin | Step: ${step} | hasErrors: ${validation.hasErrors} | EmptyRequired: ${validation.emptyRequiredFields.length} | InvalidWithErrors: ${validation.invalidFieldsWithErrors.length}`,
+      );
 
       // Guard against unfulfillable mandatory file uploads (Resume, Cover Letter, Portfolio, Custom Certificate)
       if (validation.unfulfilledMandatoryFileUpload) {
@@ -6991,10 +7365,41 @@ export class DedicatedJobRunner {
 
       // 4. Check action buttons (Submit vs Review/Next)
       const actions = await page.getModalActionButtons();
+      logger.info(
+        `[DedicatedJobRunner] Step ${step} action buttons: hasSubmit=${actions.hasSubmit} hasReview=${actions.hasReview} hasNext=${actions.hasNext}`,
+      );
 
       if (actions.hasSubmit) {
+        // If validation still reported errors, try auto-healing them before clicking submit
+        if (
+          validation.hasErrors &&
+          validation.invalidFieldsWithErrors &&
+          validation.invalidFieldsWithErrors.length > 0
+        ) {
+          logger.warning(
+            `[DedicatedJobRunner] [STAGE: SUBMIT_APPLICATION] Step ${step} has submit button but validation flagged ${validation.invalidFieldsWithErrors.length} errors. Auto-healing before submitting...`,
+          );
+          for (const invF of validation.invalidFieldsWithErrors) {
+            try {
+              const healed = await solveValidationErrorWithLLM(invF, careerBrain, scopedLLM);
+              if (healed.success && healed.answer) {
+                const adapted = validateAnswerForField(healed.answer, invF as any);
+                if (adapted.valid && adapted.value) {
+                  await page.fillModalFieldDirect(invF, adapted.value);
+                }
+              }
+            } catch {}
+          }
+        }
+
+        logger.info(
+          `[DedicatedJobRunner] [STAGE: SUBMIT_APPLICATION] Platform: linkedin | Step: ${step} | Submitting application...`,
+        );
         this.notifyStatus(portToSend, `🎉 All steps completed! Submitting your application now...`, 'info');
         const submitRes = await page.submitApplication();
+        logger.info(
+          `[DedicatedJobRunner] [STAGE: SUBMIT_APPLICATION] Platform: linkedin | Step: ${step} | Submit result: clicked=${submitRes.clicked} error=${submitRes.error || 'none'}`,
+        );
         if (!submitRes.clicked) {
           return {
             success: false,
@@ -7003,8 +7408,14 @@ export class DedicatedJobRunner {
         }
 
         // 5. Verify submission confirmation
+        logger.info(
+          `[DedicatedJobRunner] [STAGE: VERIFY_CONFIRMATION] Platform: linkedin | Step: ${step} | Awaiting confirmation...`,
+        );
         this.notifyStatus(portToSend, `⏳ Confirming with LinkedIn that application was received...`, 'info');
         const confirmRes = await page.verifySubmissionConfirmation(8000);
+        logger.info(
+          `[DedicatedJobRunner] [STAGE: VERIFY_CONFIRMATION] Platform: linkedin | Step: ${step} | Outcome: confirmed=${confirmRes.confirmed} details=${confirmRes.message || 'none'}`,
+        );
         if (confirmRes.confirmed) {
           submitted = true;
           this.notifyStatus(portToSend, `✅ Application submitted successfully! 🎉`, 'ok');
@@ -7016,6 +7427,9 @@ export class DedicatedJobRunner {
           };
         }
       } else if (actions.hasReview || actions.hasNext) {
+        logger.info(
+          `[DedicatedJobRunner] [STAGE: STEP_ADVANCE] Platform: linkedin | Step: ${step} | Forward action: ${actions.hasReview ? 'Review' : 'Next'}`,
+        );
         if (typeof page.scrollModalContent === 'function') {
           await page.scrollModalContent('bottom');
           await new Promise(r => setTimeout(r, 200));
@@ -7608,6 +8022,20 @@ export class DedicatedJobRunner {
       this.unregisterNavAwayListener();
       this.unregisterNavAwayListener = null;
     }
+
+    // Cleanup debugger and close runner window/tab on every exit path
+    const tabToDetach = this.activeRunnerTabId || (this.browserContext as any)?._currentTabId;
+    if (tabToDetach && typeof chrome !== 'undefined' && chrome.debugger?.detach) {
+      chrome.debugger.detach({ tabId: tabToDetach }).catch(() => {});
+    }
+    if (this.browserContext && typeof (this.browserContext as any).cleanup === 'function') {
+      (this.browserContext as any).cleanup().catch(() => {});
+    }
+    dedicatedWindowManager.closeRunnerWindow().catch(() => {});
+    this.activeRunnerTabId = null;
+    this.pendingAttachPromise = null;
+    this.attachingTabId = null;
+
     this.notifyStopListeners();
     runnerStateStore.clearActiveRun().catch(() => {});
   }

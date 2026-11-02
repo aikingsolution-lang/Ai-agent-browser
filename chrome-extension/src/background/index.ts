@@ -515,7 +515,7 @@ async function triggerLinkedInHarvesting(_targetTabId?: number, portToSend?: chr
 
   // 1. Active tab check karne ki jagah hum URL pattern match karenge (Window focus ka issue khatam)
   chrome.tabs.query({ url: '*://*.linkedin.com/jobs/*' }, tabs => {
-    let linkedInTab = tabs && tabs.length > 0 ? tabs[0] : null;
+    const linkedInTab = tabs && tabs.length > 0 ? tabs[0] : null;
 
     const proceedWithTab = (activeTab: chrome.tabs.Tab) => {
       if (!activeTab.id) return;
@@ -619,6 +619,12 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
 chrome.debugger.onDetach.addListener(async (source, reason) => {
   logger.warning('Debugger detached:', source, reason);
   const tabId = source.tabId;
+
+  // Ignore detachment if tab is currently undergoing intentional recovery
+  if (tabId && dedicatedJobRunner.isTabRecovering(tabId)) {
+    logger.info(`Debugger detached for tab ${tabId} during intentional recovery. Preserving run context.`);
+    return;
+  }
 
   // Ignore detachment if no job application or executor run is active, or if target closed normally
   if (!isJobApplyInProgress && !dedicatedJobRunner.isJobRunning() && !activeJobTaskId) {

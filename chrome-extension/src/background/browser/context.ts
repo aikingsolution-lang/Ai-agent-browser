@@ -16,6 +16,7 @@ export default class BrowserContext {
   private _config: BrowserContextConfig;
   private _currentTabId: number | null = null;
   private _attachedPages: Map<number, Page> = new Map();
+  private _inFlightAttaches: Map<number, Promise<Page>> = new Map();
 
   constructor(config: Partial<BrowserContextConfig>) {
     this._config = { ...DEFAULT_BROWSER_CONTEXT_CONFIG, ...config };
@@ -40,13 +41,13 @@ export default class BrowserContext {
     }
 
     const existingPage = this._attachedPages.get(tab.id);
-    if (existingPage) {
+    if (existingPage && !existingPage.isDestroyed) {
       logger.info('getOrCreatePage', tab.id, 'already attached');
       if (!forceUpdate) {
         return existingPage;
       }
       // detach the page and remove it from the attached pages if forceUpdate is true
-      await existingPage.detachPuppeteer();
+      await existingPage.detachPuppeteer().catch(() => {});
       this._attachedPages.delete(tab.id);
     }
     logger.info('getOrCreatePage', tab.id, 'creating new page');
@@ -54,45 +55,56 @@ export default class BrowserContext {
   }
 
   public async cleanup(): Promise<void> {
-    const currentPage = await this.getCurrentPage();
-    currentPage?.removeHighlight();
-    // detach all pages
-    for (const page of this._attachedPages.values()) {
-      await page.detachPuppeteer();
-    }
+    this._inFlightAttaches.clear();
+    const pages = Array.from(this._attachedPages.values());
     this._attachedPages.clear();
     this._currentTabId = null;
+    for (const page of pages) {
+      try {
+        await page.removeHighlight().catch(() => {});
+        await page.detachPuppeteer().catch(() => {});
+      } catch {}
+    }
   }
 
   public async attachPage(page: Page): Promise<boolean> {
-    // check if page is already attached
-    if (this._attachedPages.has(page.tabId)) {
-      logger.info('attachPage', page.tabId, 'already attached');
-      return true;
-    }
-
-    if (await page.attachPuppeteer()) {
-      logger.info('attachPage', page.tabId, 'attached');
-      // add page to managed pages
+    if (page.attached && !page.isDestroyed) {
       this._attachedPages.set(page.tabId, page);
       return true;
     }
+
+    const existing = this._attachedPages.get(page.tabId);
+    if (existing && existing !== page) {
+      if (existing.attached && !existing.isDestroyed) {
+        return true;
+      }
+      await existing.detachPuppeteer().catch(() => {});
+      this._attachedPages.delete(page.tabId);
+    }
+
+    const success = await page.attachPuppeteer();
+    if (success && page.attached) {
+      logger.info('attachPage', page.tabId, 'attached');
+      this._attachedPages.set(page.tabId, page);
+      return true;
+    }
+    this._attachedPages.delete(page.tabId);
     return false;
   }
 
   public async detachPage(tabId: number): Promise<void> {
-    // detach page
+    this._inFlightAttaches.delete(tabId);
     const page = this._attachedPages.get(tabId);
+    this._attachedPages.delete(tabId);
     if (page) {
-      await page.detachPuppeteer();
-      // remove page from managed pages
-      this._attachedPages.delete(tabId);
+      await page.detachPuppeteer().catch(() => {});
     }
   }
 
   public async getCurrentPage(): Promise<Page> {
     // 1. If _currentTabId not set, query the active tab and attach it
-    if (!this._currentTabId) {
+    let targetTabId: number | null = this._currentTabId;
+    if (!targetTabId) {
       let activeTab: chrome.tabs.Tab | undefined;
       const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
       if (tabs.length > 0 && tabs[0]?.id) {
@@ -106,35 +118,61 @@ export default class BrowserContext {
         // open a new tab with blank page
         const newTab = await chrome.tabs.create({ url: this._config.homePageUrl || 'about:blank' });
         if (!newTab.id) {
-          // this should rarely happen
           throw new Error('No tab ID available');
         }
         activeTab = newTab;
       }
       logger.info('active tab', activeTab.id, activeTab.url, activeTab.title);
-      const page = await this._getOrCreatePage(activeTab);
-      await this.attachPage(page);
-      this._currentTabId = activeTab.id || null;
-      return page;
+      targetTabId = activeTab.id || null;
+      this._currentTabId = targetTabId;
     }
 
-    // 2. If _currentTabId is set but not in attachedPages, attach the tab
-    const existingPage = this._attachedPages.get(this._currentTabId);
-    if (!existingPage) {
-      const tab = await chrome.tabs.get(this._currentTabId);
-      const page = await this._getOrCreatePage(tab);
-      // set current tab id to null if the page is not attached successfully
-      await this.attachPage(page);
-      return page;
+    if (!targetTabId) {
+      throw new Error('No valid tab ID available to attach page');
     }
 
-    // If existing page was not attached or puppeteer disconnected, retry attaching
-    if (!existingPage.attached) {
-      await this.attachPage(existingPage);
+    const tabId = targetTabId;
+
+    // 2. Return existing page if already attached and healthy
+    const existingPage = this._attachedPages.get(tabId);
+    if (existingPage && existingPage.attached && !existingPage.isDestroyed) {
+      return existingPage;
     }
 
-    // 3. Return existing page from attachedPages
-    return existingPage;
+    // 3. Serialize concurrent attachment requests for this tab
+    const inFlight = this._inFlightAttaches.get(tabId);
+    if (inFlight) {
+      return inFlight;
+    }
+
+    const attachPromise = (async () => {
+      try {
+        const stalePage = this._attachedPages.get(tabId);
+        if (stalePage) {
+          await stalePage.detachPuppeteer().catch(() => {});
+          this._attachedPages.delete(tabId);
+        }
+
+        const tab = await chrome.tabs.get(tabId);
+        if (!tab || !tab.id) {
+          throw new Error(`Tab ${tabId} not found`);
+        }
+
+        const page = await this._getOrCreatePage(tab, true);
+        const attached = await this.attachPage(page);
+        if (!attached || !page.attached) {
+          throw new Error(`Failed to attach debugger to tab ${tabId}`);
+        }
+
+        this._attachedPages.set(tabId, page);
+        return page;
+      } finally {
+        this._inFlightAttaches.delete(tabId);
+      }
+    })();
+
+    this._inFlightAttaches.set(tabId, attachPromise);
+    return attachPromise;
   }
 
   /**
@@ -343,6 +381,7 @@ export default class BrowserContext {
    * @param tabId - The ID of the tab to remove.
    */
   public removeAttachedPage(tabId: number): void {
+    this._inFlightAttaches.delete(tabId);
     this._attachedPages.delete(tabId);
     // update current tab id if needed
     if (this._currentTabId === tabId) {
