@@ -113,7 +113,7 @@ export interface QuestionResolutionResult {
  */
 export function cleanLinkedInText(rawText: string): string {
   if (!rawText) return '';
-  let text = rawText
+  const text = rawText
     .replace(/[\n\r\t]+/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
@@ -725,9 +725,12 @@ export function cleanLinkedInJobTitle(raw: string): string {
     .replace(/^\s*(?:🤖\s*)?(?:\[Runner\]\s*)+/i, '')
     .replace(/^\s*🤖\s*/, '')
     .replace(/(?:🤖\s*)?\[Runner\]/gi, '')
+    .replace(/^\s*selected,\s*/i, '')
+    .replace(/\s*\(\s*verified\s*job\s*\)/gi, '')
     .replace(/\bwith verification\b/gi, '')
     .replace(/\bactively recruiting\b/gi, '')
     .replace(/\bpromoted\b/gi, '')
+    .replace(/\bverified\s*job\b/gi, '')
     .replace(/\beasy apply\b/gi, '')
     .replace(/[\n\r]+/g, ' ')
     .replace(/\s+/g, ' ')

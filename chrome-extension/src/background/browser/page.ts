@@ -6124,11 +6124,14 @@ export default class Page {
    * Extracts job top-card context (title, company, location, closed status, already applied, hasEasyApply, login wall)
    * Polling up to timeoutMs to allow asynchronous page components to render.
    */
-  async extractJobTopCardContext(timeoutMs = 12000): Promise<JobTopCardContext> {
+  async extractJobTopCardContext(
+    timeoutMs = 12000,
+    fallbackContext?: { fallbackTitle?: string; fallbackCompany?: string },
+  ): Promise<JobTopCardContext> {
     const startTime = Date.now();
     const pollInterval = 600;
 
-    const extractTopCardInPage = () => {
+    const extractTopCardInPage = (fallbacks?: { fallbackTitle?: string; fallbackCompany?: string }) => {
       const url = window.location.href.toLowerCase();
       const pathname = window.location.pathname.toLowerCase();
 
@@ -6159,9 +6162,12 @@ export default class Page {
           .replace(/^\s*(?:🤖\s*)?(?:\[Runner\]\s*)+/i, '')
           .replace(/^\s*🤖\s*/, '')
           .replace(/(?:🤖\s*)?\[Runner\]/gi, '')
+          .replace(/^\s*selected,\s*/i, '')
+          .replace(/\s*\(\s*verified\s*job\s*\)/gi, '')
           .replace(/\bwith verification\b/gi, '')
           .replace(/\bactively recruiting\b/gi, '')
           .replace(/\bpromoted\b/gi, '')
+          .replace(/\bverified\s*job\b/gi, '')
           .replace(/\beasy apply\b/gi, '')
           .replace(/[\n\r]+/g, ' ')
           .replace(/\s+/g, ' ')
@@ -6288,17 +6294,23 @@ export default class Page {
           }
         }
       }
+      if (!title && fallbacks?.fallbackTitle) {
+        title = cleanLinkedInJobTitle(fallbacks.fallbackTitle);
+      }
 
       // 3. Extract Company (broadened selectors for search pane, collections & standalone view)
       const companyEl = document.querySelector(
-        '.job-details-jobs-unified-top-card__company-name, .job-details-jobs-unified-top-card__company-name a, .jobs-unified-top-card__company-name, .jobs-unified-top-card__company-name a, a.topcard__org-name-link, a[data-tracking-control-name*="company"], .jobs-details__main-content a[href*="/company/"], .jobs-unified-top-card__subtitle-primary-grouping a, .jobs-unified-top-card__primary-description a, .jobs-search-results-list__list-item--active .job-card-container__company-name, .jobs-search-results-list__list-item--active .artdeco-entity-lockup__subtitle',
+        '.job-details-jobs-unified-top-card__company-name, .job-details-jobs-unified-top-card__company-name a, .jobs-unified-top-card__company-name, .jobs-unified-top-card__company-name a, [data-view-name="job-details-top-card"] a[href*="/company/"], [data-view-name="job-details"] a[href*="/company/"], a.topcard__org-name-link, a[data-tracking-control-name*="company"], .jobs-details__main-content a[href*="/company/"], .jobs-unified-top-card__subtitle-primary-grouping a, .jobs-unified-top-card__primary-description a, .jobs-search-results-list__list-item--active .job-card-container__company-name, .jobs-search-results-list__list-item--active .artdeco-entity-lockup__subtitle',
       );
       let company = cleanElementText(companyEl);
       if (!company) {
         const compLink = document.querySelector(
-          '.jobs-unified-top-card a[href*="/company/"], .scaffold-layout__detail a[href*="/company/"], [data-view-name="job-details"] a[href*="/company/"]',
+          '.jobs-unified-top-card a[href*="/company/"], .scaffold-layout__detail a[href*="/company/"], [data-view-name="job-details"] a[href*="/company/"], [data-view-name="job-details-top-card"] a[href*="/company/"], a[data-test-app-aware-link][href*="/company/"], a.ember-view[href*="/company/"], a[href*="/company/"]',
         );
         company = cleanElementText(compLink);
+      }
+      if (!company && fallbacks?.fallbackCompany) {
+        company = fallbacks.fallbackCompany;
       }
 
       // 4. Extract Location
@@ -6336,34 +6348,60 @@ export default class Page {
         }
       }
 
-      // 7. Easy Apply check: scoped to job details container to avoid search card false matches
+      // 7. Easy Apply check: inspect details containers for Easy Apply button
       let hasEasyApply = false;
-      const detailsRoot =
-        document.querySelector('.jobs-search__job-details--container') ||
-        document.querySelector('.scaffold-layout__detail') ||
-        document.querySelector('.jobs-details__main-content') ||
-        document.querySelector('.job-view-layout') ||
-        document.querySelector('.jobs-unified-top-card') ||
-        document.querySelector('[data-view-name="job-details-top-card"]') ||
-        document.querySelector('[data-view-name="job-details"]') ||
-        document;
+      const detailsContainers = [
+        document.querySelector('[data-view-name="job-details-top-card"]'),
+        document.querySelector('[data-view-name="job-details"]'),
+        document.querySelector('.scaffold-layout__detail'),
+        document.querySelector('.jobs-search__job-details--container'),
+        document.querySelector('.jobs-details__main-content'),
+        document.querySelector('.job-view-layout'),
+        document.querySelector('.jobs-unified-top-card'),
+        document.body,
+      ].filter(Boolean) as Element[];
 
-      const applyButtons = Array.from(detailsRoot.querySelectorAll('button, a, [role="button"]'));
-      for (const btn of applyButtons) {
-        if (btn.closest('.jobs-search-results-list, .scaffold-layout__list, ul.scaffold-layout__list-container')) {
-          continue;
+      for (const container of detailsContainers) {
+        const applyButtons = Array.from(container.querySelectorAll('button, a, [role="button"]'));
+        for (const btn of applyButtons) {
+          if (btn.closest('.jobs-search-results-list, .scaffold-layout__list, ul.scaffold-layout__list-container')) {
+            continue;
+          }
+          const btnText = (btn.textContent || '')
+            .replace(/\u00a0/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .toLowerCase();
+          const ariaLabel = (btn.getAttribute('aria-label') || '')
+            .replace(/\u00a0/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .toLowerCase();
+          const dataControlName = (btn.getAttribute('data-control-name') || '').toLowerCase();
+          const dataViewName = (btn.getAttribute('data-view-name') || '').toLowerCase();
+
+          // Reject if button indicates already applied
+          if (/^applied/i.test(btnText) || /^applied/i.test(ariaLabel)) {
+            continue;
+          }
+
+          if (
+            /\beasy\s*apply\b/i.test(btnText) ||
+            /\beasy\s*apply\b/i.test(ariaLabel) ||
+            dataControlName.includes('easy_apply') ||
+            dataViewName.includes('easy-apply') ||
+            btn.querySelector('svg[data-test-icon*="easy-apply"], .jobs-apply-button__label') !== null ||
+            btn.classList.contains('jobs-apply-button') ||
+            btn.closest('.jobs-apply-button, .jobs-apply-button--top-card, .jobs-s-apply') !== null ||
+            ((btnText === 'apply' || btnText === 'apply now') &&
+              !/\bcompany\b/i.test(btnText) &&
+              btn.querySelector('svg, [class*="icon"]') !== null)
+          ) {
+            hasEasyApply = true;
+            break;
+          }
         }
-        const btnText = (btn.textContent || '').trim();
-        const ariaLabel = (btn.getAttribute('aria-label') || '').trim();
-        if (
-          /\beasy\s*apply\b/i.test(btnText) ||
-          /\beasy\s*apply\b/i.test(ariaLabel) ||
-          btn.querySelector('svg[data-test-icon*="easy-apply"]') !== null ||
-          btn.classList.contains('jobs-apply-button')
-        ) {
-          hasEasyApply = true;
-          break;
-        }
+        if (hasEasyApply) break;
       }
 
       // 8. Extract Description Snippet
@@ -6388,6 +6426,7 @@ export default class Page {
       };
     };
 
+    let lastKnownInfo: JobTopCardContext | null = null;
     while (Date.now() - startTime < timeoutMs) {
       if (!this._puppeteerPage) {
         await this.attachPuppeteer().catch(() => false);
@@ -6397,7 +6436,7 @@ export default class Page {
         let info: JobTopCardContext | null = null;
         if (this._puppeteerPage) {
           try {
-            info = await this._puppeteerPage.evaluate(extractTopCardInPage);
+            info = await this._puppeteerPage.evaluate(extractTopCardInPage, fallbackContext);
           } catch (pErr) {
             if (isCdpTabClosedError(pErr)) throw pErr;
             logger.debug(
@@ -6412,6 +6451,7 @@ export default class Page {
             const results = await chrome.scripting.executeScript({
               target: { tabId: this._tabId },
               func: extractTopCardInPage,
+              args: [fallbackContext],
             });
             info = (results?.[0]?.result as JobTopCardContext) || null;
           } catch (sErr) {
@@ -6421,14 +6461,17 @@ export default class Page {
         }
 
         if (info) {
+          lastKnownInfo = info;
           // If login wall, return immediately so runner can handle pause
           if (info.isLoginWall) {
             return info;
           }
 
-          // Return immediately only if BOTH title and company were successfully resolved,
-          // or if known terminal state (closed, already applied)
-          if ((info.title && info.company) || info.isClosed || info.isAlreadyApplied) {
+          // Return immediately if:
+          // 1. Easy Apply button is found (the details pane has loaded its key action)
+          // 2. Both title & company are resolved
+          // 3. Known terminal state (closed, already applied)
+          if (info.hasEasyApply || (info.title && info.company) || info.isClosed || info.isAlreadyApplied) {
             return info;
           }
         }
@@ -6439,9 +6482,19 @@ export default class Page {
       await new Promise(r => setTimeout(r, pollInterval));
     }
 
+    if (lastKnownInfo) {
+      if (!lastKnownInfo.title && fallbackContext?.fallbackTitle) {
+        lastKnownInfo.title = fallbackContext.fallbackTitle;
+      }
+      if (!lastKnownInfo.company && fallbackContext?.fallbackCompany) {
+        lastKnownInfo.company = fallbackContext.fallbackCompany;
+      }
+      return lastKnownInfo;
+    }
+
     return {
-      title: '',
-      company: '',
+      title: fallbackContext?.fallbackTitle || '',
+      company: fallbackContext?.fallbackCompany || '',
       location: '',
       isClosed: false,
       isAlreadyApplied: false,
@@ -6512,9 +6565,12 @@ export default class Page {
           .replace(/^\s*(?:🤖\s*)?(?:\[Runner\]\s*)+/i, '')
           .replace(/^\s*🤖\s*/, '')
           .replace(/(?:🤖\s*)?\[Runner\]/gi, '')
+          .replace(/^\s*selected,\s*/i, '')
+          .replace(/\s*\(\s*verified\s*job\s*\)/gi, '')
           .replace(/\bwith verification\b/gi, '')
           .replace(/\bactively recruiting\b/gi, '')
           .replace(/\bpromoted\b/gi, '')
+          .replace(/\bverified\s*job\b/gi, '')
           .replace(/\beasy apply\b/gi, '')
           .replace(/[\n\r]+/g, ' ')
           .replace(/\s+/g, ' ')

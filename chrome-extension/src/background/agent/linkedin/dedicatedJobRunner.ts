@@ -5654,7 +5654,10 @@ export class DedicatedJobRunner {
     this.checkAbort(runToken, this.abortController?.signal);
     let topCard: any;
     try {
-      topCard = await currentPage.extractJobTopCardContext(8000);
+      topCard = await currentPage.extractJobTopCardContext(8000, {
+        fallbackTitle: job.title,
+        fallbackCompany: job.company,
+      });
     } catch (topErr) {
       if (isCdpTabClosedError(topErr) || this.isStopping || !this.isRunning) {
         throw new AbortRunError(this.stopReason || 'Stopped by user');
@@ -5685,7 +5688,12 @@ export class DedicatedJobRunner {
         logger.info(
           `[DedicatedJobRunner] [${new Date().toISOString()}] Direct navigation to ${directJobUrl} completed.`,
         );
-        topCard = await currentPage.extractJobTopCardContext(8000).catch(() => ({}));
+        topCard = await currentPage
+          .extractJobTopCardContext(8000, {
+            fallbackTitle: job.title,
+            fallbackCompany: job.company,
+          })
+          .catch(() => ({}));
       } catch (navErr) {
         logger.warning(
           `[DedicatedJobRunner] [${new Date().toISOString()}] Direct navigation to ${directJobUrl} failed:`,
@@ -5715,7 +5723,10 @@ export class DedicatedJobRunner {
       }
       this.checkAbort(runToken, this.abortController?.signal);
       try {
-        topCard = await currentPage.extractJobTopCardContext(4500);
+        topCard = await currentPage.extractJobTopCardContext(4500, {
+          fallbackTitle: job.title,
+          fallbackCompany: job.company,
+        });
       } catch (topErr) {
         if (isCdpTabClosedError(topErr) || this.isStopping || !this.isRunning) {
           throw new AbortRunError(this.stopReason || 'Stopped by user');
@@ -5880,7 +5891,10 @@ export class DedicatedJobRunner {
         }
         this.checkAbort(runToken, this.abortController?.signal);
         try {
-          const recheckTopCard = await currentPage.extractJobTopCardContext(2000);
+          const recheckTopCard = await currentPage.extractJobTopCardContext(2000, {
+            fallbackTitle: displayTitle,
+            fallbackCompany: displayCompany,
+          });
           if (recheckTopCard?.hasEasyApply) {
             topCard = recheckTopCard;
             break;
@@ -5890,6 +5904,20 @@ export class DedicatedJobRunner {
             throw new AbortRunError(this.stopReason || 'Stopped by user');
           }
         }
+      }
+    }
+
+    if (!topCard.hasEasyApply) {
+      // Active probe: check whether clickEasyApplyButton can find and open the Easy Apply modal directly
+      logger.info(
+        `[DedicatedJobRunner] Easy Apply not confirmed via topCard for "${displayTitle}". Running active probe with clickEasyApplyButton...`,
+      );
+      const probeClick = await currentPage.clickEasyApplyButton().catch(() => ({ success: false }));
+      if (probeClick.success) {
+        logger.info(
+          `[DedicatedJobRunner] Probe clickEasyApplyButton succeeded for ${job.jobId}! Easy Apply modal opened.`,
+        );
+        topCard.hasEasyApply = true;
       }
     }
 
@@ -6117,23 +6145,11 @@ export class DedicatedJobRunner {
     this.checkAbort(runToken, this.abortController?.signal);
     this.notifyStatus(portToSend, `🚀 Opening Easy Apply for "${displayTitle}"...`, 'info', runToken);
     let clickRes: any;
-    try {
-      clickRes = await currentPage.clickEasyApplyButton();
-    } catch (btnErr) {
-      if (isCdpTabClosedError(btnErr) || this.isStopping || !this.isRunning) {
-        throw new AbortRunError(this.stopReason || 'Stopped by user');
-      }
-      clickRes = { success: false, error: String(btnErr) };
-    }
-    this.checkAbort(runToken, this.abortController?.signal);
-    logger.info(`[DedicatedJobRunner] clickEasyApplyButton attempt 1:`, clickRes);
-    if (!clickRes.success) {
-      logger.warning(`[DedicatedJobRunner] Easy Apply click attempt 1 failed (${clickRes.error}). Retrying...`);
-      const clickSleepAborted = await this.interruptibleSleep(1200);
-      if (clickSleepAborted || !this.isRunning || this.isStopping) {
-        throw new AbortRunError(this.stopReason || 'Stopped by user');
-      }
-      this.checkAbort(runToken, this.abortController?.signal);
+    const isAlreadyModalOpen = await currentPage.isEasyApplyModalOpen().catch(() => false);
+    if (isAlreadyModalOpen) {
+      logger.info(`[DedicatedJobRunner] Easy Apply modal already open for "${displayTitle}".`);
+      clickRes = { success: true };
+    } else {
       try {
         clickRes = await currentPage.clickEasyApplyButton();
       } catch (btnErr) {
@@ -6143,7 +6159,25 @@ export class DedicatedJobRunner {
         clickRes = { success: false, error: String(btnErr) };
       }
       this.checkAbort(runToken, this.abortController?.signal);
-      logger.info(`[DedicatedJobRunner] clickEasyApplyButton attempt 2:`, clickRes);
+      logger.info(`[DedicatedJobRunner] clickEasyApplyButton attempt 1:`, clickRes);
+      if (!clickRes.success) {
+        logger.warning(`[DedicatedJobRunner] Easy Apply click attempt 1 failed (${clickRes.error}). Retrying...`);
+        const clickSleepAborted = await this.interruptibleSleep(1200);
+        if (clickSleepAborted || !this.isRunning || this.isStopping) {
+          throw new AbortRunError(this.stopReason || 'Stopped by user');
+        }
+        this.checkAbort(runToken, this.abortController?.signal);
+        try {
+          clickRes = await currentPage.clickEasyApplyButton();
+        } catch (btnErr) {
+          if (isCdpTabClosedError(btnErr) || this.isStopping || !this.isRunning) {
+            throw new AbortRunError(this.stopReason || 'Stopped by user');
+          }
+          clickRes = { success: false, error: String(btnErr) };
+        }
+        this.checkAbort(runToken, this.abortController?.signal);
+        logger.info(`[DedicatedJobRunner] clickEasyApplyButton attempt 2:`, clickRes);
+      }
     }
 
     // Check immediately for LinkedIn rate limit
