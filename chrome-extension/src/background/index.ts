@@ -616,6 +616,19 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
 });
 
 // Listen for debugger detached event (e.g. when DevTools is opened or tab is closed)
+self.addEventListener('unhandledrejection', (event: PromiseRejectionEvent) => {
+  const reasonStr = String(event.reason?.message || event.reason || '');
+  if (
+    reasonStr.includes('Debugger is not attached') ||
+    reasonStr.includes('detached') ||
+    reasonStr.includes('No tab with id') ||
+    reasonStr.includes('Target closed')
+  ) {
+    logger.info('Suppressed benign CDP/debugger disconnection rejection:', reasonStr);
+    event.preventDefault();
+  }
+});
+
 chrome.debugger.onDetach.addListener(async (source, reason) => {
   logger.warning('Debugger detached:', source, reason);
   const tabId = source.tabId;

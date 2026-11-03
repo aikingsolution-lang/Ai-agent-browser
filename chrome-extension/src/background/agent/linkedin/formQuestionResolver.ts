@@ -1116,17 +1116,33 @@ export function adaptAnswerToFieldFormat(
 
   // 0c. Radio / Checkbox: For Yes/No options, must be valid boolean/Yes/No
   if (field.fieldType === 'radio' || field.fieldType === 'checkbox') {
-    if (field.options && field.options.length > 0 && field.options.every(o => /^(?:yes|no)$/i.test(o.trim()))) {
-      const strAns = answer.toLowerCase();
-      if (/^(?:yes|true|1|y)$/i.test(strAns)) {
-        const yesOpt = field.options.find(o => /^yes$/i.test(o.trim())) || 'Yes';
-        return { valid: true, value: yesOpt, wasConverted: yesOpt !== answer };
+    if (field.options && field.options.length > 0) {
+      const strAns = answer.toLowerCase().trim();
+      const isYes =
+        /^(?:yes|true|1|y)\b/i.test(strAns) ||
+        /^(?:immediate|open|willing|agree|authorized|available|comfortable)/i.test(strAns);
+      const isNo = /^(?:no|false|0|n)\b/i.test(strAns) || /^(?:unwilling|disagree|not)/i.test(strAns);
+
+      if (field.options.every(o => /^(?:yes|no)$/i.test(o.trim()))) {
+        if (isYes) {
+          const yesOpt = field.options.find(o => /^yes$/i.test(o.trim())) || 'Yes';
+          return { valid: true, value: yesOpt, wasConverted: yesOpt !== answer };
+        }
+        if (isNo) {
+          const noOpt = field.options.find(o => /^no$/i.test(o.trim())) || 'No';
+          return { valid: true, value: noOpt, wasConverted: noOpt !== answer };
+        }
+        return { valid: false, value: '', wasConverted: false };
       }
-      if (/^(?:no|false|0|n)$/i.test(strAns)) {
-        const noOpt = field.options.find(o => /^no$/i.test(o.trim())) || 'No';
-        return { valid: true, value: noOpt, wasConverted: noOpt !== answer };
+
+      if (isYes) {
+        const yesOpt = field.options.find(o => /^(?:yes|agree|true|authorized|willing)\b/i.test(o.trim()));
+        if (yesOpt) return { valid: true, value: yesOpt, wasConverted: yesOpt !== answer };
       }
-      return { valid: false, value: '', wasConverted: false };
+      if (isNo) {
+        const noOpt = field.options.find(o => /^(?:no|disagree|false|none|not)\b/i.test(o.trim()));
+        if (noOpt) return { valid: true, value: noOpt, wasConverted: noOpt !== answer };
+      }
     }
     return { valid: true, value: answer, wasConverted: false };
   }
@@ -4170,22 +4186,37 @@ export function generateAutonomousFallbackAnswerWithSource(
         }
       }
 
-      // 1f. Binary Yes/No choice: honesty rule
-      const yesOpt = validOptions.find(o => /^(?:yes\b|agree\b|true\b)/i.test(o));
-      const noOpt = validOptions.find(o => /^(?:no\b|disagree\b|false\b)/i.test(o));
+      // 1f. Binary Yes/No choice: qualification & honesty rule
+      const yesOpt = validOptions.find(o => /^(?:yes\b|agree\b|true\b|willing\b|authorized\b)/i.test(o));
+      const noOpt = validOptions.find(o => /^(?:no\b|disagree\b|false\b|none\b)/i.test(o));
       if (yesOpt && noOpt) {
         // If error message demands selection or affirmative after attempt 1
         if (attemptNumber > 2 && /please\s*make\s*a\s*selection|required/i.test(errorLower)) {
           return { answer: yesOpt, source: `Option selected from available choices: "${yesOpt}" (retry selection)` };
         }
-        // Neutral honest default: No for unverified claims, Yes for general positive screening
-        if (/\b(?:criminal|felony|background\s*check\s*issues|disciplin)\b/i.test(labelLower)) {
-          return { answer: noOpt, source: `Option selected from available choices: "${noOpt}" (honest neutral)` };
+        // Disqualifying questions: answer No
+        if (
+          /\b(?:criminal|felony|background\s*check\s*issues|convicted|disciplin|fired|terminated\s*for\s*cause)\b/i.test(
+            labelLower,
+          )
+        ) {
+          return {
+            answer: noOpt,
+            source: `Option selected from available choices: "${noOpt}" (honest neutral: no criminal/disciplinary history)`,
+          };
         }
-        if (/\b(?:agree|acknowledge|consent|terms|policy)\b/i.test(labelLower)) {
-          return { answer: yesOpt, source: `Option selected from available choices: "${yesOpt}" (compliance consent)` };
+        if (/\b(?:sponsorship|require.*visa|visa.*support)\b/i.test(labelLower)) {
+          return {
+            answer: noOpt,
+            source: `Option selected from available choices: "${noOpt}" (honest default: no visa sponsorship needed)`,
+          };
         }
-        return { answer: noOpt, source: `Option selected from available choices: "${noOpt}" (honest neutral default)` };
+        // Qualifying screening questions: answer Yes so application proceeds
+        // E.g. commute, relocation, hybrid, on-site, authorization, schedule, overtime, shifts, background check consent, comfortable, willing, driver's license, experience, degree
+        return {
+          answer: yesOpt,
+          source: `Option selected from available choices: "${yesOpt}" (qualifying screening affirmative default)`,
+        };
       }
 
       // 1g. Fallback to first non-placeholder option (never invent!)

@@ -395,7 +395,8 @@ const SidePanel = () => {
 
   const handleTaskState = useCallback(
     (event: AgentEvent) => {
-      const { actor, state, timestamp, data } = event;
+      const actor = event.actor || Actors.SYSTEM;
+      const { state, timestamp, data } = event;
       const content = data?.details;
       let skip = true;
       let displayProgress = false;

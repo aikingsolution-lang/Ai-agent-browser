@@ -4429,6 +4429,20 @@ export default class Page {
                 : /portfolio/i.test(rawLabel) || /portfolio/i.test(errText)
                   ? 'Portfolio'
                   : 'Custom Attachment';
+
+          // If this is a Resume upload, check if the modal already has pre-uploaded resumes with radio buttons
+          // that can be selected. If so, it is not an unfulfilled file upload requirement.
+          if (docType === 'Resume') {
+            const hasResumeRadios = Boolean(
+              modal.querySelector(
+                '.jobs-document-upload__resume-card, input[type="radio"][name*="resume" i], input[type="radio"][id*="resume" i]',
+              ),
+            );
+            if (hasResumeRadios) {
+              continue;
+            }
+          }
+
           // Mark this exact input so the upload method can target it precisely later
           fi.setAttribute('data-qoder-file-target', '1');
           unfulfilledMandatoryFileUpload = { label: rawLabel, documentType: docType };
@@ -4874,15 +4888,55 @@ export default class Page {
 
         // 1. Check radio groups, checkbox groups and question-library button groups
         // (fieldsets / role="radiogroup" / fb-dash form-builder wrappers) first
+        function extractRadioGroupLabel(fsEl: HTMLElement): string {
+          if (!fsEl) return '';
+          const leg = fsEl.querySelector('legend');
+          if (leg) {
+            const t = cleanElementText(leg);
+            if (t && !/^(?:form\s*field|form|field|radio|option|options|question)$/i.test(t)) return t;
+          }
+          const ariaLbl = fsEl.getAttribute('aria-label');
+          if (ariaLbl && ariaLbl.trim()) return ariaLbl.trim();
+          const labelledBy = fsEl.getAttribute('aria-labelledby');
+          if (labelledBy && modal) {
+            const parts: string[] = [];
+            for (const id of labelledBy.split(/\s+/)) {
+              if (!id) continue;
+              try {
+                const ref = modal.querySelector(`[id="${CSS.escape(id)}"]`);
+                const t = cleanElementText(ref);
+                if (t) parts.push(t);
+              } catch {}
+            }
+            if (parts.length > 0) return parts.join(' ');
+          }
+          const headings = Array.from(
+            fsEl.querySelectorAll(
+              'legend, [role="heading"], h1, h2, h3, h4, h5, h6, .fb-dash-form-element__label, .artdeco-form__label, span[class*="label" i]',
+            ),
+          );
+          for (const h of headings) {
+            if (h === fsEl || (fsEl.contains(h) && (h.tagName === 'LABEL' || h.querySelector('input')))) continue;
+            const ht = cleanElementText(h);
+            if (ht && !/^(?:form\s*field|form|field|radio|option|options|question)$/i.test(ht)) return ht;
+          }
+          return '';
+        }
+
         const fieldsets = Array.from(
           modal.querySelectorAll(
             'fieldset, div[role="radiogroup"], div[role="group"], div.fb-dash-form-element, div[data-test-form-element]',
           ),
         ) as HTMLElement[];
         for (const fs of fieldsets) {
-          const legend = fs.querySelector('legend, [role="heading"], label');
-          const legendText = cleanElementText(legend).toLowerCase().trim();
-          if (legendText && labelsMatch(legendText, cleanLabel)) {
+          const structLbl = extractRadioGroupLabel(fs);
+          const legend = fs.querySelector('legend, [role="heading"]');
+          const rawLegend = structLbl || cleanElementText(legend);
+          const legendText = cleanDuplicateText(rawLegend).toLowerCase().trim();
+          if (
+            legendText &&
+            (labelsMatch(legendText, cleanLabel) || cleanLabel.includes(legendText) || legendText.includes(cleanLabel))
+          ) {
             const radios = Array.from(fs.querySelectorAll('input[type="radio"]')) as HTMLInputElement[];
             const checkboxes = Array.from(fs.querySelectorAll('input[type="checkbox"]')) as HTMLInputElement[];
             const items = radios.length > 0 ? radios : checkboxes;
@@ -4992,6 +5046,67 @@ export default class Page {
             }
           }
           if (targetEl) break;
+        }
+
+        // 1b. Fallback: check all individual radio inputs in the modal if group container wasn't matched
+        if (!targetEl) {
+          const allRadios = Array.from(modal.querySelectorAll('input[type="radio"]')) as HTMLInputElement[];
+          for (const r of allRadios) {
+            const container = (r.closest(
+              'fieldset, div[role="radiogroup"], div[role="group"], .fb-dash-form-element, div[data-test-form-element], div',
+            ) || r.parentElement) as HTMLElement | null;
+            if (!container) continue;
+            const rGroupLabel = cleanDuplicateText(extractRadioGroupLabel(container)).toLowerCase().trim();
+            if (
+              rGroupLabel &&
+              (labelsMatch(rGroupLabel, cleanLabel) ||
+                cleanLabel.includes(rGroupLabel) ||
+                rGroupLabel.includes(cleanLabel))
+            ) {
+              const rId = r.getAttribute('id');
+              let rLbl: HTMLElement | null = null;
+              if (rId) {
+                try {
+                  rLbl =
+                    container.querySelector(`label[for="${CSS.escape(rId)}"]`) ||
+                    modal.querySelector(`label[for="${CSS.escape(rId)}"]`);
+                } catch {
+                  const allLabels = Array.from(modal.querySelectorAll('label'));
+                  rLbl = allLabels.find(l => l.getAttribute('for') === rId) || null;
+                }
+              }
+              if (!rLbl) {
+                rLbl = r.closest('label') || (r.parentElement?.querySelector('label') as HTMLElement | null);
+              }
+
+              const rawLblText = cleanElementText(rLbl).toLowerCase().trim();
+              const rawVal = (r.value || '').toLowerCase().trim();
+              const normVal = val.toLowerCase().trim();
+              const isTargetYes =
+                /^(?:yes|true|1|y|immediate(?:ly)?|available|agree|authorized|willing|interested)\b/i.test(normVal);
+              const isTargetNo = /^(?:no|false|0|n|not|none)\b/i.test(normVal);
+
+              let matched = false;
+              if (isTargetYes && (/\byes\b/i.test(rawLblText) || /^(true|1|yes|y)$/i.test(rawVal))) {
+                matched = true;
+              } else if (isTargetNo && (/\bno\b/i.test(rawLblText) || /^(false|0|no|n)$/i.test(rawVal))) {
+                matched = true;
+              } else if (
+                rawLblText &&
+                (rawLblText === normVal || rawLblText.includes(normVal) || normVal.includes(rawLblText))
+              ) {
+                matched = true;
+              } else if (rawVal && (rawVal === normVal || rawVal.includes(normVal) || normVal.includes(rawVal))) {
+                matched = true;
+              }
+
+              if (matched) {
+                targetEl = r;
+                targetRadioLabel = rLbl;
+                break;
+              }
+            }
+          }
         }
 
         // 2. If not found in fieldset, check standard labels
@@ -5192,17 +5307,24 @@ export default class Page {
           } catch {}
 
           const isDesiredState = () => (targetEl as HTMLInputElement).checked;
+          const mouseOpts = { bubbles: true, cancelable: true, view: window };
           if (!isDesiredState()) {
             try {
+              ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(evt => {
+                clickable.dispatchEvent(new MouseEvent(evt, mouseOpts));
+              });
               clickable.click();
             } catch {}
-            await new Promise(r => setTimeout(r, 100));
+            await new Promise(r => setTimeout(r, 60));
           }
           if (!isDesiredState()) {
             try {
+              ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(evt => {
+                targetEl.dispatchEvent(new MouseEvent(evt, mouseOpts));
+              });
               targetEl.click();
             } catch {}
-            await new Promise(r => setTimeout(r, 100));
+            await new Promise(r => setTimeout(r, 60));
           }
           if (!isDesiredState()) {
             // Last-resort DOM fallback; the trusted CDP click escalation follows outside.
@@ -5212,6 +5334,10 @@ export default class Page {
               setter.call(targetEl, true);
             } else {
               targetEl.checked = true;
+            }
+            const tracker = (targetEl as any)._valueTracker;
+            if (tracker) {
+              tracker.setValue(false);
             }
             targetEl.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
             targetEl.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
@@ -10344,7 +10470,22 @@ export default class Page {
           radio.focus();
         } catch {}
 
-        // 1. Native prototype setter so React 18 tracks the transition
+        // 1. Identify clickable label or radio container (NEVER click outer card container which triggers preview/download)
+        const clickable =
+          (radio.id ? modal!.querySelector(`label[for="${CSS.escape(radio.id)}"]`) : null) ||
+          radio.closest('label') ||
+          radio.closest('.fb-radio-button, .artdeco-radio-button') ||
+          radio.parentElement ||
+          radio;
+
+        try {
+          modal!
+            .querySelectorAll('[data-qoder-resume-target]')
+            .forEach(el => el.removeAttribute('data-qoder-resume-target'));
+          (clickable as HTMLElement).setAttribute('data-qoder-resume-target', '1');
+        } catch {}
+
+        // 2. Native prototype setter so React 18 tracks the transition
         const proto = HTMLInputElement.prototype;
         const setter = Object.getOwnPropertyDescriptor(proto, 'checked')?.set;
         if (setter) {
@@ -10352,22 +10493,22 @@ export default class Page {
         } else {
           radio.checked = true;
         }
-
-        // 2. Identify clickable label or card container
-        const clickable =
-          (radio.id ? modal!.querySelector(`label[for="${CSS.escape(radio.id)}"]`) : null) ||
-          radio.closest('label') ||
-          radio.closest(
-            '.jobs-document-upload__resume-card, .ui-attachment, div[data-test-form-builder-radio-button-form-component]',
-          ) ||
-          radio.parentElement ||
-          radio;
+        const tracker = (radio as any)._valueTracker;
+        if (tracker) {
+          tracker.setValue(false);
+        }
 
         // 3. Dispatch full pointer/mouse sequence on the clickable element
         const mouseOpts = { bubbles: true, cancelable: true, view: window };
         ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(evt => {
           clickable.dispatchEvent(new MouseEvent(evt, mouseOpts));
         });
+        try {
+          (clickable as HTMLElement).click();
+        } catch {}
+        try {
+          radio.click();
+        } catch {}
 
         // 4. Fire React input and change events
         radio.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
@@ -10411,12 +10552,18 @@ export default class Page {
       const stopWords = new Set(['resume', 'cv', 'doc', 'docx', 'pdf', 'profile', 'updated', 'latest', 'final']);
       const targetWords = normTarget.split(/\s+/).filter(w => w.length > 2 && !stopWords.has(w));
 
-      let bestRadio: HTMLInputElement | null = null;
-      let bestRadioLabel = '';
-      let highestScore = -1;
-
+      // Collect all resume radios in DOM order (on LinkedIn Easy Apply, resumes are strictly ordered
+      // chronologically with the LATEST uploaded resume at index 0 / top of the list)
+      const validResumeEntries: Array<{
+        radio: HTMLInputElement;
+        cardEl: HTMLElement;
+        rawCardText: string;
+        index: number;
+      }> = [];
+      let rIdx = 0;
       for (const radio of radios) {
-        const cardEl = radio.closest('div, label, li, tr') || radio.parentElement;
+        const cardEl = (radio.closest('.jobs-document-upload__resume-card, div, label, li, tr') ||
+          radio.parentElement) as HTMLElement;
         const rawCardText = (cardEl?.textContent || '').toLowerCase().trim();
 
         const isResumeRadio =
@@ -10424,12 +10571,35 @@ export default class Page {
           rawCardText.includes('.doc') ||
           rawCardText.includes('resume') ||
           radio.name.toLowerCase().includes('resume') ||
-          radio.id.toLowerCase().includes('resume');
+          radio.id.toLowerCase().includes('resume') ||
+          Boolean(radio.closest('.jobs-document-upload__resume-card'));
 
-        if (!isResumeRadio) continue;
+        if (isResumeRadio) {
+          validResumeEntries.push({ radio, cardEl, rawCardText, index: rIdx++ });
+        }
+      }
 
+      let bestRadio: HTMLInputElement | null = null;
+      let bestRadioLabel = '';
+      let highestScore = -1;
+
+      for (const entry of validResumeEntries) {
+        const { radio, rawCardText, index: cardIndex } = entry;
         const normCard = normalizeFileName(rawCardText);
         let score = 0;
+
+        // Recency priority: In LinkedIn Easy Apply, the top card (index 0) represents the
+        // LATEST uploaded resume. Higher recency bonus ensures newly uploaded resumes
+        // are prioritized over older ones.
+        const recencyBonus = Math.max(0, (validResumeEntries.length - cardIndex) * 300);
+        score += recencyBonus;
+
+        // Check for recent upload indicators in card text (e.g. "Uploaded on 11/02/2026", "Uploaded 2 days ago", "just now")
+        if (/\b(?:just now|today|yesterday|hours? ago|days? ago)\b/i.test(rawCardText)) {
+          score += 350;
+        } else if (/\b(?:uploaded\s+(?:on\s+)?)?(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b/i.test(rawCardText)) {
+          score += 150;
+        }
 
         // Tier 1: Exact or strong match on Primary Target resume (Default / Active in extension)
         if (normTarget && normCard === normTarget) {
@@ -10442,7 +10612,7 @@ export default class Page {
           }
         }
 
-        // Tier 2: Match against any other uploaded resume in the extension
+        // Tier 2: Match against any other uploaded resume in CareerBrain
         for (const alt of normAltTargets) {
           if (alt && normCard === alt) {
             score += 500;
@@ -10460,15 +10630,8 @@ export default class Page {
           }
         }
 
-        // Tier 4: Fallback - if no match found, first available resume gets 10 points
-        if (score === 0) {
-          score = 10;
-        }
-
-        // Preference for already checked radio if tied
-        if (radio.checked) {
-          score += 1;
-        }
+        // Note: Do NOT add points for radio.checked, because LinkedIn defaults to previously checked
+        // older resumes, which would override the user's latest uploaded resume.
 
         if (score > highestScore) {
           highestScore = score;
@@ -10498,7 +10661,21 @@ export default class Page {
 
     if (this._puppeteerPage) {
       try {
-        return await this._puppeteerPage.evaluate(selectInPage, targetFileName, candidateFileNames, resumeTags);
+        const res = await this._puppeteerPage.evaluate(selectInPage, targetFileName, candidateFileNames, resumeTags);
+        if (res && res.selected) {
+          // Deliver real trusted CDP click on the marked radio element to guarantee framework selection
+          await this._puppeteerPage.click('[data-qoder-resume-target="1"]').catch(() => {});
+          await new Promise(r => setTimeout(r, 120));
+          await this._puppeteerPage
+            .evaluate(() => {
+              document
+                .querySelectorAll('[data-qoder-resume-target]')
+                .forEach(el => el.removeAttribute('data-qoder-resume-target'));
+            })
+            .catch(() => {});
+          return res;
+        }
+        return res;
       } catch {}
     }
 

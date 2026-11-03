@@ -2894,18 +2894,22 @@ export class DedicatedJobRunner {
             logger.warning(
               `[DedicatedJobRunner] direct probe timed out. Detaching wedged debugger and retrying once...`,
             );
-            currentPage = await awaitStartupStep(this.recoverWedgedPage(tabId));
             try {
-              directProbe = await awaitStartupStep(
-                withTimeout(
-                  currentPage.readJobListFromSearchPane?.(1) || Promise.resolve([]),
-                  12000,
-                  'direct probe readJobListFromSearchPane retry',
-                ),
-              );
-              logStepExit('running active search results probe (retry)');
-            } catch (retryErr) {
-              logger.warning(`[DedicatedJobRunner] direct probe retry also failed:`, retryErr);
+              currentPage = await awaitStartupStep(this.recoverWedgedPage(tabId));
+              try {
+                directProbe = await awaitStartupStep(
+                  withTimeout(
+                    currentPage.readJobListFromSearchPane?.(1) || Promise.resolve([]),
+                    12000,
+                    'direct probe readJobListFromSearchPane retry',
+                  ),
+                );
+                logStepExit('running active search results probe (retry)');
+              } catch (retryErr) {
+                logger.warning(`[DedicatedJobRunner] direct probe retry also failed:`, retryErr);
+              }
+            } catch (recErr) {
+              logger.warning(`[DedicatedJobRunner] Page recovery during direct probe failed (DevTools open?):`, recErr);
             }
           }
         }
@@ -3004,18 +3008,25 @@ export class DedicatedJobRunner {
               logger.warning(
                 `[DedicatedJobRunner] fallback probe timed out. Detaching wedged debugger and retrying once...`,
               );
-              currentPage = await awaitStartupStep(this.recoverWedgedPage(tabId));
               try {
-                fallbackCheck = await awaitStartupStep(
-                  withTimeout(
-                    currentPage.readJobListFromSearchPane?.(2) || Promise.resolve([]),
-                    12000,
-                    'fallback probe readJobListFromSearchPane retry',
-                  ),
+                currentPage = await awaitStartupStep(this.recoverWedgedPage(tabId));
+                try {
+                  fallbackCheck = await awaitStartupStep(
+                    withTimeout(
+                      currentPage.readJobListFromSearchPane?.(2) || Promise.resolve([]),
+                      12000,
+                      'fallback probe readJobListFromSearchPane retry',
+                    ),
+                  );
+                  logStepExit('fallback search results probe (retry)');
+                } catch (retryErr) {
+                  logger.warning(`[DedicatedJobRunner] fallback probe retry also failed:`, retryErr);
+                }
+              } catch (recErr) {
+                logger.warning(
+                  `[DedicatedJobRunner] Page recovery during fallback probe failed (DevTools open?):`,
+                  recErr,
                 );
-                logStepExit('fallback search results probe (retry)');
-              } catch (retryErr) {
-                logger.warning(`[DedicatedJobRunner] fallback probe retry also failed:`, retryErr);
               }
             }
           }
