@@ -91,7 +91,7 @@ export function PrioritizedLocationsInput({
         return (
           <div
             key={index}
-            className={`p-3 rounded-lg border transition-all ${
+            className={`rounded-lg border p-3 transition-all ${
               index === 0
                 ? isDarkMode
                   ? 'border-emerald-800/80 bg-slate-800/80'
@@ -100,9 +100,9 @@ export function PrioritizedLocationsInput({
                   ? 'border-slate-700 bg-slate-800/60'
                   : 'border-gray-200 bg-white'
             }`}>
-            <div className="flex items-center justify-between mb-1.5">
+            <div className="mb-1.5 flex items-center justify-between">
               <span
-                className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-xs font-semibold border ${meta.color}`}>
+                className={`inline-flex items-center gap-1.5 rounded border px-2 py-0.5 text-xs font-semibold ${meta.color}`}>
                 <span>{index === 0 ? '🥇' : index === 1 ? '🥈' : '🥉'}</span>
                 <span>{meta.title}</span>
               </span>
@@ -114,7 +114,7 @@ export function PrioritizedLocationsInput({
                     type="button"
                     onClick={() => handleMoveUp(index)}
                     title="Promote Priority (Move Up)"
-                    className="p-1 rounded text-gray-400 hover:text-sky-500 transition-colors cursor-pointer">
+                    className="cursor-pointer rounded p-1 text-gray-400 transition-colors hover:text-sky-500">
                     <FiArrowUp className="size-3.5" />
                   </button>
                 )}
@@ -123,7 +123,7 @@ export function PrioritizedLocationsInput({
                     type="button"
                     onClick={() => handleMoveDown(index)}
                     title="Demote Priority (Move Down)"
-                    className="p-1 rounded text-gray-400 hover:text-sky-500 transition-colors cursor-pointer">
+                    className="cursor-pointer rounded p-1 text-gray-400 transition-colors hover:text-sky-500">
                     <FiArrowDown className="size-3.5" />
                   </button>
                 )}
@@ -132,7 +132,7 @@ export function PrioritizedLocationsInput({
                     type="button"
                     onClick={() => handleRemove(index)}
                     title="Remove this location"
-                    className="p-1 rounded text-gray-400 hover:text-red-500 transition-colors cursor-pointer">
+                    className="cursor-pointer rounded p-1 text-gray-400 transition-colors hover:text-red-500">
                     <FiTrash2 className="size-3.5" />
                   </button>
                 )}
@@ -161,10 +161,10 @@ export function PrioritizedLocationsInput({
         <button
           type="button"
           onClick={handleAdd}
-          className={`w-full py-2 px-3 rounded-md border border-dashed flex items-center justify-center space-x-2 text-xs font-semibold transition-colors cursor-pointer ${
+          className={`flex w-full cursor-pointer items-center justify-center space-x-2 rounded-md border border-dashed px-3 py-2 text-xs font-semibold transition-colors ${
             isDarkMode
-              ? 'border-sky-800 text-sky-400 hover:bg-sky-950/40 hover:border-sky-600'
-              : 'border-sky-300 text-sky-600 hover:bg-sky-50 hover:border-sky-400'
+              ? 'border-sky-800 text-sky-400 hover:border-sky-600 hover:bg-sky-950/40'
+              : 'border-sky-300 text-sky-600 hover:border-sky-400 hover:bg-sky-50'
           }`}>
           <FiPlus className="size-4" />
           <span>Add Priority {activeLocations.length + 1} Location (Max 3)</span>

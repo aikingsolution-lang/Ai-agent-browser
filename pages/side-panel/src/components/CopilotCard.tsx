@@ -46,7 +46,7 @@ export const CopilotCard: React.FC<CopilotCardProps> = ({ card, quickOptions, on
             'border-emerald-200 bg-white text-slate-800',
           )}`}>
           <div
-            className={`flex items-center justify-between pb-2 border-b ${tone('border-emerald-500/20', 'border-slate-100')}`}>
+            className={`flex items-center justify-between border-b pb-2 ${tone('border-emerald-500/20', 'border-slate-100')}`}>
             <div className="flex items-center space-x-1.5 font-bold">
               <FiCheckCircle className={`size-4 ${tone('text-emerald-400', 'text-emerald-600')}`} />
               <span>Profile updated</span>
@@ -73,7 +73,7 @@ export const CopilotCard: React.FC<CopilotCardProps> = ({ card, quickOptions, on
                   <span className={`font-medium ${tone('text-emerald-300', 'text-slate-600')}`}>
                     {f.label || f.field}
                   </span>
-                  <span className="font-semibold text-right">{String(f.value)}</span>
+                  <span className="text-right font-semibold">{String(f.value)}</span>
                 </div>
               ))}
             </div>
@@ -81,12 +81,12 @@ export const CopilotCard: React.FC<CopilotCardProps> = ({ card, quickOptions, on
 
           {/* Profile Completeness Bar */}
           {typeof card.data?.profileCompleteness === 'number' && (
-            <div className={`mt-2.5 pt-2 border-t ${tone('border-emerald-500/20', 'border-slate-100')}`}>
-              <div className="flex justify-between text-[10px] font-semibold mb-1">
+            <div className={`mt-2.5 border-t pt-2 ${tone('border-emerald-500/20', 'border-slate-100')}`}>
+              <div className="mb-1 flex justify-between text-[10px] font-semibold">
                 <span>Profile readiness</span>
                 <span className={tone('text-emerald-300', 'text-emerald-700')}>{card.data.profileCompleteness}%</span>
               </div>
-              <div className={`h-1.5 w-full rounded-full overflow-hidden ${tone('bg-slate-700/40', 'bg-slate-200')}`}>
+              <div className={`h-1.5 w-full overflow-hidden rounded-full ${tone('bg-slate-700/40', 'bg-slate-200')}`}>
                 <div
                   className="h-full rounded-full bg-emerald-500 transition-all duration-700"
                   style={{ width: `${card.data.profileCompleteness}%` }}
@@ -105,13 +105,13 @@ export const CopilotCard: React.FC<CopilotCardProps> = ({ card, quickOptions, on
             'border-slate-200 bg-white text-slate-800',
           )}`}>
           <div
-            className={`flex items-center justify-between pb-2 border-b ${tone('border-indigo-500/20', 'border-slate-100')}`}>
+            className={`flex items-center justify-between border-b pb-2 ${tone('border-indigo-500/20', 'border-slate-100')}`}>
             <div className="flex items-center space-x-1.5 font-bold">
               <FiAward className={`size-4 ${tone('text-indigo-400', 'text-indigo-600')}`} />
               <span>Job match</span>
             </div>
             <span
-              className={`rounded-full px-2.5 py-0.5 text-[11px] font-bold border ${
+              className={`rounded-full border px-2.5 py-0.5 text-[11px] font-bold ${
                 card.data.fitReport.matchScore >= 75
                   ? tone(
                       'bg-emerald-500/20 text-emerald-300 border-emerald-500/40',
@@ -178,11 +178,11 @@ export const CopilotCard: React.FC<CopilotCardProps> = ({ card, quickOptions, on
           {/* Actionable Tip */}
           {card.data.fitReport.actionableTip && (
             <div
-              className={`mt-3 rounded-lg p-2.5 text-[11px] leading-relaxed flex items-start space-x-2 ${tone(
+              className={`mt-3 flex items-start space-x-2 rounded-lg p-2.5 text-[11px] leading-relaxed ${tone(
                 'bg-indigo-900/30 border border-indigo-700/40',
                 'bg-slate-50 border border-slate-200',
               )}`}>
-              <FiZap className={`size-3.5 shrink-0 mt-0.5 ${tone('text-amber-400', 'text-amber-600')}`} />
+              <FiZap className={`mt-0.5 size-3.5 shrink-0 ${tone('text-amber-400', 'text-amber-600')}`} />
               <div>
                 <span className={`font-bold ${tone('text-indigo-300', 'text-slate-900')}`}>Tip: </span>
                 <span>{card.data.fitReport.actionableTip}</span>
@@ -200,14 +200,14 @@ export const CopilotCard: React.FC<CopilotCardProps> = ({ card, quickOptions, on
             'border-slate-200 bg-white text-slate-800',
           )}`}>
           <div
-            className={`flex items-center justify-between pb-2 border-b ${tone('border-purple-500/20', 'border-slate-100')}`}>
+            className={`flex items-center justify-between border-b pb-2 ${tone('border-purple-500/20', 'border-slate-100')}`}>
             <div className="flex items-center space-x-1.5 font-bold">
               <FiFileText className={`size-4 ${tone('text-purple-400', 'text-violet-600')}`} />
               <span>Cover letter</span>
             </div>
             <button
               onClick={() => handleCopy(card.data.coverLetter)}
-              className={`flex items-center space-x-1 rounded-md border px-2.5 py-1 text-[11px] font-semibold transition-colors cursor-pointer ${tone(
+              className={`flex cursor-pointer items-center space-x-1 rounded-md border px-2.5 py-1 text-[11px] font-semibold transition-colors ${tone(
                 'bg-purple-500/20 hover:bg-purple-500/30 border-purple-500/40 text-purple-200',
                 'bg-white hover:bg-slate-50 border-slate-300 text-slate-700',
               )}`}>
@@ -223,7 +223,7 @@ export const CopilotCard: React.FC<CopilotCardProps> = ({ card, quickOptions, on
           </div>
 
           <div
-            className={`mt-2.5 max-h-60 overflow-y-auto whitespace-pre-wrap rounded-lg p-3 text-[11px] leading-relaxed font-sans ${tone(
+            className={`mt-2.5 max-h-60 overflow-y-auto whitespace-pre-wrap rounded-lg p-3 font-sans text-[11px] leading-relaxed ${tone(
               'bg-purple-950/20 border border-purple-800/30 text-slate-200',
               'bg-slate-50 border border-slate-200 text-slate-800',
             )}`}>
@@ -240,14 +240,14 @@ export const CopilotCard: React.FC<CopilotCardProps> = ({ card, quickOptions, on
             'border-slate-200 bg-white text-slate-800',
           )}`}>
           <div
-            className={`flex items-center justify-between pb-2 border-b ${tone('border-pink-500/20', 'border-slate-100')}`}>
+            className={`flex items-center justify-between border-b pb-2 ${tone('border-pink-500/20', 'border-slate-100')}`}>
             <div className="flex items-center space-x-1.5 font-bold">
               <FiZap className={`size-4 ${tone('text-pink-400', 'text-violet-600')}`} />
               <span>Recruiter note</span>
             </div>
             <button
               onClick={() => handleCopy(card.data.pitch)}
-              className={`flex items-center space-x-1 rounded-md border px-2 py-1 text-[10px] font-semibold transition-colors cursor-pointer ${tone(
+              className={`flex cursor-pointer items-center space-x-1 rounded-md border px-2 py-1 text-[10px] font-semibold transition-colors ${tone(
                 'bg-pink-500/20 hover:bg-pink-500/30 border-pink-500/40 text-pink-200',
                 'bg-white hover:bg-slate-50 border-slate-300 text-slate-700',
               )}`}>
@@ -263,7 +263,7 @@ export const CopilotCard: React.FC<CopilotCardProps> = ({ card, quickOptions, on
           </div>
 
           <div
-            className={`mt-2.5 rounded-lg p-3 text-[11px] leading-relaxed font-sans ${tone(
+            className={`mt-2.5 rounded-lg p-3 font-sans text-[11px] leading-relaxed ${tone(
               'bg-pink-900/20 border border-pink-800/40',
               'bg-slate-50 border border-slate-200 text-slate-800',
             )}`}>
@@ -276,7 +276,7 @@ export const CopilotCard: React.FC<CopilotCardProps> = ({ card, quickOptions, on
       {quickOptions && quickOptions.length > 0 && onSelectOption && (
         <div className="pt-1">
           <div
-            className={`flex items-center space-x-1 mb-1.5 text-[10px] font-semibold ${tone('text-slate-400', 'text-slate-500')}`}>
+            className={`mb-1.5 flex items-center space-x-1 text-[10px] font-semibold ${tone('text-slate-400', 'text-slate-500')}`}>
             <FiArrowRight className="size-2.5" />
             <span>Suggested replies</span>
           </div>

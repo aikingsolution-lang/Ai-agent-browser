@@ -156,7 +156,7 @@ function DailyQuotaCard({
           <button
             type="button"
             onClick={onRetry}
-            className={`flex shrink-0 items-center gap-1 rounded-md border px-2 py-1 text-[11px] font-semibold cursor-pointer ${
+            className={`flex shrink-0 cursor-pointer items-center gap-1 rounded-md border px-2 py-1 text-[11px] font-semibold ${
               isDarkMode
                 ? 'border-slate-600 text-slate-200 hover:bg-slate-700'
                 : 'border-slate-300 text-slate-700 hover:bg-slate-100'
@@ -180,14 +180,14 @@ function DailyQuotaCard({
         <div className="flex min-w-0 items-center gap-1.5">
           <span className={caption}>Daily applications</span>
           <span
-            className={`whitespace-nowrap rounded px-1.5 text-[9px] font-bold uppercase tracking-wider border ${
+            className={`whitespace-nowrap rounded border px-1.5 text-[9px] font-bold uppercase tracking-wider ${
               view.isPaid
                 ? isDarkMode
-                  ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
-                  : 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                  ? 'border-emerald-500/30 bg-emerald-500/15 text-emerald-300'
+                  : 'border-emerald-200 bg-emerald-50 text-emerald-700'
                 : isDarkMode
-                  ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
-                  : 'bg-amber-50 text-amber-700 border-amber-200'
+                  ? 'border-amber-500/30 bg-amber-500/15 text-amber-300'
+                  : 'border-amber-200 bg-amber-50 text-amber-700'
             }`}>
             {view.isPaid ? `${label} Active` : label}
           </span>
@@ -196,7 +196,7 @@ function DailyQuotaCard({
           <button
             type="button"
             onClick={onUpgrade}
-            className="shrink-0 rounded-full bg-gradient-to-r from-amber-500 to-orange-500 px-2.5 py-0.5 text-[10px] font-bold text-white hover:from-amber-600 hover:to-orange-600 cursor-pointer">
+            className="shrink-0 cursor-pointer rounded-full bg-gradient-to-r from-amber-500 to-orange-500 px-2.5 py-0.5 text-[10px] font-bold text-white hover:from-amber-600 hover:to-orange-600">
             Upgrade
           </button>
         )}
@@ -586,19 +586,19 @@ export function LinkedInApplyDashboard({
 
   return (
     <div
-      className={`flex flex-1 flex-col overflow-y-auto p-3 space-y-3 ${isDarkMode ? 'text-gray-100' : 'text-gray-800'}`}>
+      className={`flex flex-1 flex-col space-y-3 overflow-y-auto p-3 ${isDarkMode ? 'text-gray-100' : 'text-gray-800'}`}>
       {/* Platform Switcher */}
       <div
-        className={`flex rounded-xl p-1 border text-xs font-semibold ${
-          isDarkMode ? 'bg-slate-900/60 border-slate-700/60' : 'bg-gray-100 border-gray-200'
+        className={`flex rounded-xl border p-1 text-xs font-semibold ${
+          isDarkMode ? 'border-slate-700/60 bg-slate-900/60' : 'border-gray-200 bg-gray-100'
         }`}>
         <button
           type="button"
           onClick={() => setSelectedPlatform('linkedin')}
           disabled={isApplying}
-          className={`flex-1 py-1.5 px-2 rounded-lg text-center transition-all cursor-pointer ${
+          className={`flex-1 cursor-pointer rounded-lg px-2 py-1.5 text-center transition-all ${
             selectedPlatform === 'linkedin'
-              ? 'bg-sky-600 text-white shadow-sm font-bold'
+              ? 'bg-sky-600 font-bold text-white shadow-sm'
               : isDarkMode
                 ? 'text-gray-400 hover:text-gray-200'
                 : 'text-gray-600 hover:text-gray-900'
@@ -609,9 +609,9 @@ export function LinkedInApplyDashboard({
           type="button"
           onClick={() => setSelectedPlatform('naukri')}
           disabled={isApplying}
-          className={`flex-1 py-1.5 px-2 rounded-lg text-center transition-all cursor-pointer ${
+          className={`flex-1 cursor-pointer rounded-lg px-2 py-1.5 text-center transition-all ${
             selectedPlatform === 'naukri'
-              ? 'bg-blue-600 text-white shadow-sm font-bold'
+              ? 'bg-blue-600 font-bold text-white shadow-sm'
               : isDarkMode
                 ? 'text-gray-400 hover:text-gray-200'
                 : 'text-gray-600 hover:text-gray-900'
@@ -622,9 +622,9 @@ export function LinkedInApplyDashboard({
           type="button"
           onClick={() => setSelectedPlatform('indeed')}
           disabled={isApplying}
-          className={`flex-1 py-1.5 px-2 rounded-lg text-center transition-all cursor-pointer ${
+          className={`flex-1 cursor-pointer rounded-lg px-2 py-1.5 text-center transition-all ${
             selectedPlatform === 'indeed'
-              ? 'bg-indigo-600 text-white shadow-sm font-bold'
+              ? 'bg-indigo-600 font-bold text-white shadow-sm'
               : isDarkMode
                 ? 'text-gray-400 hover:text-gray-200'
                 : 'text-gray-600 hover:text-gray-900'
@@ -659,7 +659,7 @@ export function LinkedInApplyDashboard({
             <button
               type="button"
               onClick={() => (onOpenPlansModal ? onOpenPlansModal() : openJobformPricing())}
-              className="mt-1.5 rounded-md bg-gradient-to-r from-amber-500 to-orange-500 px-3 py-1 text-[11px] font-bold text-white hover:from-amber-600 hover:to-orange-600 cursor-pointer">
+              className="mt-1.5 cursor-pointer rounded-md bg-gradient-to-r from-amber-500 to-orange-500 px-3 py-1 text-[11px] font-bold text-white hover:from-amber-600 hover:to-orange-600">
               Get Premium
             </button>
           )}
@@ -675,13 +675,13 @@ export function LinkedInApplyDashboard({
           type="button"
           onClick={() => setShowEasyApplySettings(prev => !prev)}
           aria-expanded={showEasyApplySettings}
-          className="flex w-full items-center justify-between gap-2 px-3 py-2.5 text-left cursor-pointer select-none">
+          className="flex w-full cursor-pointer select-none items-center justify-between gap-2 px-3 py-2.5 text-left">
           <div className="flex min-w-0 items-center gap-2">
             <FiSliders className="size-4 shrink-0 text-sky-400" />
             <div className="min-w-0">
               <div className="flex items-center gap-1.5">
-                <span className="text-xs font-bold whitespace-nowrap">Match settings</span>
-                <span className="whitespace-nowrap rounded bg-sky-500/20 px-1.5 text-[9px] font-bold text-sky-500 border border-sky-500/30">
+                <span className="whitespace-nowrap text-xs font-bold">Match settings</span>
+                <span className="whitespace-nowrap rounded border border-sky-500/30 bg-sky-500/20 px-1.5 text-[9px] font-bold text-sky-500">
                   Min fit {automationConfig.minFitScore ?? 50}%
                 </span>
               </div>
@@ -701,10 +701,10 @@ export function LinkedInApplyDashboard({
         </button>
 
         {showEasyApplySettings && (
-          <div className="border-t px-3 pb-3 pt-2 space-y-3 text-xs border-sky-500/10">
+          <div className="space-y-3 border-t border-sky-500/10 px-3 pb-3 pt-2 text-xs">
             {/* Minimum Match / Fit Score Threshold Slider & Presets */}
             <div>
-              <div className="flex items-center justify-between mb-1">
+              <div className="mb-1 flex items-center justify-between">
                 <label htmlFor="min-fit-score" className="text-[11px] font-semibold opacity-80">
                   Minimum match score
                 </label>
@@ -720,7 +720,7 @@ export function LinkedInApplyDashboard({
                 onChange={e => handleUpdateFitScore(Number(e.target.value))}
                 className="w-full cursor-pointer accent-sky-500"
               />
-              <div className="flex flex-wrap gap-1 mt-1.5">
+              <div className="mt-1.5 flex flex-wrap gap-1">
                 {[
                   { label: '50% (default)', val: 50 },
                   { label: '60%', val: 60 },
@@ -731,9 +731,9 @@ export function LinkedInApplyDashboard({
                     key={preset.val}
                     type="button"
                     onClick={() => handleUpdateFitScore(preset.val)}
-                    className={`rounded px-2 py-0.5 text-[10px] font-medium transition-colors cursor-pointer ${
+                    className={`cursor-pointer rounded px-2 py-0.5 text-[10px] font-medium transition-colors ${
                       (automationConfig.minFitScore ?? 50) === preset.val
-                        ? 'bg-sky-500 text-white font-bold'
+                        ? 'bg-sky-500 font-bold text-white'
                         : isDarkMode
                           ? 'bg-slate-700 text-slate-300 hover:bg-slate-600'
                           : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
@@ -742,15 +742,15 @@ export function LinkedInApplyDashboard({
                   </button>
                 ))}
               </div>
-              <p className="text-[10px] opacity-60 mt-1">
+              <p className="mt-1 text-[10px] opacity-60">
                 Jobs below {automationConfig.minFitScore ?? 50}% match are skipped.
               </p>
             </div>
 
             {/* Experience Gap & Safeties */}
-            <div className="grid grid-cols-2 gap-2 pt-1 border-t border-sky-500/10">
+            <div className="grid grid-cols-2 gap-2 border-t border-sky-500/10 pt-1">
               <div>
-                <label className="block text-[10px] font-semibold opacity-70 mb-0.5">Max Exp Gap Tolerance</label>
+                <label className="mb-0.5 block text-[10px] font-semibold opacity-70">Max Exp Gap Tolerance</label>
                 <select
                   value={automationConfig.maxExperienceGapYears ?? 3}
                   onChange={async e => {
@@ -770,24 +770,24 @@ export function LinkedInApplyDashboard({
               </div>
 
               <div>
-                <label className="block text-[10px] font-semibold opacity-70 mb-0.5">Negative Keywords</label>
+                <label className="mb-0.5 block text-[10px] font-semibold opacity-70">Negative Keywords</label>
                 <div
-                  className={`px-2 py-1 rounded-md border text-[11px] flex items-center justify-between ${
+                  className={`flex items-center justify-between rounded-md border px-2 py-1 text-[11px] ${
                     isDarkMode ? 'border-sky-800 bg-slate-900 text-gray-300' : 'border-sky-200 bg-white text-gray-700'
                   }`}>
                   <span>{automationConfig.negativeKeywords?.length || 0} active</span>
-                  <span className="text-[9px] text-emerald-400 font-medium">Safe</span>
+                  <span className="text-[9px] font-medium text-emerald-400">Safe</span>
                 </div>
               </div>
             </div>
 
             {/* Link to Full Options Page */}
-            <div className="pt-1 flex items-center justify-between border-t border-sky-500/10 text-[10px]">
+            <div className="flex items-center justify-between border-t border-sky-500/10 pt-1 text-[10px]">
               <span className="opacity-60">Saved answers & blocked companies</span>
               <button
                 type="button"
                 onClick={() => chrome.runtime.openOptionsPage()}
-                className="text-sky-400 hover:text-sky-300 font-semibold underline cursor-pointer flex items-center gap-1">
+                className="flex cursor-pointer items-center gap-1 font-semibold text-sky-400 underline hover:text-sky-300">
                 <span>Full Settings</span>
                 <FiExternalLink className="size-2.5" />
               </button>
@@ -802,7 +802,7 @@ export function LinkedInApplyDashboard({
           <div className="space-y-2">
             <button
               onClick={() => onOpenAuthModal?.()}
-              className="w-full flex items-center justify-center space-x-2 rounded-xl py-3 px-4 font-bold text-sm bg-gradient-to-r from-blue-600 to-indigo-600 text-white hover:from-blue-500 hover:to-indigo-500 shadow-md shadow-blue-500/20 active:scale-[0.99] cursor-pointer transition-all">
+              className="flex w-full cursor-pointer items-center justify-center space-x-2 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 px-4 py-3 text-sm font-bold text-white shadow-md shadow-blue-500/20 transition-all hover:from-blue-500 hover:to-indigo-500 active:scale-[0.99]">
               <FiLock className="size-4" />
               <span>Login with JobForm Automator</span>
             </button>
@@ -812,10 +812,10 @@ export function LinkedInApplyDashboard({
             <button
               onClick={() => onStartAutoApply?.(selectedPlatform)}
               disabled={isApplying || platformPauseInfo.isPaused}
-              className={`w-full flex items-center justify-center space-x-2 rounded-xl py-3 px-4 font-bold text-sm shadow-md transition-all ${
+              className={`flex w-full items-center justify-center space-x-2 rounded-xl px-4 py-3 text-sm font-bold shadow-md transition-all ${
                 isApplying || platformPauseInfo.isPaused
-                  ? 'bg-slate-700 text-gray-400 cursor-not-allowed opacity-60'
-                  : 'bg-gradient-to-r from-sky-500 to-blue-600 text-white hover:from-sky-600 hover:to-blue-700 hover:shadow-sky-500/20 active:scale-[0.99] cursor-pointer'
+                  ? 'cursor-not-allowed bg-slate-700 text-gray-400 opacity-60'
+                  : 'cursor-pointer bg-gradient-to-r from-sky-500 to-blue-600 text-white hover:from-sky-600 hover:to-blue-700 hover:shadow-sky-500/20 active:scale-[0.99]'
               }`}>
               {platformPauseInfo.isPaused ? (
                 <FiPauseCircle className="size-4 text-amber-300" />
@@ -835,13 +835,13 @@ export function LinkedInApplyDashboard({
                   await queueSafetyStore.clearPlatformPause(selectedPlatform);
                   setPlatformPauseInfo({ isPaused: false });
                 }}
-                className="w-full flex items-center justify-center space-x-1.5 rounded-xl py-2 px-3 font-semibold text-xs bg-amber-500/20 text-amber-300 hover:bg-amber-500/30 border border-amber-500/40 transition-all cursor-pointer">
+                className="flex w-full cursor-pointer items-center justify-center space-x-1.5 rounded-xl border border-amber-500/40 bg-amber-500/20 px-3 py-2 text-xs font-semibold text-amber-300 transition-all hover:bg-amber-500/30">
                 <FiPlay className="size-3.5" />
                 <span>Remove Safety Pause & Resume</span>
               </button>
             )}
             {platformPauseInfo.isPaused && (
-              <p className="text-[11px] text-center opacity-70">Paused for today to protect your account.</p>
+              <p className="text-center text-[11px] opacity-70">Paused for today to protect your account.</p>
             )}
           </>
         )}
@@ -850,7 +850,7 @@ export function LinkedInApplyDashboard({
         {isApplying && !isPlatformPaused && (
           <button
             onClick={onStop}
-            className="w-full flex items-center justify-center space-x-2 rounded-xl py-2.5 px-4 font-bold text-xs bg-red-500 text-white hover:bg-red-600 shadow-md transition-all cursor-pointer animate-pulse">
+            className="flex w-full animate-pulse cursor-pointer items-center justify-center space-x-2 rounded-xl bg-red-500 px-4 py-2.5 text-xs font-bold text-white shadow-md transition-all hover:bg-red-600">
             <FiSquare className="size-3.5" />
             <span>Stop Application</span>
           </button>
@@ -859,10 +859,10 @@ export function LinkedInApplyDashboard({
 
       {/* Interactive Human-In-The-Loop Question Card */}
       {pendingQuestion && (
-        <div className="rounded-xl border-2 border-amber-500/80 bg-amber-500/10 p-4 space-y-3 shadow-lg animate-pulse">
+        <div className="animate-pulse space-y-3 rounded-xl border-2 border-amber-500/80 bg-amber-500/10 p-4 shadow-lg">
           <div className="flex items-center justify-between">
             <div className="flex items-center space-x-2 text-xs font-bold text-amber-400">
-              <span className="size-2 rounded-full bg-amber-400 animate-ping" />
+              <span className="size-2 animate-ping rounded-full bg-amber-400" />
               <span>Input Required to Proceed</span>
             </div>
             <span className="rounded bg-amber-500/20 px-2 py-0.5 text-[10px] font-bold text-amber-300">
@@ -871,7 +871,7 @@ export function LinkedInApplyDashboard({
             </span>
           </div>
 
-          <p className="text-xs font-semibold text-white leading-relaxed">{pendingQuestion.questionText}</p>
+          <p className="text-xs font-semibold leading-relaxed text-white">{pendingQuestion.questionText}</p>
 
           {/* Form controls based on fieldType */}
           {pendingQuestion.options && pendingQuestion.options.length > 0 ? (
@@ -879,9 +879,9 @@ export function LinkedInApplyDashboard({
               {pendingQuestion.options.map(opt => (
                 <label
                   key={opt}
-                  className={`flex items-center space-x-2 p-2 rounded-lg border text-xs cursor-pointer transition-all ${
+                  className={`flex cursor-pointer items-center space-x-2 rounded-lg border p-2 text-xs transition-all ${
                     userAnswerInput === opt
-                      ? 'border-amber-400 bg-amber-500/20 text-white font-bold'
+                      ? 'border-amber-400 bg-amber-500/20 font-bold text-white'
                       : 'border-slate-700 bg-slate-800/80 text-gray-300 hover:border-slate-600'
                   }`}>
                   <input
@@ -925,7 +925,7 @@ export function LinkedInApplyDashboard({
               }
             }}
             disabled={userAnswerInput === ''}
-            className="w-full rounded-lg bg-gradient-to-r from-amber-500 to-orange-500 py-2 text-xs font-bold text-slate-950 hover:from-amber-400 hover:to-orange-400 disabled:opacity-50 transition-all cursor-pointer shadow-md">
+            className="w-full cursor-pointer rounded-lg bg-gradient-to-r from-amber-500 to-orange-500 py-2 text-xs font-bold text-slate-950 shadow-md transition-all hover:from-amber-400 hover:to-orange-400 disabled:opacity-50">
             Submit Answer & Continue Application
           </button>
         </div>
@@ -933,10 +933,10 @@ export function LinkedInApplyDashboard({
 
       {/* Interactive Human-In-The-Loop Question Batch Card */}
       {pendingBatch && pendingBatch.questions && pendingBatch.questions.length > 0 && (
-        <div className="rounded-xl border-2 border-amber-500/80 bg-amber-500/10 p-4 space-y-3.5 shadow-lg">
+        <div className="space-y-3.5 rounded-xl border-2 border-amber-500/80 bg-amber-500/10 p-4 shadow-lg">
           <div className="flex items-center justify-between border-b border-amber-500/20 pb-2.5">
             <div className="flex items-center space-x-2 text-xs font-bold text-amber-400">
-              <span className="size-2 rounded-full bg-amber-400 animate-ping" />
+              <span className="size-2 animate-ping rounded-full bg-amber-400" />
               <span>Input Required ({pendingBatch.questions.length} questions)</span>
             </div>
             <span className="rounded bg-amber-500/20 px-2 py-0.5 text-[10px] font-bold text-amber-300">
@@ -944,9 +944,9 @@ export function LinkedInApplyDashboard({
             </span>
           </div>
 
-          <div className="max-h-[360px] overflow-y-auto space-y-3 pr-1">
+          <div className="max-h-[360px] space-y-3 overflow-y-auto pr-1">
             {pendingBatch.questions.map((q, idx) => (
-              <div key={q.id} className="rounded-lg border border-slate-700/80 bg-slate-900/90 p-3 space-y-2">
+              <div key={q.id} className="space-y-2 rounded-lg border border-slate-700/80 bg-slate-900/90 p-3">
                 <div className="flex items-start justify-between gap-2">
                   <span className="text-[11px] font-bold text-amber-400">
                     Q{idx + 1} {q.required ? <span className="text-red-400">*</span> : ''}
@@ -957,7 +957,7 @@ export function LinkedInApplyDashboard({
                     </span>
                   )}
                 </div>
-                <p className="text-xs font-semibold text-white leading-relaxed">{q.questionText}</p>
+                <p className="text-xs font-semibold leading-relaxed text-white">{q.questionText}</p>
 
                 {/* Form controls based on fieldType */}
                 {q.options && q.options.length > 0 ? (
@@ -965,9 +965,9 @@ export function LinkedInApplyDashboard({
                     {q.options.map(opt => (
                       <label
                         key={opt}
-                        className={`flex items-center space-x-2 p-2 rounded-lg border text-xs cursor-pointer transition-all ${
+                        className={`flex cursor-pointer items-center space-x-2 rounded-lg border p-2 text-xs transition-all ${
                           batchAnswers[q.id] === opt
-                            ? 'border-amber-400 bg-amber-500/20 text-white font-bold'
+                            ? 'border-amber-400 bg-amber-500/20 font-bold text-white'
                             : 'border-slate-700 bg-slate-800/80 text-gray-300 hover:border-slate-600'
                         }`}>
                         <input
@@ -1014,7 +1014,7 @@ export function LinkedInApplyDashboard({
               }
             }}
             disabled={pendingBatch.questions.some(q => !batchAnswers[q.id] || batchAnswers[q.id].trim() === '')}
-            className="w-full rounded-lg bg-gradient-to-r from-amber-500 to-orange-500 py-2.5 text-xs font-bold text-slate-950 hover:from-amber-400 hover:to-orange-400 disabled:opacity-50 transition-all cursor-pointer shadow-md">
+            className="w-full cursor-pointer rounded-lg bg-gradient-to-r from-amber-500 to-orange-500 py-2.5 text-xs font-bold text-slate-950 shadow-md transition-all hover:from-amber-400 hover:to-orange-400 disabled:opacity-50">
             Submit All Answers (
             {pendingBatch.questions.filter(q => batchAnswers[q.id] && batchAnswers[q.id].trim() !== '').length}/
             {pendingBatch.questions.length}) & Continue Application
@@ -1032,14 +1032,14 @@ export function LinkedInApplyDashboard({
 
           return (
             <div
-              className={`rounded-xl border p-3.5 space-y-2 transition-colors ${
+              className={`space-y-2 rounded-xl border p-3.5 transition-colors ${
                 isPlatformPaused
                   ? isDarkMode
                     ? 'border-red-500/50 bg-red-950/30'
                     : 'border-red-300 bg-red-50/90'
                   : isWaitingVerification
                     ? isDarkMode
-                      ? 'border-amber-500/50 bg-amber-950/40 animate-pulse'
+                      ? 'animate-pulse border-amber-500/50 bg-amber-950/40'
                       : 'border-amber-400 bg-amber-50/95 shadow-sm'
                     : isDarkMode
                       ? 'border-sky-500/40 bg-sky-950/30'
@@ -1067,7 +1067,7 @@ export function LinkedInApplyDashboard({
                   />
                 ) : (
                   <AiOutlineLoading3Quarters
-                    className={`size-4 animate-spin shrink-0 ${isDarkMode ? 'text-sky-400' : 'text-sky-600'}`}
+                    className={`size-4 shrink-0 animate-spin ${isDarkMode ? 'text-sky-400' : 'text-sky-600'}`}
                   />
                 )}
                 <span>
@@ -1079,18 +1079,18 @@ export function LinkedInApplyDashboard({
                 </span>
               </div>
               <p
-                className={`text-xs font-medium leading-relaxed p-2.5 rounded-lg border ${
+                className={`rounded-lg border p-2.5 text-xs font-medium leading-relaxed ${
                   isPlatformPaused
                     ? isDarkMode
-                      ? 'text-red-100 bg-slate-900/80 border-red-500/30'
-                      : 'text-red-950 bg-white border-red-300 shadow-sm'
+                      ? 'border-red-500/30 bg-slate-900/80 text-red-100'
+                      : 'border-red-300 bg-white text-red-950 shadow-sm'
                     : isWaitingVerification
                       ? isDarkMode
-                        ? 'text-amber-100 bg-slate-900/80 border-amber-500/40'
-                        : 'text-amber-950 bg-white border-amber-300 shadow-sm'
+                        ? 'border-amber-500/40 bg-slate-900/80 text-amber-100'
+                        : 'border-amber-300 bg-white text-amber-950 shadow-sm'
                       : isDarkMode
-                        ? 'text-[#f1f5f9] bg-slate-900/80 border-sky-500/20'
-                        : 'text-[#0f172a] bg-white border-sky-200 shadow-sm'
+                        ? 'border-sky-500/20 bg-slate-900/80 text-[#f1f5f9]'
+                        : 'border-sky-200 bg-white text-[#0f172a] shadow-sm'
                 }`}>
                 {activeStatusText ||
                   platformPauseInfo.reason ||
@@ -1100,7 +1100,7 @@ export function LinkedInApplyDashboard({
                 <button
                   type="button"
                   onClick={handleFocusRunnerTab}
-                  className="w-full flex items-center justify-center gap-1.5 rounded-lg py-2 px-3 text-xs font-bold bg-amber-500 hover:bg-amber-600 text-slate-950 transition shadow-sm cursor-pointer active:scale-98">
+                  className="active:scale-98 flex w-full cursor-pointer items-center justify-center gap-1.5 rounded-lg bg-amber-500 px-3 py-2 text-xs font-bold text-slate-950 shadow-sm transition hover:bg-amber-600">
                   <span>👉 Switch to Runner Tab to Solve</span>
                 </button>
               )}
@@ -1110,7 +1110,7 @@ export function LinkedInApplyDashboard({
 
       {/* Live Activity Logs */}
       <div
-        className={`rounded-xl border p-3 flex flex-col space-y-2 ${activityItems.length > 0 || appliedLogs.length > 0 ? 'flex-1' : ''} ${isDarkMode ? 'border-[#334155] bg-[#0f172a]' : 'border-[#e2e8f0] bg-white shadow-sm'}`}>
+        className={`flex flex-col space-y-2 rounded-xl border p-3 ${activityItems.length > 0 || appliedLogs.length > 0 ? 'flex-1' : ''} ${isDarkMode ? 'border-[#334155] bg-[#0f172a]' : 'border-[#e2e8f0] bg-white shadow-sm'}`}>
         <div
           className={`flex items-center justify-between border-b pb-1.5 ${isDarkMode ? 'border-[#334155]' : 'border-[#e2e8f0]'}`}>
           <span
@@ -1128,10 +1128,10 @@ export function LinkedInApplyDashboard({
               onClick={handleExportSidePanelCsv}
               disabled={isExporting}
               title="Export Applied & Processed Jobs to CSV / Excel"
-              className={`flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-bold transition shadow-xs cursor-pointer ${
+              className={`shadow-xs flex cursor-pointer items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-bold transition ${
                 isDarkMode
-                  ? 'bg-emerald-950/60 text-emerald-300 border border-emerald-500/40 hover:bg-emerald-900/60'
-                  : 'bg-emerald-50 text-emerald-700 border border-emerald-300 hover:bg-emerald-100'
+                  ? 'border border-emerald-500/40 bg-emerald-950/60 text-emerald-300 hover:bg-emerald-900/60'
+                  : 'border border-emerald-300 bg-emerald-50 text-emerald-700 hover:bg-emerald-100'
               }`}>
               <FiDownload className={`size-3 ${isExporting ? 'animate-bounce' : ''}`} />
               <span>{isExporting ? 'Saved' : 'CSV'}</span>
@@ -1139,13 +1139,13 @@ export function LinkedInApplyDashboard({
           </div>
         </div>
 
-        <div className="flex-1 overflow-y-auto space-y-2.5 text-xs">
+        <div className="flex-1 space-y-2.5 overflow-y-auto text-xs">
           {activityItems.length > 0 && (
             <div className="space-y-2">
               {activityItems.map(item => (
                 <div
                   key={item.id}
-                  className={`rounded-xl border p-2.5 space-y-1.5 text-xs transition-colors ${
+                  className={`space-y-1.5 rounded-xl border p-2.5 text-xs transition-colors ${
                     isDarkMode
                       ? item.status === 'needs_verification'
                         ? 'border-amber-500/60 bg-[#1e293b] hover:bg-[#273449]'
@@ -1161,21 +1161,21 @@ export function LinkedInApplyDashboard({
                                   ? 'border-red-900/60 bg-[#1e293b] hover:bg-[#273449]'
                                   : 'border-[#334155] bg-[#1e293b] hover:bg-[#273449]'
                       : item.status === 'needs_verification'
-                        ? 'border-amber-400 bg-amber-50/90 hover:bg-amber-100/90 shadow-sm'
+                        ? 'border-amber-400 bg-amber-50/90 shadow-sm hover:bg-amber-100/90'
                         : item.status === 'modal_opened'
-                          ? 'border-purple-200 bg-white hover:bg-[#f8fafc] shadow-sm'
+                          ? 'border-purple-200 bg-white shadow-sm hover:bg-[#f8fafc]'
                           : item.status === 'modal_failed'
-                            ? 'border-rose-200 bg-white hover:bg-[#f8fafc] shadow-sm'
+                            ? 'border-rose-200 bg-white shadow-sm hover:bg-[#f8fafc]'
                             : item.status === 'applied'
-                              ? 'border-emerald-200 bg-white hover:bg-[#f8fafc] shadow-sm'
+                              ? 'border-emerald-200 bg-white shadow-sm hover:bg-[#f8fafc]'
                               : item.status === 'skipped'
-                                ? 'border-amber-200 bg-white hover:bg-[#f8fafc] shadow-sm'
+                                ? 'border-amber-200 bg-white shadow-sm hover:bg-[#f8fafc]'
                                 : item.status === 'failed'
-                                  ? 'border-red-200 bg-white hover:bg-[#f8fafc] shadow-sm'
-                                  : 'border-[#e2e8f0] bg-white hover:bg-[#f8fafc] shadow-sm'
+                                  ? 'border-red-200 bg-white shadow-sm hover:bg-[#f8fafc]'
+                                  : 'border-[#e2e8f0] bg-white shadow-sm hover:bg-[#f8fafc]'
                   }`}>
                   <div className="flex items-start justify-between gap-2">
-                    <div className={`font-bold truncate ${isDarkMode ? 'text-[#f1f5f9]' : 'text-[#0f172a]'}`}>
+                    <div className={`truncate font-bold ${isDarkMode ? 'text-[#f1f5f9]' : 'text-[#0f172a]'}`}>
                       {item.title || 'LinkedIn Job'}
                       {item.company && (
                         <span className={`font-normal ${isDarkMode ? 'text-[#94a3b8]' : 'text-[#64748b]'}`}>
@@ -1185,34 +1185,34 @@ export function LinkedInApplyDashboard({
                       )}
                     </div>
                     <span
-                      className={`text-[10px] px-2 py-0.5 rounded-full font-bold uppercase shrink-0 ${
+                      className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-bold uppercase ${
                         item.status === 'needs_verification'
                           ? isDarkMode
-                            ? 'bg-[#78350f] text-[#fbbf24] border border-amber-500/50 animate-pulse'
-                            : 'bg-[#fef3c7] text-[#b45309] border border-[#fcd34d] animate-pulse'
+                            ? 'animate-pulse border border-amber-500/50 bg-[#78350f] text-[#fbbf24]'
+                            : 'animate-pulse border border-[#fcd34d] bg-[#fef3c7] text-[#b45309]'
                           : item.status === 'modal_opened'
                             ? isDarkMode
-                              ? 'bg-[#4c1d95] text-[#c4b5fd] border border-purple-500/40'
-                              : 'bg-[#ede9fe] text-[#6d28d9] border border-[#c4b5fd]'
+                              ? 'border border-purple-500/40 bg-[#4c1d95] text-[#c4b5fd]'
+                              : 'border border-[#c4b5fd] bg-[#ede9fe] text-[#6d28d9]'
                             : item.status === 'modal_failed'
                               ? isDarkMode
-                                ? 'bg-rose-950/60 text-rose-300 border border-rose-500/40'
-                                : 'bg-rose-100 text-rose-700 border border-rose-300'
+                                ? 'border border-rose-500/40 bg-rose-950/60 text-rose-300'
+                                : 'border border-rose-300 bg-rose-100 text-rose-700'
                               : item.status === 'applied'
                                 ? isDarkMode
-                                  ? 'bg-[#14532d] text-[#4ade80] border border-emerald-500/40'
-                                  : 'bg-[#dcfce7] text-[#15803d] border border-[#86efac]'
+                                  ? 'border border-emerald-500/40 bg-[#14532d] text-[#4ade80]'
+                                  : 'border border-[#86efac] bg-[#dcfce7] text-[#15803d]'
                                 : item.status === 'skipped'
                                   ? isDarkMode
-                                    ? 'bg-[#78350f] text-[#fbbf24] border border-amber-500/40'
-                                    : 'bg-[#fef3c7] text-[#b45309] border border-[#fcd34d]'
+                                    ? 'border border-amber-500/40 bg-[#78350f] text-[#fbbf24]'
+                                    : 'border border-[#fcd34d] bg-[#fef3c7] text-[#b45309]'
                                   : item.status === 'failed'
                                     ? isDarkMode
-                                      ? 'bg-red-950/60 text-red-300 border border-red-500/40'
-                                      : 'bg-red-100 text-red-700 border border-red-300'
+                                      ? 'border border-red-500/40 bg-red-950/60 text-red-300'
+                                      : 'border border-red-300 bg-red-100 text-red-700'
                                     : isDarkMode
-                                      ? 'bg-sky-950/60 text-sky-300 border border-sky-500/40 animate-pulse'
-                                      : 'bg-sky-100 text-sky-700 border border-sky-300 animate-pulse'
+                                      ? 'animate-pulse border border-sky-500/40 bg-sky-950/60 text-sky-300'
+                                      : 'animate-pulse border border-sky-300 bg-sky-100 text-sky-700'
                       }`}>
                       {item.status === 'needs_verification'
                         ? 'Needs Verification'
@@ -1235,7 +1235,7 @@ export function LinkedInApplyDashboard({
                       href={item.url}
                       target="_blank"
                       rel="noreferrer"
-                      className={`text-[10px] truncate block hover:underline ${isDarkMode ? 'text-sky-400 hover:text-sky-300' : 'text-sky-600 hover:text-sky-700'}`}>
+                      className={`block truncate text-[10px] hover:underline ${isDarkMode ? 'text-sky-400 hover:text-sky-300' : 'text-sky-600 hover:text-sky-700'}`}>
                       {item.url}
                     </a>
                   )}
@@ -1247,10 +1247,10 @@ export function LinkedInApplyDashboard({
                   )}
 
                   <div
-                    className={`flex items-center justify-between text-[9px] pt-0.5 ${isDarkMode ? 'text-[#94a3b8]' : 'text-[#64748b]'}`}>
+                    className={`flex items-center justify-between pt-0.5 text-[9px] ${isDarkMode ? 'text-[#94a3b8]' : 'text-[#64748b]'}`}>
                     <span>{new Date(item.timestamp).toLocaleTimeString()}</span>
                     {item.status === 'applied' && (
-                      <span className={isDarkMode ? 'text-[#4ade80] font-semibold' : 'text-[#15803d] font-semibold'}>
+                      <span className={isDarkMode ? 'font-semibold text-[#4ade80]' : 'font-semibold text-[#15803d]'}>
                         Applied & verified
                       </span>
                     )}
@@ -1297,67 +1297,67 @@ export function LinkedInApplyDashboard({
                   className={`flex items-start space-x-2 rounded-lg p-2.5 text-[11px] leading-relaxed transition-all ${
                     isDarkMode
                       ? category === 'MATCHED'
-                        ? 'border border-emerald-900/60 bg-[#1e293b] hover:bg-[#273449] text-[#f1f5f9]'
+                        ? 'border border-emerald-900/60 bg-[#1e293b] text-[#f1f5f9] hover:bg-[#273449]'
                         : category === 'GENERATED'
-                          ? 'border border-purple-900/60 bg-[#1e293b] hover:bg-[#273449] text-[#f1f5f9]'
+                          ? 'border border-purple-900/60 bg-[#1e293b] text-[#f1f5f9] hover:bg-[#273449]'
                           : category === 'ASKED'
-                            ? 'border border-amber-900/60 bg-[#1e293b] hover:bg-[#273449] text-[#f1f5f9]'
+                            ? 'border border-amber-900/60 bg-[#1e293b] text-[#f1f5f9] hover:bg-[#273449]'
                             : log.status === 'ok'
-                              ? 'border border-emerald-900/60 bg-[#1e293b] hover:bg-[#273449] text-[#f1f5f9]'
+                              ? 'border border-emerald-900/60 bg-[#1e293b] text-[#f1f5f9] hover:bg-[#273449]'
                               : log.status === 'fail'
-                                ? 'border border-rose-900/60 bg-[#1e293b] hover:bg-[#273449] text-[#f1f5f9]'
-                                : 'border border-[#334155] bg-[#1e293b] hover:bg-[#273449] text-[#f1f5f9]'
+                                ? 'border border-rose-900/60 bg-[#1e293b] text-[#f1f5f9] hover:bg-[#273449]'
+                                : 'border border-[#334155] bg-[#1e293b] text-[#f1f5f9] hover:bg-[#273449]'
                       : category === 'MATCHED'
-                        ? 'border border-emerald-200 bg-white hover:bg-[#f8fafc] text-[#0f172a] shadow-sm'
+                        ? 'border border-emerald-200 bg-white text-[#0f172a] shadow-sm hover:bg-[#f8fafc]'
                         : category === 'GENERATED'
-                          ? 'border border-purple-200 bg-white hover:bg-[#f8fafc] text-[#0f172a] shadow-sm'
+                          ? 'border border-purple-200 bg-white text-[#0f172a] shadow-sm hover:bg-[#f8fafc]'
                           : category === 'ASKED'
-                            ? 'border border-amber-200 bg-white hover:bg-[#f8fafc] text-[#0f172a] shadow-sm'
+                            ? 'border border-amber-200 bg-white text-[#0f172a] shadow-sm hover:bg-[#f8fafc]'
                             : log.status === 'ok'
-                              ? 'border border-emerald-200 bg-white hover:bg-[#f8fafc] text-[#0f172a] shadow-sm'
+                              ? 'border border-emerald-200 bg-white text-[#0f172a] shadow-sm hover:bg-[#f8fafc]'
                               : log.status === 'fail'
-                                ? 'border border-rose-200 bg-white hover:bg-[#f8fafc] text-[#0f172a] shadow-sm'
-                                : 'border border-[#e2e8f0] bg-white hover:bg-[#f8fafc] text-[#0f172a] shadow-sm'
+                                ? 'border border-rose-200 bg-white text-[#0f172a] shadow-sm hover:bg-[#f8fafc]'
+                                : 'border border-[#e2e8f0] bg-white text-[#0f172a] shadow-sm hover:bg-[#f8fafc]'
                   }`}>
                   {category === 'MATCHED' ? (
                     <FiCheckCircle
-                      className={`size-3.5 shrink-0 mt-0.5 ${isDarkMode ? 'text-[#4ade80]' : 'text-[#15803d]'}`}
+                      className={`mt-0.5 size-3.5 shrink-0 ${isDarkMode ? 'text-[#4ade80]' : 'text-[#15803d]'}`}
                     />
                   ) : category === 'GENERATED' ? (
-                    <FiZap className={`size-3.5 shrink-0 mt-0.5 ${isDarkMode ? 'text-[#c4b5fd]' : 'text-[#6d28d9]'}`} />
+                    <FiZap className={`mt-0.5 size-3.5 shrink-0 ${isDarkMode ? 'text-[#c4b5fd]' : 'text-[#6d28d9]'}`} />
                   ) : category === 'ASKED' ? (
                     <FiHelpCircle
-                      className={`size-3.5 shrink-0 mt-0.5 ${isDarkMode ? 'text-[#fbbf24]' : 'text-[#b45309]'}`}
+                      className={`mt-0.5 size-3.5 shrink-0 ${isDarkMode ? 'text-[#fbbf24]' : 'text-[#b45309]'}`}
                     />
                   ) : log.status === 'ok' ? (
                     <FiCheckCircle
-                      className={`size-3.5 shrink-0 mt-0.5 ${isDarkMode ? 'text-[#4ade80]' : 'text-[#15803d]'}`}
+                      className={`mt-0.5 size-3.5 shrink-0 ${isDarkMode ? 'text-[#4ade80]' : 'text-[#15803d]'}`}
                     />
                   ) : log.status === 'fail' ? (
                     <FiAlertTriangle
-                      className={`size-3.5 shrink-0 mt-0.5 ${isDarkMode ? 'text-rose-400' : 'text-rose-600'}`}
+                      className={`mt-0.5 size-3.5 shrink-0 ${isDarkMode ? 'text-rose-400' : 'text-rose-600'}`}
                     />
                   ) : (
                     <span
-                      className={`size-1.5 rounded-full shrink-0 mt-1.5 ${isDarkMode ? 'bg-sky-400' : 'bg-sky-600'}`}
+                      className={`mt-1.5 size-1.5 shrink-0 rounded-full ${isDarkMode ? 'bg-sky-400' : 'bg-sky-600'}`}
                     />
                   )}
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center flex-wrap gap-1.5 mb-0.5">
+                  <div className="min-w-0 flex-1">
+                    <div className="mb-0.5 flex flex-wrap items-center gap-1.5">
                       {categoryBadge && (
                         <span
-                          className={`inline-block px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider ${
+                          className={`inline-block rounded px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider ${
                             isDarkMode
                               ? category === 'MATCHED'
-                                ? 'bg-[#14532d] text-[#4ade80] border border-emerald-700/50'
+                                ? 'border border-emerald-700/50 bg-[#14532d] text-[#4ade80]'
                                 : category === 'GENERATED'
-                                  ? 'bg-[#4c1d95] text-[#c4b5fd] border border-purple-700/50'
-                                  : 'bg-[#78350f] text-[#fbbf24] border border-amber-700/50'
+                                  ? 'border border-purple-700/50 bg-[#4c1d95] text-[#c4b5fd]'
+                                  : 'border border-amber-700/50 bg-[#78350f] text-[#fbbf24]'
                               : category === 'MATCHED'
-                                ? 'bg-[#dcfce7] text-[#15803d] border border-[#86efac]'
+                                ? 'border border-[#86efac] bg-[#dcfce7] text-[#15803d]'
                                 : category === 'GENERATED'
-                                  ? 'bg-[#ede9fe] text-[#6d28d9] border border-[#c4b5fd]'
-                                  : 'bg-[#fef3c7] text-[#b45309] border border-[#fcd34d]'
+                                  ? 'border border-[#c4b5fd] bg-[#ede9fe] text-[#6d28d9]'
+                                  : 'border border-[#fcd34d] bg-[#fef3c7] text-[#b45309]'
                           }`}>
                           {categoryBadge}
                         </span>
@@ -1366,7 +1366,7 @@ export function LinkedInApplyDashboard({
                     <div className={`break-words font-medium ${isDarkMode ? 'text-[#f1f5f9]' : 'text-[#0f172a]'}`}>
                       {displayText}
                     </div>
-                    <span className={`block text-[9px] mt-1 ${isDarkMode ? 'text-[#94a3b8]' : 'text-[#64748b]'}`}>
+                    <span className={`mt-1 block text-[9px] ${isDarkMode ? 'text-[#94a3b8]' : 'text-[#64748b]'}`}>
                       {new Date(log.timestamp).toLocaleTimeString()}
                     </span>
                   </div>

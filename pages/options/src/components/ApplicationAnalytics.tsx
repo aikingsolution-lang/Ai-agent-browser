@@ -216,7 +216,7 @@ export const ApplicationAnalytics: React.FC<ApplicationAnalyticsProps> = ({ isDa
           <button
             type="button"
             onClick={handleExportApplied}
-            className="flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3.5 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-emerald-700 active:scale-95 cursor-pointer">
+            className="flex cursor-pointer items-center gap-1.5 rounded-lg bg-emerald-600 px-3.5 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-emerald-700 active:scale-95">
             <FiDownload className="size-3.5" />
             <span>Export Applied Jobs ({appliedCount})</span>
           </button>
@@ -227,7 +227,7 @@ export const ApplicationAnalytics: React.FC<ApplicationAnalyticsProps> = ({ isDa
               type="button"
               onClick={handleClearHistory}
               title="Clear Local History"
-              className="rounded-lg border border-gray-200 p-2 text-gray-400 hover:border-red-300 hover:text-red-500 dark:border-slate-700 dark:hover:border-red-800 cursor-pointer">
+              className="cursor-pointer rounded-lg border border-gray-200 p-2 text-gray-400 hover:border-red-300 hover:text-red-500 dark:border-slate-700 dark:hover:border-red-800">
               <FiTrash2 className="size-3.5" />
             </button>
           )}
@@ -302,9 +302,9 @@ export const ApplicationAnalytics: React.FC<ApplicationAnalyticsProps> = ({ isDa
           <button
             type="button"
             onClick={() => setStatusFilter('APPLIED')}
-            className={`rounded-lg px-3 py-1.5 text-xs font-bold transition cursor-pointer ${
+            className={`cursor-pointer rounded-lg px-3 py-1.5 text-xs font-bold transition ${
               statusFilter === 'APPLIED'
-                ? 'bg-emerald-600 text-white shadow-xs'
+                ? 'shadow-xs bg-emerald-600 text-white'
                 : isDarkMode
                   ? 'bg-slate-700 text-gray-300 hover:bg-slate-600'
                   : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
@@ -314,9 +314,9 @@ export const ApplicationAnalytics: React.FC<ApplicationAnalyticsProps> = ({ isDa
           <button
             type="button"
             onClick={() => setStatusFilter('ALL')}
-            className={`rounded-lg px-3 py-1.5 text-xs font-medium transition cursor-pointer ${
+            className={`cursor-pointer rounded-lg px-3 py-1.5 text-xs font-medium transition ${
               statusFilter === 'ALL'
-                ? 'bg-sky-600 text-white shadow-xs'
+                ? 'shadow-xs bg-sky-600 text-white'
                 : isDarkMode
                   ? 'bg-slate-700 text-gray-300 hover:bg-slate-600'
                   : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
@@ -454,7 +454,7 @@ export const ApplicationAnalytics: React.FC<ApplicationAnalyticsProps> = ({ isDa
                       </td>
 
                       {/* Outcome / Reason */}
-                      <td className="px-4 py-3 text-gray-600 dark:text-gray-300 max-w-xs truncate">
+                      <td className="max-w-xs truncate px-4 py-3 text-gray-600 dark:text-gray-300">
                         {rec.reason || 'Successfully submitted via Easy Apply'}
                       </td>
 
@@ -483,7 +483,7 @@ export const ApplicationAnalytics: React.FC<ApplicationAnalyticsProps> = ({ isDa
                             e.stopPropagation();
                             setSelectedRecord(rec);
                           }}
-                          className="rounded-md p-1 text-sky-600 hover:text-sky-700 dark:text-sky-400 cursor-pointer">
+                          className="cursor-pointer rounded-md p-1 text-sky-600 hover:text-sky-700 dark:text-sky-400">
                           <FiChevronRight className="size-4" />
                         </button>
                       </td>

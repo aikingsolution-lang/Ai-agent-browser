@@ -698,12 +698,12 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
   if (!hasAuth) {
     return (
       <div
-        className={`flex flex-1 flex-col items-center justify-center p-8 text-center min-h-[350px] ${
+        className={`flex min-h-[350px] flex-1 flex-col items-center justify-center p-8 text-center ${
           isDarkMode ? 'text-gray-300' : 'text-gray-600'
         }`}>
-        <FiLock className="size-12 text-sky-400 mb-3" />
-        <h3 className="text-base font-bold mb-1">Authentication Required</h3>
-        <p className="text-xs text-gray-400 max-w-xs">
+        <FiLock className="mb-3 size-12 text-sky-400" />
+        <h3 className="mb-1 text-base font-bold">Authentication Required</h3>
+        <p className="max-w-xs text-xs text-gray-400">
           Please sign in to upload resumes, build your Career Brain, and configure application details.
         </p>
       </div>
@@ -712,7 +712,7 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
 
   return (
     <div
-      className={`flex flex-1 flex-col overflow-y-auto p-4 space-y-4 ${isDarkMode ? 'text-gray-100' : 'text-gray-800'}`}>
+      className={`flex flex-1 flex-col space-y-4 overflow-y-auto p-4 ${isDarkMode ? 'text-gray-100' : 'text-gray-800'}`}>
       {/* Upload Box */}
       <div
         onDragOver={e => {
@@ -722,7 +722,7 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
         onDragLeave={() => setIsDragging(false)}
         onDrop={handleDrop}
         onClick={() => fileInputRef.current?.click()}
-        className={`flex flex-col items-center justify-center p-6 border-2 border-dashed rounded-xl cursor-pointer transition-all ${
+        className={`flex cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-dashed p-6 transition-all ${
           isDragging
             ? 'border-sky-500 bg-sky-50/20'
             : isDarkMode
@@ -779,13 +779,13 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
                   : 'border border-sky-500/30 bg-sky-500/10 text-sky-400'
           }`}>
           {uploadStatus.type === 'success' ? (
-            <FiCheckCircle className="size-4 shrink-0 text-emerald-400 mt-0.5" />
+            <FiCheckCircle className="mt-0.5 size-4 shrink-0 text-emerald-400" />
           ) : uploadStatus.type === 'warning' ? (
-            <FiAlertTriangle className="size-4 shrink-0 text-amber-400 mt-0.5" />
+            <FiAlertTriangle className="mt-0.5 size-4 shrink-0 text-amber-400" />
           ) : uploadStatus.type === 'error' ? (
-            <FiAlertCircle className="size-4 shrink-0 text-red-400 mt-0.5" />
+            <FiAlertCircle className="mt-0.5 size-4 shrink-0 text-red-400" />
           ) : (
-            <AiOutlineLoading3Quarters className="size-4 shrink-0 animate-spin text-sky-400 mt-0.5" />
+            <AiOutlineLoading3Quarters className="mt-0.5 size-4 shrink-0 animate-spin text-sky-400" />
           )}
           <span className="flex-1">{uploadStatus.message}</span>
         </div>
@@ -794,19 +794,19 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
       {/* Resume Profiles & Smart Best Match Auto-Select */}
       {profile.resumes && profile.resumes.length > 0 && (
         <div
-          className={`rounded-xl border p-4 space-y-3 ${
+          className={`space-y-3 rounded-xl border p-4 ${
             isDarkMode ? 'border-sky-900 bg-slate-800/80' : 'border-sky-100 bg-white/90 shadow-sm'
           }`}>
-          <div className="flex items-center justify-between border-b pb-2 border-gray-200/20">
+          <div className="flex items-center justify-between border-b border-gray-200/20 pb-2">
             <div className="flex items-center space-x-2">
               <FiFileText className="size-4 text-sky-500" />
               <h3 className="text-sm font-bold">Resume Profiles ({profile.resumes.length})</h3>
             </div>
-            <span className="rounded-full bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold text-emerald-400 border border-emerald-500/20">
+            <span className="rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold text-emerald-400">
               ⚡ Best Match Auto-Select
             </span>
           </div>
-          <p className="text-[11px] opacity-70 leading-relaxed">
+          <p className="text-[11px] leading-relaxed opacity-70">
             JobForm Automator dynamically analyzes job descriptions and auto-selects the resume profile with the highest
             skill & keyword match for each application.
           </p>
@@ -817,7 +817,7 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
               return (
                 <div
                   key={r.id}
-                  className={`flex flex-col sm:flex-row items-start sm:items-center justify-between p-3 rounded-lg border text-xs transition-colors ${
+                  className={`flex flex-col items-start justify-between rounded-lg border p-3 text-xs transition-colors sm:flex-row sm:items-center ${
                     isActive
                       ? isDarkMode
                         ? 'border-emerald-500/40 bg-emerald-950/20'
@@ -826,9 +826,9 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
                         ? 'border-gray-800 bg-slate-900/40 hover:border-gray-700'
                         : 'border-gray-200 bg-gray-50/50 hover:border-gray-300'
                   }`}>
-                  <div className="space-y-1.5 flex-1 pr-2">
+                  <div className="flex-1 space-y-1.5 pr-2">
                     <div className="flex items-center space-x-2">
-                      <span className="font-semibold truncate max-w-[220px]" title={r.fileName}>
+                      <span className="max-w-[220px] truncate font-semibold" title={r.fileName}>
                         {r.fileName}
                       </span>
                       {isActive && (
@@ -844,8 +844,8 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
                             key={tag}
                             className={`rounded px-1.5 py-0.5 text-[9px] font-medium ${
                               isDarkMode
-                                ? 'bg-sky-900/40 text-sky-300 border border-sky-800/40'
-                                : 'bg-sky-50 text-sky-700 border border-sky-200'
+                                ? 'border border-sky-800/40 bg-sky-900/40 text-sky-300'
+                                : 'border border-sky-200 bg-sky-50 text-sky-700'
                             }`}>
                             #{tag}
                           </span>
@@ -854,14 +854,14 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
                     )}
                   </div>
 
-                  <div className="flex items-center space-x-2 mt-2 sm:mt-0 shrink-0">
+                  <div className="mt-2 flex shrink-0 items-center space-x-2 sm:mt-0">
                     {!isActive && (
                       <button
                         onClick={() => handleSetActiveResume(r.id)}
-                        className={`px-2.5 py-1 rounded text-[11px] font-medium transition-colors ${
+                        className={`rounded px-2.5 py-1 text-[11px] font-medium transition-colors ${
                           isDarkMode
-                            ? 'bg-slate-700 hover:bg-slate-600 text-gray-200'
-                            : 'bg-white hover:bg-gray-100 text-gray-700 border border-gray-200 shadow-sm'
+                            ? 'bg-slate-700 text-gray-200 hover:bg-slate-600'
+                            : 'border border-gray-200 bg-white text-gray-700 shadow-sm hover:bg-gray-100'
                         }`}>
                         Set Default
                       </button>
@@ -869,7 +869,7 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
                     {profile.resumes.length > 1 && (
                       <button
                         onClick={() => handleDeleteResume(r.id)}
-                        className="p-1.5 rounded text-red-400 hover:bg-red-500/10 transition-colors"
+                        className="rounded p-1.5 text-red-400 transition-colors hover:bg-red-500/10"
                         title="Delete resume profile">
                         <FiTrash2 className="size-3.5" />
                       </button>
@@ -884,8 +884,8 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
 
       {/* Candidate Profile Details Card */}
       <div
-        className={`rounded-xl border p-4 space-y-3 ${isDarkMode ? 'border-sky-900 bg-slate-800/80' : 'border-sky-100 bg-white/90 shadow-sm'}`}>
-        <div className="flex items-center justify-between border-b pb-2 border-gray-200/20">
+        className={`space-y-3 rounded-xl border p-4 ${isDarkMode ? 'border-sky-900 bg-slate-800/80' : 'border-sky-100 bg-white/90 shadow-sm'}`}>
+        <div className="flex items-center justify-between border-b border-gray-200/20 pb-2">
           <div className="flex items-center space-x-2">
             <FiUser className="size-4 text-sky-500" />
             <h3 className="text-sm font-bold">{profile.fullName || 'Candidate Profile'}</h3>
@@ -900,10 +900,10 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
               }
             }}
             disabled={isSaving}
-            className={`flex items-center space-x-1 rounded-md px-2.5 py-1 text-xs font-semibold cursor-pointer transition-colors ${
+            className={`flex cursor-pointer items-center space-x-1 rounded-md px-2.5 py-1 text-xs font-semibold transition-colors ${
               isEditing
-                ? 'bg-emerald-600 hover:bg-emerald-500 text-white'
-                : 'bg-sky-500/20 hover:bg-sky-500/30 text-sky-400'
+                ? 'bg-emerald-600 text-white hover:bg-emerald-500'
+                : 'bg-sky-500/20 text-sky-400 hover:bg-sky-500/30'
             }`}>
             {isEditing ? (
               <>
@@ -923,7 +923,7 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
           /* Editable Form */
           <div className="space-y-2.5 text-xs">
             <div>
-              <label className="block text-[11px] font-semibold opacity-70 mb-1">Full Name</label>
+              <label className="mb-1 block text-[11px] font-semibold opacity-70">Full Name</label>
               <input
                 type="text"
                 value={editForm.fullName}
@@ -936,7 +936,7 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
             </div>
             <div className="grid grid-cols-2 gap-2">
               <div>
-                <label className="block text-[11px] font-semibold opacity-70 mb-1">Gender</label>
+                <label className="mb-1 block text-[11px] font-semibold opacity-70">Gender</label>
                 <select
                   value={editForm.gender || 'Prefer not to say'}
                   onChange={e => setEditForm(prev => ({ ...prev, gender: e.target.value }))}
@@ -950,7 +950,7 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
                 </select>
               </div>
               <div>
-                <label className="block text-[11px] font-semibold opacity-70 mb-1">Years of Exp</label>
+                <label className="mb-1 block text-[11px] font-semibold opacity-70">Years of Exp</label>
                 <input
                   type="number"
                   value={editForm.yearsOfExperience}
@@ -964,7 +964,7 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
             </div>
             <div className="grid grid-cols-2 gap-2">
               <div>
-                <label className="block text-[11px] font-semibold opacity-70 mb-1">Phone Number</label>
+                <label className="mb-1 block text-[11px] font-semibold opacity-70">Phone Number</label>
                 <input
                   type="tel"
                   value={editForm.phoneNumber}
@@ -976,7 +976,7 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
                 />
               </div>
               <div>
-                <label className="block text-[11px] font-semibold opacity-70 mb-1">Email</label>
+                <label className="mb-1 block text-[11px] font-semibold opacity-70">Email</label>
                 <input
                   type="email"
                   value={editForm.email}
@@ -1011,7 +1011,7 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
             </div>
             <div className="grid grid-cols-2 gap-2">
               <div>
-                <label className="block text-[11px] font-semibold opacity-70 mb-1">College / University</label>
+                <label className="mb-1 block text-[11px] font-semibold opacity-70">College / University</label>
                 <input
                   type="text"
                   value={editForm.college || ''}
@@ -1023,7 +1023,7 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
                 />
               </div>
               <div>
-                <label className="block text-[11px] font-semibold opacity-70 mb-1">CGPA / Percentage</label>
+                <label className="mb-1 block text-[11px] font-semibold opacity-70">CGPA / Percentage</label>
                 <input
                   type="text"
                   value={editForm.cgpa || ''}
@@ -1037,7 +1037,7 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
             </div>
             <div className="grid grid-cols-2 gap-2">
               <div>
-                <label className="block text-[11px] font-semibold opacity-70 mb-1">Current CTC</label>
+                <label className="mb-1 block text-[11px] font-semibold opacity-70">Current CTC</label>
                 <input
                   type="text"
                   value={editForm.currentCTC || ''}
@@ -1049,7 +1049,7 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
                 />
               </div>
               <div>
-                <label className="block text-[11px] font-semibold opacity-70 mb-1">Expected CTC</label>
+                <label className="mb-1 block text-[11px] font-semibold opacity-70">Expected CTC</label>
                 <input
                   type="text"
                   value={editForm.expectedCTC || ''}
@@ -1064,7 +1064,7 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
             <div className="grid grid-cols-2 gap-2">
               <div>
                 <label
-                  className={`block text-[11px] font-semibold mb-1 ${isDarkMode ? 'text-slate-200' : 'text-slate-700'}`}>
+                  className={`mb-1 block text-[11px] font-semibold ${isDarkMode ? 'text-slate-200' : 'text-slate-700'}`}>
                   Current Location{' '}
                   <span className={`text-[9px] font-normal ${isDarkMode ? 'text-sky-400' : 'text-sky-600'}`}>
                     (City, State, Country)
@@ -1079,7 +1079,7 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
                 />
               </div>
               <div>
-                <label className="block text-[11px] font-semibold opacity-70 mb-1">Notice Period</label>
+                <label className="mb-1 block text-[11px] font-semibold opacity-70">Notice Period</label>
                 <input
                   type="text"
                   value={editForm.noticePeriod || ''}
@@ -1092,7 +1092,7 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
               </div>
             </div>
             <div>
-              <div className="flex items-center justify-between mb-1">
+              <div className="mb-1 flex items-center justify-between">
                 <label
                   className={`block text-[11px] font-semibold ${isDarkMode ? 'text-slate-200' : 'text-slate-700'}`}>
                   Target Preferred Locations{' '}
@@ -1122,18 +1122,18 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
               />
             </div>
             <div>
-              <label className="block text-[11px] font-semibold opacity-70 mb-1">
+              <label className="mb-1 block text-[11px] font-semibold opacity-70">
                 Primary Skills (Core Tech Stack)
               </label>
               {editForm.skills && editForm.skills.length > 0 && (
-                <div className="flex flex-wrap gap-1.5 mb-2">
+                <div className="mb-2 flex flex-wrap gap-1.5">
                   {editForm.skills.map((skill, idx) => (
                     <span
                       key={skill + idx}
-                      className={`inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium ${
+                      className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium ${
                         isDarkMode
-                          ? 'bg-sky-950 text-sky-300 border border-sky-800'
-                          : 'bg-sky-50 text-sky-700 border border-sky-200'
+                          ? 'border border-sky-800 bg-sky-950 text-sky-300'
+                          : 'border border-sky-200 bg-sky-50 text-sky-700'
                       }`}>
                       {skill}
                       <button
@@ -1144,7 +1144,7 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
                             skills: (prev.skills || []).filter((_, i) => i !== idx),
                           }));
                         }}
-                        className="ml-1 text-gray-400 hover:text-red-400 focus:outline-none cursor-pointer">
+                        className="ml-1 cursor-pointer text-gray-400 hover:text-red-400 focus:outline-none">
                         <FiX className="size-2.5" />
                       </button>
                     </span>
@@ -1188,7 +1188,7 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
                     }
                   }}
                   disabled={!newPrimarySkill.trim()}
-                  className="rounded-lg bg-sky-500 px-3 py-1.5 text-xs font-bold text-white hover:bg-sky-400 disabled:opacity-50 cursor-pointer shrink-0">
+                  className="shrink-0 cursor-pointer rounded-lg bg-sky-500 px-3 py-1.5 text-xs font-bold text-white hover:bg-sky-400 disabled:opacity-50">
                   Add
                 </button>
               </div>
@@ -1197,12 +1197,12 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
               <button
                 onClick={handleSaveProfile}
                 disabled={isSaving}
-                className="flex-1 rounded-lg bg-sky-500 py-1.5 font-bold text-white hover:bg-sky-400 cursor-pointer">
+                className="flex-1 cursor-pointer rounded-lg bg-sky-500 py-1.5 font-bold text-white hover:bg-sky-400">
                 {isSaving ? 'Saving...' : 'Save Profile'}
               </button>
               <button
                 onClick={() => setIsEditing(false)}
-                className={`rounded-lg px-3 py-1.5 font-semibold cursor-pointer ${
+                className={`cursor-pointer rounded-lg px-3 py-1.5 font-semibold ${
                   isDarkMode ? 'bg-slate-700 hover:bg-slate-600' : 'bg-gray-200 hover:bg-gray-300'
                 }`}>
                 Cancel
@@ -1213,7 +1213,7 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
           /* View Mode */
           <div className="grid grid-cols-1 gap-2 text-xs opacity-90">
             <div className="flex items-start space-x-2">
-              <FiBriefcase className="size-3.5 shrink-0 text-sky-400 mt-0.5" />
+              <FiBriefcase className="mt-0.5 size-3.5 shrink-0 text-sky-400" />
               <div className="min-w-0 flex-1">
                 {Array.isArray(profile.predefinedRoles) && profile.predefinedRoles.length > 1 ? (
                   <div className="flex flex-wrap items-center gap-1.5">
@@ -1222,14 +1222,14 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
                       return (
                         <span
                           key={idx}
-                          className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-medium border ${
+                          className={`inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[10px] font-medium ${
                             isPrimary
                               ? isDarkMode
-                                ? 'bg-emerald-950/40 text-emerald-300 border-emerald-600/40 font-semibold'
-                                : 'bg-emerald-50 text-emerald-800 border-emerald-300 font-semibold'
+                                ? 'border-emerald-600/40 bg-emerald-950/40 font-semibold text-emerald-300'
+                                : 'border-emerald-300 bg-emerald-50 font-semibold text-emerald-800'
                               : isDarkMode
-                                ? 'bg-slate-900 text-sky-300 border-sky-800'
-                                : 'bg-sky-50 text-sky-700 border-sky-200'
+                                ? 'border-sky-800 bg-slate-900 text-sky-300'
+                                : 'border-sky-200 bg-sky-50 text-sky-700'
                           }`}>
                           {isPrimary && <span>⭐</span>}
                           <span>{r}</span>
@@ -1276,7 +1276,7 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
               </div>
             )}
             <div className="flex items-start space-x-2">
-              <FiMapPin className="size-3.5 shrink-0 text-sky-400 mt-0.5" />
+              <FiMapPin className="mt-0.5 size-3.5 shrink-0 text-sky-400" />
               <div className="min-w-0 flex-1 text-xs">
                 <div>
                   <span className={isDarkMode ? 'text-gray-400' : 'text-gray-600'}>Current: </span>
@@ -1294,18 +1294,18 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
                         key={i}
                         className={`flex items-center gap-1.5 pl-0.5 text-[11px] ${isDarkMode ? 'text-slate-200' : 'text-slate-800'}`}>
                         <span
-                          className={`text-[9px] font-bold px-1 rounded border ${
+                          className={`rounded border px-1 text-[9px] font-bold ${
                             i === 0
                               ? isDarkMode
-                                ? 'text-emerald-300 bg-emerald-950/60 border-emerald-800'
-                                : 'text-emerald-800 bg-emerald-100 border-emerald-300 font-bold'
+                                ? 'border-emerald-800 bg-emerald-950/60 text-emerald-300'
+                                : 'border-emerald-300 bg-emerald-100 font-bold text-emerald-800'
                               : i === 1
                                 ? isDarkMode
-                                  ? 'text-sky-300 bg-sky-950/60 border-sky-800'
-                                  : 'text-sky-800 bg-sky-100 border-sky-300 font-bold'
+                                  ? 'border-sky-800 bg-sky-950/60 text-sky-300'
+                                  : 'border-sky-300 bg-sky-100 font-bold text-sky-800'
                                 : isDarkMode
-                                  ? 'text-purple-300 bg-purple-950/60 border-purple-800'
-                                  : 'text-purple-800 bg-purple-100 border-purple-300 font-bold'
+                                  ? 'border-purple-800 bg-purple-950/60 text-purple-300'
+                                  : 'border-purple-300 bg-purple-100 font-bold text-purple-800'
                           }`}>
                           #{i + 1}
                         </span>
@@ -1315,7 +1315,7 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
                   </div>
                 ) : (
                   profile.preferredLocation && (
-                    <div className={`text-[11px] mt-0.5 ${isDarkMode ? 'text-gray-300' : 'text-gray-600'}`}>
+                    <div className={`mt-0.5 text-[11px] ${isDarkMode ? 'text-gray-300' : 'text-gray-600'}`}>
                       Pref: {profile.preferredLocation}
                     </div>
                   )
@@ -1329,18 +1329,18 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
               </span>
             </div>
             {profile.skills && profile.skills.length > 0 && (
-              <div className="pt-2 border-t border-gray-200/20">
-                <span className="block text-[10px] font-semibold uppercase tracking-wider text-gray-400 mb-1">
+              <div className="border-t border-gray-200/20 pt-2">
+                <span className="mb-1 block text-[10px] font-semibold uppercase tracking-wider text-gray-400">
                   Primary Skills
                 </span>
                 <div className="flex flex-wrap gap-1.5">
                   {profile.skills.map((s, idx) => (
                     <span
                       key={s + idx}
-                      className={`inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium ${
+                      className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium ${
                         isDarkMode
-                          ? 'bg-slate-800 text-sky-300 border border-slate-700'
-                          : 'bg-sky-50 text-sky-700 border border-sky-100'
+                          ? 'border border-slate-700 bg-slate-800 text-sky-300'
+                          : 'border border-sky-100 bg-sky-50 text-sky-700'
                       }`}>
                       {s}
                     </span>
@@ -1352,7 +1352,7 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
         )}
 
         {/* Work Experience Section */}
-        <div className="pt-3 border-t border-gray-200/20 space-y-2.5">
+        <div className="space-y-2.5 border-t border-gray-200/20 pt-3">
           <div className="flex items-center justify-between">
             <div className="flex items-center space-x-1.5">
               <FiBriefcase className="size-3.5 text-sky-400" />
@@ -1369,7 +1369,7 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
                     setShowWorkExpForm(true);
                   }
                 }}
-                className="flex items-center space-x-1 text-[11px] font-semibold text-sky-400 hover:text-sky-300 cursor-pointer">
+                className="flex cursor-pointer items-center space-x-1 text-[11px] font-semibold text-sky-400 hover:text-sky-300">
                 <FiPlus className="size-3" />
                 <span>Add Position</span>
               </button>
@@ -1378,12 +1378,12 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
 
           {/* Do you have work experience? Yes / No Toggle */}
           <div
-            className={`flex items-center justify-between p-2 rounded-lg border text-xs ${
+            className={`flex items-center justify-between rounded-lg border p-2 text-xs ${
               isDarkMode ? 'border-sky-900 bg-slate-900/60' : 'border-sky-100 bg-white/70'
             }`}>
             <span className="font-medium">Do you have work experience?</span>
             <div
-              className={`flex rounded-md p-0.5 border ${
+              className={`flex rounded-md border p-0.5 ${
                 isDarkMode ? 'border-slate-700 bg-slate-800' : 'border-sky-200 bg-sky-50'
               }`}>
               <button
@@ -1393,9 +1393,9 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
                   const updated = await careerBrainStore.getCareerBrain();
                   setProfile(updated);
                 }}
-                className={`px-3 py-0.5 rounded text-xs font-bold transition-all cursor-pointer ${
+                className={`cursor-pointer rounded px-3 py-0.5 text-xs font-bold transition-all ${
                   profile.hasWorkExperience !== false
-                    ? 'bg-sky-500 text-white shadow-xs'
+                    ? 'shadow-xs bg-sky-500 text-white'
                     : 'text-gray-400 hover:text-gray-200'
                 }`}>
                 Yes
@@ -1408,9 +1408,9 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
                   setProfile(updated);
                   resetWorkExpForm();
                 }}
-                className={`px-3 py-0.5 rounded text-xs font-bold transition-all cursor-pointer ${
+                className={`cursor-pointer rounded px-3 py-0.5 text-xs font-bold transition-all ${
                   profile.hasWorkExperience === false
-                    ? 'bg-sky-500 text-white shadow-xs'
+                    ? 'shadow-xs bg-sky-500 text-white'
                     : 'text-gray-400 hover:text-gray-200'
                 }`}>
                 No
@@ -1421,13 +1421,13 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
           {/* If No: Candidate is a fresher */}
           {profile.hasWorkExperience === false && (
             <div
-              className={`p-2.5 rounded-lg border text-xs text-center ${
+              className={`rounded-lg border p-2.5 text-center text-xs ${
                 isDarkMode
                   ? 'border-slate-800 bg-slate-900/40 text-gray-400'
                   : 'border-gray-200 bg-gray-50 text-gray-500'
               }`}>
               <p className="font-medium">Candidate is a fresher / entry level with no formal work experience.</p>
-              <p className="text-[10px] opacity-75 mt-0.5">
+              <p className="mt-0.5 text-[10px] opacity-75">
                 Work experience questions will be answered according to fresher status.
               </p>
             </div>
@@ -1439,22 +1439,22 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
               {/* Add / Edit Position Form */}
               {showWorkExpForm && (
                 <div
-                  className={`p-3 rounded-lg border space-y-2.5 text-xs ${
+                  className={`space-y-2.5 rounded-lg border p-3 text-xs ${
                     isDarkMode ? 'border-sky-900 bg-slate-900/80' : 'border-sky-100 bg-sky-50/50'
                   }`}>
-                  <div className="flex items-center justify-between font-bold text-sky-400 text-[11px] uppercase tracking-wider">
+                  <div className="flex items-center justify-between text-[11px] font-bold uppercase tracking-wider text-sky-400">
                     <span>{editingWorkExpId ? 'Edit Position' : 'Add Position'}</span>
                     <button
                       type="button"
                       onClick={resetWorkExpForm}
-                      className="text-gray-400 hover:text-gray-200 cursor-pointer">
+                      className="cursor-pointer text-gray-400 hover:text-gray-200">
                       <FiX className="size-3.5" />
                     </button>
                   </div>
 
                   <div className="grid grid-cols-2 gap-2">
                     <div>
-                      <label className="block text-[10px] font-semibold text-gray-400 mb-0.5">Company *</label>
+                      <label className="mb-0.5 block text-[10px] font-semibold text-gray-400">Company *</label>
                       <input
                         type="text"
                         placeholder="e.g. Google, Infosys"
@@ -1468,7 +1468,7 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
                       />
                     </div>
                     <div>
-                      <label className="block text-[10px] font-semibold text-gray-400 mb-0.5">Job Title *</label>
+                      <label className="mb-0.5 block text-[10px] font-semibold text-gray-400">Job Title *</label>
                       <JobTitleAutocompleteInput
                         placeholder="e.g. Software Engineer"
                         value={workExpTitle}
@@ -1486,7 +1486,7 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
                   {/* Start Date */}
                   <div className="grid grid-cols-2 gap-2">
                     <div>
-                      <label className="block text-[10px] font-semibold text-gray-400 mb-0.5">Start Date</label>
+                      <label className="mb-0.5 block text-[10px] font-semibold text-gray-400">Start Date</label>
                       <div className="flex space-x-1.5">
                         <select
                           value={workExpStartMonth}
@@ -1519,16 +1519,16 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
 
                     {/* End Date / Present */}
                     <div>
-                      <div className="flex items-center justify-between mb-0.5">
+                      <div className="mb-0.5 flex items-center justify-between">
                         <label className="text-[10px] font-semibold text-gray-400">End Date</label>
-                        <label className="flex items-center space-x-1 cursor-pointer">
+                        <label className="flex cursor-pointer items-center space-x-1">
                           <input
                             type="checkbox"
                             checked={workExpIsCurrent}
                             onChange={e => setWorkExpIsCurrent(e.target.checked)}
-                            className="rounded border-slate-700 text-sky-500 focus:ring-0 size-3"
+                            className="size-3 rounded border-slate-700 text-sky-500 focus:ring-0"
                           />
-                          <span className="text-[10px] text-sky-400 font-medium">Currently work here</span>
+                          <span className="text-[10px] font-medium text-sky-400">Currently work here</span>
                         </label>
                       </div>
                       {!workExpIsCurrent ? (
@@ -1562,7 +1562,7 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
                         </div>
                       ) : (
                         <div
-                          className={`rounded-lg border px-2 py-1 text-xs text-center font-semibold text-emerald-400 ${
+                          className={`rounded-lg border px-2 py-1 text-center text-xs font-semibold text-emerald-400 ${
                             isDarkMode ? 'border-emerald-900/50 bg-emerald-950/20' : 'border-emerald-200 bg-emerald-50'
                           }`}>
                           Present
@@ -1572,7 +1572,7 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
                   </div>
 
                   <div>
-                    <label className="block text-[10px] font-semibold text-gray-400 mb-0.5">
+                    <label className="mb-0.5 block text-[10px] font-semibold text-gray-400">
                       Description / Achievements
                     </label>
                     <textarea
@@ -1580,7 +1580,7 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
                       placeholder="Key responsibilities, technologies used, and accomplishments..."
                       value={workExpDescription}
                       onChange={e => setWorkExpDescription(e.target.value)}
-                      className={`w-full rounded-lg border px-2.5 py-1.5 text-xs outline-none resize-none ${
+                      className={`w-full resize-none rounded-lg border px-2.5 py-1.5 text-xs outline-none ${
                         isDarkMode
                           ? 'border-sky-900 bg-slate-800 text-white focus:border-sky-500'
                           : 'border-sky-200 bg-white text-gray-900 focus:border-sky-400'
@@ -1592,14 +1592,14 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
                     <button
                       type="button"
                       onClick={resetWorkExpForm}
-                      className="px-2.5 py-1 text-xs font-medium text-gray-400 hover:text-gray-200 cursor-pointer">
+                      className="cursor-pointer px-2.5 py-1 text-xs font-medium text-gray-400 hover:text-gray-200">
                       Cancel
                     </button>
                     <button
                       type="button"
                       onClick={handleSaveWorkExp}
                       disabled={!workExpCompany.trim() || !workExpTitle.trim()}
-                      className="flex items-center space-x-1 rounded-lg bg-sky-500 px-3 py-1 text-xs font-bold text-white hover:bg-sky-400 disabled:opacity-50 cursor-pointer">
+                      className="flex cursor-pointer items-center space-x-1 rounded-lg bg-sky-500 px-3 py-1 text-xs font-bold text-white hover:bg-sky-400 disabled:opacity-50">
                       <FiCheck className="size-3" />
                       <span>{editingWorkExpId ? 'Update Position' : 'Save Position'}</span>
                     </button>
@@ -1615,24 +1615,24 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
                     return (
                       <div
                         key={item.id}
-                        className={`p-2.5 rounded-lg border text-xs transition-colors ${
+                        className={`rounded-lg border p-2.5 text-xs transition-colors ${
                           isDarkMode ? 'border-sky-900/70 bg-slate-900/60' : 'border-sky-100 bg-white/70'
                         }`}>
                         <div className="flex items-start justify-between">
                           <div className="min-w-0 pr-2">
-                            <div className="flex items-center flex-wrap gap-1.5 mb-0.5">
+                            <div className="mb-0.5 flex flex-wrap items-center gap-1.5">
                               <span className="font-bold text-sky-300">{item.title}</span>
-                              <span className="text-gray-400 text-[11px]">at</span>
+                              <span className="text-[11px] text-gray-400">at</span>
                               <span className="font-semibold">{item.company}</span>
                               {item.source === 'resume' && (
                                 <span
                                   title="Extracted from resume"
-                                  className="px-1.5 py-0.2 rounded text-[8px] font-semibold bg-sky-500/15 text-sky-400 border border-sky-500/30 whitespace-nowrap">
+                                  className="py-0.2 whitespace-nowrap rounded border border-sky-500/30 bg-sky-500/15 px-1.5 text-[8px] font-semibold text-sky-400">
                                   from resume
                                 </span>
                               )}
                               {item.isCurrent && (
-                                <span className="px-1.5 py-0.2 rounded text-[8px] font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 whitespace-nowrap">
+                                <span className="py-0.2 whitespace-nowrap rounded border border-emerald-500/30 bg-emerald-500/15 px-1.5 text-[8px] font-semibold text-emerald-400">
                                   Current
                                 </span>
                               )}
@@ -1644,25 +1644,25 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
                               </div>
                             )}
                           </div>
-                          <div className="flex items-center space-x-1 shrink-0">
+                          <div className="flex shrink-0 items-center space-x-1">
                             <button
                               type="button"
                               onClick={() => startEditWorkExp(item)}
                               title="Edit position"
-                              className="p-1 text-gray-400 hover:text-sky-400 transition-colors cursor-pointer">
+                              className="cursor-pointer p-1 text-gray-400 transition-colors hover:text-sky-400">
                               <FiEdit2 className="size-3" />
                             </button>
                             <button
                               type="button"
                               onClick={() => handleDeleteWorkExp(item.id)}
                               title="Delete position"
-                              className="p-1 text-gray-400 hover:text-red-400 transition-colors cursor-pointer">
+                              className="cursor-pointer p-1 text-gray-400 transition-colors hover:text-red-400">
                               <FiTrash2 className="size-3" />
                             </button>
                           </div>
                         </div>
                         {item.description && (
-                          <p className="mt-1.5 text-[11px] text-gray-300 opacity-90 leading-relaxed whitespace-pre-line border-t border-gray-200/10 pt-1.5">
+                          <p className="mt-1.5 whitespace-pre-line border-t border-gray-200/10 pt-1.5 text-[11px] leading-relaxed text-gray-300 opacity-90">
                             {item.description}
                           </p>
                         )}
@@ -1673,7 +1673,7 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
               ) : (
                 !showWorkExpForm && (
                   <div
-                    className={`p-3 rounded-lg border text-xs text-center ${
+                    className={`rounded-lg border p-3 text-center text-xs ${
                       isDarkMode
                         ? 'border-slate-800 bg-slate-900/30 text-gray-400'
                         : 'border-gray-100 bg-gray-50/50 text-gray-500'
@@ -1682,7 +1682,7 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
                     <button
                       type="button"
                       onClick={() => setShowWorkExpForm(true)}
-                      className="text-sky-400 hover:underline font-semibold cursor-pointer">
+                      className="cursor-pointer font-semibold text-sky-400 hover:underline">
                       "Add Position"
                     </button>{' '}
                     or upload a resume.
@@ -1694,7 +1694,7 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
         </div>
 
         {/* Skills & Experience per Skill */}
-        <div className="pt-3 border-t border-gray-200/20 space-y-2">
+        <div className="space-y-2 border-t border-gray-200/20 pt-3">
           <div className="flex items-center justify-between">
             <div className="flex items-center space-x-1.5">
               <FiAward className="size-3.5 text-sky-400" />
@@ -1714,20 +1714,20 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
               return (
                 <div
                   key={skill}
-                  className={`flex items-center justify-between p-2 rounded-lg border text-xs ${
+                  className={`flex items-center justify-between rounded-lg border p-2 text-xs ${
                     isDarkMode ? 'border-sky-900 bg-slate-900/60' : 'border-sky-100 bg-white/70'
                   }`}>
-                  <div className="flex items-center min-w-0 mr-1.5 overflow-hidden">
-                    <span className="font-semibold truncate text-sky-300">{skill}</span>
+                  <div className="mr-1.5 flex min-w-0 items-center overflow-hidden">
+                    <span className="truncate font-semibold text-sky-300">{skill}</span>
                     {isFromResume && (
                       <span
                         title="Auto-extracted from resume"
-                        className="ml-1 px-1 py-0.2 rounded text-[8px] font-semibold bg-sky-500/15 text-sky-400 border border-sky-500/30 whitespace-nowrap shrink-0">
+                        className="py-0.2 ml-1 shrink-0 whitespace-nowrap rounded border border-sky-500/30 bg-sky-500/15 px-1 text-[8px] font-semibold text-sky-400">
                         from resume
                       </span>
                     )}
                   </div>
-                  <div className="flex items-center space-x-1 shrink-0">
+                  <div className="flex shrink-0 items-center space-x-1">
                     <input
                       type="number"
                       min="0"
@@ -1739,7 +1739,7 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
                         const updated = await careerBrainStore.getCareerBrain();
                         setProfile(updated);
                       }}
-                      className={`w-10 text-center rounded border py-0.5 text-xs font-bold outline-none ${
+                      className={`w-10 rounded border py-0.5 text-center text-xs font-bold outline-none ${
                         isDarkMode
                           ? 'border-slate-700 bg-slate-800 text-white'
                           : 'border-gray-200 bg-white text-gray-800'
@@ -1765,7 +1765,7 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
                         }));
                       }}
                       title="Remove skill"
-                      className="p-0.5 text-gray-400 hover:text-red-400 transition-colors ml-1 cursor-pointer">
+                      className="ml-1 cursor-pointer p-0.5 text-gray-400 transition-colors hover:text-red-400">
                       <FiTrash2 className="size-3" />
                     </button>
                   </div>
@@ -1817,7 +1817,7 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
                   setNewSkillYears('');
                 }
               }}
-              className={`w-14 shrink-0 rounded-lg border px-2 py-1 text-xs text-center outline-none ${
+              className={`w-14 shrink-0 rounded-lg border px-2 py-1 text-center text-xs outline-none ${
                 isDarkMode ? 'border-sky-900 bg-slate-900 text-white' : 'border-sky-200 bg-white text-gray-900'
               }`}
             />
@@ -1832,19 +1832,19 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
                 setNewSkillYears('');
               }}
               disabled={!newSkillName.trim() || newSkillYears === ''}
-              className="rounded-lg bg-sky-500 px-3 py-1 text-xs font-bold text-white hover:bg-sky-400 disabled:opacity-50 cursor-pointer shrink-0">
+              className="shrink-0 cursor-pointer rounded-lg bg-sky-500 px-3 py-1 text-xs font-bold text-white hover:bg-sky-400 disabled:opacity-50">
               Add
             </button>
           </div>
         </div>
 
         {/* Saved Golden Answers (with Edit / Delete) */}
-        <div className="pt-3 border-t border-gray-200/20 space-y-2">
+        <div className="space-y-2 border-t border-gray-200/20 pt-3">
           <div className="flex items-center justify-between">
             <span className="text-[11px] font-bold uppercase tracking-wider text-sky-400">Saved Golden Answers</span>
             <button
               onClick={() => setShowAddGolden(!showAddGolden)}
-              className="flex items-center space-x-1 text-[11px] font-semibold text-sky-400 hover:text-sky-300 cursor-pointer">
+              className="flex cursor-pointer items-center space-x-1 text-[11px] font-semibold text-sky-400 hover:text-sky-300">
               <FiPlus className="size-3" />
               <span>Add Custom Q&A</span>
             </button>
@@ -1853,7 +1853,7 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
           {/* Add Golden Answer Form */}
           {showAddGolden && (
             <div
-              className={`p-2.5 rounded-lg border space-y-2 text-xs ${
+              className={`space-y-2 rounded-lg border p-2.5 text-xs ${
                 isDarkMode ? 'border-sky-900 bg-slate-900/80' : 'border-sky-100 bg-sky-50/50'
               }`}>
               <input
@@ -1885,12 +1885,12 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
                     setNewAnswerText('');
                     setShowAddGolden(false);
                   }}
-                  className="rounded bg-sky-500 px-3 py-1 text-[11px] font-bold text-white hover:bg-sky-400 cursor-pointer">
+                  className="cursor-pointer rounded bg-sky-500 px-3 py-1 text-[11px] font-bold text-white hover:bg-sky-400">
                   Save
                 </button>
                 <button
                   onClick={() => setShowAddGolden(false)}
-                  className="rounded bg-gray-600 px-2.5 py-1 text-[11px] font-semibold text-gray-200 hover:bg-gray-500 cursor-pointer">
+                  className="cursor-pointer rounded bg-gray-600 px-2.5 py-1 text-[11px] font-semibold text-gray-200 hover:bg-gray-500">
                   Cancel
                 </button>
               </div>
@@ -1898,21 +1898,21 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
           )}
 
           {/* Golden Answers List */}
-          <div className="space-y-1.5 max-h-52 overflow-y-auto pr-1">
+          <div className="max-h-52 space-y-1.5 overflow-y-auto pr-1">
             {(profile.goldenAnswers || []).map(ga => (
               <div
                 key={ga.id}
-                className={`p-2 rounded-lg border flex items-center justify-between text-xs transition-colors ${
+                className={`flex items-center justify-between rounded-lg border p-2 text-xs transition-colors ${
                   isDarkMode
                     ? 'border-slate-800 bg-slate-900/40 hover:border-slate-700'
-                    : 'border-gray-100 bg-white hover:border-gray-200 shadow-sm'
+                    : 'border-gray-100 bg-white shadow-sm hover:border-gray-200'
                 }`}>
-                <div className="flex-1 mr-2 truncate">
-                  <p className={`font-medium truncate ${isDarkMode ? 'text-gray-300' : 'text-slate-800'}`}>
+                <div className="mr-2 flex-1 truncate">
+                  <p className={`truncate font-medium ${isDarkMode ? 'text-gray-300' : 'text-slate-800'}`}>
                     {ga.question}
                   </p>
                   {editingGoldenId === ga.id ? (
-                    <div className="flex items-center space-x-1.5 mt-1">
+                    <div className="mt-1 flex items-center space-x-1.5">
                       <input
                         type="text"
                         value={editingGoldenAnswer}
@@ -1932,32 +1932,32 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
                           setEditingGoldenId(null);
                         }}
                         title="Save"
-                        className="p-1 text-emerald-400 hover:text-emerald-300 cursor-pointer">
+                        className="cursor-pointer p-1 text-emerald-400 hover:text-emerald-300">
                         <FiCheck className="size-3.5" />
                       </button>
                       <button
                         onClick={() => setEditingGoldenId(null)}
                         title="Cancel"
-                        className="p-1 text-gray-400 hover:text-gray-300 cursor-pointer">
+                        className="cursor-pointer p-1 text-gray-400 hover:text-gray-300">
                         <FiX className="size-3.5" />
                       </button>
                     </div>
                   ) : (
                     <p
-                      className={`font-semibold truncate text-[11px] mt-0.5 ${isDarkMode ? 'text-emerald-400' : 'text-emerald-700'}`}>
+                      className={`mt-0.5 truncate text-[11px] font-semibold ${isDarkMode ? 'text-emerald-400' : 'text-emerald-700'}`}>
                       {ga.answer}
                     </p>
                   )}
                 </div>
                 {editingGoldenId !== ga.id && (
-                  <div className="flex items-center space-x-1 shrink-0">
+                  <div className="flex shrink-0 items-center space-x-1">
                     <button
                       onClick={() => {
                         setEditingGoldenId(ga.id);
                         setEditingGoldenAnswer(ga.answer);
                       }}
                       title="Edit Answer"
-                      className="p-1 text-gray-400 hover:text-sky-400 transition-colors cursor-pointer">
+                      className="cursor-pointer p-1 text-gray-400 transition-colors hover:text-sky-400">
                       <FiEdit2 className="size-3" />
                     </button>
                     <button
@@ -1967,7 +1967,7 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
                         setProfile(updated);
                       }}
                       title="Delete Answer"
-                      className="p-1 text-gray-400 hover:text-red-400 transition-colors cursor-pointer">
+                      className="cursor-pointer p-1 text-gray-400 transition-colors hover:text-red-400">
                       <FiTrash2 className="size-3" />
                     </button>
                   </div>
@@ -1980,17 +1980,17 @@ export function ResumeProfileView({ isDarkMode = false }: ResumeProfileViewProps
 
       {/* Settings & Automation Safeties Quick Link */}
       <div
-        className={`rounded-xl border p-3 flex items-center justify-between text-xs ${
+        className={`flex items-center justify-between rounded-xl border p-3 text-xs ${
           isDarkMode ? 'border-sky-900/60 bg-slate-800/60' : 'border-sky-100 bg-white/80 shadow-sm'
         }`}>
         <div>
-          <span className="font-semibold text-[11px] block text-sky-400">Career Brain & Automation Safeties</span>
+          <span className="block text-[11px] font-semibold text-sky-400">Career Brain & Automation Safeties</span>
           <span className="text-[10px] opacity-60">Manage match score threshold, negative keywords & safeties</span>
         </div>
         <button
           type="button"
           onClick={() => chrome.runtime.openOptionsPage()}
-          className="inline-flex items-center gap-1 rounded-md px-2.5 py-1 text-[11px] font-semibold bg-sky-500/15 text-sky-300 hover:bg-sky-500/25 border border-sky-500/30 cursor-pointer transition-colors">
+          className="inline-flex cursor-pointer items-center gap-1 rounded-md border border-sky-500/30 bg-sky-500/15 px-2.5 py-1 text-[11px] font-semibold text-sky-300 transition-colors hover:bg-sky-500/25">
           <span>Open Settings</span>
           <FiExternalLink className="size-3" />
         </button>

@@ -148,7 +148,7 @@ export function MultipleJobRolesInput({
         <div>
           <label className="block text-[11px] font-semibold opacity-80">
             Target Job Roles{' '}
-            <span className="text-[9px] text-sky-400 font-normal">
+            <span className="text-[9px] font-normal text-sky-400">
               ({currentRoles.length}/{maxRoles})
             </span>
           </label>
@@ -157,12 +157,12 @@ export function MultipleJobRolesInput({
           type="button"
           onClick={handleAiSuggest}
           disabled={isSuggesting}
-          className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-[10px] font-semibold transition-all cursor-pointer ${
+          className={`inline-flex cursor-pointer items-center gap-1.5 rounded-md px-2 py-0.5 text-[10px] font-semibold transition-all ${
             isSuggesting
-              ? 'opacity-60 cursor-not-allowed bg-sky-900/30 text-sky-300'
+              ? 'cursor-not-allowed bg-sky-900/30 text-sky-300 opacity-60'
               : isDarkMode
-                ? 'bg-sky-500/15 hover:bg-sky-500/25 text-sky-300 border border-sky-500/30'
-                : 'bg-sky-50 hover:bg-sky-100 text-sky-700 border border-sky-200'
+                ? 'border border-sky-500/30 bg-sky-500/15 text-sky-300 hover:bg-sky-500/25'
+                : 'border border-sky-200 bg-sky-50 text-sky-700 hover:bg-sky-100'
           }`}
           title="Analyze resume and skills to suggest matching roles">
           {isSuggesting ? (
@@ -182,18 +182,18 @@ export function MultipleJobRolesInput({
       {/* AI Suggestion Pills Drawer */}
       {suggestedRoles.length > 0 && (
         <div
-          className={`p-2.5 rounded-lg border text-xs space-y-2 ${
+          className={`space-y-2 rounded-lg border p-2.5 text-xs ${
             isDarkMode ? 'border-sky-800/80 bg-sky-950/20' : 'border-sky-200 bg-sky-50/50'
           }`}>
           <div className="flex items-center justify-between">
-            <span className="text-[10px] font-bold text-sky-400 flex items-center gap-1">
+            <span className="flex items-center gap-1 text-[10px] font-bold text-sky-400">
               <span>🎯</span> AI Recommended for Your Profile:
             </span>
             {currentRoles.length < maxRoles && (
               <button
                 type="button"
                 onClick={handleAddAllSuggestions}
-                className="text-[10px] font-semibold text-emerald-400 hover:text-emerald-300 underline cursor-pointer">
+                className="cursor-pointer text-[10px] font-semibold text-emerald-400 underline hover:text-emerald-300">
                 + Add All
               </button>
             )}
@@ -207,14 +207,14 @@ export function MultipleJobRolesInput({
                   type="button"
                   onClick={() => !isAlreadyAdded && handleAddRole(sRole)}
                   disabled={isAlreadyAdded || currentRoles.length >= maxRoles}
-                  className={`inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium transition-colors ${
+                  className={`inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium transition-colors ${
                     isAlreadyAdded
                       ? isDarkMode
-                        ? 'bg-slate-800 text-gray-500 border border-gray-700 cursor-default'
-                        : 'bg-gray-100 text-gray-400 border border-gray-200 cursor-default'
+                        ? 'cursor-default border border-gray-700 bg-slate-800 text-gray-500'
+                        : 'cursor-default border border-gray-200 bg-gray-100 text-gray-400'
                       : isDarkMode
-                        ? 'bg-slate-800 hover:bg-sky-900/60 text-sky-200 border border-sky-700/60 cursor-pointer'
-                        : 'bg-white hover:bg-sky-50 text-sky-800 border border-sky-300 cursor-pointer shadow-sm'
+                        ? 'cursor-pointer border border-sky-700/60 bg-slate-800 text-sky-200 hover:bg-sky-900/60'
+                        : 'cursor-pointer border border-sky-300 bg-white text-sky-800 shadow-sm hover:bg-sky-50'
                   }`}>
                   {isAlreadyAdded ? (
                     <FiCheck className="size-3 text-emerald-400" />
@@ -230,7 +230,7 @@ export function MultipleJobRolesInput({
       )}
 
       {suggestError && (
-        <div className="text-[10px] text-amber-400 bg-amber-500/10 border border-amber-500/20 rounded px-2 py-1">
+        <div className="rounded border border-amber-500/20 bg-amber-500/10 px-2 py-1 text-[10px] text-amber-400">
           ⚠️ {suggestError}
         </div>
       )}
@@ -239,7 +239,7 @@ export function MultipleJobRolesInput({
       <div className="space-y-1.5">
         {currentRoles.length === 0 ? (
           <div
-            className={`text-center py-2 px-3 border border-dashed rounded-lg text-[11px] opacity-60 ${
+            className={`rounded-lg border border-dashed px-3 py-2 text-center text-[11px] opacity-60 ${
               isDarkMode ? 'border-gray-700' : 'border-gray-300'
             }`}>
             No target roles added yet. Add a role below or use AI suggestions.
@@ -250,7 +250,7 @@ export function MultipleJobRolesInput({
             return (
               <div
                 key={index}
-                className={`flex items-center justify-between p-2 rounded-lg border transition-all ${
+                className={`flex items-center justify-between rounded-lg border p-2 transition-all ${
                   isPrimary
                     ? isDarkMode
                       ? 'border-emerald-700/60 bg-emerald-950/25 shadow-sm'
@@ -259,12 +259,12 @@ export function MultipleJobRolesInput({
                       ? 'border-sky-900/40 bg-slate-900/50 hover:border-sky-800'
                       : 'border-sky-100 bg-white hover:border-sky-200'
                 }`}>
-                <div className="flex items-center space-x-2 min-w-0 flex-1 mr-2">
+                <div className="mr-2 flex min-w-0 flex-1 items-center space-x-2">
                   <button
                     type="button"
                     onClick={() => handleSetPrimary(role)}
                     title={isPrimary ? 'Primary target role' : 'Click to make primary role'}
-                    className={`cursor-pointer transition-colors p-0.5 rounded ${
+                    className={`cursor-pointer rounded p-0.5 transition-colors ${
                       isPrimary
                         ? 'text-amber-400 hover:text-amber-300'
                         : isDarkMode
@@ -276,11 +276,11 @@ export function MultipleJobRolesInput({
 
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-1.5">
-                      <span className="font-semibold text-xs truncate" title={role}>
+                      <span className="truncate text-xs font-semibold" title={role}>
                         {role}
                       </span>
                       {isPrimary && (
-                        <span className="rounded bg-emerald-500/20 px-1.5 py-0.2 text-[9px] font-bold text-emerald-400 border border-emerald-500/30 shrink-0">
+                        <span className="py-0.2 shrink-0 rounded border border-emerald-500/30 bg-emerald-500/20 px-1.5 text-[9px] font-bold text-emerald-400">
                           Primary
                         </span>
                       )}
@@ -289,7 +289,7 @@ export function MultipleJobRolesInput({
                 </div>
 
                 {/* Actions: Reorder & Remove */}
-                <div className="flex items-center space-x-1 shrink-0">
+                <div className="flex shrink-0 items-center space-x-1">
                   {currentRoles.length > 1 && (
                     <>
                       <button
@@ -297,12 +297,12 @@ export function MultipleJobRolesInput({
                         onClick={() => handleMoveUp(index)}
                         disabled={index === 0}
                         title="Move up"
-                        className={`p-1 rounded cursor-pointer transition-colors ${
+                        className={`cursor-pointer rounded p-1 transition-colors ${
                           index === 0
-                            ? 'opacity-20 cursor-not-allowed'
+                            ? 'cursor-not-allowed opacity-20'
                             : isDarkMode
-                              ? 'text-gray-400 hover:text-white hover:bg-slate-800'
-                              : 'text-gray-500 hover:text-gray-900 hover:bg-gray-100'
+                              ? 'text-gray-400 hover:bg-slate-800 hover:text-white'
+                              : 'text-gray-500 hover:bg-gray-100 hover:text-gray-900'
                         }`}>
                         <FiArrowUp className="size-3" />
                       </button>
@@ -311,12 +311,12 @@ export function MultipleJobRolesInput({
                         onClick={() => handleMoveDown(index)}
                         disabled={index === currentRoles.length - 1}
                         title="Move down"
-                        className={`p-1 rounded cursor-pointer transition-colors ${
+                        className={`cursor-pointer rounded p-1 transition-colors ${
                           index === currentRoles.length - 1
-                            ? 'opacity-20 cursor-not-allowed'
+                            ? 'cursor-not-allowed opacity-20'
                             : isDarkMode
-                              ? 'text-gray-400 hover:text-white hover:bg-slate-800'
-                              : 'text-gray-500 hover:text-gray-900 hover:bg-gray-100'
+                              ? 'text-gray-400 hover:bg-slate-800 hover:text-white'
+                              : 'text-gray-500 hover:bg-gray-100 hover:text-gray-900'
                         }`}>
                         <FiArrowDown className="size-3" />
                       </button>
@@ -326,7 +326,7 @@ export function MultipleJobRolesInput({
                     type="button"
                     onClick={() => handleRemoveRole(index)}
                     title="Remove role"
-                    className="p-1 rounded text-red-400 hover:text-red-300 hover:bg-red-500/10 cursor-pointer transition-colors">
+                    className="cursor-pointer rounded p-1 text-red-400 transition-colors hover:bg-red-500/10 hover:text-red-300">
                     <FiTrash2 className="size-3" />
                   </button>
                 </div>
@@ -362,10 +362,10 @@ export function MultipleJobRolesInput({
             type="button"
             onClick={() => handleAddRole()}
             disabled={!newRoleInput.trim()}
-            className={`inline-flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-xs font-semibold cursor-pointer transition-colors ${
+            className={`inline-flex cursor-pointer items-center gap-1 rounded-lg px-2.5 py-1.5 text-xs font-semibold transition-colors ${
               newRoleInput.trim()
-                ? 'bg-sky-500 hover:bg-sky-400 text-white'
-                : 'opacity-40 cursor-not-allowed bg-sky-500/20 text-sky-400'
+                ? 'bg-sky-500 text-white hover:bg-sky-400'
+                : 'cursor-not-allowed bg-sky-500/20 text-sky-400 opacity-40'
             }`}>
             <FiPlus className="size-3.5" />
             <span>Add</span>
@@ -374,7 +374,7 @@ export function MultipleJobRolesInput({
       )}
 
       {/* Footer Helper Note */}
-      <p className="text-[10px] opacity-60 leading-tight">
+      <p className="text-[10px] leading-tight opacity-60">
         💡 Multi-role targeting enables JobForm Automator to discover and apply for jobs matching any of these roles
         across Naukri, Indeed, and LinkedIn. The primary role is starred ⭐.
       </p>

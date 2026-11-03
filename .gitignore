@@ -35,3 +35,4 @@ HOW_JOB_APPLY_AND_LLM_WORKS.*
 __pycache__/
 *.pyc
 pdf_builder/
+*.zip

@@ -1,10 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import {
-  StandardLocation,
-  searchStandardLocations,
-  POPULAR_LOCATIONS,
-  standardizeLocationString,
-} from '@extension/storage';
+import type { StandardLocation } from '@extension/storage';
+import { searchStandardLocations, POPULAR_LOCATIONS, standardizeLocationString } from '@extension/storage';
 import { FiMapPin, FiCheck, FiInfo } from 'react-icons/fi';
 
 export interface LocationAutocompleteInputProps {
@@ -156,13 +152,13 @@ export function LocationAutocompleteInput({
           onKeyDown={handleKeyDown}
           placeholder={placeholder || defaultPlaceholder}
           autoComplete="off"
-          className={`w-full rounded-lg border px-3 py-1.5 text-xs outline-none transition-colors pr-7 font-medium ${
+          className={`w-full rounded-lg border px-3 py-1.5 pr-7 text-xs font-medium outline-none transition-colors ${
             isDarkMode
-              ? 'border-sky-800 bg-slate-900 text-white placeholder-slate-400 focus:border-sky-400'
-              : 'border-sky-200 bg-white text-slate-900 placeholder-slate-400 focus:border-sky-500'
+              ? 'border-sky-800 bg-slate-900 text-white placeholder:text-slate-400 focus:border-sky-400'
+              : 'border-sky-200 bg-white text-slate-900 placeholder:text-slate-400 focus:border-sky-500'
           } ${className}`}
         />
-        <div className="absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none">
+        <div className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2">
           {isStandardFormat ? (
             <span title="Standard LinkedIn/Indeed/Naukri format">
               <FiCheck className="size-3.5 text-emerald-400" />
@@ -178,12 +174,12 @@ export function LocationAutocompleteInput({
       {/* Floating Recommendations Dropdown */}
       {isOpen && (
         <div
-          className={`absolute left-0 right-0 z-50 mt-1 max-h-64 overflow-y-auto rounded-lg border shadow-xl ${
+          className={`absolute inset-x-0 z-50 mt-1 max-h-64 overflow-y-auto rounded-lg border shadow-xl ${
             isDarkMode ? 'border-sky-800 bg-slate-900 text-white' : 'border-sky-200 bg-white text-slate-900'
           }`}>
           {/* Header format badge */}
           <div
-            className={`px-2.5 py-1.5 border-b text-[10px] flex items-center justify-between font-medium ${
+            className={`flex items-center justify-between border-b px-2.5 py-1.5 text-[10px] font-medium ${
               isDarkMode ? 'border-sky-950 bg-slate-950/80 text-sky-300' : 'border-sky-100 bg-sky-50/80 text-sky-700'
             }`}>
             <span className="flex items-center gap-1">
@@ -192,7 +188,7 @@ export function LocationAutocompleteInput({
                 Recommended: <strong>City, State, Country</strong>
               </span>
             </span>
-            <span className="text-[9px] opacity-75 font-semibold">LinkedIn • Indeed • Naukri</span>
+            <span className="text-[9px] font-semibold opacity-75">LinkedIn • Indeed • Naukri</span>
           </div>
 
           {/* Suggestions List */}
@@ -209,7 +205,7 @@ export function LocationAutocompleteInput({
                       handleSelect(loc);
                     }}
                     onMouseEnter={() => setSelectedIndex(idx)}
-                    className={`cursor-pointer px-3 py-2 text-xs transition-colors flex items-center justify-between gap-2 ${
+                    className={`flex cursor-pointer items-center justify-between gap-2 px-3 py-2 text-xs transition-colors ${
                       isSelected
                         ? isDarkMode
                           ? 'bg-blue-600/40 text-white'
@@ -226,27 +222,27 @@ export function LocationAutocompleteInput({
                           }`}
                         />
                         <span
-                          className={`font-semibold tracking-wide truncate ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>
+                          className={`truncate font-semibold tracking-wide ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>
                           {loc.formatted}
                         </span>
-                        {isExact && <FiCheck className="size-3.5 text-emerald-400 shrink-0" />}
+                        {isExact && <FiCheck className="size-3.5 shrink-0 text-emerald-400" />}
                       </div>
                       {loc.aliases && loc.aliases.length > 0 && (
                         <div
-                          className={`text-[10px] pl-5 truncate ${isDarkMode ? 'text-slate-400' : 'text-slate-500'}`}>
+                          className={`truncate pl-5 text-[10px] ${isDarkMode ? 'text-slate-400' : 'text-slate-500'}`}>
                           aka {loc.aliases.slice(0, 3).join(', ')}
                         </div>
                       )}
                     </div>
                     <span
-                      className={`text-[9px] px-1.5 py-0.5 rounded font-semibold whitespace-nowrap shrink-0 ${
+                      className={`shrink-0 whitespace-nowrap rounded px-1.5 py-0.5 text-[9px] font-semibold ${
                         loc.category === 'remote'
                           ? isDarkMode
-                            ? 'bg-purple-900/50 text-purple-300 border border-purple-700/50'
-                            : 'bg-purple-50 text-purple-700 border border-purple-200'
+                            ? 'border border-purple-700/50 bg-purple-900/50 text-purple-300'
+                            : 'border border-purple-200 bg-purple-50 text-purple-700'
                           : isDarkMode
-                            ? 'bg-sky-950 text-sky-300 border border-sky-800'
-                            : 'bg-sky-50 text-sky-700 border border-sky-200'
+                            ? 'border border-sky-800 bg-sky-950 text-sky-300'
+                            : 'border border-sky-200 bg-sky-50 text-sky-700'
                       }`}>
                       {loc.category === 'remote' ? 'Work Mode' : 'Standard'}
                     </span>
@@ -254,7 +250,7 @@ export function LocationAutocompleteInput({
                 );
               })
             ) : (
-              <li className="px-3 py-2 text-xs text-gray-400 text-center">
+              <li className="px-3 py-2 text-center text-xs text-gray-400">
                 Type city or state to see LinkedIn/Indeed standard format
               </li>
             )}
@@ -265,15 +261,15 @@ export function LocationAutocompleteInput({
       {/* Quick Pills (Optional) */}
       {showQuickPills && (
         <div className="mt-1.5 flex flex-wrap items-center gap-1">
-          <span className="text-[10px] text-gray-400 mr-0.5">Quick:</span>
+          <span className="mr-0.5 text-[10px] text-gray-400">Quick:</span>
           {quickPillLocations.map(p => (
             <button
               key={p.formatted}
               type="button"
               onClick={() => handleSelect(p)}
-              className={`rounded px-1.5 py-0.5 text-[10px] font-medium transition-colors cursor-pointer border ${
+              className={`cursor-pointer rounded border px-1.5 py-0.5 text-[10px] font-medium transition-colors ${
                 value.toLowerCase() === p.formatted.toLowerCase()
-                  ? 'border-sky-500 bg-sky-500/20 text-sky-300 font-semibold'
+                  ? 'border-sky-500 bg-sky-500/20 font-semibold text-sky-300'
                   : isDarkMode
                     ? 'border-slate-800 bg-slate-900/60 text-gray-300 hover:border-sky-700 hover:text-white'
                     : 'border-gray-200 bg-gray-50 text-gray-700 hover:border-sky-300 hover:text-sky-800'

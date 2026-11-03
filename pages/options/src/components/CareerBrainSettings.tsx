@@ -451,7 +451,7 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
             <FiAlertCircle className="mt-0.5 size-5 shrink-0 text-red-600 dark:text-red-400" />
             <div className="flex-1">
               <h5 className="text-sm font-bold text-red-900 dark:text-red-200">Validation Error (Save Blocked)</h5>
-              <p className="mt-1 text-xs text-red-700 dark:text-red-300 leading-relaxed">{saveError}</p>
+              <p className="mt-1 text-xs leading-relaxed text-red-700 dark:text-red-300">{saveError}</p>
             </div>
             <button
               type="button"
@@ -565,7 +565,7 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
               }
             }}
             placeholder="Paste plain-text resume here (Summary, Work History, Education, Skills, Projects)..."
-            className={`w-full font-mono text-xs leading-relaxed rounded-lg border ${
+            className={`w-full rounded-lg border font-mono text-xs leading-relaxed ${
               validationErrors.resumeText
                 ? 'border-red-400 focus:ring-red-500'
                 : isDarkMode
@@ -574,7 +574,7 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
             } p-3.5 focus:outline-none focus:ring-2 focus:ring-indigo-500`}
           />
           {validationErrors.resumeText && (
-            <p className="text-xs font-medium text-red-600 dark:text-red-400 flex items-center gap-1 mt-1">
+            <p className="mt-1 flex items-center gap-1 text-xs font-medium text-red-600 dark:text-red-400">
               <FiAlertCircle className="size-3.5" />
               {validationErrors.resumeText}
             </p>
@@ -726,7 +726,7 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
           <div>
             <label className="mb-1 block text-xs font-semibold text-gray-700 dark:text-gray-300">
               Current Location{' '}
-              <span className="text-[10px] text-sky-500 font-normal">
+              <span className="text-[10px] font-normal text-sky-500">
                 (City, State, Country - LinkedIn / Indeed format)
               </span>
             </label>
@@ -740,10 +740,10 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
           </div>
 
           <div className="md:col-span-2">
-            <div className="flex items-center justify-between mb-1.5">
+            <div className="mb-1.5 flex items-center justify-between">
               <label className="block text-xs font-semibold text-gray-700 dark:text-gray-300">
                 Target Preferred Locations{' '}
-                <span className="text-[10px] text-sky-500 font-normal">
+                <span className="text-[10px] font-normal text-sky-500">
                   (Top 3 Prioritized - #1 is searched & applied first)
                 </span>
               </label>
@@ -1128,7 +1128,7 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
           isDarkMode ? 'border-slate-700 bg-slate-800' : 'border-gray-200 bg-white'
         } space-y-5 p-6 shadow-sm`}>
         {/* Header & Main Actions */}
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-gray-100 pb-4 dark:border-gray-700">
+        <div className="flex flex-col justify-between gap-4 border-b border-gray-100 pb-4 sm:flex-row sm:items-center dark:border-gray-700">
           <div className="flex items-center gap-2.5">
             <div className="rounded-lg bg-amber-100 p-2 text-amber-600 dark:bg-amber-900/60 dark:text-amber-300">
               <FiHelpCircle className="size-5" />
@@ -1153,9 +1153,9 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
               type="button"
               onClick={handleRestoreStandardSuite}
               title="Reset or restore essential standard screening rules"
-              className={`flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold transition-colors cursor-pointer ${
+              className={`flex cursor-pointer items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold transition-colors ${
                 isDarkMode
-                  ? 'border-slate-600 bg-slate-700 text-gray-200 hover:bg-slate-650'
+                  ? 'hover:bg-slate-650 border-slate-600 bg-slate-700 text-gray-200'
                   : 'border-gray-300 bg-gray-50 text-gray-700 hover:bg-gray-100'
               }`}>
               <FiRotateCcw className="size-3.5 text-amber-500" />
@@ -1164,7 +1164,7 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
             <button
               type="button"
               onClick={() => handleAddGoldenAnswerForCategory()}
-              className="flex items-center gap-1.5 rounded-lg bg-amber-600 px-3.5 py-1.5 text-xs font-semibold text-white shadow-xs transition-colors hover:bg-amber-700 cursor-pointer">
+              className="shadow-xs flex cursor-pointer items-center gap-1.5 rounded-lg bg-amber-600 px-3.5 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-amber-700">
               <FiPlus className="size-3.5" />
               Add Custom Rule
             </button>
@@ -1183,16 +1183,16 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
                   key={cat}
                   type="button"
                   onClick={() => setSelectedCategoryTab(cat)}
-                  className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-all cursor-pointer ${
+                  className={`flex cursor-pointer items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-all ${
                     isActive
-                      ? 'bg-amber-600 text-white font-semibold shadow-xs'
+                      ? 'shadow-xs bg-amber-600 font-semibold text-white'
                       : isDarkMode
-                        ? 'bg-slate-700 text-gray-300 hover:bg-slate-650'
+                        ? 'hover:bg-slate-650 bg-slate-700 text-gray-300'
                         : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
                   }`}>
                   <span>{cat}</span>
                   <span
-                    className={`rounded-full px-1.5 py-0.2 text-[10px] ${
+                    className={`py-0.2 rounded-full px-1.5 text-[10px] ${
                       isActive
                         ? 'bg-white/20 text-white'
                         : isDarkMode
@@ -1215,7 +1215,7 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
                 value={goldenSearchQuery}
                 onChange={e => setGoldenSearchQuery(e.target.value)}
                 placeholder="Search screening questions, answers, or keywords (e.g. visa, ctc, driver, relocation, shift)..."
-                className={`w-full rounded-lg border pl-9 pr-8 py-1.5 text-xs outline-none ${
+                className={`w-full rounded-lg border py-1.5 pl-9 pr-8 text-xs outline-none ${
                   isDarkMode
                     ? 'border-slate-600 bg-slate-700 text-gray-100 placeholder:text-gray-400'
                     : 'border-gray-300 bg-gray-50 text-gray-800 placeholder:text-gray-400'
@@ -1234,7 +1234,7 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
               <button
                 type="button"
                 onClick={() => setSelectedCategoryTab('All')}
-                className="text-xs text-amber-600 hover:underline dark:text-amber-400 shrink-0">
+                className="shrink-0 text-xs text-amber-600 hover:underline dark:text-amber-400">
                 Clear filter
               </button>
             )}
@@ -1252,7 +1252,7 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
               <button
                 type="button"
                 onClick={() => handleAddGoldenAnswerForCategory(selectedCategoryTab)}
-                className="mt-2 text-xs font-semibold text-amber-600 hover:underline dark:text-amber-400 cursor-pointer">
+                className="mt-2 cursor-pointer text-xs font-semibold text-amber-600 hover:underline dark:text-amber-400">
                 + Add rule to {selectedCategoryTab}
               </button>
             </div>
@@ -1269,7 +1269,7 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
                     hasQError || hasAError
                       ? 'border-red-300 bg-red-50/40 dark:border-red-800 dark:bg-red-950/20'
                       : isDarkMode
-                        ? 'border-slate-700/80 bg-slate-750'
+                        ? 'bg-slate-750 border-slate-700/80'
                         : 'border-gray-200 bg-gray-50/50'
                   } p-3.5 transition-all`}>
                   <div className="flex items-start gap-3">
@@ -1347,7 +1347,7 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
                       type="button"
                       onClick={() => handleRemoveGoldenAnswer(item.id)}
                       title="Remove rule"
-                      className="mt-6 text-gray-400 transition-colors hover:text-red-500 focus:outline-none cursor-pointer">
+                      className="mt-6 cursor-pointer text-gray-400 transition-colors hover:text-red-500 focus:outline-none">
                       <FiTrash2 className="size-4" />
                     </button>
                   </div>
@@ -1389,7 +1389,7 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
           <div>
             <label className="mb-1 block text-xs font-semibold text-gray-700 dark:text-gray-300">
               Target Search Location{' '}
-              <span className="text-[10px] text-sky-500 font-normal">(LinkedIn / Indeed format)</span>
+              <span className="text-[10px] font-normal text-sky-500">(LinkedIn / Indeed format)</span>
             </label>
             <LocationAutocompleteInput
               value={config.targetLocation}
@@ -1432,7 +1432,7 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
                   onClick={() => setConfig(prev => ({ ...prev, minFitScore: preset.val }))}
                   className={`rounded px-2 py-0.5 text-[11px] font-medium transition-colors ${
                     config.minFitScore === preset.val
-                      ? 'bg-sky-600 text-white font-bold'
+                      ? 'bg-sky-600 font-bold text-white'
                       : isDarkMode
                         ? 'bg-slate-700 text-slate-300 hover:bg-slate-600'
                         : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
@@ -1580,7 +1580,7 @@ export const CareerBrainSettings: React.FC<CareerBrainSettingsProps> = ({ isDark
           {/* Tags */}
           <div className="mb-3 flex flex-wrap gap-1.5">
             {(config.blacklistedCompanies || []).length === 0 ? (
-              <span className="text-xs text-gray-400 italic">No companies blacklisted yet.</span>
+              <span className="text-xs italic text-gray-400">No companies blacklisted yet.</span>
             ) : (
               (config.blacklistedCompanies || []).map(comp => (
                 <span

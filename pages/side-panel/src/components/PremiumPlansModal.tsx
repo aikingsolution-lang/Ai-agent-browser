@@ -168,14 +168,14 @@ export const PremiumPlansModal: React.FC<PremiumPlansModalProps> = ({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-3 backdrop-blur-xs"
+      className="backdrop-blur-xs fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-3"
       onClick={e => e.target === e.currentTarget && onClose()}
       role="presentation">
       <div
         role="dialog"
         aria-modal="true"
         aria-labelledby="plans-dialog-title"
-        className={`relative flex w-full max-w-lg max-h-[92vh] flex-col overflow-hidden rounded-2xl border shadow-xl ${tone(
+        className={`relative flex max-h-[92vh] w-full max-w-lg flex-col overflow-hidden rounded-2xl border shadow-xl ${tone(
           'border-slate-800 bg-slate-900 text-slate-100',
           'border-slate-200 bg-slate-50 text-slate-900',
         )}`}>
@@ -194,7 +194,7 @@ export const PremiumPlansModal: React.FC<PremiumPlansModalProps> = ({
           <button
             type="button"
             onClick={onClose}
-            className={`rounded-lg p-1.5 transition-colors cursor-pointer ${tone(
+            className={`cursor-pointer rounded-lg p-1.5 transition-colors ${tone(
               'text-slate-400 hover:bg-slate-800 hover:text-slate-100',
               'text-slate-500 hover:bg-slate-100 hover:text-slate-900',
             )}`}
@@ -236,7 +236,7 @@ export const PremiumPlansModal: React.FC<PremiumPlansModalProps> = ({
                   <button
                     type="button"
                     onClick={billing.dismiss}
-                    className="shrink-0 rounded p-0.5 opacity-70 hover:opacity-100 cursor-pointer"
+                    className="shrink-0 cursor-pointer rounded p-0.5 opacity-70 hover:opacity-100"
                     aria-label="Dismiss">
                     <FiX className="size-3.5" />
                   </button>
@@ -247,7 +247,7 @@ export const PremiumPlansModal: React.FC<PremiumPlansModalProps> = ({
                   <button
                     type="button"
                     onClick={billing.reopen}
-                    className="flex items-center gap-1 rounded-md bg-sky-600 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-sky-700 cursor-pointer">
+                    className="flex cursor-pointer items-center gap-1 rounded-md bg-sky-600 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-sky-700">
                     <FiExternalLink className="size-3" />
                     Open payment page
                   </button>
@@ -261,7 +261,7 @@ export const PremiumPlansModal: React.FC<PremiumPlansModalProps> = ({
                   <button
                     type="button"
                     onClick={() => void openJobformSignIn()}
-                    className="flex items-center gap-1 rounded-md bg-sky-600 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-sky-700 cursor-pointer">
+                    className="flex cursor-pointer items-center gap-1 rounded-md bg-sky-600 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-sky-700">
                     <FiExternalLink className="size-3" />
                     Sign in with that account
                   </button>
@@ -379,7 +379,7 @@ export const PremiumPlansModal: React.FC<PremiumPlansModalProps> = ({
                   <button
                     type="button"
                     onClick={openJobformPricing}
-                    className="flex items-center gap-1 rounded-md px-2.5 py-1 text-[11px] font-semibold text-sky-600 hover:underline cursor-pointer">
+                    className="flex cursor-pointer items-center gap-1 rounded-md px-2.5 py-1 text-[11px] font-semibold text-sky-600 hover:underline">
                     <FiExternalLink className="size-3" />
                     Open pricing page
                   </button>
@@ -475,7 +475,7 @@ export const PremiumPlansModal: React.FC<PremiumPlansModalProps> = ({
                           type="button"
                           onClick={() => void billing.buy(plan.id)}
                           disabled={busy}
-                          className={`mt-2.5 flex w-full items-center justify-center gap-1.5 rounded-lg py-1.5 text-xs font-semibold transition-colors cursor-pointer disabled:cursor-not-allowed disabled:opacity-60 ${
+                          className={`mt-2.5 flex w-full cursor-pointer items-center justify-center gap-1.5 rounded-lg py-1.5 text-xs font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-60 ${
                             isDiamond
                               ? 'bg-sky-600 text-white hover:bg-sky-700'
                               : tone(

@@ -1909,7 +1909,7 @@ export class NaukriAdapter implements IPlatformAdapter {
             );
           }
 
-          let rawInputs = Array.from(
+          const rawInputs = Array.from(
             modal.querySelectorAll(
               'input:not([type="hidden"]):not([type="file"]):not([type="submit"]):not([type="button"]):not([type="reset"]):not([type="image"]), select, textarea',
             ),
@@ -2582,7 +2582,7 @@ export class NaukriAdapter implements IPlatformAdapter {
                 }
                 if (!modal) modal = document.body;
 
-                let rawInputs = Array.from(
+                const rawInputs = Array.from(
                   modal.querySelectorAll(
                     'input:not([type="hidden"]):not([type="file"]):not([type="submit"]):not([type="button"]):not([type="reset"]):not([type="image"]), select, textarea',
                   ),
@@ -3017,7 +3017,7 @@ export class NaukriAdapter implements IPlatformAdapter {
                 'input[placeholder*="Type message" i]:not([disabled]), textarea[placeholder*="Type message" i]:not([disabled]), input[placeholder*="message" i]:not([disabled]), textarea[placeholder*="message" i]:not([disabled]), [contenteditable="true"]:not([aria-disabled="true"]), input[placeholder*="Type message" i], textarea[placeholder*="Type message" i], input[placeholder*="message" i], textarea[placeholder*="message" i], [contenteditable="true"]',
               ),
             ) as HTMLElement[];
-            let activeInput =
+            const activeInput =
               chatInputs.find(el => isVisible(el) && isEnabled(el)) || chatInputs.find(el => isVisible(el));
             if (!activeInput) return null;
 

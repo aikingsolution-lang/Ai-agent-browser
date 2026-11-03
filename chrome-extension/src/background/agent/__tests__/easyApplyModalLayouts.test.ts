@@ -105,7 +105,7 @@ class MockDOMElement {
         if (attrPart) {
           const attrName = attrPart[1];
           const op = attrPart[2] || '';
-          let expectedVal = (attrPart[3] || '').replace(/['"]/g, '');
+          const expectedVal = (attrPart[3] || '').replace(/['"]/g, '');
           const actualVal = el.getAttribute(attrName);
           if (actualVal === null) return false;
           if (!op) return true;

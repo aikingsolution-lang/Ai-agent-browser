@@ -32,8 +32,7 @@ import {
   formatProjectedDate,
   type FormFieldDescriptor,
 } from '../linkedin/formQuestionResolver';
-import { generateJobsCsv } from '@extension/storage';
-import { processedJobsStore } from '@extension/storage';
+import { generateJobsCsv, processedJobsStore } from '@extension/storage';
 import type { ICareerBrain } from '@extension/storage';
 
 describe('Grounded Answers & Factual Integrity Suite (fix/grounded-answers)', () => {

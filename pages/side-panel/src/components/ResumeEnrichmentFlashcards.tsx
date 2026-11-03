@@ -174,16 +174,16 @@ export const ResumeEnrichmentFlashcards: React.FC<ResumeEnrichmentFlashcardsProp
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 bg-black/85 backdrop-blur-sm animate-fade-in font-sans">
-      <div className="relative w-full max-w-lg rounded-2xl border shadow-2xl overflow-hidden transition-all duration-300 flex flex-col max-h-[92vh] bg-slate-950 border-slate-800 text-slate-100 shadow-sky-950/40">
+    <div className="animate-fade-in fixed inset-0 z-50 flex items-center justify-center bg-black/85 p-3 font-sans backdrop-blur-sm">
+      <div className="relative flex max-h-[92vh] w-full max-w-lg flex-col overflow-hidden rounded-2xl border border-slate-800 bg-slate-950 text-slate-100 shadow-2xl shadow-sky-950/40 transition-all duration-300">
         {/* Header Bar */}
-        <div className="flex items-center justify-between px-5 py-3 border-b border-slate-800 bg-slate-900/95">
+        <div className="flex items-center justify-between border-b border-slate-800 bg-slate-900/95 px-5 py-3">
           <div className="flex items-center gap-2.5">
-            <div className="p-1.5 rounded-lg bg-blue-950/80 text-blue-400 border border-blue-700/50">
+            <div className="rounded-lg border border-blue-700/50 bg-blue-950/80 p-1.5 text-blue-400">
               <FiZap className="size-4" />
             </div>
             <div>
-              <h3 className="font-semibold text-sm tracking-wide text-white flex items-center gap-1.5">
+              <h3 className="flex items-center gap-1.5 text-sm font-semibold tracking-wide text-white">
                 <span>AI Career Profile Quick Update</span>
               </h3>
               <p className="text-[11px] text-slate-400">Step {currentStep + 1} of 5 • Structured Onboarding</p>
@@ -191,30 +191,30 @@ export const ResumeEnrichmentFlashcards: React.FC<ResumeEnrichmentFlashcardsProp
           </div>
           <button
             onClick={onClose}
-            className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors">
+            className="rounded-lg p-1 text-slate-400 transition-colors hover:bg-slate-800 hover:text-white">
             <FiX className="size-4" />
           </button>
         </div>
 
         {/* Progress Bar (System Colored) */}
-        <div className="w-full bg-slate-900 h-1">
+        <div className="h-1 w-full bg-slate-900">
           <div
-            className="bg-blue-500 h-1 transition-all duration-300"
+            className="h-1 bg-blue-500 transition-all duration-300"
             style={{ width: `${((currentStep + 1) / 5) * 100}%` }}
           />
         </div>
 
         {/* Card Body */}
-        <div className="p-5 overflow-y-auto space-y-4 flex-1">
+        <div className="flex-1 space-y-4 overflow-y-auto p-5">
           {/* STEP 0: WELCOME & RESUME SCAN OVERVIEW */}
           {currentStep === 0 && (
-            <div className="space-y-4 text-center py-2 animate-fade-in">
-              <div className="mx-auto w-14 h-14 rounded-2xl bg-slate-900 border border-blue-500/30 flex items-center justify-center text-blue-400 shadow-lg">
+            <div className="animate-fade-in space-y-4 py-2 text-center">
+              <div className="mx-auto flex size-14 items-center justify-center rounded-2xl border border-blue-500/30 bg-slate-900 text-blue-400 shadow-lg">
                 <FiAward className="size-7" />
               </div>
               <div className="space-y-1">
                 <h4 className="text-base font-bold text-white">Resume Analysis Complete</h4>
-                <p className="text-xs text-slate-400 max-w-sm mx-auto leading-relaxed">
+                <p className="mx-auto max-w-sm text-xs leading-relaxed text-slate-400">
                   We scanned your resume and projects. Let’s update your key personal profile fields and skill
                   experience so recruiter screening popups on Naukri, LinkedIn and Indeed are filled without getting
                   stuck.
@@ -222,38 +222,38 @@ export const ResumeEnrichmentFlashcards: React.FC<ResumeEnrichmentFlashcardsProp
               </div>
 
               {/* Color Code Legend Banner */}
-              <div className="flex items-center justify-center gap-4 text-[10px] py-1.5 px-3 rounded-lg bg-slate-900/60 border border-slate-800 text-slate-300">
+              <div className="flex items-center justify-center gap-4 rounded-lg border border-slate-800 bg-slate-900/60 px-3 py-1.5 text-[10px] text-slate-300">
                 <span className="flex items-center gap-1 text-emerald-400">
-                  <span className="w-2 h-2 rounded-full bg-emerald-500 inline-block" /> Dates & Time
+                  <span className="inline-block size-2 rounded-full bg-emerald-500" /> Dates & Time
                 </span>
                 <span className="flex items-center gap-1 text-blue-400">
-                  <span className="w-2 h-2 rounded-full bg-blue-500 inline-block" /> Identity & Meaning
+                  <span className="inline-block size-2 rounded-full bg-blue-500" /> Identity & Meaning
                 </span>
                 <span className="flex items-center gap-1 text-amber-400">
-                  <span className="w-2 h-2 rounded-full bg-amber-400 inline-block" /> CTC & Numbers
+                  <span className="inline-block size-2 rounded-full bg-amber-400" /> CTC & Numbers
                 </span>
               </div>
 
-              <div className="p-3.5 rounded-xl border border-slate-800 bg-slate-900/90 text-left text-xs space-y-2.5 shadow-inner">
-                <div className="flex items-center justify-between text-[11px] text-slate-400 font-semibold border-b border-slate-800 pb-1.5">
-                  <span className="tracking-wider uppercase text-[10px] text-slate-400">DETECTED RESUME PROFILE</span>
-                  <span className="text-emerald-400 font-medium">Ready</span>
+              <div className="space-y-2.5 rounded-xl border border-slate-800 bg-slate-900/90 p-3.5 text-left text-xs shadow-inner">
+                <div className="flex items-center justify-between border-b border-slate-800 pb-1.5 text-[11px] font-semibold text-slate-400">
+                  <span className="text-[10px] uppercase tracking-wider text-slate-400">DETECTED RESUME PROFILE</span>
+                  <span className="font-medium text-emerald-400">Ready</span>
                 </div>
                 <div className="grid grid-cols-2 gap-2.5 text-[11px]">
                   <div>
-                    <span className="text-slate-400 block text-[10px]">Candidate Name</span>
+                    <span className="block text-[10px] text-slate-400">Candidate Name</span>
                     <span className="font-semibold text-slate-100">{profile.fullName || 'Not specified'}</span>
                   </div>
                   <div>
-                    <span className="text-slate-400 block text-[10px]">Total Work Tenure</span>
+                    <span className="block text-[10px] text-slate-400">Total Work Tenure</span>
                     <span className="font-semibold text-amber-400">{profile.yearsOfExperience || 0} Years</span>
                   </div>
                   <div>
-                    <span className="text-slate-400 block text-[10px]">Extracted Technologies</span>
+                    <span className="block text-[10px] text-slate-400">Extracted Technologies</span>
                     <span className="font-semibold text-blue-400">{allSkills.length} Verified Skills</span>
                   </div>
                   <div>
-                    <span className="text-slate-400 block text-[10px]">Work Positions</span>
+                    <span className="block text-[10px] text-slate-400">Work Positions</span>
                     <span className="font-semibold text-slate-100">{profile.workExperience?.length || 0} Roles</span>
                   </div>
                 </div>
@@ -263,20 +263,20 @@ export const ResumeEnrichmentFlashcards: React.FC<ResumeEnrichmentFlashcardsProp
 
           {/* STEP 1: IDENTITY & DATES (GENDER, DOB, EDUCATION) */}
           {currentStep === 1 && (
-            <div className="space-y-4 animate-fade-in">
+            <div className="animate-fade-in space-y-4">
               <div className="border-b border-slate-800 pb-2">
-                <h4 className="text-xs font-bold text-blue-400 flex items-center gap-1.5 uppercase tracking-wider">
+                <h4 className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-blue-400">
                   <FiUser className="size-3.5 text-blue-400" />
                   <span>Flashcard 1: Personal Identity & Dates</span>
                 </h4>
-                <p className="text-[11px] text-slate-400 mt-0.5">
+                <p className="mt-0.5 text-[11px] text-slate-400">
                   Recruiters on Naukri, Indeed & LinkedIn require these mandatory demographic screening questions.
                 </p>
               </div>
 
               {stepError && (
-                <div className="p-2.5 rounded-xl bg-red-950/80 border border-red-500/50 text-red-200 text-xs flex items-center gap-2">
-                  <FiX className="size-4 text-red-400 shrink-0" />
+                <div className="flex items-center gap-2 rounded-xl border border-red-500/50 bg-red-950/80 p-2.5 text-xs text-red-200">
+                  <FiX className="size-4 shrink-0 text-red-400" />
                   <span>{stepError}</span>
                 </div>
               )}
@@ -284,13 +284,13 @@ export const ResumeEnrichmentFlashcards: React.FC<ResumeEnrichmentFlashcardsProp
               <div className="space-y-3.5 text-xs">
                 {/* Gender Identity [Rule: Blue/Dark Blue = Identity & Meaning] */}
                 <div>
-                  <label className="block text-[11px] font-medium text-blue-300 mb-1 flex items-center justify-between">
+                  <label className="mb-1 block flex items-center justify-between text-[11px] font-medium text-blue-300">
                     <span className="flex items-center gap-1">
                       <FiUser className="size-3 text-blue-400" />
                       <span>Gender Identity</span>
-                      <span className="text-red-400 font-bold">*</span>
+                      <span className="font-bold text-red-400">*</span>
                     </span>
-                    <span className="text-[10px] text-slate-500 font-normal">Required</span>
+                    <span className="text-[10px] font-normal text-slate-500">Required</span>
                   </label>
                   <select
                     value={gender}
@@ -298,7 +298,7 @@ export const ResumeEnrichmentFlashcards: React.FC<ResumeEnrichmentFlashcardsProp
                       setGender(e.target.value);
                       if (stepError) setStepError('');
                     }}
-                    className="w-full px-3 py-2 rounded-xl bg-slate-900 border border-slate-800 text-xs text-white focus:outline-none focus:border-blue-500">
+                    className="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-2 text-xs text-white focus:border-blue-500 focus:outline-none">
                     <option value="Male">Male</option>
                     <option value="Female">Female</option>
                     <option value="Other">Other</option>
@@ -308,13 +308,13 @@ export const ResumeEnrichmentFlashcards: React.FC<ResumeEnrichmentFlashcardsProp
 
                 {/* Date of Birth [Rule: Green = Dates & Timelines] */}
                 <div>
-                  <label className="block text-[11px] font-medium text-emerald-300 mb-1 flex items-center justify-between">
+                  <label className="mb-1 block flex items-center justify-between text-[11px] font-medium text-emerald-300">
                     <span className="flex items-center gap-1">
                       <FiCalendar className="size-3 text-emerald-400" />
                       <span>Date of Birth</span>
-                      <span className="text-red-400 font-bold">*</span>
+                      <span className="font-bold text-red-400">*</span>
                     </span>
-                    <span className="text-[10px] text-red-400/90 font-medium">Required</span>
+                    <span className="text-[10px] font-medium text-red-400/90">Required</span>
                   </label>
                   <input
                     type="date"
@@ -324,27 +324,27 @@ export const ResumeEnrichmentFlashcards: React.FC<ResumeEnrichmentFlashcardsProp
                       setDateOfBirth(e.target.value);
                       if (stepError) setStepError('');
                     }}
-                    className={`w-full px-3 py-2 rounded-xl bg-slate-900 text-xs text-white focus:outline-none transition-colors ${
+                    className={`w-full rounded-xl bg-slate-900 px-3 py-2 text-xs text-white transition-colors focus:outline-none ${
                       !dateOfBirth && stepError
                         ? 'border-2 border-red-500 focus:border-red-400'
                         : 'border border-slate-800 focus:border-emerald-500'
                     }`}
                   />
-                  <span className="text-[10px] text-slate-500 mt-0.5 block">
+                  <span className="mt-0.5 block text-[10px] text-slate-500">
                     Used to confirm 18+ age verification and birthday screening fields.
                   </span>
                 </div>
 
                 {/* Highest Education Degree [Rule: Blue = Meaning] */}
                 <div>
-                  <label className="block text-[11px] font-medium text-blue-300 mb-1 flex items-center gap-1">
+                  <label className="mb-1 block flex items-center gap-1 text-[11px] font-medium text-blue-300">
                     <FiBookOpen className="size-3 text-blue-400" />
                     <span>Highest Completed Education Level</span>
                   </label>
                   <select
                     value={highestEducation}
                     onChange={e => setHighestEducation(e.target.value)}
-                    className="w-full px-3 py-2 rounded-xl bg-slate-900 border border-slate-800 text-xs text-white focus:outline-none focus:border-blue-500">
+                    className="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-2 text-xs text-white focus:border-blue-500 focus:outline-none">
                     <option value="Bachelor's Degree">Bachelor's Degree (B.Tech / B.E / B.Sc / BCA)</option>
                     <option value="Master's Degree">Master's Degree (M.Tech / M.E / M.Sc / MCA)</option>
                     <option value="Doctorate / PhD">Doctorate / PhD</option>
@@ -355,14 +355,14 @@ export const ResumeEnrichmentFlashcards: React.FC<ResumeEnrichmentFlashcardsProp
 
                 {/* Relocation Willingness [Rule: Blue = Meaning] */}
                 <div>
-                  <label className="block text-[11px] font-medium text-blue-300 mb-1 flex items-center gap-1">
+                  <label className="mb-1 block flex items-center gap-1 text-[11px] font-medium text-blue-300">
                     <FiMapPin className="size-3 text-blue-400" />
                     <span>Are you willing to relocate for the job?</span>
                   </label>
                   <select
                     value={willingToRelocate}
                     onChange={e => setWillingToRelocate(e.target.value)}
-                    className="w-full px-3 py-2 rounded-xl bg-slate-900 border border-slate-800 text-xs text-white focus:outline-none focus:border-blue-500">
+                    className="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-2 text-xs text-white focus:border-blue-500 focus:outline-none">
                     <option value="Yes">Yes (Preferred for maximum matches)</option>
                     <option value="No">No (Remote / Current City only)</option>
                   </select>
@@ -373,20 +373,20 @@ export const ResumeEnrichmentFlashcards: React.FC<ResumeEnrichmentFlashcardsProp
 
           {/* STEP 2: SALARY, DATES & LOCATION */}
           {currentStep === 2 && (
-            <div className="space-y-4 animate-fade-in">
+            <div className="animate-fade-in space-y-4">
               <div className="border-b border-slate-800 pb-2">
-                <h4 className="text-xs font-bold text-amber-400 flex items-center gap-1.5 uppercase tracking-wider">
+                <h4 className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-amber-400">
                   <FiDollarSign className="size-3.5 text-amber-400" />
                   <span>Flashcard 2: CTC, Notice Period & Location</span>
                 </h4>
-                <p className="text-[11px] text-slate-400 mt-0.5">
+                <p className="mt-0.5 text-[11px] text-slate-400">
                   Job boards use notice period and CTC to screen applicants before forwarding to HR.
                 </p>
               </div>
 
               {stepError && (
-                <div className="p-2.5 rounded-xl bg-red-950/80 border border-red-500/50 text-red-200 text-xs flex items-center gap-2">
-                  <FiX className="size-4 text-red-400 shrink-0" />
+                <div className="flex items-center gap-2 rounded-xl border border-red-500/50 bg-red-950/80 p-2.5 text-xs text-red-200">
+                  <FiX className="size-4 shrink-0 text-red-400" />
                   <span>{stepError}</span>
                 </div>
               )}
@@ -394,14 +394,14 @@ export const ResumeEnrichmentFlashcards: React.FC<ResumeEnrichmentFlashcardsProp
               <div className="space-y-3.5 text-xs">
                 {/* Notice Period [Rule: Green = Timeline/Dates] */}
                 <div>
-                  <label className="block text-[11px] font-medium text-emerald-300 mb-1 flex items-center gap-1">
+                  <label className="mb-1 block flex items-center gap-1 text-[11px] font-medium text-emerald-300">
                     <FiClock className="size-3 text-emerald-400" />
                     <span>Notice Period / Availability to Join</span>
                   </label>
                   <select
                     value={noticePeriod}
                     onChange={e => setNoticePeriod(e.target.value)}
-                    className="w-full px-3 py-2 rounded-xl bg-slate-900 border border-slate-800 text-xs text-white focus:outline-none focus:border-emerald-500">
+                    className="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-2 text-xs text-white focus:border-emerald-500 focus:outline-none">
                     <option value="Immediate">Immediate (0 days)</option>
                     <option value="15 Days">15 Days</option>
                     <option value="30 Days">30 Days (1 Month)</option>
@@ -413,16 +413,16 @@ export const ResumeEnrichmentFlashcards: React.FC<ResumeEnrichmentFlashcardsProp
                 {/* Current & Expected CTC [Rule: Yellow = Numbers, CTC, Equations] */}
                 <div className="grid grid-cols-2 gap-3">
                   <div
-                    className={`p-2.5 rounded-xl bg-slate-900 border transition-colors ${
+                    className={`rounded-xl border bg-slate-900 p-2.5 transition-colors ${
                       !currentCTC && stepError ? 'border-red-500/80' : 'border-amber-500/20'
                     }`}>
-                    <label className="block text-[11px] font-semibold text-amber-400 mb-1 flex items-center justify-between">
+                    <label className="mb-1 block flex items-center justify-between text-[11px] font-semibold text-amber-400">
                       <span className="flex items-center gap-1">
                         <FiDollarSign className="size-3 text-amber-400" />
                         <span>Current CTC</span>
-                        <span className="text-red-400 font-bold">*</span>
+                        <span className="font-bold text-red-400">*</span>
                       </span>
-                      <span className="text-[10px] text-red-400/90 font-medium">Required</span>
+                      <span className="text-[10px] font-medium text-red-400/90">Required</span>
                     </label>
                     <input
                       type="text"
@@ -432,20 +432,20 @@ export const ResumeEnrichmentFlashcards: React.FC<ResumeEnrichmentFlashcardsProp
                         setCurrentCTC(e.target.value);
                         if (stepError) setStepError('');
                       }}
-                      className="w-full px-2.5 py-1.5 rounded-lg bg-black border border-amber-500/30 text-xs text-amber-300 font-mono focus:outline-none focus:border-amber-400"
+                      className="w-full rounded-lg border border-amber-500/30 bg-black px-2.5 py-1.5 font-mono text-xs text-amber-300 focus:border-amber-400 focus:outline-none"
                     />
                   </div>
                   <div
-                    className={`p-2.5 rounded-xl bg-slate-900 border transition-colors ${
+                    className={`rounded-xl border bg-slate-900 p-2.5 transition-colors ${
                       !expectedCTC && stepError ? 'border-red-500/80' : 'border-amber-500/20'
                     }`}>
-                    <label className="block text-[11px] font-semibold text-amber-400 mb-1 flex items-center justify-between">
+                    <label className="mb-1 block flex items-center justify-between text-[11px] font-semibold text-amber-400">
                       <span className="flex items-center gap-1">
                         <FiDollarSign className="size-3 text-amber-400" />
                         <span>Expected CTC</span>
-                        <span className="text-red-400 font-bold">*</span>
+                        <span className="font-bold text-red-400">*</span>
                       </span>
-                      <span className="text-[10px] text-red-400/90 font-medium">Required</span>
+                      <span className="text-[10px] font-medium text-red-400/90">Required</span>
                     </label>
                     <input
                       type="text"
@@ -455,7 +455,7 @@ export const ResumeEnrichmentFlashcards: React.FC<ResumeEnrichmentFlashcardsProp
                         setExpectedCTC(e.target.value);
                         if (stepError) setStepError('');
                       }}
-                      className="w-full px-2.5 py-1.5 rounded-lg bg-black border border-amber-500/30 text-xs text-amber-300 font-mono focus:outline-none focus:border-amber-400"
+                      className="w-full rounded-lg border border-amber-500/30 bg-black px-2.5 py-1.5 font-mono text-xs text-amber-300 focus:border-amber-400 focus:outline-none"
                     />
                   </div>
                 </div>
@@ -463,13 +463,13 @@ export const ResumeEnrichmentFlashcards: React.FC<ResumeEnrichmentFlashcardsProp
                 {/* Current City & Preferred City [Rule: Blue = Meaning, Standard Autocomplete] */}
                 <div className="grid grid-cols-2 gap-3">
                   <div>
-                    <label className="block text-[11px] font-semibold text-blue-300 mb-1 flex items-center justify-between">
+                    <label className="mb-1 block flex items-center justify-between text-[11px] font-semibold text-blue-300">
                       <span className="flex items-center gap-1">
                         <FiMapPin className="size-3 text-blue-400" />
                         <span>Current City</span>
-                        <span className="text-red-400 font-bold">*</span>
+                        <span className="font-bold text-red-400">*</span>
                       </span>
-                      <span className="text-[10px] text-red-400/90 font-medium">Required</span>
+                      <span className="text-[10px] font-medium text-red-400/90">Required</span>
                     </label>
                     <LocationAutocompleteInput
                       value={currentLocation}
@@ -479,13 +479,13 @@ export const ResumeEnrichmentFlashcards: React.FC<ResumeEnrichmentFlashcardsProp
                       }}
                       placeholder="e.g. Kolkata, West Bengal, India"
                       isDarkMode={true}
-                      className={`!bg-slate-900 !text-white placeholder:!text-slate-400 font-medium ${
+                      className={`!bg-slate-900 font-medium !text-white placeholder:!text-slate-400 ${
                         !currentLocation && stepError ? '!border-red-500' : '!border-slate-700'
                       }`}
                     />
                   </div>
                   <div>
-                    <label className="block text-[11px] font-semibold text-blue-300 mb-1 flex items-center gap-1">
+                    <label className="mb-1 block flex items-center gap-1 text-[11px] font-semibold text-blue-300">
                       <FiMapPin className="size-3 text-blue-400" />
                       <span>Preferred City / Remote</span>
                     </label>
@@ -495,21 +495,21 @@ export const ResumeEnrichmentFlashcards: React.FC<ResumeEnrichmentFlashcardsProp
                       isPreferred={true}
                       placeholder="e.g. Remote or Bengaluru"
                       isDarkMode={true}
-                      className="!bg-slate-900 !border-slate-700 !text-white placeholder:!text-slate-400 font-medium"
+                      className="!border-slate-700 !bg-slate-900 font-medium !text-white placeholder:!text-slate-400"
                     />
                   </div>
                 </div>
 
                 {/* Work Authorization [Rule: Blue = Meaning] */}
                 <div>
-                  <label className="block text-[11px] font-medium text-blue-300 mb-1 flex items-center gap-1">
+                  <label className="mb-1 block flex items-center gap-1 text-[11px] font-medium text-blue-300">
                     <FiShield className="size-3 text-blue-400" />
                     <span>Work Authorization</span>
                   </label>
                   <select
                     value={workAuth}
                     onChange={e => setWorkAuth(e.target.value)}
-                    className="w-full px-3 py-2 rounded-xl bg-slate-900 border border-slate-800 text-xs text-white focus:outline-none focus:border-blue-500">
+                    className="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-2 text-xs text-white focus:border-blue-500 focus:outline-none">
                     <option value="Citizen of India / Authorized to work without sponsorship">
                       Citizen of India / No Sponsorship Needed
                     </option>
@@ -524,20 +524,20 @@ export const ResumeEnrichmentFlashcards: React.FC<ResumeEnrichmentFlashcardsProp
 
           {/* STEP 3: SKILL EXPERIENCE MATRIX (NUMBERS / COUNTERS = YELLOW) */}
           {currentStep === 3 && (
-            <div className="space-y-4 animate-fade-in">
+            <div className="animate-fade-in space-y-4">
               <div className="border-b border-slate-800 pb-2">
-                <h4 className="text-xs font-bold text-amber-400 flex items-center gap-1.5 uppercase tracking-wider">
+                <h4 className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-amber-400">
                   <FiAward className="size-3.5 text-amber-400" />
                   <span>Flashcard 3: Skill Experience (Years of Experience)</span>
                 </h4>
-                <p className="text-[11px] text-slate-400 mt-0.5">
+                <p className="mt-0.5 text-[11px] text-slate-400">
                   LLM identified these skills from your resume projects & internships. Adjust the years of experience
                   counter so recruiter questions are answered 100% accurately!
                 </p>
               </div>
 
               {/* Add New Skill Input with 250+ Tech Skills Autocomplete */}
-              <div className="flex gap-2 items-center">
+              <div className="flex items-center gap-2">
                 <SkillAutocompleteInput
                   value={newSkillInput}
                   onChange={val => setNewSkillInput(val)}
@@ -559,42 +559,42 @@ export const ResumeEnrichmentFlashcards: React.FC<ResumeEnrichmentFlashcardsProp
                   placeholder="Type skill (e.g. Python, Docker, React)..."
                   isDarkMode={true}
                   containerClassName="relative flex-1"
-                  className="w-full px-3 py-2 rounded-xl bg-slate-900 border border-slate-800 text-xs text-white focus:outline-none focus:border-amber-400 placeholder:text-slate-500"
+                  className="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-2 text-xs text-white placeholder:text-slate-500 focus:border-amber-400 focus:outline-none"
                 />
                 <button
                   type="button"
                   onClick={handleAddNewSkill}
-                  className="px-3.5 py-2 bg-slate-900 text-amber-400 border border-amber-500/40 rounded-xl text-xs font-semibold hover:bg-slate-800 transition-colors flex items-center gap-1 shrink-0">
+                  className="flex shrink-0 items-center gap-1 rounded-xl border border-amber-500/40 bg-slate-900 px-3.5 py-2 text-xs font-semibold text-amber-400 transition-colors hover:bg-slate-800">
                   <FiPlus className="size-3.5" />
                   <span>Add</span>
                 </button>
               </div>
 
               {/* Skills Interactive List */}
-              <div className="space-y-2 max-h-60 overflow-y-auto pr-1">
+              <div className="max-h-60 space-y-2 overflow-y-auto pr-1">
                 {Object.entries(skillsMap).map(([skill, yrs]) => (
                   <div
                     key={skill}
-                    className="flex items-center justify-between p-3 rounded-xl border border-slate-800 bg-slate-900/90 hover:border-amber-500/50 transition-all shadow-sm">
+                    className="flex items-center justify-between rounded-xl border border-slate-800 bg-slate-900/90 p-3 shadow-sm transition-all hover:border-amber-500/50">
                     <div className="flex items-center gap-2.5">
-                      <div className="w-2 h-2 rounded-full bg-blue-400" />
-                      <span className="font-semibold text-xs text-white tracking-wide">{skill}</span>
+                      <div className="size-2 rounded-full bg-blue-400" />
+                      <span className="text-xs font-semibold tracking-wide text-white">{skill}</span>
                     </div>
 
                     <div className="flex items-center gap-2">
                       <button
                         type="button"
                         onClick={() => updateSkillYears(skill, -1)}
-                        className="p-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 transition-colors">
+                        className="rounded-lg bg-slate-800 p-1 text-slate-300 transition-colors hover:bg-slate-700">
                         <FiMinus className="size-3" />
                       </button>
-                      <span className="w-16 text-center text-xs font-bold text-amber-400 font-mono bg-black px-2.5 py-1 rounded-md border border-amber-500/40 shadow-inner">
+                      <span className="w-16 rounded-md border border-amber-500/40 bg-black px-2.5 py-1 text-center font-mono text-xs font-bold text-amber-400 shadow-inner">
                         {yrs} {yrs === 1 ? 'yr' : 'yrs'}
                       </span>
                       <button
                         type="button"
                         onClick={() => updateSkillYears(skill, 1)}
-                        className="p-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 transition-colors">
+                        className="rounded-lg bg-slate-800 p-1 text-slate-300 transition-colors hover:bg-slate-700">
                         <FiPlus className="size-3" />
                       </button>
                     </div>
@@ -606,13 +606,13 @@ export const ResumeEnrichmentFlashcards: React.FC<ResumeEnrichmentFlashcardsProp
 
           {/* STEP 4: SUCCESS & PROFILE UPDATE COMPLETE */}
           {currentStep === 4 && (
-            <div className="text-center py-6 space-y-4 animate-fade-in">
-              <div className="mx-auto w-16 h-16 rounded-full bg-emerald-950 text-emerald-400 flex items-center justify-center border border-emerald-500/40">
+            <div className="animate-fade-in space-y-4 py-6 text-center">
+              <div className="mx-auto flex size-16 items-center justify-center rounded-full border border-emerald-500/40 bg-emerald-950 text-emerald-400">
                 <FiCheckCircle className="size-8" />
               </div>
               <div className="space-y-1">
                 <h4 className="text-base font-bold text-white">Career Profile Updated & Ready!</h4>
-                <p className="text-xs text-slate-400 max-w-sm mx-auto leading-relaxed">
+                <p className="mx-auto max-w-sm text-xs leading-relaxed text-slate-400">
                   Your demographic details, salary expectations, and verified skill matrix are saved. Auto-apply agents
                   will now answer all screening questions with maximum precision.
                 </p>
@@ -622,12 +622,12 @@ export const ResumeEnrichmentFlashcards: React.FC<ResumeEnrichmentFlashcardsProp
         </div>
 
         {/* Footer Navigation Buttons */}
-        <div className="flex items-center justify-between px-5 py-3 border-t border-slate-800 bg-slate-900/90">
+        <div className="flex items-center justify-between border-t border-slate-800 bg-slate-900/90 px-5 py-3">
           {currentStep > 0 && currentStep < 4 ? (
             <button
               type="button"
               onClick={() => setCurrentStep(prev => prev - 1)}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs text-slate-400 hover:text-white transition-colors">
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs text-slate-400 transition-colors hover:text-white">
               <FiChevronLeft className="size-3.5" />
               <span>Back</span>
             </button>
@@ -639,7 +639,7 @@ export const ResumeEnrichmentFlashcards: React.FC<ResumeEnrichmentFlashcardsProp
             <button
               type="button"
               onClick={() => setCurrentStep(1)}
-              className="ml-auto inline-flex items-center gap-1.5 px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-semibold shadow-lg shadow-blue-900/40 transition-all cursor-pointer">
+              className="ml-auto inline-flex cursor-pointer items-center gap-1.5 rounded-xl bg-blue-600 px-4 py-2 text-xs font-semibold text-white shadow-lg shadow-blue-900/40 transition-all hover:bg-blue-500">
               <span>Start Profile Update</span>
               <FiChevronRight className="size-3.5" />
             </button>
@@ -649,10 +649,10 @@ export const ResumeEnrichmentFlashcards: React.FC<ResumeEnrichmentFlashcardsProp
             <button
               type="button"
               onClick={handleStep1Next}
-              className={`ml-auto inline-flex items-center gap-1.5 px-4 py-2 text-white rounded-xl text-xs font-semibold shadow-lg transition-all cursor-pointer ${
+              className={`ml-auto inline-flex cursor-pointer items-center gap-1.5 rounded-xl px-4 py-2 text-xs font-semibold text-white shadow-lg transition-all ${
                 isStep1Valid
-                  ? 'bg-blue-600 hover:bg-blue-500 shadow-blue-900/40'
-                  : 'bg-slate-800 text-slate-400 hover:bg-slate-700 cursor-not-allowed opacity-80'
+                  ? 'bg-blue-600 shadow-blue-900/40 hover:bg-blue-500'
+                  : 'cursor-not-allowed bg-slate-800 text-slate-400 opacity-80 hover:bg-slate-700'
               }`}>
               <span>Next: Compensation & City</span>
               <FiChevronRight className="size-3.5" />
@@ -663,10 +663,10 @@ export const ResumeEnrichmentFlashcards: React.FC<ResumeEnrichmentFlashcardsProp
             <button
               type="button"
               onClick={handleStep2Next}
-              className={`ml-auto inline-flex items-center gap-1.5 px-4 py-2 text-white rounded-xl text-xs font-semibold shadow-lg transition-all cursor-pointer ${
+              className={`ml-auto inline-flex cursor-pointer items-center gap-1.5 rounded-xl px-4 py-2 text-xs font-semibold text-white shadow-lg transition-all ${
                 isStep2Valid
-                  ? 'bg-blue-600 hover:bg-blue-500 shadow-blue-900/40'
-                  : 'bg-slate-800 text-slate-400 hover:bg-slate-700 cursor-not-allowed opacity-80'
+                  ? 'bg-blue-600 shadow-blue-900/40 hover:bg-blue-500'
+                  : 'cursor-not-allowed bg-slate-800 text-slate-400 opacity-80 hover:bg-slate-700'
               }`}>
               <span>Next: Skill Experience</span>
               <FiChevronRight className="size-3.5" />
@@ -678,7 +678,7 @@ export const ResumeEnrichmentFlashcards: React.FC<ResumeEnrichmentFlashcardsProp
               type="button"
               disabled={isSaving}
               onClick={handleFinalSubmit}
-              className="ml-auto inline-flex items-center gap-1.5 px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-semibold shadow-lg shadow-emerald-950/50 transition-all cursor-pointer disabled:opacity-50">
+              className="ml-auto inline-flex cursor-pointer items-center gap-1.5 rounded-xl bg-emerald-600 px-4 py-2 text-xs font-semibold text-white shadow-lg shadow-emerald-950/50 transition-all hover:bg-emerald-500 disabled:opacity-50">
               <span>{isSaving ? 'Saving...' : 'Save & Calibrate Brain'}</span>
               <FiCheckCircle className="size-3.5" />
             </button>
@@ -688,7 +688,7 @@ export const ResumeEnrichmentFlashcards: React.FC<ResumeEnrichmentFlashcardsProp
             <button
               type="button"
               onClick={onClose}
-              className="ml-auto inline-flex items-center gap-1.5 px-5 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-semibold transition-all cursor-pointer">
+              className="ml-auto inline-flex cursor-pointer items-center gap-1.5 rounded-xl bg-blue-600 px-5 py-2 text-xs font-semibold text-white transition-all hover:bg-blue-500">
               <span>Done</span>
             </button>
           )}

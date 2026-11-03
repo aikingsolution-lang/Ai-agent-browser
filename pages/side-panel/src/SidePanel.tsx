@@ -1,7 +1,27 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { RxDiscordLogo } from 'react-icons/rx';
-import { FiSettings, FiZap, FiUser, FiLogOut, FiStar, FiAlertTriangle, FiRefreshCw, FiX } from 'react-icons/fi';
+import {
+  FiSettings,
+  FiZap,
+  FiUser,
+  FiLogOut,
+  FiStar,
+  FiAlertTriangle,
+  FiRefreshCw,
+  FiX,
+  FiBriefcase,
+  FiFileText,
+  FiMessageSquare,
+  FiLock,
+  FiGlobe,
+  FiCompass,
+  FiSearch,
+  FiTarget,
+  FiEdit3,
+  FiMic,
+  FiChevronRight,
+} from 'react-icons/fi';
 import { PiPlusBold } from 'react-icons/pi';
 import { GrHistory } from 'react-icons/gr';
 import {
@@ -40,19 +60,6 @@ import BookmarkList from './components/BookmarkList';
 import { AuthGateView } from './components/AuthGateView';
 import { PremiumPlansModal } from './components/PremiumPlansModal';
 import { EventType, type AgentEvent, ExecutionState } from './types/event';
-import {
-  FiBriefcase,
-  FiFileText,
-  FiMessageSquare,
-  FiLock,
-  FiGlobe,
-  FiCompass,
-  FiSearch,
-  FiTarget,
-  FiEdit3,
-  FiMic,
-  FiChevronRight,
-} from 'react-icons/fi';
 import { AiOutlineLoading3Quarters } from 'react-icons/ai';
 import { ResumeProfileView } from './components/ResumeProfileView';
 import {
@@ -1735,7 +1742,7 @@ const SidePanel = () => {
                       <button
                         type="button"
                         onClick={() => setIsPlansModalOpen(true)}
-                        className="inline-flex items-center gap-1 whitespace-nowrap rounded-md border border-violet-300 bg-violet-100 px-2 py-0.5 text-[11px] font-semibold text-violet-800 hover:bg-violet-200 cursor-pointer transition-colors"
+                        className="inline-flex cursor-pointer items-center gap-1 whitespace-nowrap rounded-md border border-violet-300 bg-violet-100 px-2 py-0.5 text-[11px] font-semibold text-violet-800 transition-colors hover:bg-violet-200"
                         title="AI Auto Apply is included with JobForm Automator Premium">
                         <FiZap className="size-2.5" />
                         <span>AI Included</span>
@@ -1745,7 +1752,7 @@ const SidePanel = () => {
                         <button
                           type="button"
                           onClick={() => setIsPlansModalOpen(true)}
-                          className="inline-flex items-center gap-1 whitespace-nowrap rounded-md border border-slate-200 bg-slate-100 px-2 py-0.5 text-[11px] font-semibold text-slate-700 hover:border-blue-500/50 hover:text-blue-600 cursor-pointer transition-colors"
+                          className="inline-flex cursor-pointer items-center gap-1 whitespace-nowrap rounded-md border border-slate-200 bg-slate-100 px-2 py-0.5 text-[11px] font-semibold text-slate-700 transition-colors hover:border-blue-500/50 hover:text-blue-600"
                           title="Credits and plans">
                           <FiZap className="size-2.5 text-indigo-500" />
                           <span>{userCredits.remainingCredits.toLocaleString()} credits</span>
@@ -1764,7 +1771,7 @@ const SidePanel = () => {
                         setUserCredits(null);
                       }}
                       title="Sign Out"
-                      className="cursor-pointer p-1 text-slate-400 transition-colors hover:text-red-500 rounded-md">
+                      className="cursor-pointer rounded-md p-1 text-slate-400 transition-colors hover:text-red-500">
                       <FiLogOut className="size-3.5" />
                     </button>
                   </div>
@@ -1781,7 +1788,7 @@ const SidePanel = () => {
                       openJobformSignIn();
                     }}
                     title="Login with JobForm Automator"
-                    className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 px-3 py-1 text-xs font-semibold text-white shadow-xs transition-colors">
+                    className="shadow-xs inline-flex cursor-pointer items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-1 text-xs font-semibold text-white transition-colors hover:bg-blue-700">
                     <FiUser className="size-3.5" />
                     <span>Login</span>
                   </button>
@@ -1828,14 +1835,14 @@ const SidePanel = () => {
         {showAuthRequiredBanner && (
           <div
             data-testid="auth-required-banner"
-            className="mx-3 my-2 p-3 rounded-xl border text-xs bg-red-500/10 border-red-500/30 text-red-700 dark:text-red-300 flex items-center justify-between gap-3 shadow-sm">
-            <div className="flex items-center gap-2.5 min-w-0">
+            className="mx-3 my-2 flex items-center justify-between gap-3 rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-700 shadow-sm dark:text-red-300">
+            <div className="flex min-w-0 items-center gap-2.5">
               <FiLock className="size-4 shrink-0 text-red-500" />
               <div className="min-w-0">
-                <div className="font-bold text-xs text-red-800 dark:text-red-200">
+                <div className="text-xs font-bold text-red-800 dark:text-red-200">
                   Session expired. Please sign in again.
                 </div>
-                <div className="text-[11px] opacity-80 truncate">
+                <div className="truncate text-[11px] opacity-80">
                   Authentication is required to run automated job applications.
                 </div>
               </div>
@@ -1846,7 +1853,7 @@ const SidePanel = () => {
                 setShowAuthRequiredBanner(false);
                 openJobformSignIn();
               }}
-              className="px-3 py-1.5 rounded-lg text-xs font-bold bg-blue-600 text-white hover:bg-blue-500 shadow-sm cursor-pointer transition-all shrink-0">
+              className="shrink-0 cursor-pointer rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-bold text-white shadow-sm transition-all hover:bg-blue-500">
               Sign in
             </button>
           </div>
@@ -1858,12 +1865,12 @@ const SidePanel = () => {
         {/* Navigation Tabs - ONLY SHOWN WHEN AUTHENTICATED */}
         {!showHistory && authSession?.token && (
           <div
-            className={`flex border-b text-xs font-semibold shrink-0 ${isDarkMode ? 'border-sky-900 bg-slate-800/90' : 'border-sky-100 bg-white/90 shadow-sm'}`}>
+            className={`flex shrink-0 border-b text-xs font-semibold ${isDarkMode ? 'border-sky-900 bg-slate-800/90' : 'border-sky-100 bg-white/90 shadow-sm'}`}>
             <button
               onClick={() => setMainTab('apply')}
-              className={`flex-1 flex items-center justify-center space-x-1.5 py-2.5 transition-colors cursor-pointer border-b-2 ${
+              className={`flex flex-1 cursor-pointer items-center justify-center space-x-1.5 border-b-2 py-2.5 transition-colors ${
                 mainTab === 'apply'
-                  ? 'border-sky-500 text-sky-400 font-bold bg-sky-500/10'
+                  ? 'border-sky-500 bg-sky-500/10 font-bold text-sky-400'
                   : 'border-transparent opacity-70 hover:opacity-100'
               }`}>
               <FiBriefcase className="size-3.5" />
@@ -1871,9 +1878,9 @@ const SidePanel = () => {
             </button>
             <button
               onClick={() => setMainTab('resume')}
-              className={`flex-1 flex items-center justify-center space-x-1.5 py-2.5 transition-colors cursor-pointer border-b-2 ${
+              className={`flex flex-1 cursor-pointer items-center justify-center space-x-1.5 border-b-2 py-2.5 transition-colors ${
                 mainTab === 'resume'
-                  ? 'border-sky-500 text-sky-400 font-bold bg-sky-500/10'
+                  ? 'border-sky-500 bg-sky-500/10 font-bold text-sky-400'
                   : 'border-transparent opacity-70 hover:opacity-100'
               }`}>
               <FiFileText className="size-3.5" />
@@ -1881,9 +1888,9 @@ const SidePanel = () => {
             </button>
             <button
               onClick={() => setMainTab('chat')}
-              className={`flex-1 flex items-center justify-center space-x-1.5 py-2.5 transition-colors cursor-pointer border-b-2 ${
+              className={`flex flex-1 cursor-pointer items-center justify-center space-x-1.5 border-b-2 py-2.5 transition-colors ${
                 mainTab === 'chat'
-                  ? 'border-sky-500 text-sky-400 font-bold bg-sky-500/10'
+                  ? 'border-sky-500 bg-sky-500/10 font-bold text-sky-400'
                   : 'border-transparent opacity-70 hover:opacity-100'
               }`}>
               <FiMessageSquare className="size-3.5" />
@@ -2010,7 +2017,7 @@ const SidePanel = () => {
               <>
                 {/* Chat mode: Web Agent / Career Copilot */}
                 <div
-                  className={`flex items-center justify-between gap-2 border-b px-3 py-2 shrink-0 ${
+                  className={`flex shrink-0 items-center justify-between gap-2 border-b px-3 py-2 ${
                     isDarkMode ? 'border-sky-900 bg-slate-800/80' : 'border-slate-200 bg-white/70'
                   }`}>
                   <div
@@ -2064,7 +2071,7 @@ const SidePanel = () => {
                   <>
                     {/* Career Copilot Mode View */}
                     {copilotMessages.length === 0 ? (
-                      <div className="flex-1 overflow-y-auto p-3 space-y-3">
+                      <div className="flex-1 space-y-3 overflow-y-auto p-3">
                         {/* Overview and profile readiness */}
                         <section
                           className={`rounded-xl border p-3 ${
@@ -2117,7 +2124,7 @@ const SidePanel = () => {
                                 <button
                                   type="button"
                                   onClick={() => handleSendMessage('Audit my profile')}
-                                  className={`mt-2.5 flex w-full items-start gap-2 rounded-lg border px-2.5 py-2 text-left text-[11px] cursor-pointer transition-colors ${
+                                  className={`mt-2.5 flex w-full cursor-pointer items-start gap-2 rounded-lg border px-2.5 py-2 text-left text-[11px] transition-colors ${
                                     isDarkMode
                                       ? 'border-amber-500/30 bg-amber-500/10 text-slate-200 hover:bg-amber-500/20'
                                       : 'border-amber-200 bg-amber-50 text-slate-700 hover:bg-amber-100'
@@ -2143,17 +2150,17 @@ const SidePanel = () => {
                             Quick actions
                           </h4>
                           <div
-                            className={`overflow-hidden rounded-xl border divide-y ${
+                            className={`divide-y overflow-hidden rounded-xl border ${
                               isDarkMode
-                                ? 'border-slate-700 divide-slate-700 bg-slate-800/70'
-                                : 'border-slate-200 divide-slate-100 bg-white shadow-sm'
+                                ? 'divide-slate-700 border-slate-700 bg-slate-800/70'
+                                : 'divide-slate-100 border-slate-200 bg-white shadow-sm'
                             }`}>
                             {COPILOT_ACTIONS.map(({ prompt, title, description, Icon }) => (
                               <button
                                 key={prompt}
                                 type="button"
                                 onClick={() => handleSendMessage(prompt)}
-                                className={`flex w-full items-center gap-2.5 px-3 py-2.5 text-left cursor-pointer transition-colors ${
+                                className={`flex w-full cursor-pointer items-center gap-2.5 px-3 py-2.5 text-left transition-colors ${
                                   isDarkMode ? 'hover:bg-slate-700/60' : 'hover:bg-slate-50'
                                 }`}>
                                 <span

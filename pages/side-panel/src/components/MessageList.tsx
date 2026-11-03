@@ -49,7 +49,7 @@ function MessageBlock({ message, isSameActor, isDarkMode = false, onSelectOption
       }`}>
       {!isSameActor && (
         <div
-          className="flex size-8 shrink-0 items-center justify-center rounded-full text-white text-xs font-bold shadow-sm"
+          className="flex size-8 shrink-0 items-center justify-center rounded-full text-xs font-bold text-white shadow-sm"
           style={{ backgroundColor: actor.iconBackground }}>
           {message.actor === 'copilot' ? '✨' : <img src={actor.icon} alt={actor.name} className="size-5" />}
         </div>
@@ -115,7 +115,7 @@ function RichMessageContent({ content, isDarkMode = false }: { content: string; 
           return (
             <h4
               key={idx}
-              className={`text-xs font-bold uppercase tracking-wider mt-2.5 mb-1 ${
+              className={`mb-1 mt-2.5 text-xs font-bold uppercase tracking-wider ${
                 isDarkMode ? 'text-purple-300' : 'text-purple-700'
               }`}>
               {renderInlineStyles(trimmed.replace('### ', ''), isDarkMode)}
@@ -128,7 +128,7 @@ function RichMessageContent({ content, isDarkMode = false }: { content: string; 
           return (
             <h3
               key={idx}
-              className={`text-sm font-extrabold mt-2 mb-1 ${isDarkMode ? 'text-sky-300' : 'text-sky-700'}`}>
+              className={`mb-1 mt-2 text-sm font-extrabold ${isDarkMode ? 'text-sky-300' : 'text-sky-700'}`}>
               {renderInlineStyles(trimmed.replace(/^#+\s*/, ''), isDarkMode)}
             </h3>
           );
@@ -154,12 +154,12 @@ function RichMessageContent({ content, isDarkMode = false }: { content: string; 
           return (
             <div
               key={idx}
-              className={`my-2 flex items-start gap-2 rounded-xl border p-2.5 text-xs font-semibold shadow-xs ${
+              className={`shadow-xs my-2 flex items-start gap-2 rounded-xl border p-2.5 text-xs font-semibold ${
                 isDarkMode
                   ? 'border-amber-500/40 bg-amber-950/30 text-amber-200'
                   : 'border-amber-300 bg-amber-50 text-amber-900'
               }`}>
-              <span className="text-sm shrink-0">👉</span>
+              <span className="shrink-0 text-sm">👉</span>
               <span className="flex-1">{renderInlineStyles(trimmed.replace(/^👉\s*/, ''), isDarkMode)}</span>
             </div>
           );
@@ -169,8 +169,8 @@ function RichMessageContent({ content, isDarkMode = false }: { content: string; 
         if (/^[-*]\s+/.test(trimmed)) {
           const itemText = trimmed.replace(/^[-*]\s+/, '');
           return (
-            <div key={idx} className="flex items-start gap-1.5 text-xs pl-1">
-              <span className={`text-[11px] mt-0.5 ${isDarkMode ? 'text-sky-400' : 'text-sky-600'}`}>•</span>
+            <div key={idx} className="flex items-start gap-1.5 pl-1 text-xs">
+              <span className={`mt-0.5 text-[11px] ${isDarkMode ? 'text-sky-400' : 'text-sky-600'}`}>•</span>
               <span className="flex-1">{renderInlineStyles(itemText, isDarkMode)}</span>
             </div>
           );
@@ -204,10 +204,10 @@ function renderInlineStyles(text: string, isDarkMode: boolean): React.ReactNode 
       return (
         <code
           key={i}
-          className={`rounded px-1.5 py-0.5 text-[10px] font-mono ${
+          className={`rounded px-1.5 py-0.5 font-mono text-[10px] ${
             isDarkMode
-              ? 'bg-slate-800 text-sky-300 border border-slate-700'
-              : 'bg-gray-100 text-sky-700 border border-gray-200'
+              ? 'border border-slate-700 bg-slate-800 text-sky-300'
+              : 'border border-gray-200 bg-gray-100 text-sky-700'
           }`}>
           {codeText}
         </code>

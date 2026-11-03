@@ -157,7 +157,7 @@ export function SkillAutocompleteInput({
     return (
       <span>
         {before}
-        <strong className={isDarkMode ? 'text-sky-300 font-bold underline' : 'text-sky-600 font-bold underline'}>
+        <strong className={isDarkMode ? 'font-bold text-sky-300 underline' : 'font-bold text-sky-600 underline'}>
           {matched}
         </strong>
         {after}
@@ -196,10 +196,10 @@ export function SkillAutocompleteInput({
         <ul
           ref={listRef}
           role="listbox"
-          className={`absolute left-0 right-0 top-full z-50 mt-1 max-h-48 overflow-y-auto rounded-lg border shadow-xl transition-all ${
+          className={`absolute inset-x-0 top-full z-50 mt-1 max-h-48 overflow-y-auto rounded-lg border shadow-xl transition-all ${
             isDarkMode
-              ? 'border-sky-800/80 bg-slate-900 text-gray-200 divide-y divide-slate-800/60'
-              : 'border-sky-200 bg-white text-gray-800 divide-y divide-gray-100'
+              ? 'divide-y divide-slate-800/60 border-sky-800/80 bg-slate-900 text-gray-200'
+              : 'divide-y divide-gray-100 border-sky-200 bg-white text-gray-800'
           }`}>
           {suggestions.map((skill, index) => {
             const isSelected = index === selectedIndex;
@@ -213,17 +213,17 @@ export function SkillAutocompleteInput({
                   handleSelect(skill);
                 }}
                 onMouseEnter={() => setSelectedIndex(index)}
-                className={`flex cursor-pointer items-center justify-between px-3 py-1.5 text-xs select-none transition-colors ${
+                className={`flex cursor-pointer select-none items-center justify-between px-3 py-1.5 text-xs transition-colors ${
                   isSelected
                     ? isDarkMode
-                      ? 'bg-sky-950/90 text-sky-200 font-medium'
-                      : 'bg-sky-100/90 text-sky-900 font-medium'
+                      ? 'bg-sky-950/90 font-medium text-sky-200'
+                      : 'bg-sky-100/90 font-medium text-sky-900'
                     : isDarkMode
                       ? 'hover:bg-slate-800/80 hover:text-white'
                       : 'hover:bg-sky-50 hover:text-sky-900'
                 }`}>
                 <span className="truncate">{renderHighlightedSkill(skill)}</span>
-                <span className={`text-[10px] ml-2 shrink-0 ${isDarkMode ? 'text-gray-500' : 'text-gray-400'}`}>
+                <span className={`ml-2 shrink-0 text-[10px] ${isDarkMode ? 'text-gray-500' : 'text-gray-400'}`}>
                   Skill
                 </span>
               </li>

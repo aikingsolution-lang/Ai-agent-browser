@@ -55,7 +55,7 @@ export const PremiumPlans: React.FC<PremiumPlansProps> = ({ isDarkMode }) => {
   return (
     <section className="space-y-6">
       <div
-        className={`rounded-2xl border p-8 text-left shadow-xs ${tone('border-slate-800 bg-slate-900', 'border-slate-200 bg-white')}`}>
+        className={`shadow-xs rounded-2xl border p-8 text-left ${tone('border-slate-800 bg-slate-900', 'border-slate-200 bg-white')}`}>
         <div className="mx-auto mb-8 max-w-2xl text-center">
           <h2 className={`text-2xl font-bold sm:text-3xl ${tone('text-slate-100', 'text-slate-900')}`}>
             JobForm Automator plans
@@ -142,7 +142,7 @@ export const PremiumPlans: React.FC<PremiumPlansProps> = ({ isDarkMode }) => {
               <button
                 type="button"
                 onClick={() => void billing.loadPlans()}
-                className={`flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold cursor-pointer ${tone(
+                className={`flex cursor-pointer items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold ${tone(
                   'border-slate-700 text-slate-200 hover:bg-slate-800',
                   'border-slate-300 text-slate-700 hover:bg-slate-50',
                 )}`}>
@@ -152,7 +152,7 @@ export const PremiumPlans: React.FC<PremiumPlansProps> = ({ isDarkMode }) => {
               <button
                 type="button"
                 onClick={openJobformPricing}
-                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-sky-600 hover:underline cursor-pointer">
+                className="flex cursor-pointer items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-sky-600 hover:underline">
                 <FiExternalLink className="size-3.5" />
                 Open pricing page
               </button>
@@ -254,7 +254,7 @@ export const PremiumPlans: React.FC<PremiumPlansProps> = ({ isDarkMode }) => {
                       type="button"
                       onClick={() => void billing.buy(plan.id)}
                       disabled={busy}
-                      className={`mt-6 flex w-full items-center justify-center gap-2 rounded-lg py-2.5 text-xs font-semibold transition-colors cursor-pointer disabled:cursor-not-allowed disabled:opacity-50 ${
+                      className={`mt-6 flex w-full cursor-pointer items-center justify-center gap-2 rounded-lg py-2.5 text-xs font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
                         isDiamond
                           ? 'bg-blue-600 text-white hover:bg-blue-700'
                           : tone(
