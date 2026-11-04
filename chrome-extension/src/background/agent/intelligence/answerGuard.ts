@@ -93,7 +93,9 @@ export function validateAnswerForField(
   const isRestricted40CharProseField =
     field.fieldType === 'number' ||
     field.fieldType === 'date' ||
-    /\b(?:salary|ctc|compensation|pay|package|lakhs?|lpa|inr|stipend)\b/i.test(labelLower) ||
+    /\b(?:salary|ctc|compensation|pay|package|lakhs?|lpa|inr|stipend|financial\s*expectations?|monthly\s*gross|annual\s*gross|remuneration|gross\s*(?:salary|pay|ctc|compensation))\b/i.test(
+      labelLower,
+    ) ||
     /\b(?:how\s*many\s*(?:years|months)?|years\s*of|experience\s*in|yoe|total\s*experience|work\s*experience)\b/i.test(
       labelLower,
     ) ||
@@ -243,7 +245,10 @@ export function validateAnswerForField(
   );
 
   const isSalaryQuestion =
-    /(?:current|present|existing|fixed|annual|expected|target|desired|seeking)?\s*(?:ctc|salary|compensation)\b/i.test(
+    /\b(?:salary|ctc|compensation|remuneration|financial\s*expectations?|monthly\s*gross|annual\s*gross|gross\s*(?:salary|pay|ctc|compensation)|package)\b/i.test(
+      labelLower,
+    ) ||
+    /(?:current|present|existing|fixed|annual|expected|target|desired|seeking)\s*(?:ctc|salary|compensation|remuneration|pay)\b/i.test(
       labelLower,
     );
 
@@ -278,15 +283,25 @@ export function validateAnswerForField(
 
     // Salary / CTC conversion
     if (isSalaryQuestion) {
+      const expectsMonthly =
+        /\b(?:monthly|per\s*month|\/\s*month|month|per\s*mo|\/\s*mo)\b/i.test(labelLower) ||
+        /\b(?:monthly|per\s*month|\/\s*month)\b/i.test(hintLower);
+
       const expectsLPA =
-        /\bin\s*lpa\b|\blpa\b|\bin\s*lakhs?\b|\blacs?\b/i.test(labelLower) ||
-        /example:\s*\d{1,2}(?:\.\d+)?\b/i.test(hintLower);
+        !expectsMonthly &&
+        (/\bin\s*lpa\b|\blpa\b|\bin\s*lakhs?\b|\blacs?\b/i.test(labelLower) ||
+          /example:\s*\d{1,2}(?:\.\d+)?\b/i.test(hintLower));
 
       // Check "X LPA" or "X Lakhs"
       const lpaMatch = answer.match(/^₹?\s*(?:rs\.?)?\s*(\d+(?:,\d+)*(?:\.\d+)?)\s*(?:lpa|lakhs?|lacs?|l)\b/i);
       if (lpaMatch) {
         const num = parseFloat(lpaMatch[1].replace(/,/g, ''));
-        const finalVal = expectsLPA ? String(num) : String(Math.round(num * 100000));
+        const inrVal = Math.round(num * 100000);
+        if (expectsMonthly) {
+          const monthly = Math.round(inrVal / 12);
+          return { valid: true, value: String(monthly), wasConverted: true };
+        }
+        const finalVal = expectsLPA ? String(num) : String(inrVal);
         return { valid: true, value: finalVal, wasConverted: true };
       }
 
@@ -294,7 +309,11 @@ export function validateAnswerForField(
       const cleanedNum = answer.replace(/[₹$,\s]|(?:rs\.?)|(?:inr)/gi, '');
       const parsed = parseFloat(cleanedNum);
       if (!isNaN(parsed) && /^\d+(?:\.\d+)?$/.test(cleanedNum)) {
-        if (expectsLPA) {
+        if (expectsMonthly) {
+          const inr = parsed <= 100 ? Math.round(parsed * 100000) : Math.round(parsed);
+          const monthly = inr >= 12000 ? Math.round(inr / 12) : inr;
+          return { valid: true, value: String(monthly), wasConverted: true };
+        } else if (expectsLPA) {
           const lpa = parsed > 100 ? parsed / 100000 : parsed;
           return { valid: true, value: String(lpa), wasConverted: true };
         } else {
@@ -308,7 +327,11 @@ export function validateAnswerForField(
       if (firstNum) {
         const parsedRange = parseFloat(firstNum[1].replace(/,/g, ''));
         if (!isNaN(parsedRange) && parsedRange > 0) {
-          if (expectsLPA) {
+          if (expectsMonthly) {
+            const inr = parsedRange <= 100 ? Math.round(parsedRange * 100000) : Math.round(parsedRange);
+            const monthly = inr >= 12000 ? Math.round(inr / 12) : inr;
+            return { valid: true, value: String(monthly), wasConverted: true };
+          } else if (expectsLPA) {
             const lpa = parsedRange > 100 ? parsedRange / 100000 : parsedRange;
             return { valid: true, value: String(lpa), wasConverted: true };
           } else {

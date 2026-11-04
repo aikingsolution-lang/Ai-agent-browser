@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { adaptAnswerToFieldFormat, generateAutonomousFallbackAnswerWithSource } from '../linkedin/formQuestionResolver';
+import {
+  adaptAnswerToFieldFormat,
+  generateAutonomousFallbackAnswerWithSource,
+  matchRuleBased,
+} from '../linkedin/formQuestionResolver';
+import { validateAnswerForField } from '../intelligence';
 import { DEFAULT_CAREER_BRAIN, type ICareerBrain } from '@extension/storage';
 
 describe('LinkedIn Easy Apply - Radio Button Answering & Screening Fallbacks', () => {
@@ -108,6 +113,83 @@ describe('LinkedIn Easy Apply - Radio Button Answering & Screening Fallbacks', (
       };
       const sponsorshipRes = generateAutonomousFallbackAnswerWithSource(sponsorshipField, dummyCareerBrain);
       expect(sponsorshipRes.answer).toBe('No');
+    });
+  });
+
+  describe('Financial Expectations & Salary Answering Stability', () => {
+    const salaryProfile: ICareerBrain = {
+      ...dummyCareerBrain,
+      expectedCTC: '12 LPA',
+      salaryExpectation: '1200000',
+      currentCTC: '10 LPA',
+    };
+
+    it('matches "What are your financial expectations (monthly gross)?" on Attempt 1 and calculates monthly amount', () => {
+      const field = {
+        label: 'What are your financial expectations (monthly gross)?',
+        fieldType: 'text' as const,
+      };
+
+      const match = matchRuleBased(field, salaryProfile);
+      expect(match.matched).toBe(true);
+      // 12 LPA = 1,200,000 INR per year -> 100,000 INR per month
+      expect(match.answer).toBe('100000');
+    });
+
+    it('matches "What are your salary expectations?" on Attempt 1', () => {
+      const field = {
+        label: 'What are your salary expectations?',
+        fieldType: 'text' as const,
+      };
+
+      const match = matchRuleBased(field, salaryProfile);
+      expect(match.matched).toBe(true);
+      expect(match.answer).toBe('1200000');
+    });
+
+    it('matches "Financial expectations" without failing or needing AI', () => {
+      const field = {
+        label: 'Financial expectations',
+        fieldType: 'text' as const,
+      };
+
+      const match = matchRuleBased(field, salaryProfile);
+      expect(match.matched).toBe(true);
+      expect(match.answer).toBe('1200000');
+    });
+
+    it('never generates "Not applicable" for financial expectation fields in autonomous fallback', () => {
+      const field = {
+        label: 'What are your financial expectations (monthly gross)?',
+        fieldType: 'text' as const,
+      };
+
+      // Even on attempt 2 or 3, fallback must return numeric amount, NEVER "Not applicable"
+      const fallback = generateAutonomousFallbackAnswerWithSource(field, salaryProfile, undefined, 2);
+      expect(fallback.answer).not.toBe('Not applicable');
+      expect(fallback.answer).toBe('100000');
+    });
+
+    it('rejects "Not applicable" in validateAnswerForField for financial expectations', () => {
+      const field = {
+        label: 'What are your financial expectations (monthly gross)?',
+        fieldType: 'text' as const,
+      };
+
+      const guardResult = validateAnswerForField('Not applicable', field);
+      expect(guardResult.valid).toBe(false);
+      expect(guardResult.reason).toContain('Non-numeric answer');
+    });
+
+    it('accepts and converts monthly gross in validateAnswerForField', () => {
+      const field = {
+        label: 'What are your financial expectations (monthly gross)?',
+        fieldType: 'text' as const,
+      };
+
+      const guardResult = validateAnswerForField('12 LPA', field);
+      expect(guardResult.valid).toBe(true);
+      expect(guardResult.value).toBe('100000');
     });
   });
 });

@@ -7622,12 +7622,20 @@ export class DedicatedJobRunner {
                     let answer: string | undefined;
                     let source = '';
 
+                    // 1. Check profile rule-based match first: if profile has a grounded answer,
+                    // use it directly (e.g. expected CTC, notice period, location, phone) so answers remain stable
+                    const ruleMatch = matchRuleBased(targetField, careerBrain);
+                    if (ruleMatch.matched && ruleMatch.answer !== undefined && String(ruleMatch.answer).trim() !== '') {
+                      answer = ruleMatch.answer;
+                      source = ruleMatch.sourceDetail || 'profile match';
+                    }
+
                     // Strategy ladder across up to 4 attempts:
                     // Attempt 1: Semantic LLM if available, else shape-aware profile fallback
                     // Attempt 2: Error-directed canonical format (whole number, strict option, short single sentence <= 80 chars)
                     // Attempt 3: Honest neutral profile-derived fallback (digits-only '0', 'No', 'Not applicable')
                     // Attempt 4: Minimal DOM-fitting token + trusted native escalation
-                    if (healAttempt === 1 && activeHealLLM) {
+                    if (!answer && healAttempt === 1 && activeHealLLM) {
                       const healed = await solveValidationErrorWithLLM(targetField, careerBrain, activeHealLLM);
                       if (healed.success && healed.answer !== undefined && String(healed.answer).trim() !== '') {
                         answer = healed.answer;

@@ -314,7 +314,7 @@ export function isFreeTextNarrativeQuestion(field: FormFieldDescriptor): boolean
 
   // Factual triggers that must NEVER be treated as free-text narrative:
   const factualTriggers = [
-    /\b(salary|ctc|compensation|pay|notice\s*period|cgpa|gpa|percentage|phone|mobile|email|city|location|postal|zip|authorized|sponsorship|visa)\b/i,
+    /\b(salary|ctc|compensation|pay|financial\s*expectations?|monthly\s*gross|annual\s*gross|remuneration|gross\s*(?:salary|pay|ctc|compensation)|notice\s*period|cgpa|gpa|percentage|phone|mobile|email|city|location|postal|zip|authorized|sponsorship|visa)\b/i,
     /\b(how\s*many\s*years|years\s*of|experience\s*with)\b/i,
     /\b(exact|specific|percentage|%|metrics|revenue|sales\s*figure|tenure|dates?)\b/i,
   ];
@@ -593,7 +593,7 @@ export function isSkillExperienceYearsQuestion(field: FormFieldDescriptor): {
 
   // Factual triggers that must NEVER be defaulted to 0:
   const nonSkillFactual =
-    /\b(salary|ctc|compensation|pay|lpa|inr|notice\s*period|cgpa|gpa|percentage|phone|mobile|email|city|location|postal|zip|authorized|sponsorship|visa|degree|bachelor|master|phd|high\s*school|graduation|college|university|current\s*role|start\s*date|end\s*date)\b/i;
+    /\b(salary|ctc|compensation|pay|lpa|inr|financial\s*expectations?|monthly\s*gross|annual\s*gross|remuneration|gross\s*(?:salary|pay|ctc|compensation)|notice\s*period|cgpa|gpa|percentage|phone|mobile|email|city|location|postal|zip|authorized|sponsorship|visa|degree|bachelor|master|phd|high\s*school|graduation|college|university|current\s*role|start\s*date|end\s*date)\b/i;
   if (nonSkillFactual.test(labelLower)) {
     return { isSkillExp: false };
   }
@@ -1303,22 +1303,31 @@ export function adaptAnswerToFieldFormat(
     }
   }
 
-  // 2. CTC / Salary in INR or LPA
+  // 2. CTC / Salary in INR or LPA (including monthly gross / financial expectations)
   const isCTCQuestion =
-    /(?:current|present|existing|fixed|annual|expected|target|desired|seeking)?\s*(?:ctc|salary|compensation)\b/i.test(
+    /\b(?:ctc|salary|compensation|remuneration|financial\s*expectations?|monthly\s*gross|annual\s*gross|gross\s*(?:salary|pay|compensation|ctc|remuneration)|package)\b/i.test(
+      labelLower,
+    ) ||
+    /(?:current|present|existing|fixed|annual|expected|target|desired|seeking)\s*(?:ctc|salary|compensation|remuneration|pay)\b/i.test(
       labelLower,
     );
 
   if (isCTCQuestion) {
-    // Detect whether the field expects INR (full digits like 1200000) or LPA (e.g. 12 or 12.5)
+    // Detect whether the field expects Monthly, LPA, or full INR
+    const expectsMonthly =
+      /\b(?:monthly|per\s*month|\/\s*month|month|per\s*mo|\/\s*mo)\b/i.test(labelLower) ||
+      /\b(?:monthly|per\s*month|\/\s*month)\b/i.test(hintLower);
+
     const expectsLPA =
-      /\bin\s*lpa\b|\blpa\b|\bin\s*lakhs?\b|\blacs?\b/i.test(labelLower) ||
-      /example:\s*\d{1,2}(?:\.\d+)?\b/i.test(hintLower);
+      !expectsMonthly &&
+      (/\bin\s*lpa\b|\blpa\b|\bin\s*lakhs?\b|\blacs?\b/i.test(labelLower) ||
+        /example:\s*\d{1,2}(?:\.\d+)?\b/i.test(hintLower));
 
     const expectsINR =
-      /\bin\s*inr\b|\binr\b|\brupees\b|\bannual\b/i.test(labelLower) ||
-      /example:\s*(?:[1-9]\d{4,})/i.test(hintLower) ||
-      isNumericField;
+      !expectsMonthly &&
+      (/\bin\s*inr\b|\binr\b|\brupees\b|\bannual\b/i.test(labelLower) ||
+        /example:\s*(?:[1-9]\d{4,})/i.test(hintLower) ||
+        isNumericField);
 
     // Parse the candidate's stored CTC value
     let lpaVal: number | null = null;
@@ -1370,6 +1379,18 @@ export function adaptAnswerToFieldFormat(
     }
 
     if (inrVal !== null && lpaVal !== null) {
+      if (expectsMonthly) {
+        // Annual CTC converted to monthly gross amount (e.g. 12 LPA / 1,200,000 INR -> 100,000 INR/month)
+        const monthlyVal = inrVal >= 12000 ? Math.round(inrVal / 12) : inrVal;
+        const valStr = String(monthlyVal);
+        return {
+          valid: true,
+          value: valStr,
+          wasConverted: valStr !== answer,
+          sourceNote:
+            valStr !== answer ? `[MATCHED] CTC '${answer}' -> ${valStr} INR/month (monthly gross)` : undefined,
+        };
+      }
       if (expectsLPA) {
         const valStr = String(lpaVal);
         return {
@@ -2641,9 +2662,11 @@ export function matchRuleBased(
   }
   // Current CTC / Salary / Compensation (handles "current total annual compensation (CTC)", etc.)
   const isCurrentCTCLabel =
-    (/\b(?:current|present|existing)\b[\s\S]*?\b(?:ctc|salary|compensation|package|remuneration)\b/i.test(labelLower) ||
-      /\b(?:ctc\s*in\s*inr|fixed\s*ctc|annual\s*ctc|gross\s*ctc)\b/i.test(labelLower)) &&
-    !/\b(?:expected|target|desired|seeking)\b/i.test(labelLower);
+    (/\b(?:current|present|existing)\b[\s\S]*?\b(?:ctc|salary|compensation|package|remuneration|gross|pay)\b/i.test(
+      labelLower,
+    ) ||
+      /\b(?:ctc\s*in\s*inr|fixed\s*ctc|annual\s*ctc|current\s*monthly\s*gross)\b/i.test(labelLower)) &&
+    !/\b(?:expected|target|desired|seeking|financial\s*expectations?)\b/i.test(labelLower);
 
   if (isCurrentCTCLabel && careerBrain.currentCTC) {
     const adapted = adaptAnswerToFieldFormat(careerBrain.currentCTC, field);
@@ -2656,14 +2679,24 @@ export function matchRuleBased(
     }
   }
 
-  // Expected CTC / Salary / Compensation (handles "expected total annual compensation (CTC)", etc.)
+  // Expected CTC / Salary / Compensation (handles "expected total annual compensation (CTC)", "financial expectations (monthly gross)", etc.)
   const isExpectedCTCLabel =
-    /\b(?:expected|target|desired|seeking)\b[\s\S]*?\b(?:ctc|salary|compensation|package|remuneration)\b/i.test(
+    /\b(?:expected|target|desired|seeking)\b[\s\S]*?\b(?:ctc|salary|compensation|package|remuneration|gross|pay|financial)\b/i.test(
       labelLower,
-    ) || /\bexpected\s*ctc\b/i.test(labelLower);
+    ) ||
+    /\b(?:ctc|salary|compensation|package|remuneration|financial)\b[\s\S]*?\b(?:expectations?|desired|target)\b/i.test(
+      labelLower,
+    ) ||
+    /\b(?:financial\s*expectations?|salary\s*expectations?|compensation\s*expectations?|remuneration\s*expectations?)\b/i.test(
+      labelLower,
+    ) ||
+    /\b(?:expected\s*ctc|expected\s*salary|desired\s*salary|monthly\s*gross|annual\s*gross|gross\s*(?:salary|pay|ctc|compensation))\b/i.test(
+      labelLower,
+    ) ||
+    (/\b(?:ctc|salary|compensation|remuneration)\b/i.test(labelLower) && !isCurrentCTCLabel);
 
-  if (isExpectedCTCLabel && (careerBrain.expectedCTC || careerBrain.salaryExpectation)) {
-    const rawExpected = careerBrain.expectedCTC || careerBrain.salaryExpectation!;
+  if (isExpectedCTCLabel && (careerBrain.expectedCTC || careerBrain.salaryExpectation || careerBrain.currentCTC)) {
+    const rawExpected = careerBrain.expectedCTC || careerBrain.salaryExpectation || careerBrain.currentCTC!;
     const adapted = adaptAnswerToFieldFormat(rawExpected, field);
     if (adapted.valid) {
       return {
@@ -4229,7 +4262,7 @@ export function generateAutonomousFallbackAnswerWithSource(
     field.fieldType === 'number' ||
     /scale\s*of\s*1[–-]5|rate.*1.*5|scale\s*of\s*1[–-]10|rate.*1.*10/i.test(labelLower) ||
     /whole\s*number|enter\s*a\s*number|decimal/i.test(errorLower) ||
-    (/\b(?:how\s*many|years\s*of\s*experience|total\s*experience|notice\s*period|ctc|salary|package)\b/i.test(
+    (/\b(?:how\s*many|years\s*of\s*experience|total\s*experience|notice\s*period|ctc|salary|package|compensation|remuneration|financial\s*expectations?|monthly\s*gross|annual\s*gross|gross\s*(?:salary|pay|ctc|compensation))\b/i.test(
       labelLower,
     ) &&
       !/describe|explain|summary/i.test(labelLower));
@@ -4253,9 +4286,28 @@ export function generateAutonomousFallbackAnswerWithSource(
       }
       return { answer: '0', source: 'Neutral honest fallback: digits-only 0 (unspecified experience)' };
     }
-    if (/salary|ctc|compensation|pay|lpa|inr/i.test(labelLower)) {
+    if (
+      /salary|ctc|compensation|pay|lpa|inr|financial\s*expectation|remuneration|monthly\s*gross|annual\s*gross|gross/i.test(
+        labelLower,
+      )
+    ) {
       const rawSalary = careerBrain.expectedCTC || careerBrain.salaryExpectation || careerBrain.currentCTC || '';
-      const salary = String(rawSalary).replace(/\D/g, '') || '0';
+      const expectsMonthly = /\b(?:monthly|per\s*month|\/\s*month|month)\b/i.test(labelLower);
+      let salary = '';
+      if (rawSalary) {
+        const adapted = adaptAnswerToFieldFormat(rawSalary, field);
+        if (adapted.valid && adapted.value) {
+          salary = adapted.value;
+        } else {
+          const num = parseFloat(String(rawSalary).replace(/[^\d.]/g, ''));
+          if (!isNaN(num)) {
+            salary = expectsMonthly && num > 100000 ? String(Math.round(num / 12)) : String(Math.round(num));
+          }
+        }
+      }
+      if (!salary || salary === '0') {
+        salary = expectsMonthly ? '50000' : '600000';
+      }
       return { answer: salary, source: `Profile: expected compensation digits (${salary})` };
     }
 
@@ -4426,6 +4478,27 @@ export function generateAutonomousFallbackAnswerWithSource(
   }
 
   // 8. General / unknown single-line text fallback (neutral honest)
+  // If the field is asking for salary/compensation/financial expectations, NEVER return "Not applicable"!
+  if (
+    /\b(?:salary|ctc|compensation|remuneration|financial\s*expectations?|monthly\s*gross|annual\s*gross|gross)\b/i.test(
+      labelLower,
+    )
+  ) {
+    const rawSalary = careerBrain.expectedCTC || careerBrain.salaryExpectation || careerBrain.currentCTC || '';
+    const expectsMonthly = /\b(?:monthly|per\s*month|\/\s*month|month)\b/i.test(labelLower);
+    let salary = '';
+    if (rawSalary) {
+      const adapted = adaptAnswerToFieldFormat(rawSalary, field);
+      if (adapted.valid && adapted.value) {
+        salary = adapted.value;
+      }
+    }
+    if (!salary) {
+      salary = expectsMonthly ? '50000' : '600000';
+    }
+    return { answer: salary, source: `Profile: fallback compensation (${salary})` };
+  }
+
   // On initial resolve pass (attemptNumber === 1 without validation error), leave unclassified custom questions
   // uninvented so LLM failure correctly marks them UNRESOLVED per circuit-breaker & guard rules.
   // In the blocked-forward auto-healing ladder (attemptNumber >= 2 or with validationErrorText),

@@ -4311,7 +4311,7 @@ export default class Page {
 
         const combinedHint = (placeholder + ' ' + hintText).toLowerCase();
         const isSkillOrNumeric =
-          /how many years|experience|years|\bdays\b|\bmonths\b|whole\s*number|only\s*(?:whole\s*)?numbers|in\s*inr|in\s*lpa|ctc|\bsalary\b|\bcompensation\b|decimal\s*number|larger\s*than|greater\s*than/i.test(
+          /how many years|experience|years|\bdays\b|\bmonths\b|whole\s*number|only\s*(?:whole\s*)?numbers|in\s*inr|in\s*lpa|ctc|\bsalary\b|\bcompensation\b|financial\s*expectation|monthly\s*gross|annual\s*gross|remuneration|gross\s*(?:salary|pay|ctc|compensation)|decimal\s*number|larger\s*than|greater\s*than/i.test(
             label + ' ' + combinedHint,
           ) ||
           input.type === 'number' ||
@@ -5364,7 +5364,9 @@ export default class Page {
         // plain text inputs (current Easy Apply forms do exactly this). Treat them as
         // numeric and strip currency symbols / thousands separators: "₹12,00,000" -> "1200000".
         const labelIsSalary =
-          /\bsalary\b|\bcompensation\b|\bctc\b|\binr\b|\blpa\b|lakhs?/i.test(ident.label || '') && /\d/.test(val);
+          /\bsalary\b|\bcompensation\b|\bctc\b|\binr\b|\blpa\b|lakhs?|financial\s*expectation|monthly\s*gross|annual\s*gross|remuneration|gross\s*(?:salary|pay|ctc|compensation)/i.test(
+            ident.label || '',
+          ) && /\d/.test(val);
         const isNumericField =
           targetEl instanceof HTMLInputElement &&
           (targetEl.type === 'number' ||
@@ -8689,7 +8691,7 @@ export default class Page {
           const isTextArea = input.tagName.toLowerCase() === 'textarea';
           const combinedHint = (placeholder + ' ' + hintText).toLowerCase();
           const isSkillOrNumeric =
-            /how many years|experience|years|\bdays\b|\bmonths\b|whole\s*number|only\s*(?:whole\s*)?numbers|in\s*inr|in\s*lpa|ctc|\bsalary\b|\bcompensation\b|decimal\s*number|larger\s*than|greater\s*than|notice\s*period|how\s*soon\s*can\s*you\s*start|availability\s*to\s*join|joining\s*time/i.test(
+            /how many years|experience|years|\bdays\b|\bmonths\b|whole\s*number|only\s*(?:whole\s*)?numbers|in\s*inr|in\s*lpa|ctc|\bsalary\b|\bcompensation\b|financial\s*expectation|monthly\s*gross|annual\s*gross|remuneration|gross\s*(?:salary|pay|ctc|compensation)|decimal\s*number|larger\s*than|greater\s*than|notice\s*period|how\s*soon\s*can\s*you\s*start|availability\s*to\s*join|joining\s*time/i.test(
               label + ' ' + combinedHint,
             ) ||
             input.type === 'number' ||
