@@ -4923,6 +4923,31 @@ export default class Page {
           return '';
         }
 
+        const matchesOptionSafe = (optionText: string, targetValue: string): boolean => {
+          if (!optionText || !targetValue) return false;
+          if (optionText === targetValue) return true;
+          const cleanOpt = optionText
+            .replace(/[^\w\s]/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .toLowerCase();
+          const cleanTgt = targetValue
+            .replace(/[^\w\s]/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .toLowerCase();
+          if (cleanOpt === cleanTgt) return true;
+          if (cleanTgt.length >= 4) {
+            const rxTgt = new RegExp(`(?:^|\\s)${cleanTgt.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:\\s|$)`, 'i');
+            if (rxTgt.test(cleanOpt)) return true;
+          }
+          if (cleanOpt.length >= 4) {
+            const rxOpt = new RegExp(`(?:^|\\s)${cleanOpt.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:\\s|$)`, 'i');
+            if (rxOpt.test(cleanTgt)) return true;
+          }
+          return false;
+        };
+
         const fieldsets = Array.from(
           modal.querySelectorAll(
             'fieldset, div[role="radiogroup"], div[role="group"], div.fb-dash-form-element, div[data-test-form-element]',
@@ -4941,6 +4966,7 @@ export default class Page {
             const checkboxes = Array.from(fs.querySelectorAll('input[type="checkbox"]')) as HTMLInputElement[];
             const items = radios.length > 0 ? radios : checkboxes;
             const normVal = val.toLowerCase().trim();
+
             // Accept sentence-style answers ("Yes, I have worked with X", "No, not interested")
             // by matching the leading affirmative/negative token instead of requiring an
             // exact answer match.
@@ -4973,12 +4999,9 @@ export default class Page {
                 matched = true;
               } else if (isTargetNo && (/\bno\b/i.test(rawLblText) || /^(false|0|no|n)$/i.test(rawVal))) {
                 matched = true;
-              } else if (
-                rawLblText &&
-                (rawLblText === normVal || rawLblText.includes(normVal) || normVal.includes(rawLblText))
-              ) {
+              } else if (rawLblText && matchesOptionSafe(rawLblText, normVal)) {
                 matched = true;
-              } else if (rawVal && (rawVal === normVal || rawVal.includes(normVal) || normVal.includes(rawVal))) {
+              } else if (rawVal && matchesOptionSafe(rawVal, normVal)) {
                 matched = true;
               }
 
@@ -5032,9 +5055,9 @@ export default class Page {
                   matched = true;
                 } else if (isTargetNo && /\bno\b/i.test(bTxt)) {
                   matched = true;
-                } else if (bTxt && (bTxt === normVal || bTxt.includes(normVal) || normVal.includes(bTxt))) {
+                } else if (bTxt && matchesOptionSafe(bTxt, normVal)) {
                   matched = true;
-                } else if (bVal && (bVal === normVal || bVal.includes(normVal) || normVal.includes(bVal))) {
+                } else if (bVal && matchesOptionSafe(bVal, normVal)) {
                   matched = true;
                 }
                 if (matched) {
@@ -5091,12 +5114,9 @@ export default class Page {
                 matched = true;
               } else if (isTargetNo && (/\bno\b/i.test(rawLblText) || /^(false|0|no|n)$/i.test(rawVal))) {
                 matched = true;
-              } else if (
-                rawLblText &&
-                (rawLblText === normVal || rawLblText.includes(normVal) || normVal.includes(rawLblText))
-              ) {
+              } else if (rawLblText && matchesOptionSafe(rawLblText, normVal)) {
                 matched = true;
-              } else if (rawVal && (rawVal === normVal || rawVal.includes(normVal) || normVal.includes(rawVal))) {
+              } else if (rawVal && matchesOptionSafe(rawVal, normVal)) {
                 matched = true;
               }
 
@@ -5227,12 +5247,14 @@ export default class Page {
             selOk = isSelectedState();
           }
         }
+        const isAriaRadio = targetEl.getAttribute('role') === 'radio';
         return {
           ok: selOk,
           targetFound: true,
           isTextField: false,
           typeaheadUnresolved: false,
-          isButtonOption: true,
+          isButtonOption: !isAriaRadio,
+          isRadioOption: isAriaRadio,
         };
       }
 
@@ -6080,6 +6102,15 @@ export default class Page {
             if (direct && direct.type === 'radio') return direct.checked;
             const nested = el.querySelector('input[type="radio"]') as HTMLInputElement | null;
             if (nested) return nested.checked;
+            if (el.getAttribute('role') === 'radio') {
+              return el.getAttribute('aria-checked') === 'true' || el.getAttribute('aria-pressed') === 'true';
+            }
+            const nestedAria = el.querySelector('[role="radio"]');
+            if (nestedAria) {
+              return (
+                nestedAria.getAttribute('aria-checked') === 'true' || nestedAria.getAttribute('aria-pressed') === 'true'
+              );
+            }
             const labelFor = el.getAttribute('for') || (el as HTMLLabelElement).htmlFor;
             if (labelFor) {
               try {
@@ -8295,38 +8326,52 @@ export default class Page {
           const legendText = extractStructuralFieldLabel(modal, fs);
           if (!legendText || isGenericPlaceholderText(legendText)) continue;
 
-          const anyChecked = radios.some(r => r.checked);
-          if (!anyChecked) {
-            const options = radios
-              .map(r => {
-                const rId = r.getAttribute('id');
-                const rLbl = rId ? fs.querySelector(`label[for="${rId}"]`) : null;
-                return cleanElementText(rLbl) || (r.value || '').trim();
-              })
-              .filter(Boolean);
+          const options = radios
+            .map(r => {
+              const rId = r.getAttribute('id');
+              let rLbl = rId ? fs.querySelector(`label[for="${CSS.escape(rId)}"]`) : null;
+              if (!rLbl) {
+                rLbl = r.closest('label') || (r.parentElement?.querySelector('label') as HTMLElement | null);
+              }
+              return cleanElementText(rLbl) || (r.value || '').trim();
+            })
+            .filter(Boolean);
 
-            let hintText = '';
-            const hintEl = fs.querySelector(
-              '.fb-dash-form-element__hint, .artdeco-text-input--hint, span.t-12, [id*="hint"], [data-test-form-element-hint]',
-            );
-            if (hintEl) hintText = cleanElementText(hintEl);
-
-            const isExplicitlyOptional =
-              /\boptional\b/i.test(legendText) ||
-              Boolean(
-                fs.querySelector(
-                  '.fb-dash-form-element__label-title--optional, [data-test-form-element-optional], .artdeco-form__label--optional',
-                ) || fs.closest('.fb-dash-form-element--optional, [data-test-form-element-optional]'),
-              );
-
-            descriptors.push({
-              label: legendText,
-              fieldType: 'radio',
-              options,
-              hintText: hintText || undefined,
-              required: !isExplicitlyOptional,
-            });
+          const checkedRadio = radios.find(r => r.checked);
+          let checkedValue = '';
+          if (checkedRadio) {
+            const rId = checkedRadio.getAttribute('id');
+            let rLbl = rId ? fs.querySelector(`label[for="${CSS.escape(rId)}"]`) : null;
+            if (!rLbl) {
+              rLbl =
+                checkedRadio.closest('label') ||
+                (checkedRadio.parentElement?.querySelector('label') as HTMLElement | null);
+            }
+            checkedValue = cleanElementText(rLbl) || (checkedRadio.value || '').trim();
           }
+
+          let hintText = '';
+          const hintEl = fs.querySelector(
+            '.fb-dash-form-element__hint, .artdeco-text-input--hint, span.t-12, [id*="hint"], [data-test-form-element-hint]',
+          );
+          if (hintEl) hintText = cleanElementText(hintEl);
+
+          const isExplicitlyOptional =
+            /\boptional\b/i.test(legendText) ||
+            Boolean(
+              fs.querySelector(
+                '.fb-dash-form-element__label-title--optional, [data-test-form-element-optional], .artdeco-form__label--optional',
+              ) || fs.closest('.fb-dash-form-element--optional, [data-test-form-element-optional]'),
+            );
+
+          descriptors.push({
+            label: legendText,
+            fieldType: 'radio',
+            options,
+            currentValue: checkedValue,
+            hintText: hintText || undefined,
+            required: !isExplicitlyOptional,
+          });
         } else if (checkboxes.length > 0) {
           const legendText = extractStructuralFieldLabel(modal, fs);
           if (!legendText || isGenericPlaceholderText(legendText)) continue;
@@ -8355,6 +8400,38 @@ export default class Page {
               options,
               required: !isExplicitlyOptional,
             });
+          }
+        } else {
+          // Check for custom ARIA radio buttons (role="radio") without native input[type="radio"]
+          const ariaRadios = (Array.from(fs.querySelectorAll('[role="radio"]')) as HTMLElement[]).filter(
+            el => !(el instanceof HTMLInputElement && el.type === 'radio'),
+          );
+
+          if (ariaRadios.length > 0) {
+            const legendText = extractStructuralFieldLabel(modal, fs);
+            if (legendText && !isGenericPlaceholderText(legendText)) {
+              const options = ariaRadios
+                .map(r => cleanElementText(r) || r.getAttribute('aria-label') || (r.getAttribute('value') || '').trim())
+                .filter(Boolean);
+
+              const checkedAria = ariaRadios.find(
+                r =>
+                  r.getAttribute('aria-checked') === 'true' ||
+                  r.getAttribute('aria-pressed') === 'true' ||
+                  r.getAttribute('aria-selected') === 'true',
+              );
+              const checkedValue = checkedAria
+                ? cleanElementText(checkedAria) || checkedAria.getAttribute('aria-label') || ''
+                : '';
+
+              descriptors.push({
+                label: legendText,
+                fieldType: 'radio',
+                options,
+                currentValue: checkedValue,
+                required: !/\boptional\b/i.test(legendText),
+              });
+            }
           }
         }
       }
@@ -8392,6 +8469,76 @@ export default class Page {
           options: ['Yes', 'No'],
           required: isRequired,
         });
+      }
+
+      // 1c. Standalone radio buttons outside fieldsets (grouped by name or container)
+      const standaloneRadios = (Array.from(modal.querySelectorAll('input[type="radio"]')) as HTMLInputElement[]).filter(
+        r => !r.closest('fieldset, div[role="radiogroup"], div[role="group"]'),
+      );
+      if (standaloneRadios.length > 0) {
+        const unhandledRadiosByName = new Map<string, HTMLInputElement[]>();
+        for (const r of standaloneRadios) {
+          const name = r.name || `_orphan_radio_${r.id || Math.random().toString(36).slice(2, 7)}`;
+          if (!unhandledRadiosByName.has(name)) {
+            unhandledRadiosByName.set(name, []);
+          }
+          unhandledRadiosByName.get(name)!.push(r);
+        }
+
+        for (const [, radioGroup] of unhandledRadiosByName.entries()) {
+          if (radioGroup.length === 0) continue;
+          let questionLabel = '';
+          const commonParent = radioGroup[0].closest(
+            '.fb-dash-form-element, div[data-test-form-element], div[class*="form-element"], div[class*="question"]',
+          );
+          if (commonParent) {
+            questionLabel = extractStructuralFieldLabel(modal, commonParent as HTMLElement);
+          }
+          if (!questionLabel) {
+            questionLabel = labelFromIdRefs(modal, radioGroup[0]);
+          }
+          if (!questionLabel) {
+            const ariaLabel = radioGroup[0].getAttribute('aria-label');
+            if (ariaLabel) questionLabel = cleanDuplicateString(ariaLabel);
+          }
+          if (!questionLabel || isGenericPlaceholderText(questionLabel)) continue;
+
+          const options = radioGroup
+            .map(r => {
+              const rId = r.getAttribute('id');
+              let rLbl = rId ? modal.querySelector(`label[for="${CSS.escape(rId)}"]`) : null;
+              if (!rLbl) {
+                rLbl = r.closest('label') || (r.parentElement?.querySelector('label') as HTMLElement | null);
+              }
+              return cleanElementText(rLbl) || (r.value || '').trim();
+            })
+            .filter(Boolean);
+
+          const checkedRadio = radioGroup.find(r => r.checked);
+          let checkedValue = '';
+          if (checkedRadio) {
+            const rId = checkedRadio.getAttribute('id');
+            let rLbl = rId ? modal.querySelector(`label[for="${CSS.escape(rId)}"]`) : null;
+            if (!rLbl) {
+              rLbl =
+                checkedRadio.closest('label') ||
+                (checkedRadio.parentElement?.querySelector('label') as HTMLElement | null);
+            }
+            checkedValue = cleanElementText(rLbl) || (checkedRadio.value || '').trim();
+          }
+
+          const isRequired =
+            radioGroup.some(r => r.required || r.getAttribute('aria-required') === 'true') ||
+            !/\boptional\b/i.test(questionLabel);
+
+          descriptors.push({
+            label: questionLabel,
+            fieldType: 'radio',
+            options,
+            currentValue: checkedValue,
+            required: isRequired,
+          });
+        }
       }
 
       // 2. Selects / Dropdowns
@@ -10708,6 +10855,7 @@ export interface FormFieldDescriptor {
   placeholder?: string;
   hintText?: string;
   required?: boolean;
+  currentValue?: string;
 }
 
 export interface SearchJobCard {

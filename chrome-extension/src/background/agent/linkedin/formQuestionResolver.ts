@@ -27,6 +27,13 @@ import {
   areQuestionsSemanticallyEquivalent,
   findBestMatchingGoldenAnswer,
 } from '@extension/storage';
+import {
+  sessionAnswerStore,
+  computeQuestionFingerprint,
+  normalizeQuestionText,
+  type AnswerSource,
+  type AnswerConfidence,
+} from '../sessionAnswerStore';
 import { isValidSkillName } from '@extension/shared';
 import { createLogger } from '../../log';
 import { userQuestionManager } from './userQuestionManager';
@@ -95,6 +102,7 @@ export interface FormFieldDescriptor {
   placeholder?: string;
   hintText?: string;
   required?: boolean;
+  currentValue?: string;
 }
 
 export interface QuestionResolutionResult {
@@ -3487,7 +3495,13 @@ export async function solveQuestionAutonomousWithLLM(
   field: FormFieldDescriptor,
   careerBrain: ICareerBrain,
   llm?: BaseChatModel,
-): Promise<{ success: boolean; answer?: string; reason?: string }> {
+): Promise<{
+  success: boolean;
+  answer?: string;
+  reason?: string;
+  confidence?: AnswerConfidence;
+  missingInfo?: string;
+}> {
   const cleanLabel = cleanLinkedInText(field.label || '');
   if (!cleanLabel || isGenericFieldLabel(cleanLabel)) {
     return { success: false, reason: 'Field has no real question text (unresolvable generic or empty label)' };
@@ -3717,8 +3731,10 @@ DECISION RULES:
 
 OUTPUT STRICTLY VALID JSON ONLY:
 {
-  "answer": "the exact string value to fill into this field",
-  "reason": "brief explanation of why this answer was chosen"
+  "answer": "the exact string value to fill into this field (or 'UNKNOWN' if no verified candidate facts)",
+  "confidence": "HIGH" | "MEDIUM" | "LOW" | "UNKNOWN",
+  "reason": "brief explanation grounded strictly in the candidate background above",
+  "missingInfo": "optional description if information is missing or unverified"
 }`;
 
   try {
@@ -3732,61 +3748,106 @@ OUTPUT STRICTLY VALID JSON ONLY:
     const match = clean.match(/\{[\s\S]*\}/);
     if (match) {
       const parsed = JSON.parse(match[0]);
-      if (parsed.answer !== undefined && parsed.answer !== null && String(parsed.answer).trim() !== '') {
-        let ans = String(parsed.answer).trim();
+      const rawAns = parsed.answer !== undefined && parsed.answer !== null ? String(parsed.answer).trim() : '';
+      const confidence: AnswerConfidence =
+        parsed.confidence === 'HIGH' || parsed.confidence === 'MEDIUM' || parsed.confidence === 'LOW'
+          ? parsed.confidence
+          : 'MEDIUM';
+      const reason = parsed.reason || 'Autonomous LLM determination';
+      const missingInfo = parsed.missingInfo;
 
-        // If field has options, ensure ans matches one of the options
-        if (field.options && field.options.length > 0) {
-          const validOptions = field.options.filter(o => !/select\s*an\s*option|choose|select\.\.\./i.test(o.trim()));
-          const exactMatch = validOptions.find(o => o.toLowerCase().trim() === ans.toLowerCase().trim());
-          if (exactMatch) {
-            ans = exactMatch;
-          } else {
-            const partialMatch = validOptions.find(
-              o => o.toLowerCase().includes(ans.toLowerCase()) || ans.toLowerCase().includes(o.toLowerCase()),
-            );
-            if (partialMatch) {
-              ans = partialMatch;
-            } else if (/^(yes|true|agree)$/i.test(ans)) {
-              ans = validOptions.find(o => /^(yes|agree)$/i.test(o.trim())) || validOptions[0];
-            } else if (/^(no|false)$/i.test(ans)) {
-              ans = validOptions.find(o => /^no$/i.test(o.trim())) || validOptions[0];
-            } else {
-              ans = validOptions[0];
-            }
-          }
-        }
-
-        // Auto-save to goldenAnswers and customAnswers for instantaneous 0-credit future reuse
-        // Never persist placeholder labels — they would replay this answer on unrelated controls.
-        if (
-          !isGenericWorkExperienceDateField(cleanLabel) &&
-          !isSocialMediaOrUrlQuestion(cleanLabel) &&
-          !isGenericFieldLabel(cleanLabel)
-        ) {
-          await careerBrainStore.saveGoldenAnswer(cleanLabel, ans, 'Screening').catch(() => {});
-          await careerBrainStore.setCustomAnswer(cleanLabel, ans).catch(() => {});
-          if (!careerBrain.goldenAnswers) careerBrain.goldenAnswers = [];
-          careerBrain.goldenAnswers.push({
-            id: `ga_${Date.now()}`,
-            question: cleanLabel,
-            answer: ans,
-            category: 'Screening',
-          });
-          if (!careerBrain.customAnswers) careerBrain.customAnswers = {};
-          careerBrain.customAnswers[cleanLabel] = ans;
-        }
-
-        logger.info(
-          `[FormQuestionResolver] [AUTONOMOUS SOLVED] "${cleanLabel}": "${ans}" (${parsed.reason || 'Autonomous LLM determination'})`,
-        );
-        recordLlmSuccess();
+      if (!rawAns || /^unknown$/i.test(rawAns) || parsed.confidence === 'UNKNOWN') {
+        logger.info(`[FormQuestionResolver] LLM returned UNKNOWN for "${cleanLabel}": ${reason}`);
         return {
-          success: true,
-          answer: ans,
-          reason: parsed.reason || 'Autonomous LLM determination',
+          success: false,
+          reason: reason || 'Insufficient profile evidence to resolve question',
+          confidence: 'UNKNOWN',
+          missingInfo,
         };
       }
+
+      let ans = rawAns;
+
+      // If field has options, ensure ans matches one of the options
+      if (field.options && field.options.length > 0) {
+        const validOptions = field.options.filter(o => !/select\s*an\s*option|choose|select\.\.\./i.test(o.trim()));
+        const exactMatch = validOptions.find(o => o.toLowerCase().trim() === ans.toLowerCase().trim());
+        if (exactMatch) {
+          ans = exactMatch;
+        } else {
+          const escapeRx = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          const cleanAns = ans
+            .replace(/[^\w\s]/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .toLowerCase();
+          const wordMatch = validOptions.find(o => {
+            const cleanO = o
+              .replace(/[^\w\s]/g, ' ')
+              .replace(/\s+/g, ' ')
+              .trim()
+              .toLowerCase();
+            if (cleanO === cleanAns) return true;
+            if (cleanAns.length >= 4) {
+              const rx = new RegExp(`(?:^|\\s)${escapeRx(cleanAns)}(?:\\s|$)`, 'i');
+              if (rx.test(cleanO)) return true;
+            }
+            if (cleanO.length >= 4) {
+              const rx = new RegExp(`(?:^|\\s)${escapeRx(cleanO)}(?:\\s|$)`, 'i');
+              if (rx.test(cleanAns)) return true;
+            }
+            return false;
+          });
+
+          if (wordMatch) {
+            ans = wordMatch;
+          } else if (/^(yes|true|agree)$/i.test(ans)) {
+            const yesOpt = validOptions.find(o => /^(yes|agree)$/i.test(o.trim()));
+            if (yesOpt) {
+              ans = yesOpt;
+            } else {
+              return {
+                success: false,
+                reason: `Affirmative answer "${ans}" does not match available options: [${validOptions.join(', ')}]`,
+                confidence: 'LOW',
+              };
+            }
+          } else if (/^(no|false)$/i.test(ans)) {
+            const noOpt = validOptions.find(o => /^no$/i.test(o.trim()));
+            if (noOpt) {
+              ans = noOpt;
+            } else {
+              return {
+                success: false,
+                reason: `Negative answer "${ans}" does not match available options: [${validOptions.join(', ')}]`,
+                confidence: 'LOW',
+              };
+            }
+          } else {
+            // Never arbitrarily pick validOptions[0]
+            logger.warning(
+              `[FormQuestionResolver] LLM answer "${ans}" could not be aligned to options [${validOptions.join(', ')}] for field "${cleanLabel}". Rejecting.`,
+            );
+            return {
+              success: false,
+              reason: `Answer "${ans}" does not match any valid option`,
+              confidence: 'LOW',
+            };
+          }
+        }
+      }
+
+      logger.info(
+        `[FormQuestionResolver] [AUTONOMOUS SOLVED] "${cleanLabel}": "${ans}" (${reason}, confidence: ${confidence})`,
+      );
+      recordLlmSuccess();
+      return {
+        success: true,
+        answer: ans,
+        reason,
+        confidence,
+        missingInfo,
+      };
     }
   } catch (err) {
     if (isCircuitBreakerError(err)) {
@@ -4546,7 +4607,7 @@ export async function resolveModalFieldWithAudit(
   onAuditLog?: (category: QuestionResolutionCategory, label: string, answer: string, detail?: string) => void,
   // Retained for call-site compatibility; one-click mode has no prompts, so every
   // unmatched field is deferred to the caller's autonomous solver regardless.
-  _options?: { skipAskUser?: boolean },
+  _options?: { skipAskUser?: boolean; sessionId?: string; platform?: string },
 ): Promise<QuestionResolutionResult> {
   // Apply cleanLinkedInText to strip duplicate question text
   field.label = cleanLinkedInText(field.label || '');
@@ -4564,13 +4625,44 @@ export async function resolveModalFieldWithAudit(
     };
   }
 
+  const sessionId = _options?.sessionId || 'default_session';
+  const platform = _options?.platform || 'linkedin';
+  const fingerprint = computeQuestionFingerprint(label, platform, field.options);
+
   logger.info(`[FormQuestionResolver] 🎯 Attempting field resolution:`, {
     fieldType: field.fieldType,
     label,
     options: field.options,
     min: field.min,
     max: field.max,
+    sessionId,
+    fingerprint,
   });
+
+  // Helper to commit resolved answer to SessionAnswerStore
+  const saveToSession = (
+    answer: string,
+    source: AnswerSource,
+    confidence: AnswerConfidence,
+    reason?: string,
+    userApproved = false,
+  ) => {
+    sessionAnswerStore.set({
+      fingerprint,
+      sessionId,
+      questionLabel: label,
+      normalizedQuestion: normalizeQuestionText(label),
+      platform,
+      fieldType: field.fieldType,
+      options: field.options,
+      answer,
+      source,
+      confidence,
+      userApproved,
+      reason: reason || 'Resolved field',
+      resolvedAt: Date.now(),
+    });
+  };
 
   // Helper to fill field with intelligent option alignment for dropdown/radio
   async function fillWithOptionFallback(val: string): Promise<boolean> {
@@ -4597,6 +4689,35 @@ export async function resolveModalFieldWithAudit(
     return success;
   }
 
+  // Step 0: Check SessionAnswerStore (Multi-step memory & retry consistency)
+  const cached = sessionAnswerStore.get(sessionId, fingerprint);
+  if (cached && cached.answer) {
+    logger.info(
+      `[FormQuestionResolver] [SESSION-REUSE] "${label}": "${cached.answer}" (source: ${cached.source}, confidence: ${cached.confidence})`,
+    );
+    const fillSuccess = await fillWithOptionFallback(cached.answer);
+    if (fillSuccess) {
+      if (onAuditLog) {
+        onAuditLog(
+          cached.source === 'AI_GENERATED' ? 'GENERATED' : 'MATCHED',
+          label,
+          cached.answer,
+          `Session cache reuse (${cached.reason}) | DOM fill: SUCCESS`,
+        );
+      }
+      return {
+        success: true,
+        category: cached.source === 'AI_GENERATED' ? 'GENERATED' : 'MATCHED',
+        answer: cached.answer,
+        sourceDetail: `Session cache reuse: ${cached.reason}`,
+      };
+    } else {
+      logger.warning(
+        `[FormQuestionResolver] DOM fill failed for session-cached answer "${cached.answer}" on "${label}". Re-resolving...`,
+      );
+    }
+  }
+
   // Step 1: Rule-Based Exact/Loose Match (Fast path) -> [MATCHED]
   const fastMatch = matchRuleBased(field, careerBrain);
   if (fastMatch.matched && fastMatch.answer !== undefined) {
@@ -4609,6 +4730,14 @@ export async function resolveModalFieldWithAudit(
       clickLanded: fillSuccess,
     });
     if (fillSuccess) {
+      const isUserSaved = (fastMatch.sourceDetail || '').toLowerCase().includes('golden');
+      saveToSession(
+        fastMatch.answer,
+        isUserSaved ? 'USER_SAVED' : 'PROFILE_EXPLICIT',
+        'HIGH',
+        fastMatch.sourceDetail,
+        isUserSaved,
+      );
       if (onAuditLog) {
         onAuditLog('MATCHED', label, fastMatch.answer, `${fastMatch.sourceDetail} | DOM fill: SUCCESS`);
       }
@@ -4633,6 +4762,7 @@ export async function resolveModalFieldWithAudit(
     );
     const fillSuccess = await fillWithOptionFallback(semanticIntent.matchedAnswer);
     if (fillSuccess) {
+      saveToSession(semanticIntent.matchedAnswer, 'USER_SAVED', 'HIGH', semanticIntent.reason, true);
       if (onAuditLog) {
         onAuditLog('MATCHED', label, semanticIntent.matchedAnswer, `${semanticIntent.reason} | DOM fill: SUCCESS`);
       }
@@ -4675,6 +4805,7 @@ export async function resolveModalFieldWithAudit(
       logger.info(`[FormQuestionResolver] [GENERATED] "${label}": "${headline}"`);
       const fillSuccess = await fillWithOptionFallback(headline);
       if (fillSuccess) {
+        saveToSession(headline, 'PROFILE_EXPLICIT', 'HIGH', headlineSource);
         if (onAuditLog) {
           onAuditLog('GENERATED', label, headline, `${headlineSource} | DOM fill: SUCCESS`);
         }
@@ -4717,6 +4848,7 @@ export async function resolveModalFieldWithAudit(
       logger.info(`[FormQuestionResolver] [GENERATED] "${label}": "${summary.slice(0, 160)}..."`);
       const fillSuccess = await fillWithOptionFallback(summary);
       if (fillSuccess) {
+        saveToSession(summary, 'PROFILE_EXPLICIT', 'HIGH', summarySource);
         if (onAuditLog) {
           onAuditLog('GENERATED', label, summary, `${summarySource} | DOM fill: SUCCESS`);
         }
@@ -4748,6 +4880,7 @@ export async function resolveModalFieldWithAudit(
           clickLanded: fillSuccess,
         });
         if (fillSuccess) {
+          saveToSession(generated, 'AI_GENERATED', 'HIGH', 'LLM-authored from resume');
           if (onAuditLog) {
             onAuditLog('GENERATED', label, generated, `LLM-authored from resume | DOM fill: SUCCESS`);
           }
@@ -4788,6 +4921,7 @@ export async function resolveModalFieldWithAudit(
         clickLanded: fillSuccess,
       });
       if (fillSuccess) {
+        saveToSession(semanticMatch.answer, 'DETERMINISTIC_MAP', 'HIGH', semanticMatch.sourceDetail);
         if (onAuditLog) {
           onAuditLog('MATCHED', label, semanticMatch.answer, `${semanticMatch.sourceDetail} | DOM fill: SUCCESS`);
         }
@@ -4818,6 +4952,7 @@ export async function resolveModalFieldWithAudit(
       clickLanded: fillSuccess,
     });
     if (fillSuccess) {
+      saveToSession(resumeMatch.answer, 'PROFILE_EXPLICIT', 'HIGH', resumeMatch.sourceDetail);
       if (onAuditLog) {
         onAuditLog('MATCHED', label, resumeMatch.answer, `${resumeMatch.sourceDetail} | DOM fill: SUCCESS`);
       }
@@ -4863,6 +4998,7 @@ export async function resolveModalFieldWithAudit(
 
     if (fillSuccess) {
       const sourceDetail = `years with ${skillName} -> 0 (no evidence of this skill in profile or resume)`;
+      saveToSession(adapted.value, 'DETERMINISTIC_MAP', 'HIGH', sourceDetail);
       if (onAuditLog) {
         onAuditLog('MATCHED', label, adapted.value, `${sourceDetail} | DOM fill: SUCCESS`);
       }
@@ -4904,6 +5040,7 @@ export async function resolveModalFieldWithAudit(
       });
 
       if (fillSuccess) {
+        saveToSession(subjectiveMatch.answer, 'AI_GENERATED', 'MEDIUM', subjectiveMatch.sourceDetail);
         if (onAuditLog) {
           onAuditLog('GENERATED', label, subjectiveMatch.answer, `${subjectiveMatch.sourceDetail} | DOM fill: SUCCESS`);
         }
@@ -4948,6 +5085,7 @@ export async function resolveModalFieldWithAudit(
     if (field.fieldType === 'checkbox') {
       await page.fillModalFieldDirect(field, 'No').catch(() => {});
     }
+    saveToSession(defaultAns, 'DETERMINISTIC_MAP', 'HIGH', 'optional field: skipped');
     if (onAuditLog) {
       onAuditLog('MATCHED', label, defaultAns || '(left blank)', 'optional field: skipped');
     }
@@ -4972,6 +5110,12 @@ export async function resolveModalFieldWithAudit(
       if (autoSol.success && autoSol.answer !== undefined) {
         const fillSuccess = await fillWithOptionFallback(autoSol.answer);
         if (fillSuccess) {
+          saveToSession(
+            autoSol.answer,
+            'AI_GENERATED',
+            autoSol.confidence || 'HIGH',
+            `LLM-determined: ${autoSol.reason}`,
+          );
           if (onAuditLog) {
             onAuditLog(
               'GENERATED',
@@ -5011,6 +5155,12 @@ export async function resolveModalFieldWithAudit(
           fillSuccess = await page.fillModalFieldDirect(field, autoSol.answer).catch(() => false);
         }
         if (fillSuccess) {
+          saveToSession(
+            autoSol.answer,
+            'AI_GENERATED',
+            autoSol.confidence || 'HIGH',
+            `LLM-determined: ${autoSol.reason}`,
+          );
           if (onAuditLog) {
             onAuditLog(
               'GENERATED',
@@ -5053,6 +5203,7 @@ export async function resolveModalFieldWithAudit(
       fillSuccess = await page.fillModalFieldDirect(field, fallbackAnswer).catch(() => false);
     }
     if (fillSuccess) {
+      saveToSession(fallbackAnswer, 'DETERMINISTIC_MAP', 'MEDIUM', fallback.source);
       if (onAuditLog) {
         onAuditLog('GENERATED', label, fallbackAnswer, `${fallback.source} | DOM fill: SUCCESS`);
       }
@@ -5086,6 +5237,7 @@ export async function rememberResolvedAnswer(questionLabel: string, answer: stri
   const label = (questionLabel || '').trim();
   const cleanAnswer = (answer || '').trim();
   if (!label || !cleanAnswer) return;
+  if (/^(not applicable|n\/a|none|0)$/i.test(cleanAnswer)) return;
   if (
     isGenericFieldLabel(label) ||
     isGenericWorkExperienceDateField(label) ||

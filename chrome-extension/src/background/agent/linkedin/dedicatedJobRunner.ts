@@ -121,6 +121,7 @@ import {
 } from '../intelligence';
 import { buildDraftResumePdf, buildDraftResumeFileName, bytesToBase64 } from './resumeDraft';
 import type { FormFieldDescriptor } from '../../browser/page';
+import { sessionAnswerStore, computeQuestionFingerprint } from '../sessionAnswerStore';
 
 const logger = createLogger('DedicatedJobRunner');
 
@@ -6615,6 +6616,9 @@ export class DedicatedJobRunner {
       );
     }
 
+    const jobSessionId = `linkedin_${job.jobId || String(job.title || '').replace(/[^\w]/g, '_')}_${Date.now()}`;
+    sessionAnswerStore.clearSession(jobSessionId);
+
     let step = 0;
     const maxSteps = 15;
     let submitted = false;
@@ -6833,6 +6837,8 @@ export class DedicatedJobRunner {
           try {
             const res = await resolveModalFieldWithAudit(page, field, careerBrain, scopedLLM, onAuditLog, {
               skipAskUser: true,
+              sessionId: jobSessionId,
+              platform: 'linkedin',
             });
             if (res.needsUserAnswer || !res.success) {
               const isOptionalField =
@@ -7037,6 +7043,8 @@ export class DedicatedJobRunner {
             try {
               const res = await resolveModalFieldWithAudit(page, reqField, careerBrain, scopedLLM, onAuditLog, {
                 skipAskUser: true,
+                sessionId: jobSessionId,
+                platform: 'linkedin',
               });
               if (res.needsUserAnswer || !res.success) {
                 unresolvedReqFields.push(reqField);
@@ -7622,12 +7630,25 @@ export class DedicatedJobRunner {
                     let answer: string | undefined;
                     let source = '';
 
+                    const fp = computeQuestionFingerprint(targetField.label, 'linkedin', targetField.options);
+                    const sessionCached = sessionAnswerStore.get(jobSessionId, fp);
+                    if (sessionCached && sessionCached.answer && !targetField.errorText) {
+                      answer = sessionCached.answer;
+                      source = `Session cache: ${sessionCached.reason}`;
+                    }
+
                     // 1. Check profile rule-based match first: if profile has a grounded answer,
                     // use it directly (e.g. expected CTC, notice period, location, phone) so answers remain stable
-                    const ruleMatch = matchRuleBased(targetField, careerBrain);
-                    if (ruleMatch.matched && ruleMatch.answer !== undefined && String(ruleMatch.answer).trim() !== '') {
-                      answer = ruleMatch.answer;
-                      source = ruleMatch.sourceDetail || 'profile match';
+                    if (!answer) {
+                      const ruleMatch = matchRuleBased(targetField, careerBrain);
+                      if (
+                        ruleMatch.matched &&
+                        ruleMatch.answer !== undefined &&
+                        String(ruleMatch.answer).trim() !== ''
+                      ) {
+                        answer = ruleMatch.answer;
+                        source = ruleMatch.sourceDetail || 'profile match';
+                      }
                     }
 
                     // Strategy ladder across up to 4 attempts:
@@ -7670,6 +7691,28 @@ export class DedicatedJobRunner {
 
                     if (adapted.valid && adapted.value) {
                       const fillSuccess = await page.fillModalFieldDirect(targetField, adapted.value);
+
+                      if (fillSuccess) {
+                        sessionAnswerStore.set({
+                          fingerprint: fp,
+                          sessionId: jobSessionId,
+                          questionLabel: targetField.label,
+                          normalizedQuestion: targetField.label
+                            .toLowerCase()
+                            .replace(/[^\w\s]/g, ' ')
+                            .replace(/\s+/g, ' ')
+                            .trim(),
+                          platform: 'linkedin',
+                          fieldType: targetField.fieldType || 'text',
+                          options: targetField.options,
+                          answer: adapted.value,
+                          source: 'AI_GENERATED',
+                          confidence: 'MEDIUM',
+                          userApproved: false,
+                          reason: `Blocked-forward heal (attempt ${healAttempt}): ${source}`,
+                          resolvedAt: Date.now(),
+                        });
+                      }
 
                       // Read back value from DOM
                       let readbackValue = '';
