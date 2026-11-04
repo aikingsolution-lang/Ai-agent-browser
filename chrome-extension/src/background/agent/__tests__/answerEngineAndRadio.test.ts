@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { SessionAnswerStore, computeQuestionFingerprint, normalizeQuestionText } from '../sessionAnswerStore';
+import { resolveCurrentLocationFromProfileOrResume, matchRuleBased } from '../linkedin/formQuestionResolver';
+import type { ICareerBrain } from '@extension/storage';
 
 describe('Answer Engine & Form Interaction Tests', () => {
   let store: SessionAnswerStore;
@@ -242,6 +244,154 @@ describe('Answer Engine & Form Interaction Tests', () => {
       const option = 'Immediate Joiner';
       const target = 'Immediate';
       expect(matchesOptionSafe(option, target)).toBe(true);
+    });
+  });
+
+  describe('Current Location Resolution from Profile & Resume', () => {
+    it('resolves location from careerBrain.currentLocation as highest priority', () => {
+      const brain: Partial<ICareerBrain> = {
+        currentLocation: 'Kolkata, West Bengal, India',
+        resumeText: 'Location: Bengaluru, Karnataka, India\nFull Stack Developer',
+      };
+      const res = resolveCurrentLocationFromProfileOrResume(brain);
+      expect(res).not.toBeNull();
+      expect(res?.city).toBe('Kolkata');
+      expect(res?.location).toBe('Kolkata, West Bengal, India');
+      expect(res?.state).toBe('West Bengal');
+      expect(res?.country).toBe('India');
+      expect(res?.sourceDetail).toContain('profile: currentLocation');
+    });
+
+    it('extracts location from resume text when profile currentLocation is missing', () => {
+      const brain: Partial<ICareerBrain> = {
+        currentLocation: '',
+        resumeText: 'John Doe\nSoftware Engineer\nLocation: Kolkata, West Bengal, India\nEmail: john@example.com',
+      };
+      const res = resolveCurrentLocationFromProfileOrResume(brain);
+      expect(res).not.toBeNull();
+      expect(res?.city).toBe('Kolkata');
+      expect(res?.location).toBe('Kolkata, West Bengal, India');
+      expect(res?.sourceDetail).toContain('resume: explicit location');
+    });
+
+    it('extracts location from resume header lines when no explicit prefix tag is used', () => {
+      const brain: Partial<ICareerBrain> = {
+        currentLocation: '',
+        resumeText: 'Rahul Sharma\nKolkata, India | +91 9876543210 | rahul@example.com\nSummary: Software Engineer',
+      };
+      const res = resolveCurrentLocationFromProfileOrResume(brain);
+      expect(res).not.toBeNull();
+      expect(res?.city).toBe('Kolkata');
+      expect(res?.country).toBe('India');
+      expect(res?.sourceDetail).toContain('resume header: location');
+    });
+
+    it('returns null when neither profile nor resume contains location information', () => {
+      const brain: Partial<ICareerBrain> = {
+        currentLocation: '',
+        preferredLocation: 'Bengaluru, India',
+        resumeText: 'Senior Backend Developer with 5 years experience in Go, Node, React.',
+      };
+      const res = resolveCurrentLocationFromProfileOrResume(brain);
+      expect(res).toBeNull();
+    });
+
+    it('matchRuleBased fills City field using candidate current location', () => {
+      const brain = {
+        currentLocation: 'Kolkata, West Bengal, India',
+      } as ICareerBrain;
+
+      const field = {
+        id: 'city-input',
+        name: 'city',
+        label: 'City*',
+        fieldType: 'text' as const,
+      };
+
+      const result = matchRuleBased(field, brain);
+      expect(result.matched).toBe(true);
+      expect(result.answer).toBe('Kolkata');
+    });
+
+    it('matchRuleBased fills Location field with full location string', () => {
+      const brain = {
+        currentLocation: 'Kolkata, West Bengal, India',
+      } as ICareerBrain;
+
+      const field = {
+        id: 'location-input',
+        name: 'location',
+        label: 'Current Location',
+        fieldType: 'text' as const,
+      };
+
+      const result = matchRuleBased(field, brain);
+      expect(result.matched).toBe(true);
+      expect(result.answer).toBe('Kolkata, West Bengal, India');
+    });
+
+    it('matchRuleBased accurately answers binary location screening questions', () => {
+      const brain = {
+        currentLocation: 'Kolkata, West Bengal, India',
+      } as ICareerBrain;
+
+      const kolkataField = {
+        id: 'q1',
+        name: 'q1',
+        label: 'Are you currently located in Kolkata?',
+        fieldType: 'radio' as const,
+        options: ['Yes', 'No'],
+      };
+      const kolkataRes = matchRuleBased(kolkataField, brain);
+      expect(kolkataRes.matched).toBe(true);
+      expect(kolkataRes.answer).toBe('Yes');
+
+      const mumbaiField = {
+        id: 'q2',
+        name: 'q2',
+        label: 'Are you currently located in Mumbai?',
+        fieldType: 'radio' as const,
+        options: ['Yes', 'No'],
+      };
+      const mumbaiRes = matchRuleBased(mumbaiField, brain);
+      expect(mumbaiRes.matched).toBe(true);
+      expect(mumbaiRes.answer).toBe('No');
+    });
+
+    it('matchRuleBased matches dropdown options accurately for current city', () => {
+      const brain = {
+        resumeText: 'Location: Kolkata, West Bengal, India\nFull Stack Engineer',
+      } as ICareerBrain;
+
+      const dropdownField = {
+        id: 'city-select',
+        name: 'city-select',
+        label: 'Where are you currently located?',
+        fieldType: 'dropdown' as const,
+        options: ['Bengaluru, Karnataka', 'Mumbai, Maharashtra', 'Kolkata, West Bengal', 'New Delhi, Delhi'],
+      };
+
+      const result = matchRuleBased(dropdownField, brain);
+      expect(result.matched).toBe(true);
+      expect(result.answer).toBe('Kolkata, West Bengal');
+    });
+
+    it('matchRuleBased refuses to hallucinate when location is completely absent', () => {
+      const brain = {
+        currentLocation: '',
+        preferredLocation: 'Bengaluru, Karnataka, India',
+        resumeText: 'Full Stack Engineer with 4 years experience in Go and React.',
+      } as ICareerBrain;
+
+      const field = {
+        id: 'city-input',
+        name: 'city',
+        label: 'City',
+        fieldType: 'text' as const,
+      };
+
+      const result = matchRuleBased(field, brain);
+      expect(result.matched).toBe(false);
     });
   });
 });

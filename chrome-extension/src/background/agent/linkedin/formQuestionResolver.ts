@@ -1610,6 +1610,168 @@ export const COUNTRY_DIALING_DATA: Array<{ prefix: string; country: string; iso:
 ];
 
 /**
+ * Resolves the candidate's current location strictly from CareerBrain profile and/or resume text.
+ * Never guesses or falls back to preferred search location.
+ */
+export function resolveCurrentLocationFromProfileOrResume(careerBrain?: Partial<ICareerBrain> | null): {
+  location: string;
+  city: string;
+  state?: string;
+  country?: string;
+  sourceDetail: string;
+} | null {
+  if (!careerBrain) return null;
+
+  // 1. Direct profile field: currentLocation
+  if (careerBrain.currentLocation && careerBrain.currentLocation.trim()) {
+    const raw = cleanLocationForCityField(careerBrain.currentLocation) || careerBrain.currentLocation.trim();
+    if (raw) {
+      const parts = parseLocationParts(raw);
+      return {
+        location: raw,
+        city: parts.city || raw.split(',')[0].trim(),
+        state: parts.state,
+        country: parts.country,
+        sourceDetail: `profile: currentLocation ("${raw}")`,
+      };
+    }
+  }
+
+  // 2. Extract from candidate's resumeText (resume headers, explicit location prefix)
+  const resumeText = (careerBrain.resumeText || '').trim();
+  if (resumeText) {
+    // 2a. Explicit location prefix in resume (e.g., "Location: Kolkata, India", "Address: Noida, UP", "Current City: Pune")
+    const explicitPrefixMatch = resumeText.match(
+      /(?:^|\n)\s*(?:current\s*)?(?:location|address|residence|residing\s*at|based\s*in|city)\s*[:\-–]\s*([^\n\r|•·]{3,80})/i,
+    );
+    if (explicitPrefixMatch && explicitPrefixMatch[1]) {
+      const candidateLoc = cleanLocationForCityField(explicitPrefixMatch[1].trim());
+      if (
+        candidateLoc &&
+        candidateLoc.length >= 3 &&
+        candidateLoc.length <= 80 &&
+        !/\b(?:developer|engineer|manager|years|skills|experience|summary|projects|bachelor|master)\b/i.test(
+          candidateLoc,
+        )
+      ) {
+        const parts = parseLocationParts(candidateLoc);
+        return {
+          location: candidateLoc,
+          city: parts.city || candidateLoc.split(',')[0].trim(),
+          state: parts.state,
+          country: parts.country,
+          sourceDetail: `resume: explicit location ("${candidateLoc}")`,
+        };
+      }
+    }
+
+    // 2b. Check header lines (typically top 15 lines of resume) for "City, State, Country" or "City, Country"
+    const headerLines = resumeText.split(/\r?\n/).slice(0, 15);
+    for (const line of headerLines) {
+      const trimmed = line.trim();
+      const tokens = trimmed
+        .split(/[|•·\t]/)
+        .map(t => t.trim())
+        .filter(Boolean);
+      for (const token of tokens) {
+        if (
+          /^[A-Z][a-zA-Z\s.-]+,\s*[A-Z][a-zA-Z\s.-]+(?:,\s*[A-Z][a-zA-Z\s.-]+)?$/.test(token) &&
+          !/\b(?:university|college|school|institute|bachelor|master|degree|curriculum|resume|experience|technologies|projects|education|skills|certifications)\b/i.test(
+            token,
+          ) &&
+          token.length >= 4 &&
+          token.length <= 60
+        ) {
+          const loc = cleanLocationForCityField(token);
+          if (loc) {
+            const parts = parseLocationParts(loc);
+            return {
+              location: loc,
+              city: parts.city || loc.split(',')[0].trim(),
+              state: parts.state,
+              country: parts.country,
+              sourceDetail: `resume header: location ("${loc}")`,
+            };
+          }
+        }
+      }
+    }
+
+    // 2c. Known major Indian and global tech cities in resume header
+    const knownCities = [
+      'Bengaluru',
+      'Bangalore',
+      'Hyderabad',
+      'Pune',
+      'Mumbai',
+      'Delhi',
+      'New Delhi',
+      'Noida',
+      'Gurugram',
+      'Gurgaon',
+      'Kolkata',
+      'Chennai',
+      'Ahmedabad',
+      'Kochi',
+      'Jaipur',
+      'Chandigarh',
+      'Indore',
+      'Bhubaneswar',
+      'Coimbatore',
+      'Trivandrum',
+      'San Francisco',
+      'New York',
+      'Seattle',
+      'Austin',
+      'London',
+      'Berlin',
+      'Toronto',
+      'Singapore',
+    ];
+    const headerSnippet = headerLines.join(' ');
+    for (const city of knownCities) {
+      const rx = new RegExp(`\\b${city}\\b(?:,\\s*([A-Za-z\\s]+(?:,\\s*[A-Za-z\\s]+)?))?`, 'i');
+      const cityMatch = headerSnippet.match(rx);
+      if (cityMatch) {
+        const fullLoc = cityMatch[0]
+          .trim()
+          .replace(/[|•·].*$/, '')
+          .trim();
+        const loc = cleanLocationForCityField(fullLoc) || city;
+        const parts = parseLocationParts(loc);
+        return {
+          location: loc,
+          city: parts.city || city,
+          state: parts.state,
+          country: parts.country,
+          sourceDetail: `resume: detected city ("${loc}")`,
+        };
+      }
+    }
+  }
+
+  // 3. Current work experience role location if present in resume/profile
+  if (Array.isArray(careerBrain.workExperience) && careerBrain.workExperience.length > 0) {
+    const currentRole = careerBrain.workExperience.find(w => w.isCurrent);
+    if (currentRole && (currentRole as any).location) {
+      const loc = cleanLocationForCityField((currentRole as any).location);
+      if (loc) {
+        const parts = parseLocationParts(loc);
+        return {
+          location: loc,
+          city: parts.city || loc.split(',')[0].trim(),
+          state: parts.state,
+          country: parts.country,
+          sourceDetail: `work history: current role location ("${loc}")`,
+        };
+      }
+    }
+  }
+
+  return null;
+}
+
+/**
  * Derives the phone country code and country details strictly following the resolution order:
  * 1. Candidate's profile (phone number prefix / country)
  * 2. If undetermined, default to profile's current location country
@@ -1654,8 +1816,14 @@ export function derivePhoneCountryCode(careerBrain?: Partial<ICareerBrain>): Der
     }
   }
 
-  // 2. Default to profile's current location country
-  const locationStr = (careerBrain?.currentLocation || careerBrain?.preferredLocation || '').trim();
+  // 2. Default to candidate's resolved current location country
+  const resolvedLoc = resolveCurrentLocationFromProfileOrResume(careerBrain);
+  const locationStr = (
+    resolvedLoc?.location ||
+    careerBrain?.currentLocation ||
+    careerBrain?.preferredLocation ||
+    ''
+  ).trim();
   if (locationStr) {
     const locLower = locationStr.toLowerCase();
     if (
@@ -2015,13 +2183,12 @@ export function matchRuleBased(
 
     // City / Location row of the work-experience sub-form
     if (/^(?:city|work\s*city|job\s*city|location)$/i.test(workLabel)) {
-      const rawLoc = (careerBrain.currentLocation || careerBrain.preferredLocation || '').trim();
-      const city = cleanLocationForCityField(rawLoc).split(',')[0]?.trim() || '';
-      if (city) {
+      const resolved = resolveCurrentLocationFromProfileOrResume(careerBrain);
+      if (resolved?.city) {
         return {
           matched: true,
-          answer: city,
-          sourceDetail: `work history: city from profile location (${city})`,
+          answer: resolved.city,
+          sourceDetail: `work history: ${resolved.sourceDetail} (${resolved.city})`,
         };
       }
     }
@@ -2590,58 +2757,130 @@ export function matchRuleBased(
     }
   }
 
+  // Binary location confirmation: "Are you currently located in Kolkata?", "Do you live in India?", etc.
+  if (
+    /^(?:are\s+you|do\s+you)\s+(?:currently\s+)?(?:located|residing|based|live)\s+in\s+([A-Za-z\s]+)\??$/i.test(
+      labelLower,
+    ) ||
+    /^(?:currently\s+)?(?:located|residing|based)\s+in\s+([A-Za-z\s]+)\??$/i.test(labelLower)
+  ) {
+    const resolvedLoc = resolveCurrentLocationFromProfileOrResume(careerBrain);
+    if (resolvedLoc) {
+      const matchTarget = labelLower.match(/(?:located|residing|based|live)\s+in\s+([A-Za-z\s]+)/i);
+      if (matchTarget && matchTarget[1]) {
+        const targetPlace = matchTarget[1].trim().toLowerCase();
+        const candidateLocLower = resolvedLoc.location.toLowerCase();
+        const candidateCityLower = resolvedLoc.city.toLowerCase();
+        const candidateCountryLower = (resolvedLoc.country || '').toLowerCase();
+        const isMatch =
+          candidateLocLower.includes(targetPlace) ||
+          candidateCityLower.includes(targetPlace) ||
+          (candidateCountryLower && candidateCountryLower.includes(targetPlace));
+        return {
+          matched: true,
+          answer: isMatch ? 'Yes' : 'No',
+          sourceDetail: `${resolvedLoc.sourceDetail} comparison with "${targetPlace}": ${isMatch ? 'Yes' : 'No'}`,
+        };
+      }
+    }
+  }
+
   // City / Residential Location / Current Residence / Base Location (must NOT be a willingness or binary question)
-  // Strict rule: Use ONLY profile's currentLocation, NEVER preferred or search location
+  // Strict rule: Use candidate's currentLocation from profile or resume, NEVER preferred or search location
   const isCurrentLocationQuestion =
-    /(?:^|\b)(?:where\s+are\s+you\s+(?:currently\s+)?(?:based|located|residing|living)|current\s*(?:city|location|residence|place\s*of\s*stay)|base\s*location|where\s+do\s+you\s+live|current\s*city|residence)(?:\b|$)/i.test(
+    /(?:^|\b)(?:where\s+are\s+you\s+(?:currently\s+)?(?:based|located|residing|living)|current\s*(?:city|location|residence|place\s*of\s*stay)|base\s*location|where\s+do\s+you\s+live|current\s*city|residence|city|location|home\s*location|your\s*location|present\s*location)(?:\b|$)/i.test(
       labelLower,
     ) &&
-    !/comfortable|willing|open\s+to|commute|relocate|able\s+to|hybrid|onsite|are\s+you\s+(?:open|willing|comfortable)/i.test(
+    !/comfortable|willing|open\s+to|commute|relocate|able\s+to|hybrid|onsite|are\s+you\s+(?:open|willing|comfortable)|preferred|target/i.test(
       labelLower,
     );
 
   if (isCurrentLocationQuestion) {
-    if (!careerBrain.currentLocation) {
-      // Grounded rule: No currentLocation in profile, do not invent one or fallback to preferredLocation!
+    const resolvedLoc = resolveCurrentLocationFromProfileOrResume(careerBrain);
+    if (!resolvedLoc) {
+      // Grounded rule: No currentLocation in profile or resume, do not invent one!
       return { matched: false };
     }
-    const cleanCity = cleanLocationForCityField(careerBrain.currentLocation) || careerBrain.currentLocation.trim();
+    const cleanCity = resolvedLoc.city;
+    const cleanLocation = resolvedLoc.location;
+
     if (field.options && field.options.length > 0) {
       const cityLo = cleanCity.toLowerCase();
+      const locLo = cleanLocation.toLowerCase();
       const matchedOpt = field.options.find(opt => {
         const optLo = opt.toLowerCase();
-        return cityLo.includes(optLo) || optLo.includes(cityLo);
+        return (
+          cityLo === optLo ||
+          (cityLo.length >= 3 && optLo.includes(cityLo)) ||
+          (optLo.length >= 3 && cityLo.includes(optLo)) ||
+          locLo.includes(optLo) ||
+          optLo.includes(locLo)
+        );
       });
       if (matchedOpt) {
-        return { matched: true, answer: matchedOpt, sourceDetail: `profile: currentLocation ("${matchedOpt}")` };
+        return { matched: true, answer: matchedOpt, sourceDetail: `${resolvedLoc.sourceDetail} -> "${matchedOpt}"` };
       }
     }
-    return { matched: true, answer: cleanCity, sourceDetail: `profile: currentLocation ("${cleanCity}")` };
+
+    // For text inputs: if the label specifically requests only city (e.g. "City" or "Current City")
+    const expectsCityOnly = /^(?:city|current\s*city|residence\s*city)$/i.test(labelLower.replace(/[*\s:]/g, ' '));
+    const ans = expectsCityOnly ? cleanCity : cleanLocation;
+    return { matched: true, answer: ans, sourceDetail: resolvedLoc.sourceDetail };
   }
 
   // State / Province / Region
   if (
     /(?:^|\b)(?:state|province|region)(?:\b|$)/i.test(labelLower) &&
-    !/comfortable|willing|open\s+to|commute|relocate/i.test(labelLower) &&
-    (careerBrain.currentLocation || careerBrain.preferredLocation)
+    !/comfortable|willing|open\s+to|commute|relocate/i.test(labelLower)
   ) {
-    const rawLoc = careerBrain.currentLocation || careerBrain.preferredLocation || '';
-    const parts = parseLocationParts(rawLoc);
-    if (parts.state) {
-      return { matched: true, answer: parts.state, sourceDetail: `profile: location state ("${parts.state}")` };
+    const resolvedLoc = resolveCurrentLocationFromProfileOrResume(careerBrain);
+    if (resolvedLoc?.state) {
+      if (field.options && field.options.length > 0) {
+        const stateLo = resolvedLoc.state.toLowerCase();
+        const matchedOpt = field.options.find(
+          opt => opt.toLowerCase().includes(stateLo) || stateLo.includes(opt.toLowerCase()),
+        );
+        if (matchedOpt) {
+          return {
+            matched: true,
+            answer: matchedOpt,
+            sourceDetail: `${resolvedLoc.sourceDetail} -> state ("${matchedOpt}")`,
+          };
+        }
+      }
+      return {
+        matched: true,
+        answer: resolvedLoc.state,
+        sourceDetail: `${resolvedLoc.sourceDetail} -> state ("${resolvedLoc.state}")`,
+      };
     }
   }
 
   // Country
   if (
     /(?:^|\b)(?:country|nationality)(?:\b|$)/i.test(labelLower) &&
-    !/comfortable|willing|open\s+to|commute|relocate|authorized|sponsorship/i.test(labelLower) &&
-    (careerBrain.currentLocation || careerBrain.preferredLocation)
+    !/comfortable|willing|open\s+to|commute|relocate|authorized|sponsorship/i.test(labelLower)
   ) {
-    const rawLoc = careerBrain.currentLocation || careerBrain.preferredLocation || '';
-    const parts = parseLocationParts(rawLoc);
-    if (parts.country) {
-      return { matched: true, answer: parts.country, sourceDetail: `profile: location country ("${parts.country}")` };
+    const resolvedLoc = resolveCurrentLocationFromProfileOrResume(careerBrain);
+    if (resolvedLoc?.country) {
+      if (field.options && field.options.length > 0) {
+        const countryLo = resolvedLoc.country.toLowerCase();
+        const matchedOpt = field.options.find(
+          opt => opt.toLowerCase().includes(countryLo) || countryLo.includes(opt.toLowerCase()),
+        );
+        if (matchedOpt) {
+          return {
+            matched: true,
+            answer: matchedOpt,
+            sourceDetail: `${resolvedLoc.sourceDetail} -> country ("${matchedOpt}")`,
+          };
+        }
+      }
+      return {
+        matched: true,
+        answer: resolvedLoc.country,
+        sourceDetail: `${resolvedLoc.sourceDetail} -> country ("${resolvedLoc.country}")`,
+      };
     }
   }
   if (/authorized|legally\s*authorized|eligible\s*to\s*work/i.test(labelLower)) {
@@ -3590,9 +3829,9 @@ CANDIDATE BACKGROUND (VERIFIED FROM RESUME & PROFILE):
 - Current Job Title: ${careerBrain.workExperience?.[0]?.title || careerBrain.currentTitle || 'Software Engineer'}
 - Current Company: ${careerBrain.workExperience?.[0]?.company || (careerBrain.hasWorkExperience === false ? 'None (Fresher)' : 'Self-Employed / Independent')}
 - Total Experience: ${yoe} years
-- Current Location: ${careerBrain.currentLocation || 'Bengaluru, India'}
+- Current Location: ${resolveCurrentLocationFromProfileOrResume(careerBrain)?.location || careerBrain.currentLocation || 'Not specified'}
 - Country of Residence / Nationality: India
-- Preferred Location(s): ${careerBrain.preferredLocations?.join(', ') || careerBrain.preferredLocation || 'Bengaluru, India'}
+- Preferred Location(s): ${careerBrain.preferredLocations?.join(', ') || careerBrain.preferredLocation || resolveCurrentLocationFromProfileOrResume(careerBrain)?.location || 'Not specified'}
 - Gender: ${careerBrain.gender || 'Prefer not to say'}
 - Date of Birth: ${careerBrain.dateOfBirth || '2000-01-01'} (18+ confirmed, format: DD/MM/YYYY is 01/01/2000)
 - Highest Education: ${careerBrain.highestEducation || edu}
@@ -3920,7 +4159,7 @@ ${JSON.stringify(modalData)}
 CANDIDATE (for filling any fields you identify):
 - Full Name: ${careerBrain.fullName || 'Candidate'}
 - Years of experience: ${careerBrain.yearsOfExperience ?? 1}
-- Current Location: ${careerBrain.currentLocation || 'Bengaluru, India'}
+- Current Location: ${resolveCurrentLocationFromProfileOrResume(careerBrain)?.location || careerBrain.currentLocation || 'Not specified'}
 - Notice Period: ${careerBrain.noticePeriod || 'Immediate / 15-30 days'}
 - Work Authorization: ${careerBrain.workAuthorization || 'Legally authorized to work, does not require sponsorship'}
 - Gender: ${careerBrain.gender || 'Prefer not to say'}
@@ -4250,17 +4489,25 @@ export function generateAutonomousFallbackAnswerWithSource(
         }
       }
 
-      // 1d. Location / country match against profile
-      if (/\b(?:country|state|city|location|residence)\b/i.test(labelLower) && careerBrain.currentLocation) {
-        const locLower = careerBrain.currentLocation.toLowerCase();
+      // 1d. Location / country match against profile or resume
+      const candidateLoc = resolveCurrentLocationFromProfileOrResume(careerBrain);
+      if (/\b(?:country|state|city|location|residence)\b/i.test(labelLower) && candidateLoc) {
+        const locLower = candidateLoc.location.toLowerCase();
+        const cityLower = candidateLoc.city.toLowerCase();
         const locMatch = validOptions.find(o => {
           const optL = o.toLowerCase();
-          return locLower.includes(optL) || optL.includes(locLower) || (/india/i.test(locLower) && /india/i.test(optL));
+          return (
+            locLower.includes(optL) ||
+            optL.includes(locLower) ||
+            cityLower === optL ||
+            optL.includes(cityLower) ||
+            (/india/i.test(locLower) && /india/i.test(optL))
+          );
         });
         if (locMatch) {
           return {
             answer: locMatch,
-            source: `Option selected from available choices: "${locMatch}" (profile location)`,
+            source: `Option selected from available choices: "${locMatch}" (${candidateLoc.sourceDetail})`,
           };
         }
       }
@@ -4451,15 +4698,16 @@ export function generateAutonomousFallbackAnswerWithSource(
   }
 
   // 5. Single-line text / Location / Residence: ONE short sentence (<= 80 chars, respect maxlength)
-  if (/\b(?:where\s*are\s*you|based|location|residence|current\s*city)\b/i.test(labelLower)) {
-    if (!careerBrain.currentLocation) {
+  if (/\b(?:where\s*are\s*you|based|location|residence|current\s*city|city)\b/i.test(labelLower)) {
+    const candidateLoc = resolveCurrentLocationFromProfileOrResume(careerBrain);
+    if (!candidateLoc) {
       return { answer: '', source: '' };
     }
-    let loc = cleanLocationForCityField(careerBrain.currentLocation) || careerBrain.currentLocation.trim();
+    let loc = cleanLocationForCityField(candidateLoc.location) || candidateLoc.location.trim();
     if (loc.length > 80 || (maxLen && loc.length > maxLen)) {
-      loc = loc.split(',')[0].trim();
+      loc = candidateLoc.city || loc.split(',')[0].trim();
     }
-    return { answer: loc, source: `Profile: currentLocation ("${loc}")` };
+    return { answer: loc, source: candidateLoc.sourceDetail };
   }
 
   // 5b. Offers in Hand fallback for text fields
