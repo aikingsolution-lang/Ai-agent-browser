@@ -88,6 +88,14 @@ export default class Page {
   private _attachPromise: Promise<boolean> | null = null;
   private _isDestroyed = false;
   public lastScanDiagnostic: string = '';
+  /** Outcome of the latest fillModalFieldDirect call — the precise reason a fill did not hold. */
+  public lastFillDiagnostics: {
+    label: string;
+    value: string;
+    ok: boolean;
+    targetFound: boolean;
+    reason?: string;
+  } | null = null;
 
   constructor(tabId: number, url: string, title: string, config: Partial<BrowserContextConfig> = {}) {
     this._tabId = tabId;
@@ -2292,6 +2300,29 @@ export default class Page {
         return false;
       }
 
+      // "Continue" (or "Continue applying …" / "Resume application") for a saved draft — only in
+      // the job details, never in a dialog, and only beside LinkedIn's saved-draft wording (or an
+      // aria-label that names the application), so an unrelated "Continue" is never clicked.
+      function isSavedDraftContinue(btn: HTMLElement, text: string, aria: string): boolean {
+        const t = text.replace(/\s+/g, ' ').trim();
+        const named =
+          /^(?:continue|continue applying|continue application|resume application)$/.test(t) ||
+          /^continue (?:applying|application|your application)\b/.test(aria) ||
+          /^resume (?:your )?application\b/.test(aria);
+        if (!named) return false;
+        if (btn.closest('dialog, [role="dialog"], [aria-modal="true"]')) return false;
+        const scope =
+          btn.closest(
+            '[data-view-name="job-details-top-card"], [data-view-name="job-details"], .jobs-unified-top-card, .scaffold-layout__detail, .jobs-search__job-details--container, .jobs-details__main-content, .job-view-layout, main',
+          ) || document.body;
+        return (
+          /\bappl/.test(aria) ||
+          /\blast modified this application\b|\bcontinue (?:your|this) application\b|\bresume (?:your )?application\b|\bapplication (?:was |has been )?saved\b/i.test(
+            scope.textContent || '',
+          )
+        );
+      }
+
       // Verdict helper — returns match result plus rejection reason for diagnostics
       function easyApplyVerdict(btn: HTMLElement): { ok: boolean; why: string } {
         if (isFilterOrNav(btn)) return { ok: false, why: 'filter/nav exclusion' };
@@ -2301,6 +2332,23 @@ export default class Page {
         // A true Easy Apply action button has concise text. Large text indicates a card or container.
         if (text.length > 50 && !btn.classList.contains('jobs-apply-button')) {
           return { ok: false, why: 'text too long for button (job card or container)' };
+        }
+        // LinkedIn's current job page may render Easy Apply as a link into the SDUI apply flow
+        // without the literal "Easy Apply" text (e.g. "Continue" for a saved draft).
+        const href = btn.getAttribute('href') || '';
+        if (/\/apply\//.test(href) && /openSDUIApplyFlow/i.test(href)) {
+          // Never follow another job's apply link (e.g. a recommendation card on the page).
+          const pageJob = (location.href.match(/\/jobs\/view\/(\d+)/) ||
+            location.href.match(/[?&]currentJobId=(\d+)/) ||
+            [])[1];
+          const linkJob = (href.match(/\/jobs\/view\/(\d+)/) || [])[1];
+          if (pageJob && linkJob && pageJob !== linkJob) return { ok: false, why: 'apply link for a different job' };
+          return { ok: true, why: 'match' };
+        }
+        // A saved draft of this application: LinkedIn replaces "Easy Apply" with a "Continue"
+        // control next to "You last modified this application …"; it re-opens the same form.
+        if (isSavedDraftContinue(btn, text, aria)) {
+          return { ok: true, why: 'match' };
         }
         if (
           btn.classList.contains('jobs-apply-button') ||
@@ -2389,6 +2437,7 @@ export default class Page {
         'button[aria-label*="Easy Apply" i]',
         'a.jobs-apply-button',
         '[role="button"][aria-label*="Easy Apply" i]',
+        'a[href*="openSDUIApplyFlow"]',
       ];
 
       let easyApplyBtn: HTMLElement | null = null;
@@ -2564,14 +2613,38 @@ export default class Page {
 
     const markerSel = '[data-qoder-easy-apply-target]';
     try {
-      const present = await this._puppeteerPage.evaluate((sel: string) => {
+      const probe = await this._puppeteerPage.evaluate((sel: string) => {
         const el = document.querySelector(sel) as HTMLElement | null;
-        if (!el) return false;
+        if (!el) return { present: false, coveredBy: '' };
         el.scrollIntoView({ behavior: 'instant', block: 'center' });
-        return el.isConnected;
+        // A real click lands on whatever is on top. When a dialog (e.g. LinkedIn's "Job search
+        // safety reminder") covers the button, the click would only hit that overlay.
+        const r = el.getBoundingClientRect();
+        const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2) as HTMLElement | null;
+        if (hit && hit !== el && !el.contains(hit)) {
+          const cover = hit.closest(
+            'dialog, [role="dialog"], [role="alertdialog"], [aria-modal="true"], .artdeco-modal, .artdeco-modal-overlay',
+          ) as HTMLElement | null;
+          if (cover) {
+            const title = (cover.querySelector('h1, h2, h3')?.textContent || cover.getAttribute('aria-label') || '')
+              .replace(/\s+/g, ' ')
+              .trim();
+            return {
+              present: true,
+              coveredBy: `${cover.tagName.toLowerCase()}${title ? ` "${title.slice(0, 60)}"` : ''}`,
+            };
+          }
+        }
+        return { present: el.isConnected, coveredBy: '' };
       }, markerSel);
-      if (!present) {
+      if (!probe.present) {
         logger.debug('[trustedClickEasyApplyButton] No marked Easy Apply target found.');
+        return false;
+      }
+      if (probe.coveredBy) {
+        logger.info(
+          `[trustedClickEasyApplyButton] Easy Apply button is covered by ${probe.coveredBy}; not clicking through the overlay.`,
+        );
         return false;
       }
       await this._puppeteerPage.click(markerSel);
@@ -2683,8 +2756,8 @@ export default class Page {
    * Polls up to maxWaitMs (every pollIntervalMs) for the Easy Apply modal.
    * Checks light DOM and open shadow roots (#interop-outlet).
    * Automatically handles known intermediate dialogs:
-   *   - "Continue applying?" -> Clicks Continue
-   *   - "Job search safety reminder" -> Clicks Continue / Dismiss
+   *   - "Job search safety reminder" / "Continue applying?" -> trusted click on "Continue
+   *     applying" (never "Review job post" / Dismiss), then waits for the form itself
    *   - "Save this application?" -> Preserves the draft (Save / dismiss), never Discard
    *   - Unknown modal/dialog -> Halts with clear error!
    * Checks if modal is already open before waiting.
@@ -2698,6 +2771,8 @@ export default class Page {
     inShadowRoot?: boolean;
     interactiveCount?: number;
     error?: string;
+    /** Set when a "Job search safety reminder" / "Continue applying?" prompt was seen. */
+    interstitial?: { title: string; clicks: number; stillOpen: boolean };
   }> {
     if (!this._puppeteerPage) {
       await this.attachPuppeteer().catch(() => false);
@@ -2708,12 +2783,63 @@ export default class Page {
     let lastUnknownDialog: string | null = null;
 
     const checkInPage = () => {
+      // "Job search safety reminder" (Review job post / Continue applying) or a bare
+      // "Continue applying?" prompt shown between the Easy Apply click and the form.
+      function classifyInterstitial(dialogText: string): 'safety' | 'continue' | null {
+        const t = dialogText.toLowerCase();
+        if (/job search safety|safety reminder/.test(t)) return 'safety';
+        if (/review job post/.test(t) && /continue applying/.test(t)) return 'safety';
+        if (/continue applying/.test(t)) return 'continue';
+        return null;
+      }
+
+      // Finds the prompt's "Continue applying" control. Real controls (button / link /
+      // role=button) whose text is exactly "Continue applying" win; then aria-labels; then a
+      // bare "Continue"; finally a text-only render (<span>Continue applying</span> inside a
+      // non-semantic clickable wrapper). Never returns Review job post / Dismiss / Close.
+      function findContinueControl(dialog: HTMLElement): { el: HTMLElement; disabled: boolean; desc: string } | null {
+        const norm = (s: string | null | undefined) => (s || '').replace(/\s+/g, ' ').trim().toLowerCase();
+        const shown = (el: HTMLElement) => {
+          const st = window.getComputedStyle(el);
+          if (st.display === 'none' || st.visibility === 'hidden') return false;
+          const r = el.getBoundingClientRect();
+          return r.width > 0 && r.height > 0;
+        };
+        const NEGATIVE = /review job post|dismiss|close|cancel|discard|report|not now|exit|\bback\b|\bsave\b/;
+        const CLICKABLE = 'button, a, [role="button"], [role="link"], input[type="button"], input[type="submit"]';
+        const textOf = (el: HTMLElement) =>
+          norm(el.innerText || el.textContent || (el as HTMLInputElement).value || '');
+        const controls = (Array.from(dialog.querySelectorAll(CLICKABLE)) as HTMLElement[]).filter(shown);
+        let el =
+          controls.find(c => /^continue applying\b/.test(textOf(c)) && !NEGATIVE.test(textOf(c))) ||
+          controls.find(c => /continue applying/.test(norm(c.getAttribute('aria-label')))) ||
+          controls.find(c => textOf(c) === 'continue') ||
+          null;
+        if (!el) {
+          // Document order puts the outermost element carrying exactly this text first.
+          const label = (Array.from(dialog.querySelectorAll('span, div, p, strong')) as HTMLElement[]).find(
+            n => /^continue applying$/.test(norm(n.textContent)) && shown(n),
+          );
+          if (label) {
+            const wrapper = label.closest(`${CLICKABLE}, [tabindex], [onclick]`) as HTMLElement | null;
+            el = wrapper && dialog.contains(wrapper) ? wrapper : label;
+          }
+        }
+        if (!el) return null;
+        const disabled = (el as HTMLButtonElement).disabled === true || el.getAttribute('aria-disabled') === 'true';
+        return { el, disabled, desc: `${el.tagName.toLowerCase()} "${textOf(el).slice(0, 40)}"` };
+      }
+
       function inspectRoot(root: any): {
         modalFound: boolean;
         inShadow: boolean;
         dialogTitle?: string;
         isIntermediate?: boolean;
         intermediateAction?: 'continue' | 'safety' | 'discard' | 'unknown';
+        needsTrustedClick?: boolean;
+        controlFound?: boolean;
+        controlDisabled?: boolean;
+        controlDesc?: string;
         inputsCount: number;
         buttonsCount: number;
         hasClosedShadow: boolean;
@@ -2721,6 +2847,20 @@ export default class Page {
         // Helper to ensure an element is a genuine visible modal dialog
         function isGenuineVisibleModal(dialog: HTMLElement): boolean {
           if (!dialog || !dialog.isConnected) return false;
+
+          // A native <dialog> opened with showModal() is in the top layer and blocks the whole
+          // page wherever it sits in the DOM (LinkedIn renders some prompts inside the job's top
+          // card / <header>, which the nav/header exclusion below would otherwise reject).
+          let isTopLayerModal = false;
+          try {
+            isTopLayerModal = dialog.tagName === 'DIALOG' && dialog.matches(':modal');
+          } catch {
+            // best effort; failure here is non-fatal
+          }
+          if (isTopLayerModal) {
+            const r = dialog.getBoundingClientRect();
+            return r.width >= 120 && r.height >= 60;
+          }
 
           // Direct match: If it is explicitly marked as the Easy Apply modal, always accept!
           if (
@@ -2793,7 +2933,7 @@ export default class Page {
         const rawDialogs = root.querySelectorAll
           ? (Array.from(
               root.querySelectorAll(
-                'div.jobs-easy-apply-modal, [data-easy-apply-modal], [data-test-modal-id="easy-apply-modal"], div[data-test-modal], div.artdeco-modal, dialog[open], dialog, div[role="dialog"], [aria-modal="true"]',
+                'div.jobs-easy-apply-modal, [data-easy-apply-modal], [data-test-modal-id="easy-apply-modal"], div[data-test-modal], div.artdeco-modal, dialog[open], dialog, div[role="dialog"], [role="alertdialog"], [aria-modal="true"]',
               ),
             ) as HTMLElement[])
           : [];
@@ -2829,7 +2969,7 @@ export default class Page {
           const hasExplicitEasyApplyClass =
             dialog.classList.contains('jobs-easy-apply-modal') ||
             dialog.querySelector(
-              '.jobs-easy-apply-modal, .jobs-easy-apply-content, [data-easy-apply-modal], .jobs-easy-apply-form-section, .jobs-easy-apply-form-element, form.jobs-easy-apply-form, [data-test-modal-id="easy-apply-modal"]',
+              '.jobs-easy-apply-modal, .jobs-easy-apply-content, [data-easy-apply-modal], .jobs-easy-apply-form-section, .jobs-easy-apply-form-element, form.jobs-easy-apply-form, [data-test-modal-id="easy-apply-modal"], [data-sdui-screen*="easyapply" i]',
             ) !== null;
 
           // Confirmation / intermediate dialogs must never be mistaken for the form itself.
@@ -2882,42 +3022,40 @@ export default class Page {
           const titleEl = dialog.querySelector('h1, h2, h3, [id*="header"], [class*="header"]');
           const title = (titleEl?.textContent || text.slice(0, 100)).trim();
 
-          // Known intermediate dialog 1: "Continue applying?"
-          if (/continue applying/i.test(title) || /continue applying/i.test(text)) {
-            const buttons = Array.from(dialog.querySelectorAll('button'));
-            const continueBtn = buttons.find(b => /continue/i.test(b.textContent || ''));
-            if (continueBtn) {
-              continueBtn.click();
-              return {
-                modalFound: false,
-                inShadow: root instanceof ShadowRoot,
-                dialogTitle: title,
-                isIntermediate: true,
-                intermediateAction: 'continue',
-                inputsCount: 0,
-                buttonsCount: 0,
-                hasClosedShadow: false,
-              };
+          // Known intermediate dialogs 1 & 2: LinkedIn's "Job search safety reminder" and the
+          // "Continue applying?" prompt. Both lead to the form ONLY through their "Continue
+          // applying" control — never "Review job post" or Dismiss, which abandon the apply flow.
+          // The control is marked here and clicked from outside with a REAL (trusted) mouse
+          // click: LinkedIn's new UI ignores synthetic clicks on it, and its button is often not
+          // a <button> (an <a>/[role=button] wrapping <span><span>Continue applying</span></span>).
+          const interstitialKind = classifyInterstitial(`${title} ${text}`);
+          if (interstitialKind) {
+            const control = findContinueControl(dialog);
+            try {
+              document
+                .querySelectorAll('[data-qoder-intermediate-target]')
+                .forEach(m => m.removeAttribute('data-qoder-intermediate-target'));
+              root
+                .querySelectorAll('[data-qoder-intermediate-target]')
+                .forEach((m: Element) => m.removeAttribute('data-qoder-intermediate-target'));
+              if (control) control.el.setAttribute('data-qoder-intermediate-target', '1');
+            } catch {
+              // best effort; failure here is non-fatal
             }
-          }
-
-          // Known intermediate dialog 2: "Job search safety reminder"
-          if (/job search safety/i.test(title) || /safety reminder/i.test(title) || /safety reminder/i.test(text)) {
-            const buttons = Array.from(dialog.querySelectorAll('button'));
-            const okBtn = buttons.find(b => /continue|got it|dismiss|understand/i.test(b.textContent || ''));
-            if (okBtn) {
-              okBtn.click();
-              return {
-                modalFound: false,
-                inShadow: root instanceof ShadowRoot,
-                dialogTitle: title,
-                isIntermediate: true,
-                intermediateAction: 'safety',
-                inputsCount: 0,
-                buttonsCount: 0,
-                hasClosedShadow: false,
-              };
-            }
+            return {
+              modalFound: false,
+              inShadow: root instanceof ShadowRoot,
+              dialogTitle: title.slice(0, 80),
+              isIntermediate: true,
+              intermediateAction: interstitialKind,
+              needsTrustedClick: true,
+              controlFound: Boolean(control),
+              controlDisabled: Boolean(control?.disabled),
+              controlDesc: control?.desc || '',
+              inputsCount: 0,
+              buttonsCount: 0,
+              hasClosedShadow: false,
+            };
           }
 
           // Known intermediate dialog 3: "Save this application?" / "Save draft?" / "Discard draft?"
@@ -2960,6 +3098,50 @@ export default class Page {
                 hasClosedShadow: false,
               };
             }
+          }
+        }
+
+        // Pass 2b: the safety reminder rendered without dialog semantics (a plain overlay
+        // container): anchor on its heading and climb to the container holding the control.
+        const promptHeadings = root.querySelectorAll
+          ? (Array.from(root.querySelectorAll('h1, h2, h3, h4, [role="heading"]')) as HTMLElement[]).filter(h => {
+              if (!/job search safety reminder|safety reminder/i.test((h.textContent || '').trim())) return false;
+              const r = h.getBoundingClientRect();
+              return r.width > 0 && r.height > 0;
+            })
+          : [];
+        for (const heading of promptHeadings) {
+          let anc: HTMLElement | null = heading.parentElement;
+          let depth = 0;
+          while (anc && depth < 8) {
+            const control = findContinueControl(anc);
+            if (!control) {
+              anc = anc.parentElement;
+              depth++;
+              continue;
+            }
+            try {
+              document
+                .querySelectorAll('[data-qoder-intermediate-target]')
+                .forEach(m => m.removeAttribute('data-qoder-intermediate-target'));
+              control.el.setAttribute('data-qoder-intermediate-target', '1');
+            } catch {
+              // best effort; failure here is non-fatal
+            }
+            return {
+              modalFound: false,
+              inShadow: root instanceof ShadowRoot,
+              dialogTitle: (heading.textContent || '').trim().slice(0, 80),
+              isIntermediate: true,
+              intermediateAction: 'safety',
+              needsTrustedClick: true,
+              controlFound: true,
+              controlDisabled: control.disabled,
+              controlDesc: control.desc,
+              inputsCount: 0,
+              buttonsCount: 0,
+              hasClosedShadow: false,
+            };
           }
         }
 
@@ -3024,7 +3206,22 @@ export default class Page {
       return inspectRoot(document);
     };
 
-    while (Date.now() - startTime < maxWaitMs) {
+    // Interstitial ("Job search safety reminder" / "Continue applying?") handling: its
+    // "Continue applying" control gets a trusted click, re-clicked only if the prompt is still
+    // up after a cooldown (no click spam), at most MAX_INTERSTITIAL_CLICKS times. Each click
+    // extends the wait so the form can open after the prompt closes; success is reported only
+    // once the Easy Apply form itself is detected.
+    const INTERSTITIAL_RECLICK_MS = 2500;
+    const MAX_INTERSTITIAL_CLICKS = 3;
+    const INTERSTITIAL_FORM_GRACE_MS = 8000;
+    let deadline = startTime + maxWaitMs;
+    let interstitialTitle: string | null = null;
+    let interstitialClicks = 0;
+    let lastInterstitialClickAt = 0;
+    let interstitialOpenAtLastPoll = false;
+    let interstitialControlMissing = false;
+
+    while (Date.now() < deadline) {
       attempt++;
 
       let checkResult: any = null;
@@ -3050,6 +3247,41 @@ export default class Page {
 
       if (!checkResult) {
         await new Promise(r => setTimeout(r, pollIntervalMs));
+        continue;
+      }
+
+      interstitialOpenAtLastPoll = Boolean(checkResult.isIntermediate && checkResult.needsTrustedClick);
+      if (interstitialOpenAtLastPoll) {
+        interstitialTitle = String(checkResult.dialogTitle || 'LinkedIn prompt').trim();
+        if (!checkResult.controlFound || checkResult.controlDisabled) {
+          // Rendered, but "Continue applying" is not there / not enabled yet: keep polling (a
+          // little past the caller's budget) and never click anything else on the prompt.
+          interstitialControlMissing = true;
+          deadline = Math.max(
+            deadline,
+            Math.min(startTime + maxWaitMs + INTERSTITIAL_FORM_GRACE_MS, Date.now() + 1500),
+          );
+          await new Promise(r => setTimeout(r, pollIntervalMs));
+          continue;
+        }
+        interstitialControlMissing = false;
+        const cooledDown = Date.now() - lastInterstitialClickAt >= INTERSTITIAL_RECLICK_MS;
+        if (interstitialClicks === 0 || (interstitialClicks < MAX_INTERSTITIAL_CLICKS && cooledDown)) {
+          const method = await this.clickMarkedInterstitialControl(interstitialClicks);
+          if (method === 'failed') {
+            // The control re-rendered between marking and clicking (nothing was clicked): the
+            // next poll re-marks it and retries without spending a bounded click attempt.
+            logger.debug(`[JobApplyAgent] "${interstitialTitle}": "Continue applying" not clickable yet; retrying.`);
+          } else {
+            interstitialClicks++;
+            lastInterstitialClickAt = Date.now();
+            logger.info(
+              `[JobApplyAgent] "${interstitialTitle}": clicked ${checkResult.controlDesc || '"Continue applying"'} via ${method} click (attempt ${interstitialClicks}/${MAX_INTERSTITIAL_CLICKS}). Waiting for the Easy Apply form...`,
+            );
+            deadline = Math.max(deadline, Date.now() + INTERSTITIAL_FORM_GRACE_MS);
+          }
+        }
+        await new Promise(r => setTimeout(r, 400));
         continue;
       }
 
@@ -3080,6 +3312,9 @@ export default class Page {
           opened: true,
           inShadowRoot: checkResult.inShadow,
           interactiveCount: checkResult.inputsCount + checkResult.buttonsCount,
+          interstitial: interstitialTitle
+            ? { title: interstitialTitle, clicks: interstitialClicks, stillOpen: false }
+            : undefined,
         };
       }
 
@@ -3088,6 +3323,22 @@ export default class Page {
       }
 
       await new Promise(r => setTimeout(r, pollIntervalMs));
+    }
+
+    if (interstitialTitle) {
+      const err = interstitialOpenAtLastPoll
+        ? interstitialClicks > 0
+          ? `LinkedIn "${interstitialTitle}" prompt stayed open after ${interstitialClicks} "Continue applying" click(s)`
+          : `LinkedIn "${interstitialTitle}" prompt is open but its "Continue applying" button was ${
+              interstitialControlMissing ? 'not found' : 'not clickable'
+            }`
+        : `Clicked "Continue applying" on LinkedIn "${interstitialTitle}" but the Easy Apply form did not open`;
+      logger.warning(`[JobApplyAgent] ${err}`);
+      return {
+        opened: false,
+        error: err,
+        interstitial: { title: interstitialTitle, clicks: interstitialClicks, stillOpen: interstitialOpenAtLastPoll },
+      };
     }
 
     if (lastUnknownDialog) {
@@ -3099,6 +3350,88 @@ export default class Page {
 
     console.debug(`[JobApplyAgent] Easy Apply modal did not appear within ${maxWaitMs}ms`);
     return { opened: false, error: 'Easy Apply modal failed to open within timeout' };
+  }
+
+  /**
+   * Clicks the interstitial control marked `data-qoder-intermediate-target` by
+   * waitForEasyApplyModal. The first two attempts use a REAL trusted CDP mouse click (LinkedIn's
+   * new UI discards synthetic clicks on this prompt); the last attempt, or a session without
+   * Puppeteer, falls back to a synthetic pointer + click sequence on the innermost element under
+   * the control's centre so the event bubbles through every wrapper.
+   */
+  private async clickMarkedInterstitialControl(attempt: number): Promise<'trusted' | 'synthetic' | 'failed'> {
+    const marker = '[data-qoder-intermediate-target="1"]';
+    if (this._puppeteerPage && attempt < 2) {
+      try {
+        const handle = await this._puppeteerPage.$(`pierce/${marker}`);
+        if (handle) {
+          try {
+            await handle.click({ delay: 40 });
+            return 'trusted';
+          } finally {
+            await handle.dispose().catch(() => {});
+          }
+        }
+      } catch (err) {
+        logger.debug('[clickMarkedInterstitialControl] Trusted click failed, falling back to synthetic:', err);
+      }
+    }
+
+    const syntheticClick = (sel: string) => {
+      const find = (root: Document | ShadowRoot): HTMLElement | null => {
+        const direct = root.querySelector(sel) as HTMLElement | null;
+        if (direct) return direct;
+        for (const n of Array.from(root.querySelectorAll('*'))) {
+          const sr = (n as HTMLElement).shadowRoot;
+          if (sr) {
+            const found = find(sr);
+            if (found) return found;
+          }
+        }
+        return null;
+      };
+      const el = find(document);
+      if (!el) return false;
+      try {
+        el.scrollIntoView({ block: 'center' });
+      } catch {
+        // best effort; failure here is non-fatal
+      }
+      const r = el.getBoundingClientRect();
+      const cx = r.left + r.width / 2;
+      const cy = r.top + r.height / 2;
+      const rootNode = el.getRootNode() as Document | ShadowRoot;
+      const hit = typeof rootNode.elementFromPoint === 'function' ? rootNode.elementFromPoint(cx, cy) : null;
+      const target = (hit && el.contains(hit) ? hit : el) as HTMLElement;
+      const opts = { bubbles: true, cancelable: true, composed: true, view: window, clientX: cx, clientY: cy };
+      target.dispatchEvent(new PointerEvent('pointerdown', opts));
+      target.dispatchEvent(new MouseEvent('mousedown', opts));
+      target.dispatchEvent(new PointerEvent('pointerup', opts));
+      target.dispatchEvent(new MouseEvent('mouseup', opts));
+      target.click();
+      return true;
+    };
+
+    if (this._puppeteerPage) {
+      try {
+        if (await this._puppeteerPage.evaluate(syntheticClick, marker)) return 'synthetic';
+      } catch {
+        // best effort; failure here is non-fatal
+      }
+    }
+    if (this._tabId && typeof chrome !== 'undefined' && chrome.scripting?.executeScript) {
+      try {
+        const results = await chrome.scripting.executeScript({
+          target: { tabId: this._tabId },
+          func: syntheticClick,
+          args: [marker],
+        });
+        if (results?.[0]?.result) return 'synthetic';
+      } catch {
+        // best effort; failure here is non-fatal
+      }
+    }
+    return 'failed';
   }
 
   /**
@@ -3268,6 +3601,21 @@ export default class Page {
             ) as HTMLElement[])
           : [];
 
+        // LinkedIn SDUI Easy Apply pre-pass: an open <dialog> holding [data-sdui-screen*="easyapply"] is the
+        // application form; prefer it so a stale/hidden dialog earlier in the DOM is never used.
+        const sduiForm = (candidates as HTMLElement[]).find(c => {
+          if (!c || !c.isConnected) return false;
+          const marked =
+            (typeof c.matches === 'function' && c.matches('[data-sdui-screen*="easyapply" i]')) ||
+            Boolean(c.querySelector && c.querySelector('[data-sdui-screen*="easyapply" i]'));
+          if (!marked) return false;
+          const st = window.getComputedStyle(c);
+          if (st.display === 'none' || st.visibility === 'hidden') return false;
+          const r = c.getBoundingClientRect();
+          return r.width >= 120 && r.height >= 60;
+        });
+        if (sduiForm) return sduiForm;
+
         for (const c of candidates) {
           if (!c || !c.isConnected) continue;
           if (
@@ -3290,6 +3638,12 @@ export default class Page {
           }
           // A native "Save this application?" / "Discard draft?" sheet is not the form.
           if (/save this application|save application|discard draft/i.test(text)) continue;
+          // LinkedIn's "Job search safety reminder" interstitial is not the application form.
+          if (
+            /job search safety|safety reminder/i.test(text) &&
+            !c.querySelector('input:not([type="hidden"]), select, textarea')
+          )
+            continue;
           const style = window.getComputedStyle(c);
           if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity || '1') <= 0.05)
             continue;
@@ -3436,6 +3790,104 @@ export default class Page {
             .trim();
         }
         return cleanDuplicateText(txt);
+      }
+
+      // Visible text of ONE radio/checkbox option. LinkedIn's current (SDUI) form gives the native
+      // input no value (so .value is the default "on"), an EMPTY <label for>, and an aria-label that
+      // holds the QUESTION; the option text sits in a sibling <p>. Order: non-empty associated label
+      // -> aria-labelledby -> text of the option row (largest ancestor holding no other control, or
+      // the text right beside it) -> aria-label / title when they are not the question -> value,
+      // unless it is the meaningless default "on".
+      function choiceOptionText(input: HTMLInputElement, group: Element | null, question: string): string {
+        const norm = (t: string) =>
+          (t || '')
+            .replace(/[*\s]+/g, ' ')
+            .trim()
+            .toLowerCase();
+        const q = norm(question);
+        const isQuestionText = (t: string) => {
+          const n = norm(t);
+          if (!n) return true;
+          if (!q) return false;
+          return n === q || (n.length >= 12 && q.includes(n)) || (q.length >= 12 && n.includes(q));
+        };
+        const CONTROLS = 'input:not([type="hidden"]), select, textarea';
+
+        const fromLabels: string[] = [];
+        try {
+          Array.from(input.labels || []).forEach(l => fromLabels.push(cleanElementText(l)));
+        } catch {
+          // best effort; failure here is non-fatal
+        }
+        const wrapping = input.closest('label');
+        if (wrapping) fromLabels.push(cleanElementText(wrapping));
+        for (const t of fromLabels) if (t && !isQuestionText(t)) return t;
+
+        const root = input.getRootNode() as Document | ShadowRoot;
+        const refs = (input.getAttribute('aria-labelledby') || '').split(/\s+/).filter(Boolean);
+        if (refs.length > 0) {
+          const t = refs
+            .map(id => {
+              try {
+                return cleanElementText(root.querySelector(`[id="${CSS.escape(id)}"]`));
+              } catch {
+                return '';
+              }
+            })
+            .filter(Boolean)
+            .join(' ')
+            .trim();
+          if (t && !isQuestionText(t)) return t;
+        }
+
+        // Option row: climb while the ancestor holds no other form control.
+        let row: HTMLElement | null = null;
+        let cur: HTMLElement | null = input.parentElement;
+        while (cur && cur !== group && cur !== document.body) {
+          if (cur.querySelectorAll(CONTROLS).length > 1) break;
+          row = cur;
+          cur = cur.parentElement;
+        }
+        if (row) {
+          let t = cleanElementText(row);
+          // The row can also hold a (visually hidden) copy of the question that the input names via
+          // aria-labelledby — LinkedIn: <div id=q>question…</div> <input aria-labelledby=q> <p>Yes</p>.
+          // Read the row without that copy, or every option reads as the question (no options).
+          if (t && isQuestionText(t) && refs.length > 0) {
+            const clone = row.cloneNode(true) as HTMLElement;
+            for (const id of refs) {
+              try {
+                clone.querySelectorAll(`[id="${CSS.escape(id)}"]`).forEach(n => n.remove());
+              } catch {
+                // best effort; failure here is non-fatal
+              }
+            }
+            t = cleanElementText(clone);
+          }
+          if (!t) {
+            // Text rendered BESIDE the input's wrapper (<div><input><label/></div><div><p>Yes</p></div>).
+            const parts: string[] = [];
+            let sib = row.nextElementSibling;
+            for (let i = 0; sib && i < 3; i++, sib = sib.nextElementSibling) {
+              if (sib.matches(CONTROLS) || sib.querySelector(CONTROLS)) break;
+              const st = cleanElementText(sib);
+              if (st) parts.push(st);
+            }
+            t = parts.join(' ').trim();
+            if (!t) {
+              const prev = row.previousElementSibling;
+              if (prev && !prev.matches(CONTROLS) && !prev.querySelector(CONTROLS)) t = cleanElementText(prev);
+            }
+          }
+          if (t && t.length <= 300 && !isQuestionText(t)) return t;
+        }
+
+        const aria = (input.getAttribute('aria-label') || '').trim();
+        if (aria && !isQuestionText(aria)) return aria;
+        const title = (input.getAttribute('title') || '').trim();
+        if (title && !isQuestionText(title)) return title;
+        const v = (input.value || '').trim();
+        return v && !/^(?:on|off|true|false)$/i.test(v) ? v : '';
       }
 
       function cleanDuplicateString(text: string): string {
@@ -4002,24 +4454,7 @@ export default class Page {
             legendText &&
             !isGenericPlaceholderText(legendText)
           ) {
-            const options = radios
-              .map(r => {
-                const rId = r.getAttribute('id');
-                let rLbl: HTMLElement | null = null;
-                if (rId) {
-                  try {
-                    rLbl = fs.querySelector(`label[for="${CSS.escape(rId)}"]`);
-                  } catch {
-                    const allLabels = Array.from(fs.querySelectorAll('label'));
-                    rLbl = allLabels.find(l => l.getAttribute('for') === rId) || null;
-                  }
-                }
-                if (!rLbl) {
-                  rLbl = r.closest('label') || (r.parentElement?.querySelector('label') as HTMLElement | null);
-                }
-                return cleanElementText(rLbl) || (r.value || '').trim();
-              })
-              .filter(Boolean);
+            const options = radios.map(r => choiceOptionText(r, fs, legendText)).filter(Boolean);
 
             if (!emptyRequiredFields.some(e => e.label === legendText && e.fieldType === 'radio')) {
               emptyRequiredFields.push({
@@ -4065,24 +4500,7 @@ export default class Page {
             legendText &&
             !isGenericPlaceholderText(legendText)
           ) {
-            const options = checkboxes
-              .map(c => {
-                const cId = c.getAttribute('id');
-                let cLbl: HTMLElement | null = null;
-                if (cId) {
-                  try {
-                    cLbl = fs.querySelector(`label[for="${CSS.escape(cId)}"]`);
-                  } catch {
-                    const allLabels = Array.from(fs.querySelectorAll('label'));
-                    cLbl = allLabels.find(l => l.getAttribute('for') === cId) || null;
-                  }
-                }
-                if (!cLbl) {
-                  cLbl = c.closest('label') || (c.parentElement?.querySelector('label') as HTMLElement | null);
-                }
-                return cleanElementText(cLbl) || (c.value || '').trim();
-              })
-              .filter(Boolean);
+            const options = checkboxes.map(c => choiceOptionText(c, fs, legendText)).filter(Boolean);
 
             emptyRequiredFields.push({
               label: legendText,
@@ -4581,7 +4999,11 @@ export default class Page {
       );
       return false;
     }
-    const fillInPage = async (ident: { id?: string; label?: string }, val: string) => {
+    const fillInPage = async (
+      ident: { id?: string; label?: string },
+      val: string,
+      fillOpts?: { allowTrustedEscalation?: boolean },
+    ) => {
       function cleanDuplicateText(rawText: string): string {
         if (!rawText) return '';
         const text = rawText
@@ -4659,6 +5081,132 @@ export default class Page {
         return cleanDuplicateText(txt);
       }
 
+      // Visible text of ONE radio/checkbox option. LinkedIn's current (SDUI) form gives the native
+      // input no value (so .value is the default "on"), an EMPTY <label for>, and an aria-label that
+      // holds the QUESTION; the option text sits in a sibling <p>. Order: non-empty associated label
+      // -> aria-labelledby -> text of the option row (largest ancestor holding no other control, or
+      // the text right beside it) -> aria-label / title when they are not the question -> value,
+      // unless it is the meaningless default "on".
+      function choiceOptionText(input: HTMLInputElement, group: Element | null, question: string): string {
+        const norm = (t: string) =>
+          (t || '')
+            .replace(/[*\s]+/g, ' ')
+            .trim()
+            .toLowerCase();
+        const q = norm(question);
+        const isQuestionText = (t: string) => {
+          const n = norm(t);
+          if (!n) return true;
+          if (!q) return false;
+          return n === q || (n.length >= 12 && q.includes(n)) || (q.length >= 12 && n.includes(q));
+        };
+        const CONTROLS = 'input:not([type="hidden"]), select, textarea';
+
+        const fromLabels: string[] = [];
+        try {
+          Array.from(input.labels || []).forEach(l => fromLabels.push(cleanElementText(l)));
+        } catch {
+          // best effort; failure here is non-fatal
+        }
+        const wrapping = input.closest('label');
+        if (wrapping) fromLabels.push(cleanElementText(wrapping));
+        for (const t of fromLabels) if (t && !isQuestionText(t)) return t;
+
+        const root = input.getRootNode() as Document | ShadowRoot;
+        const refs = (input.getAttribute('aria-labelledby') || '').split(/\s+/).filter(Boolean);
+        if (refs.length > 0) {
+          const t = refs
+            .map(id => {
+              try {
+                return cleanElementText(root.querySelector(`[id="${CSS.escape(id)}"]`));
+              } catch {
+                return '';
+              }
+            })
+            .filter(Boolean)
+            .join(' ')
+            .trim();
+          if (t && !isQuestionText(t)) return t;
+        }
+
+        // Option row: climb while the ancestor holds no other form control.
+        let row: HTMLElement | null = null;
+        let cur: HTMLElement | null = input.parentElement;
+        while (cur && cur !== group && cur !== document.body) {
+          if (cur.querySelectorAll(CONTROLS).length > 1) break;
+          row = cur;
+          cur = cur.parentElement;
+        }
+        if (row) {
+          let t = cleanElementText(row);
+          // The row can also hold a (visually hidden) copy of the question that the input names via
+          // aria-labelledby — LinkedIn: <div id=q>question…</div> <input aria-labelledby=q> <p>Yes</p>.
+          // Read the row without that copy, or every option reads as the question (no options).
+          if (t && isQuestionText(t) && refs.length > 0) {
+            const clone = row.cloneNode(true) as HTMLElement;
+            for (const id of refs) {
+              try {
+                clone.querySelectorAll(`[id="${CSS.escape(id)}"]`).forEach(n => n.remove());
+              } catch {
+                // best effort; failure here is non-fatal
+              }
+            }
+            t = cleanElementText(clone);
+          }
+          if (!t) {
+            // Text rendered BESIDE the input's wrapper (<div><input><label/></div><div><p>Yes</p></div>).
+            const parts: string[] = [];
+            let sib = row.nextElementSibling;
+            for (let i = 0; sib && i < 3; i++, sib = sib.nextElementSibling) {
+              if (sib.matches(CONTROLS) || sib.querySelector(CONTROLS)) break;
+              const st = cleanElementText(sib);
+              if (st) parts.push(st);
+            }
+            t = parts.join(' ').trim();
+            if (!t) {
+              const prev = row.previousElementSibling;
+              if (prev && !prev.matches(CONTROLS) && !prev.querySelector(CONTROLS)) t = cleanElementText(prev);
+            }
+          }
+          if (t && t.length <= 300 && !isQuestionText(t)) return t;
+        }
+
+        const aria = (input.getAttribute('aria-label') || '').trim();
+        if (aria && !isQuestionText(aria)) return aria;
+        const title = (input.getAttribute('title') || '').trim();
+        if (title && !isQuestionText(title)) return title;
+        const v = (input.value || '').trim();
+        return v && !/^(?:on|off|true|false)$/i.test(v) ? v : '';
+      }
+
+      // The element a person clicks for this option: a visible associated label (LinkedIn styles the
+      // empty <label for> as the radio/checkbox), an ARIA radio/checkbox wrapper, the input when it
+      // has a box, else the nearest visible ancestor holding only this input. The native input
+      // itself is often 0x0 / transparent, so a trusted click on it would miss.
+      function choiceClickTarget(input: HTMLInputElement): HTMLElement {
+        const hasBox = (el: Element | null): boolean => {
+          if (!el) return false;
+          const r = (el as HTMLElement).getBoundingClientRect();
+          const st = window.getComputedStyle(el as HTMLElement);
+          return r.width >= 4 && r.height >= 4 && st.visibility !== 'hidden' && st.display !== 'none';
+        };
+        const labels = Array.from(input.labels || []) as HTMLElement[];
+        const label = labels.find(hasBox);
+        if (label) return label;
+        const wrapper = input.closest(
+          '[role="radio"], [role="checkbox"], [role="option"], label',
+        ) as HTMLElement | null;
+        if (wrapper && hasBox(wrapper)) return wrapper;
+        if (hasBox(input)) return input;
+        let cur: HTMLElement | null = input.parentElement;
+        while (cur && cur !== document.body) {
+          if (cur.querySelectorAll('input:not([type="hidden"]), select, textarea').length > 1) break;
+          if (hasBox(cur)) return cur;
+          cur = cur.parentElement;
+        }
+        return input;
+      }
+
       function cleanDuplicateString(text: string): string {
         return cleanDuplicateText(text);
       }
@@ -4671,6 +5219,21 @@ export default class Page {
               ),
             ) as HTMLElement[])
           : [];
+
+        // LinkedIn SDUI Easy Apply pre-pass: an open <dialog> holding [data-sdui-screen*="easyapply"] is the
+        // application form; prefer it so a stale/hidden dialog earlier in the DOM is never used.
+        const sduiForm = (candidates as HTMLElement[]).find(c => {
+          if (!c || !c.isConnected) return false;
+          const marked =
+            (typeof c.matches === 'function' && c.matches('[data-sdui-screen*="easyapply" i]')) ||
+            Boolean(c.querySelector && c.querySelector('[data-sdui-screen*="easyapply" i]'));
+          if (!marked) return false;
+          const st = window.getComputedStyle(c);
+          if (st.display === 'none' || st.visibility === 'hidden') return false;
+          const r = c.getBoundingClientRect();
+          return r.width >= 120 && r.height >= 60;
+        });
+        if (sduiForm) return sduiForm;
 
         for (const c of candidates) {
           if (!c || !c.isConnected) continue;
@@ -4694,6 +5257,12 @@ export default class Page {
           }
           // A native "Save this application?" / "Discard draft?" sheet is not the form.
           if (/save this application|save application|discard draft/i.test(text)) continue;
+          // LinkedIn's "Job search safety reminder" interstitial is not the application form.
+          if (
+            /job search safety|safety reminder/i.test(text) &&
+            !c.querySelector('input:not([type="hidden"]), select, textarea')
+          )
+            continue;
           const style = window.getComputedStyle(c);
           if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity || '1') <= 0.05)
             continue;
@@ -4835,6 +5404,396 @@ export default class Page {
         return false;
       }
 
+      // ── Checkbox handling ────────────────────────────────────────────────────
+      // LinkedIn renders multi-choice questions as a GROUP of checkboxes (each checkbox is an
+      // answer option) and consent questions as a SINGLE checkbox. A group answer names the
+      // option(s) to tick; a single-checkbox answer is Yes/No. Every tick is verified by reading
+      // `checked` back. Boxes that a synthetic click could not tick are marked
+      // `data-qoder-cb-pending` for the outer ladder to click with a REAL (trusted) mouse event.
+      const checkboxResultBase = {
+        targetFound: true,
+        isTextField: false,
+        typeaheadUnresolved: false,
+        isButtonOption: false,
+      };
+      const allowTrustedEscalation = Boolean(fillOpts?.allowTrustedEscalation);
+      try {
+        document.querySelectorAll('[data-qoder-cb-pending]').forEach(m => m.removeAttribute('data-qoder-cb-pending'));
+        modal.querySelectorAll('[data-qoder-cb-pending]').forEach(m => m.removeAttribute('data-qoder-cb-pending'));
+      } catch {
+        // best effort; failure here is non-fatal
+      }
+      const normOptionText = (s: string): string =>
+        (s || '')
+          .toLowerCase()
+          .replace(/&/g, ' and ')
+          .replace(/[^\w\s]/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim();
+      const optionTextMatches = (optionText: string, target: string): boolean => {
+        const o = normOptionText(optionText);
+        const t = normOptionText(target);
+        if (!o || !t) return false;
+        if (o === t) return true;
+        const esc = (x: string) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        if (t.length >= 4 && new RegExp(`(?:^|\\s)${esc(t)}(?:\\s|$)`).test(o)) return true;
+        if (o.length >= 4 && new RegExp(`(?:^|\\s)${esc(o)}(?:\\s|$)`).test(t)) return true;
+        return false;
+      };
+      const checkboxLabelFor = (cb: HTMLInputElement, scope: ParentNode): HTMLElement | null => {
+        const id = cb.getAttribute('id');
+        if (id) {
+          try {
+            const byFor =
+              (scope.querySelector(`label[for="${CSS.escape(id)}"]`) as HTMLElement | null) ||
+              (modal.querySelector(`label[for="${CSS.escape(id)}"]`) as HTMLElement | null);
+            if (byFor) return byFor;
+          } catch {
+            // best effort; failure here is non-fatal
+          }
+        }
+        const wrapping = cb.closest('label') as HTMLElement | null;
+        if (wrapping) return wrapping;
+        return (cb.parentElement?.querySelector('label') as HTMLElement | null) || null;
+      };
+      const pause = (ms: number) => new Promise(r => setTimeout(r, ms));
+      // Synthetic click on the visible label first (what a user clicks), then on the input. A
+      // framework-controlled checkbox that ignores synthetic events reverts during dispatch, so
+      // the state read back is authoritative; it is read once more after a short pause so a
+      // late revert is not mistaken for success.
+      const ensureCheckboxState = async (
+        cb: HTMLInputElement,
+        label: HTMLElement | null,
+        desired: boolean,
+      ): Promise<boolean> => {
+        if (cb.checked === desired) return true;
+        const clickable = (label || cb.closest('label') || cb) as HTMLElement;
+        try {
+          clickable.scrollIntoView({ behavior: 'instant', block: 'center' });
+        } catch {
+          // best effort; failure here is non-fatal
+        }
+        try {
+          clickable.click();
+        } catch {
+          // best effort; failure here is non-fatal
+        }
+        await pause(120);
+        if (cb.checked !== desired && clickable !== cb) {
+          try {
+            cb.click();
+          } catch {
+            // best effort; failure here is non-fatal
+          }
+          await pause(120);
+        }
+        if (cb.checked !== desired) return false;
+        await pause(150);
+        return cb.checked === desired;
+      };
+      const setCheckedNatively = (cb: HTMLInputElement, desired: boolean) => {
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'checked')?.set;
+        if (setter) {
+          setter.call(cb, desired);
+        } else {
+          cb.checked = desired;
+        }
+        const tracker = (cb as HTMLInputElement & { _valueTracker?: { setValue(v: string): void } })._valueTracker;
+        if (tracker) tracker.setValue(String(!desired));
+        cb.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+        cb.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+      };
+      // When the synthetic attempts did not stick: mark the box for the trusted CDP click, or —
+      // when no trusted input exists (chrome.scripting fallback) — use the native setter.
+      const escalateCheckbox = (cb: HTMLInputElement, label: HTMLElement | null, desired: boolean): boolean => {
+        if (allowTrustedEscalation) {
+          // A trusted click needs a visible box; LinkedIn hides the native input behind its label.
+          const target = (label || cb.closest('label') || cb) as HTMLElement;
+          try {
+            target.setAttribute('data-qoder-cb-pending', desired ? '1' : '0');
+          } catch {
+            // best effort; failure here is non-fatal
+          }
+          return false;
+        }
+        setCheckedNatively(cb, desired);
+        return cb.checked === desired;
+      };
+      // Multi-choice group: the answer NAMES the option(s). Exact option text wins over partial
+      // matches ("Information Technology Management" must not tick "Information Systems
+      // Management & Information Technology Management"); a bare Yes/No never ticks an
+      // arbitrary option; options are only ever ticked, never unticked.
+      const fillCheckboxGroup = async (container: HTMLElement, boxes: HTMLInputElement[], rawVal: string) => {
+        const options = boxes.map(cb => {
+          const text = choiceOptionText(cb, container, ident.label || '');
+          const rawValue = (cb.value || '').trim();
+          return {
+            cb,
+            label: choiceClickTarget(cb),
+            text,
+            norm: normOptionText(text),
+            valueNorm: /^(?:on|off)$/i.test(rawValue) ? '' : normOptionText(rawValue),
+          };
+        });
+        const pickOne = (wantRaw: string) => {
+          const want = normOptionText(wantRaw);
+          if (!want) return null;
+          const exact = options.find(o => o.norm === want) || options.find(o => o.valueNorm && o.valueNorm === want);
+          if (exact) return exact;
+          const isYes = /^(?:yes|y|true)\b/.test(want);
+          const isNo = /^(?:no|n|false)\b/.test(want);
+          if (isYes || isNo) {
+            const yn = options.filter(o => (isYes ? /^yes\b/ : /^no\b/).test(o.norm));
+            return yn.length === 1 ? yn[0] : null;
+          }
+          const partial = options.filter(o => optionTextMatches(o.text, wantRaw));
+          if (partial.length === 1) return partial[0];
+          if (partial.length > 1) {
+            const ranked = partial
+              .map(o => ({ o, d: Math.abs(o.norm.length - want.length) }))
+              .sort((a, b) => a.d - b.d);
+            return ranked[0].d < ranked[1].d ? ranked[0].o : null;
+          }
+          return null;
+        };
+        // Option texts can contain commas ("Software Development, Engineering & Analysis"), so an
+        // answer that is exactly one option is never split; otherwise lists split on | ; or
+        // newlines, and on commas only when every part is itself an exact option.
+        const isExactOption = (w: string) => {
+          const n = normOptionText(w);
+          return Boolean(n) && options.some(o => o.norm === n || (o.valueNorm && o.valueNorm === n));
+        };
+        let wanted: string[] = [rawVal];
+        if (!isExactOption(rawVal)) {
+          const parts = rawVal
+            .split(/\s*(?:\||;|\n)\s*/)
+            .map(p => p.trim())
+            .filter(Boolean);
+          if (parts.length > 1) {
+            wanted = parts;
+          } else {
+            const commaParts = rawVal
+              .split(/\s*,\s*/)
+              .map(p => p.trim())
+              .filter(Boolean);
+            if (commaParts.length > 1 && commaParts.every(isExactOption)) {
+              wanted = commaParts;
+            }
+          }
+        }
+        const picks: typeof options = [];
+        for (const w of wanted) {
+          const p = pickOne(w);
+          if (p && !picks.includes(p)) picks.push(p);
+        }
+        if (picks.length === 0) {
+          const shown = options.map(o => o.text).filter(Boolean);
+          return {
+            ok: false,
+            ...checkboxResultBase,
+            reason: `no checkbox option matches "${rawVal}" (options: ${shown.join(' | ') || 'none readable'})`,
+          };
+        }
+        let allOk = true;
+        for (const p of picks) {
+          const ok = (await ensureCheckboxState(p.cb, p.label, true)) || escalateCheckbox(p.cb, p.label, true);
+          if (!ok) allOk = false;
+        }
+        return {
+          ok: allOk,
+          ...checkboxResultBase,
+          isCheckboxOption: !allOk,
+          reason: allOk ? undefined : 'checkbox did not stay checked after a synthetic click',
+        };
+      };
+
+      // Picks the option to select in a radio/checkbox group: exact option text first, then a
+      // Yes/No answer to the Yes/No option, then a unique partial match. Default input values
+      // ("on") never count as option text.
+      const pickChoiceIndex = (items: HTMLInputElement[], scope: Element | null, question: string, value: string) => {
+        const texts = items.map(i => choiceOptionText(i, scope, question));
+        const vals = items.map(i => {
+          const v = (i.value || '').trim();
+          return /^(?:on|off)$/i.test(v) ? '' : v;
+        });
+        const want = normOptionText(value);
+        let index = texts.findIndex(t => t && normOptionText(t) === want);
+        if (index < 0) index = vals.findIndex(v => v && normOptionText(v) === want);
+        if (index < 0) {
+          const lower = value.toLowerCase().trim();
+          const isYes = /^(?:yes|true|1|y|immediate(?:ly)?|available|agree|authorized|willing|interested)\b/i.test(
+            lower,
+          );
+          const isNo = /^(?:no|false|0|n|not|none)\b/i.test(lower);
+          if (isYes || isNo) {
+            index = items.findIndex(
+              (_, i) =>
+                (isYes ? /\byes\b/i : /\bno\b/i).test(texts[i]) ||
+                (isYes ? /^(?:true|1|yes|y)$/i : /^(?:false|0|no|n)$/i).test(vals[i]),
+            );
+          }
+        }
+        if (index < 0) {
+          const partial = items
+            .map((_, i) => i)
+            .filter(
+              i => (texts[i] && optionTextMatches(texts[i], value)) || (vals[i] && optionTextMatches(vals[i], value)),
+            );
+          if (partial.length === 1) {
+            index = partial[0];
+          } else if (partial.length > 1) {
+            const ranked = partial
+              .map(i => ({ i, d: Math.abs(normOptionText(texts[i] || vals[i]).length - want.length) }))
+              .sort((a, b) => a.d - b.d);
+            index = ranked[0].d < ranked[1].d ? ranked[0].i : -1;
+          }
+        }
+        return { index, texts };
+      };
+
+      // Names a choice group the way discovery and validation do (their `extractStructuralFieldLabel`):
+      // legend, aria-labelledby, aria-label, label[for], a heading in its form-element wrapper, else
+      // the text just before the group.
+      const isPlaceholderName = (raw: string): boolean => {
+        const clean = (raw || '')
+          .replace(/\p{Cf}/gu, '')
+          .replace(/[*?:.]+/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim();
+        if (clean.length <= 2) return true;
+        return /^(?:form\s*field|form|field|fields|question|questions|answer|answers|input|text(?:\s*field)?|textbox|select|selection|dropdown|checkbox|radio(?:\s*button)?|option|options|value|n\/?a|none|null|undefined|-+|_+|\d{1,3})$/i.test(
+          clean,
+        );
+      };
+      const idRefsText = (el: Element, attr: string): string => {
+        const parts: string[] = [];
+        for (const id of (el.getAttribute(attr) || '').split(/\s+/).filter(Boolean)) {
+          try {
+            const ref = (el.getRootNode() as Document | ShadowRoot).querySelector(`[id="${CSS.escape(id)}"]`);
+            const t = cleanElementText(ref);
+            if (t) parts.push(t);
+          } catch {
+            // best effort; failure here is non-fatal
+          }
+        }
+        return cleanDuplicateText(parts.join(' '));
+      };
+      const structuralGroupName = (el: HTMLElement): string => {
+        const usable = (t: string) => Boolean(t) && !isPlaceholderName(t);
+        if (el.tagName === 'FIELDSET') {
+          const t = cleanElementText(el.querySelector('legend'));
+          if (usable(t)) return t;
+        }
+        const parentFieldset = el.parentElement?.closest('fieldset');
+        if (parentFieldset) {
+          const t = cleanElementText(parentFieldset.querySelector('legend'));
+          if (usable(t)) return t;
+        }
+        const byRefs = idRefsText(el, 'aria-labelledby');
+        if (usable(byRefs)) return byRefs;
+        const aria = cleanDuplicateText((el.getAttribute('aria-label') || '').trim());
+        if (usable(aria)) return aria;
+        if (el.id) {
+          try {
+            const t = cleanElementText(modal.querySelector(`label[for="${CSS.escape(el.id)}"]`));
+            if (usable(t)) return t;
+          } catch {
+            // best effort; failure here is non-fatal
+          }
+        }
+        const wrapper = el.closest(
+          '.fb-dash-form-element, .jobs-easy-apply-form-element, div[data-test-form-element], .jobs-easy-apply-form-section__grouping, [class*="form-element" i]',
+        ) as HTMLElement | null;
+        const headings = Array.from(
+          (wrapper || el).querySelectorAll(
+            'legend, [role="heading"], h1, h2, h3, h4, h5, h6, .fb-dash-form-element__label, .artdeco-form__label, span[class*="label" i]',
+          ),
+        );
+        for (const h of headings) {
+          if (h === el || (el.contains(h) && (h.tagName === 'LABEL' || h.querySelector('input')))) continue;
+          const t = cleanElementText(h);
+          if (usable(t)) return t;
+        }
+        const nearText = (n: Element | null) => {
+          const t = cleanElementText(n);
+          return t.length > 2 && t.length < 300 && usable(t) ? t : '';
+        };
+        for (let prev = el.previousElementSibling; prev; prev = prev.previousElementSibling) {
+          const t = nearText(prev);
+          if (t) return t;
+        }
+        return wrapper ? nearText(wrapper.previousElementSibling) : '';
+      };
+      // A choice group whose name — as discovery would give it — is the requested question. Only
+      // the innermost group container counts (an outer one can hold several questions), and loose
+      // radios (no group container) are grouped by `name` and also named by their aria-labelledby.
+      const findChoiceGroupByOutsideName = (
+        question: string,
+      ): { root: HTMLElement; inputs: HTMLInputElement[] } | null => {
+        const want = normOptionText(question);
+        if (!want) return null;
+        const nameScore = (name: string): number => {
+          const n = normOptionText(cleanDuplicateText(name || ''));
+          if (!n) return 0;
+          if (n === want) return 2;
+          return Math.min(n.length, want.length) >= 12 && (n.includes(want) || want.includes(n)) ? 1 : 0;
+        };
+        const CHOICE = 'input[type="radio"], input[type="checkbox"]';
+        const GROUP = 'fieldset, [role="radiogroup"], [role="group"]';
+        const candidates: Array<{ root: HTMLElement; inputs: HTMLInputElement[]; names: string[] }> = [];
+        for (const g of Array.from(modal.querySelectorAll(GROUP)) as HTMLElement[]) {
+          if (g.querySelector(GROUP)) continue;
+          const inputs = Array.from(g.querySelectorAll(CHOICE)) as HTMLInputElement[];
+          // A group needs 2+ options — except a lone checkbox: a consent question ("You declare
+          // that you have read … privacy notice" with one "I consent" box) whose wording sits
+          // outside the box's container.
+          if (inputs.length === 0 || (inputs.length === 1 && inputs[0].type !== 'checkbox')) continue;
+          const radioNames = new Set(inputs.filter(i => i.type === 'radio').map(i => i.name || ''));
+          if (radioNames.size > 1) continue;
+          candidates.push({ root: g, inputs, names: [structuralGroupName(g)] });
+        }
+        const looseByName = new Map<string, HTMLInputElement[]>();
+        for (const i of Array.from(modal.querySelectorAll(CHOICE)) as HTMLInputElement[]) {
+          const key = (i.getAttribute('name') || '').trim();
+          if (!key || i.closest(GROUP)) continue;
+          if (!looseByName.has(key)) looseByName.set(key, []);
+          looseByName.get(key)!.push(i);
+        }
+        for (const inputs of looseByName.values()) {
+          if (inputs.length < 2) continue;
+          let root: HTMLElement | null = null;
+          let anc: HTMLElement | null = inputs[0].parentElement;
+          while (anc && anc !== modal) {
+            const a: HTMLElement = anc;
+            if (inputs.every(i => a.contains(i))) {
+              root = a;
+              break;
+            }
+            anc = a.parentElement;
+          }
+          if (!root) continue;
+          candidates.push({
+            root,
+            inputs,
+            names: [idRefsText(inputs[0], 'aria-labelledby'), structuralGroupName(root)],
+          });
+        }
+        let best: { root: HTMLElement; inputs: HTMLInputElement[] } | null = null;
+        let bestScore = 0;
+        for (const c of candidates) {
+          const s = Math.max(0, ...c.names.map(nameScore));
+          if (s > bestScore) {
+            best = { root: c.root, inputs: c.inputs };
+            bestScore = s;
+            if (s === 2) break;
+          }
+        }
+        return best;
+      };
+
+      // A group whose question matched but none of whose options matched the answer.
+      let choiceMiss: { question: string; options: string[] } | null = null;
+
       if (!targetEl && ident.label) {
         const cleanLabel = cleanDuplicateString(ident.label).toLowerCase().trim();
 
@@ -4890,6 +5849,9 @@ export default class Page {
         // (fieldsets / role="radiogroup" / fb-dash form-builder wrappers) first
         function extractRadioGroupLabel(fsEl: HTMLElement): string {
           if (!fsEl) return '';
+          // Checkbox groups without a <fieldset> are tagged with their question by discovery.
+          const taggedLabel = fsEl.getAttribute('data-qoder-cb-group-label');
+          if (taggedLabel && taggedLabel.trim()) return taggedLabel.trim();
           const leg = fsEl.querySelector('legend');
           if (leg) {
             const t = cleanElementText(leg);
@@ -4950,7 +5912,7 @@ export default class Page {
 
         const fieldsets = Array.from(
           modal.querySelectorAll(
-            'fieldset, div[role="radiogroup"], div[role="group"], div.fb-dash-form-element, div[data-test-form-element]',
+            'fieldset, div[role="radiogroup"], div[role="group"], div.fb-dash-form-element, div[data-test-form-element], [data-qoder-cb-group]',
           ),
         ) as HTMLElement[];
         for (const fs of fieldsets) {
@@ -4964,51 +5926,27 @@ export default class Page {
           ) {
             const radios = Array.from(fs.querySelectorAll('input[type="radio"]')) as HTMLInputElement[];
             const checkboxes = Array.from(fs.querySelectorAll('input[type="checkbox"]')) as HTMLInputElement[];
+            // Multi-choice checkbox group: the value names the option(s) to tick (never a
+            // Yes/No toggle). Handled — and verified — on its own.
+            if (radios.length === 0 && checkboxes.length > 1) {
+              return await fillCheckboxGroup(fs, checkboxes, val);
+            }
             const items = radios.length > 0 ? radios : checkboxes;
             const normVal = val.toLowerCase().trim();
-
             // Accept sentence-style answers ("Yes, I have worked with X", "No, not interested")
-            // by matching the leading affirmative/negative token instead of requiring an
-            // exact answer match.
+            // by matching the leading affirmative/negative token (used by the button-group
+            // branch below; the input branch uses pickChoiceIndex).
             const isTargetYes =
               /^(?:yes|true|1|y|immediate(?:ly)?|available|agree|authorized|willing|interested)\b/i.test(normVal);
             const isTargetNo = /^(?:no|false|0|n|not|none)\b/i.test(normVal);
 
-            for (const r of items) {
-              const rId = r.getAttribute('id');
-              let rLbl: HTMLElement | null = null;
-              if (rId) {
-                try {
-                  rLbl =
-                    fs.querySelector(`label[for="${CSS.escape(rId)}"]`) ||
-                    modal.querySelector(`label[for="${CSS.escape(rId)}"]`);
-                } catch {
-                  const allLabels = Array.from(fs.querySelectorAll('label'));
-                  rLbl = allLabels.find(l => l.getAttribute('for') === rId) || null;
-                }
-              }
-              if (!rLbl) {
-                rLbl = r.closest('label') || (r.parentElement?.querySelector('label') as HTMLElement | null);
-              }
-
-              const rawLblText = cleanElementText(rLbl).toLowerCase().trim();
-              const rawVal = (r.value || '').toLowerCase().trim();
-
-              let matched = false;
-              if (isTargetYes && (/\byes\b/i.test(rawLblText) || /^(true|1|yes|y)$/i.test(rawVal))) {
-                matched = true;
-              } else if (isTargetNo && (/\bno\b/i.test(rawLblText) || /^(false|0|no|n)$/i.test(rawVal))) {
-                matched = true;
-              } else if (rawLblText && matchesOptionSafe(rawLblText, normVal)) {
-                matched = true;
-              } else if (rawVal && matchesOptionSafe(rawVal, normVal)) {
-                matched = true;
-              }
-
-              if (matched) {
-                targetEl = r;
-                targetRadioLabel = rLbl;
-                break;
+            if (items.length > 0) {
+              const pick = pickChoiceIndex(items, fs, rawLegend || ident.label || '', val);
+              if (pick.index >= 0) {
+                targetEl = items[pick.index];
+                targetRadioLabel = choiceClickTarget(items[pick.index]);
+              } else {
+                choiceMiss = { question: rawLegend || ident.label || '', options: pick.texts.filter(Boolean) };
               }
             }
 
@@ -5071,6 +6009,39 @@ export default class Page {
           if (targetEl) break;
         }
 
+        // 1a. LinkedIn's current form: no fieldset, and the QUESTION is each choice input's
+        // aria-label (the option text sits beside the input). Collect the inputs asked by this
+        // question; several checkboxes form a multi-choice group.
+        if (!targetEl) {
+          const want = normOptionText(cleanLabel);
+          const askedBy = (
+            Array.from(modal.querySelectorAll('input[type="radio"], input[type="checkbox"]')) as HTMLInputElement[]
+          ).filter(inp => {
+            const aria = normOptionText(cleanDuplicateString(inp.getAttribute('aria-label') || ''));
+            if (!aria || !want) return false;
+            return (
+              aria === want || (aria.length >= 12 && want.length >= 12 && (aria.includes(want) || want.includes(aria)))
+            );
+          });
+          const askedRadios = askedBy.filter(i => i.type === 'radio');
+          const askedBoxes = askedBy.filter(i => i.type === 'checkbox');
+          if (askedRadios.length === 0 && askedBoxes.length > 1) {
+            return await fillCheckboxGroup(modal, askedBoxes, val);
+          }
+          const pool = askedRadios.length > 0 ? askedRadios : askedBoxes;
+          if (pool.length === 1 && pool[0].type === 'checkbox') {
+            targetEl = pool[0];
+          } else if (pool.length > 0) {
+            const pick = pickChoiceIndex(pool, null, ident.label, val);
+            if (pick.index >= 0) {
+              targetEl = pool[pick.index];
+              targetRadioLabel = choiceClickTarget(pool[pick.index]);
+            } else {
+              choiceMiss = { question: ident.label, options: pick.texts.filter(Boolean) };
+            }
+          }
+        }
+
         // 1b. Fallback: check all individual radio inputs in the modal if group container wasn't matched
         if (!targetEl) {
           const allRadios = Array.from(modal.querySelectorAll('input[type="radio"]')) as HTMLInputElement[];
@@ -5086,24 +6057,11 @@ export default class Page {
                 cleanLabel.includes(rGroupLabel) ||
                 rGroupLabel.includes(cleanLabel))
             ) {
-              const rId = r.getAttribute('id');
-              let rLbl: HTMLElement | null = null;
-              if (rId) {
-                try {
-                  rLbl =
-                    container.querySelector(`label[for="${CSS.escape(rId)}"]`) ||
-                    modal.querySelector(`label[for="${CSS.escape(rId)}"]`);
-                } catch {
-                  const allLabels = Array.from(modal.querySelectorAll('label'));
-                  rLbl = allLabels.find(l => l.getAttribute('for') === rId) || null;
-                }
-              }
-              if (!rLbl) {
-                rLbl = r.closest('label') || (r.parentElement?.querySelector('label') as HTMLElement | null);
-              }
-
-              const rawLblText = cleanElementText(rLbl).toLowerCase().trim();
-              const rawVal = (r.value || '').toLowerCase().trim();
+              const rawLblText = choiceOptionText(r, null, rGroupLabel).toLowerCase().trim();
+              const rawValue = (r.value || '').toLowerCase().trim();
+              // The default value "on" (no value attribute) is not option text.
+              const rawVal = /^(?:on|off)$/.test(rawValue) ? '' : rawValue;
+              const rLbl = choiceClickTarget(r);
               const normVal = val.toLowerCase().trim();
               const isTargetYes =
                 /^(?:yes|true|1|y|immediate(?:ly)?|available|agree|authorized|willing|interested)\b/i.test(normVal);
@@ -5161,7 +6119,9 @@ export default class Page {
         }
 
         if (!targetEl) {
-          // 3. Fallback: check standalone checkboxes by label, aria-label, or text in parent/wrapper
+          // 3. Fallback: check standalone checkboxes by label, aria-label, or text in parent/wrapper.
+          // A wrapper holding several checkboxes is a multi-choice group: matching its question
+          // text would tick an arbitrary (the first) option, so it is never used here.
           const allCheckboxes = Array.from(modal.querySelectorAll('input[type="checkbox"]')) as HTMLInputElement[];
           for (const cb of allCheckboxes) {
             const cbAria = cleanDuplicateString(cb.getAttribute('aria-label') || '')
@@ -5172,7 +6132,7 @@ export default class Page {
               break;
             }
             const parent = cb.closest('label, div, p, span, li');
-            if (parent) {
+            if (parent && parent.querySelectorAll('input[type="checkbox"]').length === 1) {
               const pText = cleanElementText(parent).toLowerCase().trim();
               if (pText && labelsMatch(pText, cleanLabel)) {
                 targetEl = cb;
@@ -5181,10 +6141,84 @@ export default class Page {
             }
           }
         }
+
+        // 4. Text inputs / selects named only by aria-label or aria-labelledby (LinkedIn's current
+        // form labels many question inputs this way, with no <label>). Exact names win.
+        if (!targetEl && !choiceMiss) {
+          const controls = Array.from(
+            modal.querySelectorAll(
+              'input:not([type="hidden"]):not([type="radio"]):not([type="checkbox"]):not([type="file"]):not([type="submit"]):not([type="button"]), select, textarea, [contenteditable="true"], [role="combobox"]',
+            ),
+          ) as HTMLElement[];
+          const want = normOptionText(cleanLabel);
+          const nameOf = (c: HTMLElement): string => {
+            const parts: string[] = [];
+            const aria = c.getAttribute('aria-label');
+            if (aria) parts.push(aria);
+            for (const ref of (c.getAttribute('aria-labelledby') || '').split(/\s+/).filter(Boolean)) {
+              try {
+                const refEl = (c.getRootNode() as Document | ShadowRoot).querySelector(`[id="${CSS.escape(ref)}"]`);
+                const t = cleanElementText(refEl);
+                if (t) parts.push(t);
+              } catch {
+                // best effort; failure here is non-fatal
+              }
+            }
+            return normOptionText(cleanDuplicateString(parts.join(' ')));
+          };
+          const named = controls.map(c => ({ c, name: nameOf(c) })).filter(x => x.name);
+          const exact = named.find(x => x.name === want);
+          const partial = named.filter(
+            x => x.name.length >= 4 && want.length >= 4 && (x.name.includes(want) || want.includes(x.name)),
+          );
+          targetEl = exact?.c || (partial.length === 1 ? partial[0].c : null);
+        }
+
+        // 5. Choice questions named by text OUTSIDE their own group. Discovery and validation name
+        // a fieldset / role="radiogroup" / role="group" by its legend, aria-labelledby, aria-label or
+        // heading, else by the text just before it — LinkedIn: "Choose the location where you would
+        // prefer to work." above a radio group — and loose radios by their own aria-labelledby. The
+        // lookups above read only text inside the group, so such a question was reported "not
+        // found" on every attempt. Same naming here; only an exact or near-exact name counts.
+        if (!targetEl && !choiceMiss) {
+          const outsideMatch = findChoiceGroupByOutsideName(cleanLabel);
+          if (outsideMatch) {
+            const { root, inputs } = outsideMatch;
+            const radios = inputs.filter(i => i.type === 'radio');
+            const boxes = inputs.filter(i => i.type === 'checkbox');
+            if (radios.length === 0 && boxes.length > 1) {
+              return await fillCheckboxGroup(root, boxes, val);
+            }
+            if (radios.length === 0 && boxes.length === 1) {
+              // Lone consent box: the single-checkbox handler below reads "Yes" / "I agree" /
+              // "I consent" / the box's own text as "tick it".
+              targetEl = boxes[0];
+              targetRadioLabel = choiceClickTarget(boxes[0]);
+            } else {
+              const pick = pickChoiceIndex(radios, root, ident.label || '', val);
+              if (pick.index >= 0) {
+                targetEl = radios[pick.index];
+                targetRadioLabel = choiceClickTarget(radios[pick.index]);
+              } else {
+                choiceMiss = { question: ident.label || '', options: pick.texts.filter(Boolean) };
+              }
+            }
+          }
+        }
       }
 
-      if (!targetEl)
-        return { ok: false, targetFound: false, isTextField: false, typeaheadUnresolved: false, isButtonOption: false };
+      if (!targetEl) {
+        return {
+          ok: false,
+          targetFound: false,
+          isTextField: false,
+          typeaheadUnresolved: false,
+          isButtonOption: false,
+          reason: choiceMiss
+            ? `no option matches "${val}" for "${choiceMiss.question}" (options: ${choiceMiss.options.join(' | ') || 'none readable'})`
+            : 'field not found in the form (it may not be rendered yet)',
+        };
+      }
 
       // Mark the resolved element so the outer method can escalate to REAL CDP keyboard typing
       // if in-page fill verification fails. Stale markers are cleared first.
@@ -5282,40 +6316,59 @@ export default class Page {
       }
 
       if (targetEl instanceof HTMLInputElement && (targetEl.type === 'radio' || targetEl.type === 'checkbox')) {
-        const clickable = targetRadioLabel || targetEl.closest('label') || targetEl.parentElement || targetEl;
+        // What a person clicks: a visible label / ARIA wrapper / the input itself when it has a box
+        // (LinkedIn's current form hides the native input and styles an empty <label> instead).
+        const clickable = targetRadioLabel || choiceClickTarget(targetEl);
 
         try {
           targetEl.focus();
         } catch {}
 
         const normVal = val.toLowerCase().trim();
-        const shouldBeChecked =
-          targetEl.type === 'checkbox' ? /^(yes|true|1|y|checked|agree|authorized)$/i.test(normVal) : true;
 
         if (targetEl.type === 'checkbox') {
-          if (targetEl.checked !== shouldBeChecked) {
-            // Trigger click via clickable wrapper or element to fire framework change events
-            clickable.click();
-
-            // If framework or default action didn't match the desired state, invoke native setter and dispatch input/change
-            if (targetEl.checked !== shouldBeChecked) {
-              const proto = HTMLInputElement.prototype;
-              const setter = Object.getOwnPropertyDescriptor(proto, 'checked')?.set;
-              if (setter) {
-                setter.call(targetEl, shouldBeChecked);
-              } else {
-                targetEl.checked = shouldBeChecked;
-              }
-              targetEl.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
-              targetEl.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
-            }
+          // Single (consent-style) checkbox. The answer is an explicit affirmative / negative, or
+          // the checkbox's own option text. Anything else is not an instruction for this box, so
+          // it is left alone and reported as a failure — never as a silent no-op "success".
+          const cb = targetEl;
+          const clickTarget = choiceClickTarget(cb);
+          // The box's own wording: its <label> text, its aria-label, or the text beside it
+          // (LinkedIn's current form leaves the <label> empty and puts the text in a <p>).
+          const ownTexts = [
+            cleanElementText(checkboxLabelFor(cb, modal)),
+            cb.getAttribute('aria-label') || '',
+            choiceOptionText(cb, null, ''),
+          ].filter(Boolean);
+          let desired: boolean | null = null;
+          if (
+            /^(?:yes|y|true|1|checked|check|tick|ticked|on|agree|agreed|i agree|accept|accepted|i accept|confirm|confirmed|i confirm|acknowledge|acknowledged|i acknowledge|authorized|authorised|consent|i consent|certify|i certify)$/.test(
+              normVal,
+            ) ||
+            /^yes\b/.test(normVal)
+          ) {
+            desired = true;
+          } else if (
+            /^(?:no|n|false|0|unchecked|uncheck|off|disagree|decline|declined)$/.test(normVal) ||
+            /^no\b/.test(normVal)
+          ) {
+            desired = false;
+          } else if (ownTexts.some(t => optionTextMatches(t, val))) {
+            desired = true;
           }
+          if (desired === null) {
+            return {
+              ok: false,
+              ...checkboxResultBase,
+              reason: `"${val}" is not a yes/no answer for checkbox "${ownTexts[0] || ident.label}"`,
+            };
+          }
+          const ok =
+            (await ensureCheckboxState(cb, clickTarget, desired)) || escalateCheckbox(cb, clickTarget, desired);
           return {
-            ok: targetEl.checked === shouldBeChecked,
-            targetFound: true,
-            isTextField: false,
-            typeaheadUnresolved: false,
-            isButtonOption: false,
+            ok,
+            ...checkboxResultBase,
+            isCheckboxOption: !ok,
+            reason: ok ? undefined : 'checkbox did not stay in the requested state after a synthetic click',
           };
         } else {
           // Radio button — LinkedIn's React form registers radio selection from CLICK
@@ -5450,10 +6503,26 @@ export default class Page {
           /location|city/i.test(targetEl.id || '') ||
           /location|city/i.test(targetEl.name || '');
 
+        // aria-controls alone is not a typeahead signal: LinkedIn's current inputs point it at
+        // helper text, and treating a plain field (e.g. "LinkedIn" URL, "Experience in Years") as
+        // a typeahead made its fill "fail" for want of a suggestion list. Only a combobox role,
+        // list autocomplete, or an aria-controls target that is a listbox count.
+        const controlsListbox = (() => {
+          const ids = (targetEl.getAttribute('aria-controls') || '').split(/\s+/).filter(Boolean);
+          const root = targetEl.getRootNode() as Document | ShadowRoot;
+          return ids.some(id => {
+            try {
+              const ctl = root.querySelector(`[id="${CSS.escape(id)}"]`) || document.getElementById(id);
+              return Boolean(ctl && (ctl.getAttribute('role') === 'listbox' || ctl.querySelector('[role="option"]')));
+            } catch {
+              return false;
+            }
+          });
+        })();
         const isTypeahead =
           targetEl.getAttribute('role') === 'combobox' ||
           targetEl.getAttribute('aria-autocomplete') === 'list' ||
-          targetEl.hasAttribute('aria-controls') ||
+          controlsListbox ||
           Boolean(targetEl.closest('.basic-typeahead, .artdeco-typeahead, [data-test-typeahead]')) ||
           isLocationField ||
           /school|college|university|company|title/i.test(ident.label || '');
@@ -5666,7 +6735,7 @@ export default class Page {
             const hasStructuralCombobox =
               targetEl.getAttribute('role') === 'combobox' ||
               targetEl.getAttribute('aria-autocomplete') === 'list' ||
-              targetEl.hasAttribute('aria-controls');
+              controlsListbox;
             if (isLocationField || hasStructuralCombobox) {
               ok = false;
               typeaheadUnresolved = true;
@@ -5726,7 +6795,19 @@ export default class Page {
         targetEl.dispatchEvent(new Event('blur', { bubbles: true, composed: true }));
         targetEl.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
 
-        return { ok, targetFound: true, isTextField: true, typeaheadUnresolved, isButtonOption: false };
+        const shownNow = ((targetEl as HTMLInputElement | HTMLTextAreaElement).value || '').trim();
+        return {
+          ok,
+          targetFound: true,
+          isTextField: true,
+          typeaheadUnresolved,
+          isButtonOption: false,
+          reason: ok
+            ? undefined
+            : typeaheadUnresolved
+              ? `no suggestion in the list matched "${cleanVal}" (typeahead field)`
+              : `form shows "${shownNow.slice(0, 60)}" instead of "${String(finalVal).slice(0, 60)}"`,
+        };
       } else if (targetEl instanceof HTMLSelectElement) {
         // If select is currently disabled or options haven't hydrated yet (cascading parent -> child AJAX delay),
         // poll up to 1200ms for options to load
@@ -5946,6 +7027,10 @@ export default class Page {
       typeaheadUnresolved: boolean;
       isButtonOption: boolean;
       isRadioOption?: boolean;
+      /** Checkbox(es) left marked `data-qoder-cb-pending` for a trusted click. */
+      isCheckboxOption?: boolean;
+      /** Why the fill did not hold (diagnostics for the audit log). */
+      reason?: string;
     };
     const normalizeFillResult = (raw: unknown): FillResultShape | null => {
       if (raw && typeof raw === 'object') {
@@ -5958,6 +7043,8 @@ export default class Page {
             typeaheadUnresolved: Boolean(r.typeaheadUnresolved),
             isButtonOption: Boolean(r.isButtonOption),
             isRadioOption: Boolean(r.isRadioOption),
+            isCheckboxOption: Boolean(r.isCheckboxOption),
+            reason: typeof r.reason === 'string' ? r.reason : undefined,
           };
         }
       }
@@ -5977,7 +7064,11 @@ export default class Page {
     const runFillInPage = async (): Promise<FillResultShape | null> => {
       if (this._puppeteerPage) {
         try {
-          return normalizeFillResult(await this._puppeteerPage.evaluate(fillInPage, identifier, value));
+          // A trusted CDP click is available: checkboxes that ignore synthetic clicks are left
+          // for it instead of being forced through the native `checked` setter.
+          return normalizeFillResult(
+            await this._puppeteerPage.evaluate(fillInPage, identifier, value, { allowTrustedEscalation: true }),
+          );
         } catch {}
       }
       if (this._tabId && typeof chrome !== 'undefined' && chrome.scripting?.executeScript) {
@@ -5985,7 +7076,7 @@ export default class Page {
           const results = await chrome.scripting.executeScript({
             target: { tabId: this._tabId },
             func: fillInPage,
-            args: [identifier, value],
+            args: [identifier, value, { allowTrustedEscalation: false }],
           });
           return normalizeFillResult(results?.[0]?.result);
         } catch {}
@@ -5994,6 +7085,20 @@ export default class Page {
     };
 
     let result = await runFillInPage();
+
+    // LinkedIn's current form renders its question list lazily: a field below the fold may not
+    // exist until the dialog is scrolled. Scroll and look once more before giving up.
+    if (result && !result.targetFound && !/no option matches/.test(result.reason || '')) {
+      for (const where of ['bottom', 'top'] as const) {
+        await this.scrollModalContent(where).catch(() => false);
+        await new Promise(r => setTimeout(r, 300));
+        const retry = await runFillInPage();
+        if (retry && retry.targetFound) {
+          result = retry;
+          break;
+        }
+      }
+    }
 
     // ── ESCALATION LADDER (Level 2): REAL CDP keyboard typing ────────────────
     // If in-page fill verification failed on a text/typeahead field, drive REAL
@@ -6131,17 +7236,115 @@ export default class Page {
       }
     }
 
+    // ── ESCALATION LADDER (Level 2d): REAL CDP mouse click for checkboxes ──
+    // Same root cause as radios: some LinkedIn builds ignore synthetic clicks on React-controlled
+    // checkboxes, so the box reverts to unchecked. Each box the in-page attempt marked
+    // `data-qoder-cb-pending` gets a trusted click, but only while it is still in the wrong state
+    // (a click on a box that already holds the right state would toggle it back). The native
+    // `checked` setter is the last resort, and success is reported only if the box ends up in the
+    // requested state.
+    if (result && !result.ok && result.targetFound && result.isCheckboxOption && this._puppeteerPage) {
+      try {
+        const pending = await this._puppeteerPage.$$('pierce/[data-qoder-cb-pending]');
+        for (const handle of pending) {
+          try {
+            const needsClick = await handle.evaluate((el: Element) => {
+              const desired = el.getAttribute('data-qoder-cb-pending') === '1';
+              let cb: HTMLInputElement | null = null;
+              if (el instanceof HTMLInputElement) cb = el;
+              else if (el instanceof HTMLLabelElement && el.control instanceof HTMLInputElement) cb = el.control;
+              else cb = el.querySelector('input[type="checkbox"]');
+              return Boolean(cb && cb.checked !== desired);
+            });
+            if (needsClick) {
+              await handle.click();
+              await new Promise(r => setTimeout(r, 250));
+            }
+          } catch (clickErr) {
+            logger.debug('[Page] fillModalFieldDirect trusted checkbox click failed:', clickErr);
+          } finally {
+            await handle.dispose().catch(() => {});
+          }
+        }
+        const verdict = await this._puppeteerPage.evaluate(() => {
+          const marked: Element[] = [];
+          const collect = (root: Document | ShadowRoot) => {
+            root.querySelectorAll('[data-qoder-cb-pending]').forEach(m => marked.push(m));
+            root.querySelectorAll('*').forEach(n => {
+              if ((n as HTMLElement).shadowRoot) collect((n as HTMLElement).shadowRoot as ShadowRoot);
+            });
+          };
+          collect(document);
+          let allOk = marked.length > 0;
+          let usedSetter = 0;
+          for (const el of marked) {
+            const desired = el.getAttribute('data-qoder-cb-pending') === '1';
+            el.removeAttribute('data-qoder-cb-pending');
+            let cb: HTMLInputElement | null = null;
+            if (el instanceof HTMLInputElement) cb = el;
+            else if (el instanceof HTMLLabelElement && el.control instanceof HTMLInputElement) cb = el.control;
+            else cb = el.querySelector('input[type="checkbox"]');
+            if (!cb) {
+              allOk = false;
+              continue;
+            }
+            if (cb.checked !== desired) {
+              const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'checked')?.set;
+              if (setter) setter.call(cb, desired);
+              else cb.checked = desired;
+              const tracker = (cb as HTMLInputElement & { _valueTracker?: { setValue(v: string): void } })
+                ._valueTracker;
+              if (tracker) tracker.setValue(String(!desired));
+              cb.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+              cb.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+              usedSetter++;
+            }
+            if (cb.checked !== desired) allOk = false;
+          }
+          return { allOk, usedSetter, total: marked.length };
+        });
+        if (verdict.usedSetter > 0) {
+          logger.warning(
+            `[Page] fillModalFieldDirect: ${verdict.usedSetter}/${verdict.total} checkbox(es) for "${identifier?.label}" ignored the trusted click; used the native setter as a last resort.`,
+          );
+        }
+        result = { ...result, ok: verdict.allOk };
+      } catch (escErr) {
+        console.warn('[Page] fillModalFieldDirect checkbox click escalation failed:', escErr);
+      }
+    }
+
     // Cleanup the temporary marker attribute
     if (this._puppeteerPage) {
       try {
         await this._puppeteerPage.evaluate(() => {
-          document
-            .querySelectorAll('[data-qoder-fill-target]')
-            .forEach(m => m.removeAttribute('data-qoder-fill-target'));
+          document.querySelectorAll('[data-qoder-fill-target], [data-qoder-cb-pending]').forEach(m => {
+            m.removeAttribute('data-qoder-fill-target');
+            m.removeAttribute('data-qoder-cb-pending');
+          });
         });
       } catch {}
     }
 
+    const fieldName = identifier?.label || identifier?.id || 'field';
+    const reason = result?.ok
+      ? undefined
+      : result?.reason ||
+        (!result
+          ? 'page context unavailable'
+          : result.targetFound
+            ? 'value did not hold after filling'
+            : 'field not found in the form');
+    this.lastFillDiagnostics = {
+      label: fieldName,
+      value: String(value),
+      ok: Boolean(result?.ok),
+      targetFound: Boolean(result?.targetFound),
+      reason,
+    };
+    if (!result?.ok) {
+      logger.warning(`[Page] fillModalFieldDirect: "${fieldName}" <- "${value}" FAILED: ${reason}`);
+    }
     return result?.ok ?? false;
   }
 
@@ -6509,6 +7712,30 @@ export default class Page {
 
       // 7. Easy Apply check: inspect details containers for Easy Apply button
       let hasEasyApply = false;
+      // A saved draft of this application: LinkedIn replaces "Easy Apply" with "Continue" and shows
+      // "You last modified this application …". That control re-opens the same Easy Apply form.
+      let hasSavedDraft = false;
+      const SAVED_DRAFT_HINT =
+        /\blast modified this application\b|\bcontinue (?:your|this) application\b|\bresume (?:your )?application\b|\bapplication (?:was |has been )?saved\b/i;
+      const normText = (s: string | null | undefined) => (s || '').replace(/\s+/g, ' ').trim().toLowerCase();
+      const isSavedDraftContinue = (btn: Element): boolean => {
+        const t = normText(btn.textContent);
+        const a = normText(btn.getAttribute('aria-label'));
+        const named =
+          /^(?:continue|continue applying|continue application|resume application)$/.test(t) ||
+          /^continue (?:applying|application|your application)\b/.test(a) ||
+          /^resume (?:your )?application\b/.test(a);
+        if (!named) return false;
+        if (btn.closest('dialog, [role="dialog"], [aria-modal="true"], header, nav, footer')) return false;
+        const scope =
+          btn.closest(
+            '[data-view-name="job-details-top-card"], [data-view-name="job-details"], .jobs-unified-top-card, .scaffold-layout__detail, .jobs-search__job-details--container, .jobs-details__main-content, .job-view-layout, main',
+          ) || document.body;
+        return /\bappl/.test(a) || SAVED_DRAFT_HINT.test(scope.textContent || '');
+      };
+      const pageJobId = (window.location.href.match(/\/jobs\/view\/(\d+)/) ||
+        window.location.href.match(/[?&]currentJobId=(\d+)/) ||
+        [])[1];
       const detailsContainers = [
         document.querySelector('[data-view-name="job-details-top-card"]'),
         document.querySelector('[data-view-name="job-details"]'),
@@ -6544,6 +7771,23 @@ export default class Page {
             continue;
           }
 
+          // LinkedIn's current job page renders Easy Apply as a link into the SDUI apply flow
+          // (never another job's link, e.g. a recommendation card).
+          const href = btn.getAttribute('href') || '';
+          if (/\/apply\//.test(href) && /openSDUIApplyFlow/i.test(href)) {
+            const linkJobId = (href.match(/\/jobs\/view\/(\d+)/) || [])[1];
+            if (!(pageJobId && linkJobId && pageJobId !== linkJobId)) {
+              hasEasyApply = true;
+              if (isSavedDraftContinue(btn) || /^continue\b/.test(btnText)) hasSavedDraft = true;
+              break;
+            }
+          }
+          if (isSavedDraftContinue(btn)) {
+            hasEasyApply = true;
+            hasSavedDraft = true;
+            break;
+          }
+
           if (
             /\beasy\s*apply\b/i.test(btnText) ||
             /\beasy\s*apply\b/i.test(ariaLabel) ||
@@ -6557,6 +7801,8 @@ export default class Page {
               btn.querySelector('svg, [class*="icon"]') !== null)
           ) {
             hasEasyApply = true;
+            // Classic layout: the same apply button reads "Continue" for a saved draft.
+            if (/^continue\b/.test(btnText)) hasSavedDraft = true;
             break;
           }
         }
@@ -6580,6 +7826,7 @@ export default class Page {
         isClosed,
         isAlreadyApplied,
         hasEasyApply,
+        hasSavedDraft,
         isLoginWall,
         descriptionSnippet,
       };
@@ -8014,6 +9261,21 @@ export default class Page {
             ) as HTMLElement[])
           : [];
 
+        // LinkedIn SDUI Easy Apply pre-pass: an open <dialog> holding [data-sdui-screen*="easyapply"] is the
+        // application form; prefer it so a stale/hidden dialog earlier in the DOM is never used.
+        const sduiForm = (candidates as HTMLElement[]).find(c => {
+          if (!c || !c.isConnected) return false;
+          const marked =
+            (typeof c.matches === 'function' && c.matches('[data-sdui-screen*="easyapply" i]')) ||
+            Boolean(c.querySelector && c.querySelector('[data-sdui-screen*="easyapply" i]'));
+          if (!marked) return false;
+          const st = window.getComputedStyle(c);
+          if (st.display === 'none' || st.visibility === 'hidden') return false;
+          const r = c.getBoundingClientRect();
+          return r.width >= 120 && r.height >= 60;
+        });
+        if (sduiForm) return sduiForm;
+
         for (const c of candidates) {
           if (!c || !c.isConnected) continue;
           if (
@@ -8036,6 +9298,12 @@ export default class Page {
           }
           // A native "Save this application?" / "Discard draft?" sheet is not the form.
           if (/save this application|save application|discard draft/i.test(text)) continue;
+          // LinkedIn's "Job search safety reminder" interstitial is not the application form.
+          if (
+            /job search safety|safety reminder/i.test(text) &&
+            !c.querySelector('input:not([type="hidden"]), select, textarea')
+          )
+            continue;
           const style = window.getComputedStyle(c);
           if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity || '1') <= 0.05)
             continue;
@@ -8184,6 +9452,104 @@ export default class Page {
         return cleanDuplicateText(txt);
       }
 
+      // Visible text of ONE radio/checkbox option. LinkedIn's current (SDUI) form gives the native
+      // input no value (so .value is the default "on"), an EMPTY <label for>, and an aria-label that
+      // holds the QUESTION; the option text sits in a sibling <p>. Order: non-empty associated label
+      // -> aria-labelledby -> text of the option row (largest ancestor holding no other control, or
+      // the text right beside it) -> aria-label / title when they are not the question -> value,
+      // unless it is the meaningless default "on".
+      function choiceOptionText(input: HTMLInputElement, group: Element | null, question: string): string {
+        const norm = (t: string) =>
+          (t || '')
+            .replace(/[*\s]+/g, ' ')
+            .trim()
+            .toLowerCase();
+        const q = norm(question);
+        const isQuestionText = (t: string) => {
+          const n = norm(t);
+          if (!n) return true;
+          if (!q) return false;
+          return n === q || (n.length >= 12 && q.includes(n)) || (q.length >= 12 && n.includes(q));
+        };
+        const CONTROLS = 'input:not([type="hidden"]), select, textarea';
+
+        const fromLabels: string[] = [];
+        try {
+          Array.from(input.labels || []).forEach(l => fromLabels.push(cleanElementText(l)));
+        } catch {
+          // best effort; failure here is non-fatal
+        }
+        const wrapping = input.closest('label');
+        if (wrapping) fromLabels.push(cleanElementText(wrapping));
+        for (const t of fromLabels) if (t && !isQuestionText(t)) return t;
+
+        const root = input.getRootNode() as Document | ShadowRoot;
+        const refs = (input.getAttribute('aria-labelledby') || '').split(/\s+/).filter(Boolean);
+        if (refs.length > 0) {
+          const t = refs
+            .map(id => {
+              try {
+                return cleanElementText(root.querySelector(`[id="${CSS.escape(id)}"]`));
+              } catch {
+                return '';
+              }
+            })
+            .filter(Boolean)
+            .join(' ')
+            .trim();
+          if (t && !isQuestionText(t)) return t;
+        }
+
+        // Option row: climb while the ancestor holds no other form control.
+        let row: HTMLElement | null = null;
+        let cur: HTMLElement | null = input.parentElement;
+        while (cur && cur !== group && cur !== document.body) {
+          if (cur.querySelectorAll(CONTROLS).length > 1) break;
+          row = cur;
+          cur = cur.parentElement;
+        }
+        if (row) {
+          let t = cleanElementText(row);
+          // The row can also hold a (visually hidden) copy of the question that the input names via
+          // aria-labelledby — LinkedIn: <div id=q>question…</div> <input aria-labelledby=q> <p>Yes</p>.
+          // Read the row without that copy, or every option reads as the question (no options).
+          if (t && isQuestionText(t) && refs.length > 0) {
+            const clone = row.cloneNode(true) as HTMLElement;
+            for (const id of refs) {
+              try {
+                clone.querySelectorAll(`[id="${CSS.escape(id)}"]`).forEach(n => n.remove());
+              } catch {
+                // best effort; failure here is non-fatal
+              }
+            }
+            t = cleanElementText(clone);
+          }
+          if (!t) {
+            // Text rendered BESIDE the input's wrapper (<div><input><label/></div><div><p>Yes</p></div>).
+            const parts: string[] = [];
+            let sib = row.nextElementSibling;
+            for (let i = 0; sib && i < 3; i++, sib = sib.nextElementSibling) {
+              if (sib.matches(CONTROLS) || sib.querySelector(CONTROLS)) break;
+              const st = cleanElementText(sib);
+              if (st) parts.push(st);
+            }
+            t = parts.join(' ').trim();
+            if (!t) {
+              const prev = row.previousElementSibling;
+              if (prev && !prev.matches(CONTROLS) && !prev.querySelector(CONTROLS)) t = cleanElementText(prev);
+            }
+          }
+          if (t && t.length <= 300 && !isQuestionText(t)) return t;
+        }
+
+        const aria = (input.getAttribute('aria-label') || '').trim();
+        if (aria && !isQuestionText(aria)) return aria;
+        const title = (input.getAttribute('title') || '').trim();
+        if (title && !isQuestionText(title)) return title;
+        const v = (input.value || '').trim();
+        return v && !/^(?:on|off|true|false)$/i.test(v) ? v : '';
+      }
+
       function cleanDuplicateString(text: string): string {
         return cleanDuplicateText(text);
       }
@@ -8326,29 +9692,11 @@ export default class Page {
           const legendText = extractStructuralFieldLabel(modal, fs);
           if (!legendText || isGenericPlaceholderText(legendText)) continue;
 
-          const options = radios
-            .map(r => {
-              const rId = r.getAttribute('id');
-              let rLbl = rId ? fs.querySelector(`label[for="${CSS.escape(rId)}"]`) : null;
-              if (!rLbl) {
-                rLbl = r.closest('label') || (r.parentElement?.querySelector('label') as HTMLElement | null);
-              }
-              return cleanElementText(rLbl) || (r.value || '').trim();
-            })
-            .filter(Boolean);
+          const options = radios.map(r => choiceOptionText(r, fs, legendText)).filter(Boolean);
 
+          // A checked radio whose text cannot be read is still answered — keep it that way.
           const checkedRadio = radios.find(r => r.checked);
-          let checkedValue = '';
-          if (checkedRadio) {
-            const rId = checkedRadio.getAttribute('id');
-            let rLbl = rId ? fs.querySelector(`label[for="${CSS.escape(rId)}"]`) : null;
-            if (!rLbl) {
-              rLbl =
-                checkedRadio.closest('label') ||
-                (checkedRadio.parentElement?.querySelector('label') as HTMLElement | null);
-            }
-            checkedValue = cleanElementText(rLbl) || (checkedRadio.value || '').trim();
-          }
+          const checkedValue = checkedRadio ? choiceOptionText(checkedRadio, fs, legendText) || '(selected)' : '';
 
           let hintText = '';
           const hintEl = fs.querySelector(
@@ -8378,13 +9726,7 @@ export default class Page {
 
           const anyChecked = checkboxes.some(c => c.checked);
           if (!anyChecked) {
-            const options = checkboxes
-              .map(c => {
-                const cId = c.getAttribute('id');
-                const cLbl = cId ? fs.querySelector(`label[for="${cId}"]`) : null;
-                return cleanElementText(cLbl) || (c.value || '').trim();
-              })
-              .filter(Boolean);
+            const options = checkboxes.map(c => choiceOptionText(c, fs, legendText)).filter(Boolean);
 
             const isExplicitlyOptional =
               /\boptional\b/i.test(legendText) ||
@@ -8436,10 +9778,122 @@ export default class Page {
         }
       }
 
+      // 1a-2. Multi-choice checkbox questions rendered WITHOUT a <fieldset>/role="group" wrapper.
+      // Checkboxes that share a `name`, or sit together in one LinkedIn form-element container,
+      // are ONE question whose options are their labels — otherwise every option would become a
+      // separate Yes/No question (and a "Yes" fallback would tick all of them). The container is
+      // tagged with the question so fillModalFieldDirect finds the same group by label.
+      const groupedCheckboxes = new Set<HTMLInputElement>();
+      {
+        const loose = (Array.from(modal.querySelectorAll('input[type="checkbox"]')) as HTMLInputElement[]).filter(
+          cb => !cb.closest('fieldset, div[role="radiogroup"], div[role="group"]'),
+        );
+        const groups = new Map<HTMLElement, HTMLInputElement[]>();
+        // Question text shared by every box of a group (LinkedIn's current form puts the
+        // question in each input's aria-label).
+        const sharedQuestion = new Map<HTMLElement, string>();
+        const commonAncestor = (members: HTMLInputElement[]): HTMLElement | null => {
+          let anc: HTMLElement | null = members[0].parentElement;
+          while (anc && anc !== modal && !members.every(m => anc!.contains(m))) anc = anc.parentElement;
+          return anc && anc !== modal ? anc : null;
+        };
+        const inGroup = (cb: HTMLInputElement) => Array.from(groups.values()).some(m => m.includes(cb));
+        const groupBy = (keyOf: (cb: HTMLInputElement) => string, questionFromKey: boolean) => {
+          const buckets = new Map<string, HTMLInputElement[]>();
+          for (const cb of loose) {
+            if (inGroup(cb)) continue;
+            const key = keyOf(cb);
+            if (!key) continue;
+            if (!buckets.has(key)) buckets.set(key, []);
+            buckets.get(key)!.push(cb);
+          }
+          for (const [key, members] of buckets) {
+            if (members.length < 2) continue;
+            const anc = commonAncestor(members);
+            if (!anc || groups.has(anc)) continue;
+            groups.set(anc, members);
+            if (questionFromKey) sharedQuestion.set(anc, key);
+          }
+        };
+        groupBy(cb => (cb.getAttribute('name') || '').trim(), false);
+        groupBy(cb => cleanDuplicateString((cb.getAttribute('aria-label') || '').trim()), true);
+        for (const cb of loose) {
+          if (inGroup(cb)) continue;
+          const container = cb.closest(
+            '[data-test-checkbox-form-component], .fb-dash-form-element, [data-test-form-element], .jobs-easy-apply-form-element',
+          ) as HTMLElement | null;
+          if (!container || groups.has(container)) continue;
+          const members = (
+            Array.from(container.querySelectorAll('input[type="checkbox"]')) as HTMLInputElement[]
+          ).filter(m => loose.includes(m) && !inGroup(m));
+          if (members.length >= 2) groups.set(container, members);
+        }
+        // The question is the container's own text that precedes the first option (outside any
+        // option <label>); only without it fall back to the structural lookup, which may climb
+        // to a section header such as "Additional Questions".
+        const leadingQuestionText = (container: HTMLElement, first: HTMLInputElement): string => {
+          const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+          const parts: string[] = [];
+          let node: Node | null;
+          while ((node = walker.nextNode())) {
+            if (first.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING) break;
+            const parent = node.parentElement;
+            if (!parent || parent.closest('label, [aria-hidden="true"], .visually-hidden, .sr-only, script, style')) {
+              continue;
+            }
+            const t = (node.textContent || '').replace(/\s+/g, ' ').trim();
+            if (t) parts.push(t);
+          }
+          return cleanDuplicateText(parts.join(' ')).slice(0, 300);
+        };
+        for (const [container, members] of groups) {
+          const ariaQuestion = sharedQuestion.get(container) || '';
+          const leading = ariaQuestion ? '' : leadingQuestionText(container, members[0]);
+          const question =
+            ariaQuestion && !isGenericPlaceholderText(ariaQuestion)
+              ? ariaQuestion
+              : leading && !isGenericPlaceholderText(leading)
+                ? leading
+                : extractStructuralFieldLabel(modal, container);
+          const options = members.map(cb => choiceOptionText(cb, container, question)).filter(Boolean);
+          // The question must be real text that is not one of the options themselves.
+          if (
+            !question ||
+            isGenericPlaceholderText(question) ||
+            options.length < 2 ||
+            options.some(o => o.toLowerCase() === question.toLowerCase())
+          ) {
+            continue;
+          }
+          members.forEach(m => groupedCheckboxes.add(m));
+          try {
+            container.setAttribute('data-qoder-cb-group', '1');
+            container.setAttribute('data-qoder-cb-group-label', question);
+          } catch {
+            // best effort; failure here is non-fatal
+          }
+          if (members.some(m => m.checked)) continue; // already answered — preserve
+          const isExplicitlyOptional =
+            /\boptional\b/i.test(question) ||
+            Boolean(
+              container.querySelector(
+                '.fb-dash-form-element__label-title--optional, [data-test-form-element-optional], .artdeco-form__label--optional',
+              ) || container.closest('.fb-dash-form-element--optional, [data-test-form-element-optional]'),
+            );
+          descriptors.push({
+            label: question,
+            fieldType: 'checkbox',
+            options,
+            required: !isExplicitlyOptional,
+          });
+        }
+      }
+
       // 1b. Standalone checkboxes outside fieldsets (e.g. Terms, Acknowledgment, Agreements)
       const standaloneCheckboxes = Array.from(modal.querySelectorAll('input[type="checkbox"]')) as HTMLInputElement[];
       for (const cb of standaloneCheckboxes) {
         if (cb.closest('fieldset, div[role="radiogroup"], div[role="group"]')) continue;
+        if (groupedCheckboxes.has(cb)) continue;
         if (cb.checked) continue;
 
         let label = '';
@@ -8503,29 +9957,14 @@ export default class Page {
           }
           if (!questionLabel || isGenericPlaceholderText(questionLabel)) continue;
 
-          const options = radioGroup
-            .map(r => {
-              const rId = r.getAttribute('id');
-              let rLbl = rId ? modal.querySelector(`label[for="${CSS.escape(rId)}"]`) : null;
-              if (!rLbl) {
-                rLbl = r.closest('label') || (r.parentElement?.querySelector('label') as HTMLElement | null);
-              }
-              return cleanElementText(rLbl) || (r.value || '').trim();
-            })
-            .filter(Boolean);
+          const groupRoot = (commonParent as HTMLElement | null) || null;
+          const options = radioGroup.map(r => choiceOptionText(r, groupRoot, questionLabel)).filter(Boolean);
 
+          // A checked radio whose text cannot be read is still answered — keep it that way.
           const checkedRadio = radioGroup.find(r => r.checked);
-          let checkedValue = '';
-          if (checkedRadio) {
-            const rId = checkedRadio.getAttribute('id');
-            let rLbl = rId ? modal.querySelector(`label[for="${CSS.escape(rId)}"]`) : null;
-            if (!rLbl) {
-              rLbl =
-                checkedRadio.closest('label') ||
-                (checkedRadio.parentElement?.querySelector('label') as HTMLElement | null);
-            }
-            checkedValue = cleanElementText(rLbl) || (checkedRadio.value || '').trim();
-          }
+          const checkedValue = checkedRadio
+            ? choiceOptionText(checkedRadio, groupRoot, questionLabel) || '(selected)'
+            : '';
 
           const isRequired =
             radioGroup.some(r => r.required || r.getAttribute('aria-required') === 'true') ||
@@ -8934,6 +10373,7 @@ export default class Page {
       for (const cb of checkboxes) {
         if (cb.checked) continue;
         if (cb.closest('fieldset, div[role="radiogroup"], div[role="group"]')) continue;
+        if (groupedCheckboxes.has(cb)) continue;
 
         let label = '';
         const id = cb.getAttribute('id');
@@ -9024,7 +10464,8 @@ export default class Page {
     let hasReview = false;
     let hasSubmit = false;
 
-    for (const rawText of snap.buttonTexts) {
+    // All buttons, not the 8-item diagnostic list (Submit sits after the review page's Edit buttons).
+    for (const rawText of snap.actionButtonTexts?.length ? snap.actionButtonTexts : snap.buttonTexts) {
       const text = (rawText || '').trim().toLowerCase();
       if (
         text === 'dismiss' ||
@@ -9073,6 +10514,21 @@ export default class Page {
             ) as HTMLElement[])
           : [];
 
+        // LinkedIn SDUI Easy Apply pre-pass: an open <dialog> holding [data-sdui-screen*="easyapply"] is the
+        // application form; prefer it so a stale/hidden dialog earlier in the DOM is never used.
+        const sduiForm = (candidates as HTMLElement[]).find(c => {
+          if (!c || !c.isConnected) return false;
+          const marked =
+            (typeof c.matches === 'function' && c.matches('[data-sdui-screen*="easyapply" i]')) ||
+            Boolean(c.querySelector && c.querySelector('[data-sdui-screen*="easyapply" i]'));
+          if (!marked) return false;
+          const st = window.getComputedStyle(c);
+          if (st.display === 'none' || st.visibility === 'hidden') return false;
+          const r = c.getBoundingClientRect();
+          return r.width >= 120 && r.height >= 60;
+        });
+        if (sduiForm) return sduiForm;
+
         for (const c of candidates) {
           if (!c || !c.isConnected) continue;
           if (
@@ -9089,6 +10545,12 @@ export default class Page {
           if (text.includes('select language') && (text.includes('privacy') || text.includes('help center'))) continue;
           // A native "Save this application?" / "Discard draft?" sheet is not the form.
           if (/save this application|save application|discard draft/i.test(text)) continue;
+          // LinkedIn's "Job search safety reminder" interstitial is not the application form.
+          if (
+            /job search safety|safety reminder/i.test(text) &&
+            !c.querySelector('input:not([type="hidden"]), select, textarea')
+          )
+            continue;
           const style = window.getComputedStyle(c);
           if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity || '1') <= 0.05)
             continue;
@@ -9226,6 +10688,8 @@ export default class Page {
     title: string;
     textSnippet: string;
     buttonTexts: string[];
+    /** Every button in the dialog (deduped) — used to detect Next / Review / Submit. */
+    actionButtonTexts?: string[];
     hasFileInput: boolean;
     hasRadios: boolean;
     modalTag: string;
@@ -9252,6 +10716,21 @@ export default class Page {
             ) as HTMLElement[])
           : [];
 
+        // LinkedIn SDUI Easy Apply pre-pass: an open <dialog> holding [data-sdui-screen*="easyapply"] is the
+        // application form; prefer it so a stale/hidden dialog earlier in the DOM is never used.
+        const sduiForm = (candidates as HTMLElement[]).find(c => {
+          if (!c || !c.isConnected) return false;
+          const marked =
+            (typeof c.matches === 'function' && c.matches('[data-sdui-screen*="easyapply" i]')) ||
+            Boolean(c.querySelector && c.querySelector('[data-sdui-screen*="easyapply" i]'));
+          if (!marked) return false;
+          const st = window.getComputedStyle(c);
+          if (st.display === 'none' || st.visibility === 'hidden') return false;
+          const r = c.getBoundingClientRect();
+          return r.width >= 120 && r.height >= 60;
+        });
+        if (sduiForm) return sduiForm;
+
         for (const c of candidates) {
           if (!c || !c.isConnected) continue;
           if (
@@ -9268,6 +10747,12 @@ export default class Page {
           if (text.includes('select language') && (text.includes('privacy') || text.includes('help center'))) continue;
           // A native "Save this application?" / "Discard draft?" sheet is not the form.
           if (/save this application|save application|discard draft/i.test(text)) continue;
+          // LinkedIn's "Job search safety reminder" interstitial is not the application form.
+          if (
+            /job search safety|safety reminder/i.test(text) &&
+            !c.querySelector('input:not([type="hidden"]), select, textarea')
+          )
+            continue;
           const style = window.getComputedStyle(c);
           if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity || '1') <= 0.05)
             continue;
@@ -9398,10 +10883,14 @@ export default class Page {
         }
         if (!buttons.includes(pb)) buttons.push(pb);
       }
-      const buttonTexts = buttons
-        .map(b => (b.textContent || b.getAttribute('aria-label') || '').trim().slice(0, 40))
-        .filter(t => t.length > 0)
-        .slice(0, 8);
+      const allButtonTexts = buttons
+        .map(b => (b.textContent || b.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim().slice(0, 40))
+        .filter(t => t.length > 0);
+      // Short list for diagnostics only. Action detection must see EVERY button: LinkedIn's final
+      // review page puts Dismiss and an "Edit" button per section before the footer, which pushed
+      // "Submit application" past the first 8 buttons — Submit was then never detected.
+      const buttonTexts = allButtonTexts.slice(0, 8);
+      const actionButtonTexts = Array.from(new Set(allButtonTexts)).slice(0, 80);
       const hasFileInput = Boolean(modal.querySelector('input[type="file"]'));
       const hasRadios = Boolean(modal.querySelector('input[type="radio"]'));
 
@@ -9409,6 +10898,7 @@ export default class Page {
         title,
         textSnippet,
         buttonTexts,
+        actionButtonTexts,
         hasFileInput,
         hasRadios,
         modalTag,
@@ -9470,6 +10960,21 @@ export default class Page {
             ) as HTMLElement[])
           : [];
 
+        // LinkedIn SDUI Easy Apply pre-pass: an open <dialog> holding [data-sdui-screen*="easyapply"] is the
+        // application form; prefer it so a stale/hidden dialog earlier in the DOM is never used.
+        const sduiForm = (candidates as HTMLElement[]).find(c => {
+          if (!c || !c.isConnected) return false;
+          const marked =
+            (typeof c.matches === 'function' && c.matches('[data-sdui-screen*="easyapply" i]')) ||
+            Boolean(c.querySelector && c.querySelector('[data-sdui-screen*="easyapply" i]'));
+          if (!marked) return false;
+          const st = window.getComputedStyle(c);
+          if (st.display === 'none' || st.visibility === 'hidden') return false;
+          const r = c.getBoundingClientRect();
+          return r.width >= 120 && r.height >= 60;
+        });
+        if (sduiForm) return sduiForm;
+
         for (const c of candidates) {
           if (
             c.closest(
@@ -9485,6 +10990,12 @@ export default class Page {
           if (text.includes('select language') && (text.includes('privacy') || text.includes('help center'))) continue;
           // A native "Save this application?" / "Discard draft?" sheet is not the form.
           if (/save this application|save application|discard draft/i.test(text)) continue;
+          // LinkedIn's "Job search safety reminder" interstitial is not the application form.
+          if (
+            /job search safety|safety reminder/i.test(text) &&
+            !c.querySelector('input:not([type="hidden"]), select, textarea')
+          )
+            continue;
           const style = window.getComputedStyle(c);
           if (style.display === 'none' || style.visibility === 'hidden') continue;
           const rect = c.getBoundingClientRect();
@@ -9609,6 +11120,21 @@ export default class Page {
             ) as HTMLElement[])
           : [];
 
+        // LinkedIn SDUI Easy Apply pre-pass: an open <dialog> holding [data-sdui-screen*="easyapply"] is the
+        // application form; prefer it so a stale/hidden dialog earlier in the DOM is never used.
+        const sduiForm = (candidates as HTMLElement[]).find(c => {
+          if (!c || !c.isConnected) return false;
+          const marked =
+            (typeof c.matches === 'function' && c.matches('[data-sdui-screen*="easyapply" i]')) ||
+            Boolean(c.querySelector && c.querySelector('[data-sdui-screen*="easyapply" i]'));
+          if (!marked) return false;
+          const st = window.getComputedStyle(c);
+          if (st.display === 'none' || st.visibility === 'hidden') return false;
+          const r = c.getBoundingClientRect();
+          return r.width >= 120 && r.height >= 60;
+        });
+        if (sduiForm) return sduiForm;
+
         for (const c of candidates) {
           if (!c || !c.isConnected) continue;
           if (
@@ -9625,6 +11151,12 @@ export default class Page {
           if (text.includes('select language') && (text.includes('privacy') || text.includes('help center'))) continue;
           // A native "Save this application?" / "Discard draft?" sheet is not the form.
           if (/save this application|save application|discard draft/i.test(text)) continue;
+          // LinkedIn's "Job search safety reminder" interstitial is not the application form.
+          if (
+            /job search safety|safety reminder/i.test(text) &&
+            !c.querySelector('input:not([type="hidden"]), select, textarea')
+          )
+            continue;
           const style = window.getComputedStyle(c);
           if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity || '1') <= 0.05)
             continue;
@@ -9931,8 +11463,14 @@ export default class Page {
   /**
    * Submits the application in the Review step.
    */
-  async submitApplication(): Promise<{ clicked: boolean; error?: string }> {
-    const submitInPage = () => {
+  async submitApplication(): Promise<{
+    clicked: boolean;
+    error?: string;
+    disabled?: boolean;
+    method?: 'trusted' | 'synthetic';
+    buttonText?: string;
+  }> {
+    const submitInPage = (useTrustedClick: boolean) => {
       function findActiveModal(root: any): HTMLElement | null {
         const candidates = root.querySelectorAll
           ? (Array.from(
@@ -9941,6 +11479,21 @@ export default class Page {
               ),
             ) as HTMLElement[])
           : [];
+
+        // LinkedIn SDUI Easy Apply pre-pass: an open <dialog> holding [data-sdui-screen*="easyapply"] is the
+        // application form; prefer it so a stale/hidden dialog earlier in the DOM is never used.
+        const sduiForm = (candidates as HTMLElement[]).find(c => {
+          if (!c || !c.isConnected) return false;
+          const marked =
+            (typeof c.matches === 'function' && c.matches('[data-sdui-screen*="easyapply" i]')) ||
+            Boolean(c.querySelector && c.querySelector('[data-sdui-screen*="easyapply" i]'));
+          if (!marked) return false;
+          const st = window.getComputedStyle(c);
+          if (st.display === 'none' || st.visibility === 'hidden') return false;
+          const r = c.getBoundingClientRect();
+          return r.width >= 120 && r.height >= 60;
+        });
+        if (sduiForm) return sduiForm;
 
         for (const c of candidates) {
           if (!c || !c.isConnected) continue;
@@ -9958,6 +11511,12 @@ export default class Page {
           if (text.includes('select language') && (text.includes('privacy') || text.includes('help center'))) continue;
           // A native "Save this application?" / "Discard draft?" sheet is not the form.
           if (/save this application|save application|discard draft/i.test(text)) continue;
+          // LinkedIn's "Job search safety reminder" interstitial is not the application form.
+          if (
+            /job search safety|safety reminder/i.test(text) &&
+            !c.querySelector('input:not([type="hidden"]), select, textarea')
+          )
+            continue;
           const style = window.getComputedStyle(c);
           if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity || '1') <= 0.05)
             continue;
@@ -10107,138 +11666,237 @@ export default class Page {
         if (!buttons.includes(pb)) buttons.push(pb);
       }
 
-      function dispatchFullClick(el: HTMLElement) {
-        try {
-          (el as HTMLButtonElement).disabled = false;
-          el.removeAttribute('disabled');
-          el.setAttribute('aria-disabled', 'false');
-          el.classList.remove('artdeco-button--disabled');
-        } catch {}
-        try {
-          document
-            .querySelectorAll('[data-qoder-submit-target]')
-            .forEach(e => e.removeAttribute('data-qoder-submit-target'));
-          el.setAttribute('data-qoder-submit-target', '1');
-        } catch {}
-        el.scrollIntoView({ behavior: 'instant', block: 'center' });
-        el.focus();
-        const opts = { bubbles: true, cancelable: true, view: window };
-        el.dispatchEvent(new PointerEvent('pointerdown', opts));
-        el.dispatchEvent(new MouseEvent('mousedown', opts));
-        el.dispatchEvent(new PointerEvent('pointerup', opts));
-        el.dispatchEvent(new MouseEvent('mouseup', opts));
-        el.click();
+      const textOf = (b: HTMLElement) => (b.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
+      const ariaOf = (b: HTMLElement) => (b.getAttribute('aria-label') || '').trim().toLowerCase();
+      const isExcluded = (b: HTMLElement) => {
+        const t = textOf(b);
+        const a = ariaOf(b);
+        return (
+          a.includes('dismiss') ||
+          a.includes('close') ||
+          t === 'dismiss' ||
+          t === 'cancel' ||
+          t === 'back' ||
+          /\b(?:next|review|continue|edit|save)\b/.test(t)
+        );
+      };
+      const isShown = (b: HTMLElement) => {
+        const st = window.getComputedStyle(b);
+        const r = b.getBoundingClientRect();
+        return st.display !== 'none' && st.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+      };
+      // Exact "Submit application" first, then any "Submit" control, then LinkedIn's legacy markers.
+      const candidates = buttons.filter(b => !isExcluded(b) && isShown(b));
+      const submitBtn =
+        candidates.find(b => /^submit application$/.test(textOf(b)) || /^submit application$/.test(ariaOf(b))) ||
+        candidates.find(b => /\bsubmit\b/.test(textOf(b)) || /\bsubmit\b/.test(ariaOf(b))) ||
+        candidates.find(
+          b =>
+            (b.getAttribute('data-control-name') || '').trim().toLowerCase() === 'submit_unify' ||
+            (b.hasAttribute('data-easy-apply-next-button') && /submit/.test(textOf(b))),
+        ) ||
+        // Last resort (e.g. a localised label): the dialog's primary button that is not
+        // Next / Review / Continue / Edit / Save / Back / Dismiss (filtered above).
+        candidates.find(b => modal.contains(b) && b.classList.contains('artdeco-button--primary')) ||
+        null;
+      if (!submitBtn) return { clicked: false, error: 'Submit button not found in active modal' };
+
+      const buttonText = (submitBtn.textContent || submitBtn.getAttribute('aria-label') || 'Submit')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 60);
+      // A disabled Submit is LinkedIn saying a required answer is still missing. Never force it
+      // enabled — clicking it cannot submit and would hide the real reason.
+      const isDisabled =
+        (submitBtn as HTMLButtonElement).disabled === true ||
+        submitBtn.getAttribute('aria-disabled') === 'true' ||
+        submitBtn.classList.contains('artdeco-button--disabled');
+      if (isDisabled) {
+        return {
+          clicked: false,
+          disabled: true,
+          buttonText,
+          error: `"${buttonText}" is disabled - LinkedIn still considers a required answer missing`,
+        };
       }
 
-      for (const btn of buttons) {
-        const text = (btn.textContent || '').trim().toLowerCase();
-        const aria = (btn.getAttribute('aria-label') || '').trim().toLowerCase();
-        const dataControl = (btn.getAttribute('data-control-name') || '').trim().toLowerCase();
-        if (
-          aria.includes('dismiss') ||
-          aria.includes('close') ||
-          text === 'dismiss' ||
-          text === 'cancel' ||
-          text === 'back'
-        ) {
-          continue;
-        }
-
-        const isSubmit =
-          /submit application|submit/i.test(aria) ||
-          /^\s*submit(\s*application)?\s*$/i.test(text) ||
-          text.includes('submit application') ||
-          text.includes('submit') ||
-          dataControl === 'submit_unify' ||
-          (btn.hasAttribute('data-easy-apply-next-button') && text.includes('submit'));
-
-        if (isSubmit) {
-          dispatchFullClick(btn);
-          return { clicked: true };
-        }
-      }
-
-      // Primary button fallback on review step across modal and document
-      for (const btn of buttons) {
-        if (btn.classList.contains('artdeco-button--primary')) {
-          const text = (btn.textContent || '').trim().toLowerCase();
-          const aria = (btn.getAttribute('aria-label') || '').trim().toLowerCase();
-          if (
-            !text.includes('dismiss') &&
-            !text.includes('cancel') &&
-            !text.includes('close') &&
-            !text.includes('back') &&
-            !aria.includes('dismiss') &&
-            !aria.includes('cancel') &&
-            !aria.includes('close')
-          ) {
-            dispatchFullClick(btn);
-            return { clicked: true };
-          }
+      submitBtn.scrollIntoView({ behavior: 'instant', block: 'center' });
+      const r = submitBtn.getBoundingClientRect();
+      const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2) as HTMLElement | null;
+      if (hit && hit !== submitBtn && !submitBtn.contains(hit) && !modal.contains(hit)) {
+        const cover = hit.closest('dialog, [role="dialog"], [aria-modal="true"], .artdeco-modal') as HTMLElement | null;
+        if (cover) {
+          return { clicked: false, buttonText, error: `"${buttonText}" is covered by another dialog` };
         }
       }
 
-      return { clicked: false, error: 'Submit button not found in active modal' };
+      try {
+        document
+          .querySelectorAll('[data-qoder-submit-target]')
+          .forEach(e => e.removeAttribute('data-qoder-submit-target'));
+        submitBtn.setAttribute('data-qoder-submit-target', '1');
+      } catch {
+        // best effort; failure here is non-fatal
+      }
+      if (useTrustedClick) {
+        // The caller clicks the marked button ONCE with a real (trusted) mouse event.
+        return { clicked: false, marked: true, buttonText };
+      }
+      const opts = { bubbles: true, cancelable: true, view: window };
+      submitBtn.focus();
+      submitBtn.dispatchEvent(new PointerEvent('pointerdown', opts));
+      submitBtn.dispatchEvent(new MouseEvent('mousedown', opts));
+      submitBtn.dispatchEvent(new PointerEvent('pointerup', opts));
+      submitBtn.dispatchEvent(new MouseEvent('mouseup', opts));
+      submitBtn.click();
+      return { clicked: true, method: 'synthetic' as const, buttonText };
     };
 
     if (!this._puppeteerPage) {
       await this.attachPuppeteer().catch(() => false);
     }
 
-    let res: { clicked: boolean; error?: string } = { clicked: false, error: 'Initialization error' };
+    type SubmitProbe = {
+      clicked: boolean;
+      error?: string;
+      disabled?: boolean;
+      marked?: boolean;
+      method?: 'trusted' | 'synthetic';
+      buttonText?: string;
+    };
+    let res: SubmitProbe = { clicked: false, error: 'Initialization error' };
 
     if (this._puppeteerPage) {
       try {
-        res = (await this._puppeteerPage.evaluate(submitInPage)) || {
+        res = ((await this._puppeteerPage.evaluate(submitInPage, true)) as SubmitProbe) || {
           clicked: false,
           error: 'Empty evaluation result',
         };
       } catch (err: any) {
         res = { clicked: false, error: String(err?.message || err) };
       }
+      // Exactly ONE click: a real (trusted) mouse click on the marked button. LinkedIn's new UI
+      // ignores synthetic clicks; the old code fired a synthetic click AND a trusted click, which
+      // could register twice.
+      if (res.marked) {
+        logger.info(`[LinkedIn][Submit] Button found: "${res.buttonText}" (enabled)`);
+        const marker = '[data-qoder-submit-target="1"]';
+        try {
+          const handle = await this._puppeteerPage.$(`pierce/${marker}`);
+          if (handle) {
+            try {
+              await handle.click({ delay: 40 });
+              res = { clicked: true, method: 'trusted', buttonText: res.buttonText };
+            } finally {
+              await handle.dispose().catch(() => {});
+            }
+          }
+        } catch (clickErr) {
+          logger.warning('[LinkedIn][Submit] Trusted click failed, falling back to a synthetic click:', clickErr);
+        }
+        if (!res.clicked) {
+          const synthetic = await this._puppeteerPage
+            .evaluate((sel: string) => {
+              const el = document.querySelector(sel) as HTMLElement | null;
+              if (!el) return false;
+              el.click();
+              return true;
+            }, marker)
+            .catch(() => false);
+          res = synthetic
+            ? { clicked: true, method: 'synthetic', buttonText: res.buttonText }
+            : { clicked: false, error: 'Submit button disappeared before it could be clicked' };
+        }
+        await this._puppeteerPage
+          .evaluate((sel: string) => {
+            document.querySelectorAll(sel).forEach(el => el.removeAttribute('data-qoder-submit-target'));
+          }, '[data-qoder-submit-target]')
+          .catch(() => {});
+      }
     } else if (this._tabId && typeof chrome !== 'undefined' && chrome.scripting?.executeScript) {
       try {
         const results = await chrome.scripting.executeScript({
           target: { tabId: this._tabId },
           func: submitInPage,
+          args: [false],
         });
-        const r = results?.[0]?.result;
+        const r = results?.[0]?.result as SubmitProbe | undefined;
         if (r) res = r;
       } catch (err: any) {
         res = { clicked: false, error: String(err?.message || err) };
       }
     }
 
-    // CDP TRUSTED CLICK ESCALATION:
-    // Driving a real mouse click through DevTools Protocol generates isTrusted: true input events.
-    // This ensures React 18 and LinkedIn's submit handler actually register the submission.
-    const submitMarkerSel = '[data-qoder-submit-target]';
-    if (res.clicked && this._puppeteerPage) {
-      try {
-        const hasMarker = await this._puppeteerPage.evaluate((sel: string) => {
-          const el = document.querySelector(sel) as HTMLElement | null;
-          if (!el) return false;
-          el.scrollIntoView({ behavior: 'instant', block: 'center' });
-          return el.isConnected;
-        }, submitMarkerSel);
+    if (res.clicked) {
+      logger.info(`[LinkedIn][Submit] Click attempted (${res.method}) on "${res.buttonText}"`);
+    } else {
+      logger.warning(`[LinkedIn][Submit] Not clicked: ${res.error || 'unknown reason'}`);
+    }
+    return {
+      clicked: res.clicked,
+      error: res.error,
+      disabled: res.disabled,
+      method: res.method,
+      buttonText: res.buttonText,
+    };
+  }
 
-        if (hasMarker) {
-          logger.info('[submitApplication] Firing trusted CDP click on marked Submit button...');
-          await this._puppeteerPage.click(submitMarkerSel);
-          logger.info('[submitApplication] Trusted CDP click dispatched on Submit button.');
-        }
-      } catch (cdpErr) {
-        logger.warning('[submitApplication] Trusted CDP click escalation error:', cdpErr);
-      } finally {
-        try {
-          await this._puppeteerPage.evaluate((sel: string) => {
-            document.querySelectorAll(sel).forEach(el => el.removeAttribute('data-qoder-submit-target'));
-          }, submitMarkerSel);
-        } catch {}
+  /**
+   * Text such as "Applied 1 second ago" / "Applied just now" in the CURRENT job's details pane
+   * (never the search-results list, whose cards can show other jobs' applied status). Returns the
+   * matched text, or '' when absent.
+   */
+  async detectRecentAppliedStatus(): Promise<string> {
+    const probe = () => {
+      const RECENT = /\bapplied\s+(?:\d+\s+(?:second|minute)s?\s+ago|just now|now)\b/i;
+      const panes = Array.from(
+        document.querySelectorAll(
+          '.scaffold-layout__detail, .jobs-search__job-details--container, .jobs-search__job-details, .job-view-layout, [data-view-name="job-details-top-card"], [data-view-name="job-details"], .jobs-unified-top-card, main',
+        ),
+      ) as HTMLElement[];
+      // Text nodes joined with spaces: textContent glues adjacent elements ("…DeveloperApplied now"),
+      // and React markup usually has no whitespace between elements. Embedded data (<code> JSON,
+      // scripts) is skipped — it can mention other jobs.
+      const spacedText = (root: Node) => {
+        const parts: string[] = [];
+        const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+          acceptNode: n =>
+            n.parentElement?.closest('script, style, code, template, noscript')
+              ? NodeFilter.FILTER_REJECT
+              : NodeFilter.FILTER_ACCEPT,
+        });
+        for (let n = walker.nextNode(); n; n = walker.nextNode()) parts.push(n.nodeValue || '');
+        return parts.join(' ').replace(/\s+/g, ' ');
+      };
+      for (const pane of panes) {
+        if (pane.closest('.jobs-search-results-list, .scaffold-layout__list')) continue;
+        // In split view <main> also holds the results list: read only its non-list part.
+        const clone = pane.cloneNode(true) as HTMLElement;
+        clone
+          .querySelectorAll('.jobs-search-results-list, .scaffold-layout__list, [data-view-name*="job-card"]')
+          .forEach(n => n.remove());
+        const m = spacedText(clone).match(RECENT);
+        if (m) return m[0];
+      }
+      return '';
+    };
+    if (!this._puppeteerPage) await this.attachPuppeteer().catch(() => false);
+    if (this._puppeteerPage) {
+      try {
+        return String((await this._puppeteerPage.evaluate(probe)) || '');
+      } catch {
+        // fall through to chrome.scripting
       }
     }
-
-    return res;
+    if (this._tabId && typeof chrome !== 'undefined' && chrome.scripting?.executeScript) {
+      try {
+        const results = await chrome.scripting.executeScript({ target: { tabId: this._tabId }, func: probe });
+        return String(results?.[0]?.result || '');
+      } catch {
+        // unavailable
+      }
+    }
+    return '';
   }
 
   /**
@@ -10250,6 +11908,13 @@ export default class Page {
       const check = await this.verifyApplicationConfirmation();
       if (check.confirmed) {
         return check;
+      }
+
+      // LinkedIn's current UI closes the form on submit and the job's own top card then reads
+      // "Applied 1 second ago" / "Applied just now" — a format the older checks did not know.
+      const recent = await this.detectRecentAppliedStatus().catch(() => '');
+      if (recent) {
+        return { confirmed: true, message: `LinkedIn shows "${recent}" for this job` };
       }
 
       const topCard = await this.extractJobTopCardContext(1000).catch(() => null);
@@ -10536,6 +12201,21 @@ export default class Page {
               ),
             ) as HTMLElement[])
           : [];
+
+        // LinkedIn SDUI Easy Apply pre-pass: an open <dialog> holding [data-sdui-screen*="easyapply"] is the
+        // application form; prefer it so a stale/hidden dialog earlier in the DOM is never used.
+        const sduiForm = (candidates as HTMLElement[]).find(c => {
+          if (!c || !c.isConnected) return false;
+          const marked =
+            (typeof c.matches === 'function' && c.matches('[data-sdui-screen*="easyapply" i]')) ||
+            Boolean(c.querySelector && c.querySelector('[data-sdui-screen*="easyapply" i]'));
+          if (!marked) return false;
+          const st = window.getComputedStyle(c);
+          if (st.display === 'none' || st.visibility === 'hidden') return false;
+          const r = c.getBoundingClientRect();
+          return r.width >= 120 && r.height >= 60;
+        });
+        if (sduiForm) return sduiForm;
         for (const c of candidates) {
           if (
             c.closest(
@@ -10550,6 +12230,12 @@ export default class Page {
           }
           // A native "Save this application?" / "Discard draft?" sheet is not the form.
           if (/save this application|save application|discard draft/i.test(text)) continue;
+          // LinkedIn's "Job search safety reminder" interstitial is not the application form.
+          if (
+            /job search safety|safety reminder/i.test(text) &&
+            !c.querySelector('input:not([type="hidden"]), select, textarea')
+          )
+            continue;
           const style = window.getComputedStyle(c);
           if (style.display === 'none' || style.visibility === 'hidden') continue;
           const rect = c.getBoundingClientRect();
@@ -10872,6 +12558,8 @@ export interface JobTopCardContext {
   isClosed: boolean;
   isAlreadyApplied: boolean;
   hasEasyApply: boolean;
+  /** A saved draft of this Easy Apply application exists: LinkedIn shows "Continue" instead of "Easy Apply". */
+  hasSavedDraft?: boolean;
   isLoginWall: boolean;
   descriptionSnippet?: string;
 }

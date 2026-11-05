@@ -40,7 +40,11 @@ import { wrapUntrustedContent } from '../messages/utils';
 import { ApplicationEngine } from '../linkedin/applicationEngine';
 import { linkedInConfigStore, careerBrainStore } from '@extension/storage';
 import { userQuestionManager } from '../linkedin/userQuestionManager';
-import { resolveModalFieldWithAudit, type FormFieldDescriptor } from '../linkedin/formQuestionResolver';
+import {
+  resolveModalFieldWithAudit,
+  type FormFieldDescriptor,
+  type QuestionResolutionCategory,
+} from '../linkedin/formQuestionResolver';
 import { fetchHrEmailForCompany } from '../../services/emailExtractor';
 
 const logger = createLogger('Action');
@@ -260,14 +264,11 @@ export class ActionBuilder {
     }, waitActionSchema);
     actions.push(wait);
 
-    const onAuditLog = (
-      category: 'MATCHED' | 'GENERATED' | 'ASKED',
-      label: string,
-      answer: string,
-      detail?: string,
-    ) => {
+    const onAuditLog = (category: QuestionResolutionCategory, label: string, answer: string, detail?: string) => {
       const auditText = `[${category}] ${label}: "${answer}"${detail ? ` (${detail})` : ''}`;
-      this.context.emitEvent(Actors.NAVIGATOR, ExecutionState.STEP_OK, auditText).catch(() => {});
+      // A FAILED entry must not be reported as a successful step.
+      const state = category === 'FAILED' ? ExecutionState.STEP_FAIL : ExecutionState.STEP_OK;
+      this.context.emitEvent(Actors.NAVIGATOR, state, auditText).catch(() => {});
     };
 
     const resolveOrAskModalField = async (

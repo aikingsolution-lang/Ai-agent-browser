@@ -46,6 +46,18 @@ import {
   isCircuitBreakerError,
   LLM_UNAVAILABLE_LIVE_MESSAGE,
 } from '../llmCircuitBreaker';
+import {
+  classifyAddressField,
+  describeAddressKind,
+  resolveGroundedAddressAnswer,
+  type GroundedAddressAnswer,
+} from './addressResolver';
+import {
+  parseMultiSelectAnswer,
+  resolveChoiceContradictions,
+  selectEvidenceSupportedOptions,
+} from './checkboxGroupResolver';
+import { isLinkedInAiPaused } from './linkedinAiPolicy';
 
 const logger = createLogger('FormQuestionResolver');
 
@@ -88,7 +100,8 @@ export function isNetworkError(err: unknown): boolean {
   return isCircuitBreakerError(err);
 }
 
-export type QuestionResolutionCategory = 'MATCHED' | 'GENERATED' | 'ASKED';
+/** FAILED = the field could not be answered or the DOM did not hold the answer afterwards. */
+export type QuestionResolutionCategory = 'MATCHED' | 'GENERATED' | 'ASKED' | 'FAILED';
 
 export interface FormFieldDescriptor {
   id?: string;
@@ -224,6 +237,34 @@ export function isSkillMentionedInText(skillName: string, text: string): boolean
   return pattern.test(text);
 }
 
+const LOOSE_MATCH_FILLER = new Set(
+  (
+    'a an the is are am was were be been you your yours i we our my me do does did have has had what which who how ' +
+    'when where please enter select provide specify in on at of to for with from by as and or if any this that ' +
+    'these those will would can could should'
+  ).split(' '),
+);
+const contentWords = (s: string): string[] =>
+  s
+    .toLowerCase()
+    .split(/[^a-z0-9+#]+/)
+    .filter(w => w.length >= 2 && !LOOSE_MATCH_FILLER.has(w));
+
+/**
+ * `longer` contains `shorter` AND `shorter` is that question's topic, not a word it merely
+ * mentions: "Notice period" is the topic of "What is your notice period?", but "Country" is not
+ * the topic of "Are you legally authorized to work in India / your resident country?" (a Yes/No
+ * question — its "Yes" must never fill a Country field).
+ */
+function containsAsTopic(shorter: string, longer: string): boolean {
+  if (shorter.length < 4 || !longer.includes(shorter)) return false;
+  const longWords = contentWords(longer);
+  if (longWords.length === 0) return true;
+  const coverage = contentWords(shorter).length / longWords.length;
+  const longerIsYesNo = /^(?:are|is|do|does|did|have|has|will|would|can|could|should)\b/.test(longer.trim());
+  return coverage >= 0.5 || (coverage >= 0.3 && !longerIsYesNo);
+}
+
 /**
  * Checks if two question strings match loosely
  */
@@ -232,7 +273,7 @@ export function matchesQuestionLoosely(q1: string, q2: string): boolean {
   const t1 = cleanLinkedInText(q1).toLowerCase().trim();
   const t2 = cleanLinkedInText(q2).toLowerCase().trim();
   if (t1 === t2) return true;
-  if (t1.length >= 4 && t2.length >= 4 && (t1.includes(t2) || t2.includes(t1))) return true;
+  if (t2.length >= 4 && (t1.length <= t2.length ? containsAsTopic(t1, t2) : containsAsTopic(t2, t1))) return true;
 
   // 1. Semantic equivalence (normalization + curated synonym clusters + token Jaccard)
   const semantic = areQuestionsSemanticallyEquivalent(q1, q2);
@@ -245,7 +286,7 @@ export function matchesQuestionLoosely(q1: string, q2: string): boolean {
   if (norm1 && norm2) {
     if (norm1 === norm2) return true;
     if (norm1.length >= 4 && norm2.length >= 4) {
-      if (norm1.includes(norm2) || norm2.includes(norm1)) return true;
+      if (norm1.length <= norm2.length ? containsAsTopic(norm1, norm2) : containsAsTopic(norm2, norm1)) return true;
     }
   }
   return false;
@@ -1772,6 +1813,281 @@ export function resolveCurrentLocationFromProfileOrResume(careerBrain?: Partial<
 }
 
 /**
+ * LinkedIn street / postal-code / address fields. Returns null when the field is not an address
+ * input; otherwise the grounded answer from saved Career Brain answers or the resume, with
+ * `answer: ''` when the candidate has no such detail on file (the field must stay blank).
+ */
+export function resolveLinkedInAddressField(
+  field: { label?: string; fieldType?: string },
+  careerBrain?: Partial<ICareerBrain> | null,
+): GroundedAddressAnswer | null {
+  if (!classifyAddressField(field)) return null;
+  return resolveGroundedAddressAnswer(field, careerBrain, resolveCurrentLocationFromProfileOrResume(careerBrain));
+}
+
+type AutonomousSolution = Awaited<ReturnType<typeof solveQuestionAutonomousWithLLM>>;
+
+// Successful autonomous answers per question (label + type + options) for this run. The
+// resolver tiers and the runner's follow-up passes ask the same question several times per
+// form; re-asking spends AI quota (the provider answers 429 "rate limit" and the circuit
+// breaker then disables AI for minutes) without changing a profile-grounded answer.
+const autonomousAnswerMemo = new Map<string, { at: number; result: AutonomousSolution }>();
+const AUTONOMOUS_MEMO_TTL_MS = 10 * 60 * 1000;
+
+/** Questions (per application session + fingerprint) that went through every tier unanswered. */
+const unresolvedInApplication = new Map<string, number>();
+
+function autonomousMemoKey(field: FormFieldDescriptor): string {
+  const options = (field.options || []).map(o => String(o).trim().toLowerCase()).join('␟');
+  return `${normalizeQuestionText(field.label || '')}|${field.fieldType || 'text'}|${options}`;
+}
+
+/**
+ * Validates / normalises an answer before it is put into a LinkedIn field. A multi-choice
+ * checkbox question takes a SET of options ("A | B"), which the shared single-option guard would
+ * reject or collapse to one option — so it is parsed into exact options here, with the
+ * exclusive-option rule applied. Every other field uses the shared `validateAnswerForField`.
+ */
+export function prepareAnswerForLinkedInField(
+  field: FormFieldDescriptor,
+  answer: string,
+): { valid: boolean; value: string; reason?: string } {
+  if (isMultiChoiceCheckboxGroup(field)) {
+    const parsed = parseMultiSelectAnswer(answer, field.options || []);
+    const { kept, dropped } = resolveChoiceContradictions(parsed.matched);
+    if (kept.length === 0) {
+      return {
+        valid: false,
+        value: '',
+        reason: parsed.matched.length
+          ? `contradictory options (${dropped.join(' + ')})`
+          : `no option matches "${String(answer).slice(0, 80)}"`,
+      };
+    }
+    return {
+      valid: true,
+      value: kept.join(' | '),
+      reason: dropped.length ? `dropped exclusive option(s): ${dropped.join(', ')}` : undefined,
+    };
+  }
+  const guarded = validateAnswerForField(answer, field);
+  return { valid: Boolean(guarded.valid && guarded.value), value: guarded.value || '', reason: guarded.reason };
+}
+
+/**
+ * One AI request for a multi-choice checkbox question: asks for EVERY supported option at once
+ * (the shared solver returns a single answer). Used only when no option is grounded in the
+ * candidate's own data. Returns null when AI is unavailable or answered nothing usable.
+ */
+export async function chooseCheckboxOptionsWithLLM(
+  field: FormFieldDescriptor,
+  careerBrain: ICareerBrain,
+  llm?: BaseChatModel,
+): Promise<{ selected: string[]; reason: string } | null> {
+  const options = (field.options || []).filter(Boolean);
+  if (!llm || options.length < 2 || !isLlmAvailable() || !isLlmTierAvailable() || isLinkedInAiPaused()) {
+    return null;
+  }
+  const key = `multi|${autonomousMemoKey(field)}`;
+  const cached = autonomousAnswerMemo.get(key);
+  if (cached && Date.now() - cached.at < AUTONOMOUS_MEMO_TTL_MS && cached.result.answer) {
+    return { selected: String(cached.result.answer).split(' | '), reason: `${cached.result.reason} (reused)` };
+  }
+  const roles = (careerBrain.workExperience || [])
+    .slice(0, 4)
+    .map(r => `${r.title || ''} at ${r.company || ''}: ${(r.description || '').slice(0, 400)}`);
+  const prompt = `QUESTION (select all that apply): ${cleanLinkedInText(field.label)}
+OPTIONS (use these strings exactly):
+${options.map(o => `- ${o}`).join('\n')}
+
+CANDIDATE (verified facts only):
+- Current title: ${careerBrain.currentTitle || 'not specified'}
+- Skills: ${(careerBrain.skills || []).slice(0, 30).join(', ') || 'not specified'}
+- Roles:
+${roles.map(r => `  * ${r}`).join('\n') || '  * not specified'}
+- Resume excerpt:
+${String(careerBrain.resumeText || '').slice(0, 3500)}
+
+RULES:
+1. Select EVERY option that the candidate's roles, skills or resume clearly support, and nothing else.
+2. Never select an exclusive option ("Only ...", "None of the above") together with any other option.
+3. If no option is clearly supported, return an empty list.
+Return JSON only: {"selected": ["<exact option>", "..."], "reason": "<one short sentence>"}`;
+  try {
+    const res = await llm.invoke([
+      new SystemMessage('You answer job-application checkbox questions truthfully. Output valid JSON only.'),
+      new HumanMessage(prompt),
+    ]);
+    const content = typeof res.content === 'string' ? res.content : JSON.stringify(res.content);
+    const match = content.match(/\{[\s\S]*\}/);
+    if (!match) return null;
+    const parsedJson = JSON.parse(match[0]) as { selected?: unknown; reason?: unknown };
+    const raw = Array.isArray(parsedJson.selected) ? parsedJson.selected.map(String) : [];
+    const { matched } = parseMultiSelectAnswer(raw, options);
+    const { kept } = resolveChoiceContradictions(matched);
+    if (kept.length === 0) return null;
+    const reason = String(parsedJson.reason || 'AI selection from resume').slice(0, 160);
+    if (autonomousAnswerMemo.size >= 300) autonomousAnswerMemo.clear();
+    autonomousAnswerMemo.set(key, { at: Date.now(), result: { success: true, answer: kept.join(' | '), reason } });
+    return { selected: kept, reason };
+  } catch (err) {
+    if (isNetworkError(err)) recordLlmNetworkFailure(err);
+    logger.warning(
+      `[LinkedIn][AI] Multi-select request failed for "${field.label}": ${(err as Error)?.message || err}`,
+    );
+    return null;
+  }
+}
+
+/**
+ * A saved Career Brain answer (golden / custom answers) for the same checkbox question, reduced
+ * to the options actually offered (exclusive options never combined with others).
+ */
+export function findSavedCheckboxGroupAnswer(
+  field: FormFieldDescriptor,
+  careerBrain: ICareerBrain,
+): { answer: string; question: string } | null {
+  const question = cleanLinkedInText(field.label || '');
+  const saved = [
+    ...(Array.isArray(careerBrain.goldenAnswers) ? careerBrain.goldenAnswers : []).map(g => [g.question, g.answer]),
+    ...Object.entries(careerBrain.customAnswers || {}),
+  ].find(([q, a]) => q && a && matchesQuestionLoosely(question, String(q)));
+  if (!saved) return null;
+  const parsed = parseMultiSelectAnswer(String(saved[1]), (field.options || []).filter(Boolean));
+  const { kept } = resolveChoiceContradictions(parsed.matched);
+  return kept.length > 0 ? { answer: kept.join(' | '), question: String(saved[0]) } : null;
+}
+
+/**
+ * Why a required LinkedIn question can never be answered from the candidate's data during this
+ * application — for the field kinds whose answer does not change between healing attempts: an
+ * address detail that is not on file, or a checkbox question with no saved answer and no option
+ * the profile supports. Returns null for every other field (a later attempt may still answer it).
+ */
+export function explainUnanswerableLinkedInField(field: FormFieldDescriptor, careerBrain: ICareerBrain): string | null {
+  const address = resolveLinkedInAddressField(field, careerBrain);
+  if (address) {
+    // The answer the address resolver reads back from Career Brain's saved (Golden) answers.
+    const savedQuestion: Record<string, string> = {
+      postalCode: 'Postal Code',
+      street: 'Street address',
+      addressLine2: 'Address line 2',
+      fullAddress: 'Address',
+    };
+    return address.answer
+      ? null
+      : `no ${describeAddressKind(address.kind)} in Career Brain answers or resume (left blank, never invented) - add it once in Career Brain settings > Golden Answers as "${
+          savedQuestion[address.kind] || 'Address'
+        }" and the next run fills it`;
+  }
+  if (isMultiChoiceCheckboxGroup(field)) {
+    if (findSavedCheckboxGroupAnswer(field, careerBrain)) return null;
+    const { selected } = selectEvidenceSupportedOptions(field.options || [], careerBrain);
+    if (selected.length > 0) return null;
+    return `no option is supported by Career Brain / resume${
+      isLinkedInAiPaused() ? ' (AI paused after a Gemini 429)' : ''
+    }`;
+  }
+  return null;
+}
+
+/**
+ * Answers a multi-choice checkbox question: a saved Career Brain answer for the same question,
+ * then the options the candidate's own data supports, then (only if nothing is grounded and AI is
+ * allowed) one multi-select AI request. Exclusive options are never combined with others.
+ */
+export async function solveLinkedInCheckboxGroup(
+  field: FormFieldDescriptor,
+  careerBrain: ICareerBrain,
+  llm?: BaseChatModel,
+  opts: { allowAi?: boolean } = {},
+): Promise<{ success: boolean; answer?: string; source: string; reason: string }> {
+  const options = (field.options || []).filter(Boolean);
+
+  const saved = findSavedCheckboxGroupAnswer(field, careerBrain);
+  if (saved) {
+    return {
+      success: true,
+      answer: saved.answer,
+      source: 'Approved Memory',
+      reason: `saved answer "${saved.question}"`,
+    };
+  }
+
+  const { selected, assessment } = selectEvidenceSupportedOptions(options, careerBrain);
+  if (selected.length > 0) {
+    const why = assessment
+      .filter(a => a.supported)
+      .map(a => `${a.option} [${a.found.join('+')}]`)
+      .join('; ');
+    return { success: true, answer: selected.join(' | '), source: 'Resume / Career Brain', reason: why };
+  }
+
+  if (opts.allowAi !== false) {
+    const ai = await chooseCheckboxOptionsWithLLM(field, careerBrain, llm);
+    if (ai && ai.selected.length > 0) {
+      return { success: true, answer: ai.selected.join(' | '), source: 'AI', reason: ai.reason };
+    }
+  }
+
+  const aiState = isLinkedInAiPaused()
+    ? 'AI paused after a Gemini 429'
+    : !llm || !isLlmAvailable() || !isLlmTierAvailable()
+      ? 'AI unavailable'
+      : opts.allowAi === false
+        ? 'AI not used for this question'
+        : 'AI found no supported option';
+  return {
+    success: false,
+    source: 'Unknown',
+    reason: `no option is supported by Career Brain / resume (${aiState})`,
+  };
+}
+
+/**
+ * LinkedIn entry point for the autonomous solver. Address fields are answered only from
+ * grounded data and are never sent to the LLM (it would invent a plausible street or PIN);
+ * multi-choice checkbox questions get a grounded SET of options; every other field goes to the
+ * shared `solveQuestionAutonomousWithLLM` (unchanged), and a successful answer is reused for the
+ * same question within the run instead of re-asking.
+ */
+export async function solveLinkedInFieldAutonomously(
+  field: FormFieldDescriptor,
+  careerBrain: ICareerBrain,
+  llm?: BaseChatModel,
+): Promise<AutonomousSolution> {
+  const address = resolveLinkedInAddressField(field, careerBrain);
+  if (address) {
+    return address.answer
+      ? { success: true, answer: address.answer, reason: address.sourceDetail, confidence: 'HIGH' }
+      : {
+          success: false,
+          reason: `No ${describeAddressKind(address.kind)} in Career Brain answers or resume — left blank (never invented)`,
+        };
+  }
+  if (isMultiChoiceCheckboxGroup(field)) {
+    const group = await solveLinkedInCheckboxGroup(field, careerBrain, llm);
+    return group.success
+      ? { success: true, answer: group.answer, reason: `${group.source}: ${group.reason}`, confidence: 'HIGH' }
+      : { success: false, reason: group.reason };
+  }
+  if (isLinkedInAiPaused()) {
+    return { success: false, reason: 'AI paused after a Gemini 429 — not re-asked' };
+  }
+  const key = autonomousMemoKey(field);
+  const cached = autonomousAnswerMemo.get(key);
+  if (cached && Date.now() - cached.at < AUTONOMOUS_MEMO_TTL_MS) {
+    return { ...cached.result, reason: `${cached.result.reason || 'AI answer'} (reused, not re-asked)` };
+  }
+  const result = await solveQuestionAutonomousWithLLM(field, careerBrain, llm);
+  if (result.success && result.answer !== undefined && String(result.answer).trim() !== '') {
+    if (autonomousAnswerMemo.size >= 300) autonomousAnswerMemo.clear();
+    autonomousAnswerMemo.set(key, { at: Date.now(), result });
+  }
+  return result;
+}
+
+/**
  * Derives the phone country code and country details strictly following the resolution order:
  * 1. Candidate's profile (phone number prefix / country)
  * 2. If undetermined, default to profile's current location country
@@ -1892,6 +2208,18 @@ export function matchRuleBased(
     return { matched: false };
   }
   const labelLower = label.toLowerCase().trim();
+
+  // 0. Street address / address line / postal (ZIP, PIN) code / full address.
+  // Answered only from saved Career Brain answers for the same address component or from the
+  // resume. Resolved before every other rule and before fuzzy golden matching so a street
+  // field can never receive the city or another location answer; with no grounded value the
+  // field stays blank.
+  const addressAnswer = resolveLinkedInAddressField(field, careerBrain);
+  if (addressAnswer) {
+    return addressAnswer.answer
+      ? { matched: true, answer: addressAnswer.answer, sourceDetail: addressAnswer.sourceDetail }
+      : { matched: false };
+  }
 
   // 1a. Generic Total Work Experience (overall / total / IT industry / professional / work experience)
   // Must be checked FIRST before single-skill checks so questions like "How many years of overall IT industry experience do you have?"
@@ -2481,6 +2809,36 @@ export function matchRuleBased(
   if (isFullName && careerBrain.fullName) {
     return { matched: true, answer: careerBrain.fullName.trim(), sourceDetail: 'profile: fullName' };
   }
+
+  // "Skill Set" / "Skills" / "Key Skills" text field: the candidate's own skills list.
+  const bareLabel = labelLower
+    .replace(/\(optional\)/g, ' ')
+    .replace(/[*:]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (
+    !isBinaryOrSelect &&
+    /^(?:skill\s*set|skills?|key\s*skills|technical\s*skills|primary\s*skills|core\s*skills|relevant\s*skills|top\s*skills|your\s*skills)$/.test(
+      bareLabel,
+    )
+  ) {
+    const skills = Array.from(
+      new Set(
+        [...(careerBrain.skills || []), ...(careerBrain.skills?.length ? [] : careerBrain.autoExtractedSkills || [])]
+          .map(s => String(s || '').trim())
+          .filter(s => s && isValidSkillName(s)),
+      ),
+    ).slice(0, 15);
+    if (skills.length > 0) {
+      const maxLength = Number((field as { maxLength?: number }).maxLength) || 0;
+      let answer = skills.join(', ');
+      while (maxLength > 0 && answer.length > maxLength && skills.length > 1) {
+        skills.pop();
+        answer = skills.join(', ');
+      }
+      return { matched: true, answer, sourceDetail: `profile: skills (${skills.length})` };
+    }
+  }
   // Location Willingness, Commute, Relocation, and Hybrid/Client Location questions
   // Location Willingness, Commute, Relocation, and Hybrid/Client Location questions
   if (
@@ -2823,7 +3181,10 @@ export function matchRuleBased(
     }
 
     // For text inputs: if the label specifically requests only city (e.g. "City" or "Current City")
-    const expectsCityOnly = /^(?:city|current\s*city|residence\s*city)$/i.test(labelLower.replace(/[*\s:]/g, ' '));
+    // "City*" must count as "City" (the trailing required-marker used to make it the full location).
+    const expectsCityOnly = /^(?:city|current\s*city|residence\s*city)$/i.test(
+      labelLower.replace(/[*\s:]+/g, ' ').trim(),
+    );
     const ans = expectsCityOnly ? cleanCity : cleanLocation;
     return { matched: true, answer: ans, sourceDetail: resolvedLoc.sourceDetail };
   }
@@ -4239,6 +4600,32 @@ export async function solveValidationErrorWithLLM(
   careerBrain: ICareerBrain,
   llm?: BaseChatModel,
 ): Promise<{ success: boolean; answer?: string; reason?: string }> {
+  // Address fields are healed only with the grounded value; the LLM would invent one.
+  const address = resolveLinkedInAddressField(field, careerBrain);
+  if (address) {
+    return address.answer
+      ? { success: true, answer: address.answer, reason: address.sourceDetail }
+      : {
+          success: false,
+          reason: `No ${describeAddressKind(address.kind)} in Career Brain answers or resume — left blank (never invented)`,
+        };
+  }
+
+  // A multi-choice checkbox question is healed with a grounded SET of options.
+  const asDescriptor = field as FormFieldDescriptor;
+  if (isMultiChoiceCheckboxGroup(asDescriptor)) {
+    const group = await solveLinkedInCheckboxGroup(asDescriptor, careerBrain, llm);
+    return group.success
+      ? { success: true, answer: group.answer, reason: `${group.source}: ${group.reason}` }
+      : { success: false, reason: group.reason };
+  }
+
+  // The live log showed this healer still calling the AI after the breaker had tripped — each call
+  // then spent minutes in rate-limit retries. Respect the breaker and the 429 pause.
+  if (!isLlmAvailable() || !isLlmTierAvailable() || isLinkedInAiPaused()) {
+    return { success: false, reason: 'AI unavailable or paused after a Gemini 429 - not re-asked' };
+  }
+
   let activeLLM = llm;
   if (!activeLLM) {
     try {
@@ -4385,6 +4772,13 @@ export function generateAutonomousFallbackAnswerWithSource(
   const errorLower = (validationErrorText || '').toLowerCase();
   const maxLen = (field as any).maxLength || (field as any).maxlength;
 
+  // 0. Address fields: the grounded value or nothing — never "Not applicable" and never a
+  // guessed street / PIN code, on any healing attempt.
+  const address = resolveLinkedInAddressField(field, careerBrain);
+  if (address) {
+    return address.answer ? { answer: address.answer, source: address.sourceDetail } : { answer: '', source: '' };
+  }
+
   // 1. Radio / Select / Dropdown / Choice fields: Choose ONLY from real options (field.options)
   const isChoiceField =
     field.fieldType === 'dropdown' ||
@@ -4398,6 +4792,22 @@ export function generateAutonomousFallbackAnswerWithSource(
       .filter(o => o && !/^(?:select\s*(?:an\s*)?option|choose(?:\s*an\s*option)?|--\s*select\s*--|\.\.\.)$/i.test(o));
 
     if (validOptions.length > 0) {
+      // 1-0. Multi-choice checkbox question ("select all that apply"): a saved answer for the same
+      // question, else every option the candidate's own title / skills / work history / resume
+      // supports. Checked before the single-answer rules below, which would pick one option.
+      // The first option is never ticked by default — a wrong claim is worse than none.
+      if (isMultiChoiceCheckboxGroup(field)) {
+        const saved = findSavedCheckboxGroupAnswer(field, careerBrain);
+        if (saved) return { answer: saved.answer, source: `Approved Memory: saved answer "${saved.question}"` };
+        const { selected } = selectEvidenceSupportedOptions(validOptions, careerBrain);
+        return selected.length > 0
+          ? {
+              answer: selected.join(' | '),
+              source: `Resume / Career Brain evidence for ${selected.length} option(s)`,
+            }
+          : { answer: '', source: '' };
+      }
+
       // 1a. Relocation / travel: choose affirmative option if candidate is open to relocation
       if (/\b(?:relocation|travel)\b/i.test(labelLower)) {
         const isWilling =
@@ -4886,6 +5296,34 @@ export async function resolveModalFieldWithAudit(
     sessionId,
     fingerprint,
   });
+  logger.info(
+    `[LinkedIn][Question] "${label}" (${field.fieldType}${field.required === false ? ', optional' : ', required'}${
+      field.options?.length ? `, ${field.options.length} options` : ''
+    })`,
+  );
+
+  // A question that already went through every tier without an answer in THIS application is not
+  // sent to the AI again (Phase B, the required-field pass and the repair ladder re-resolve the
+  // same questions); while AI is paused after a 429 no AI tier is tried either. Grounded tiers
+  // (Career Brain, resume, approved answers) still run.
+  const unresolvedKey = `${sessionId}|${fingerprint}`;
+  const repeatUnresolved = unresolvedInApplication.has(unresolvedKey);
+  const skipAi = repeatUnresolved || isLinkedInAiPaused();
+  if (skipAi && llm) {
+    logger.info(
+      `[LinkedIn][AI] "${label}": AI not asked (${repeatUnresolved ? 'already unresolved in this application' : 'paused after Gemini 429'})`,
+    );
+    llm = undefined;
+  }
+
+  // Every successful answer logs WHERE it came from (never the answer itself).
+  const callerAudit = onAuditLog;
+  onAuditLog = (category, auditLabel, auditAnswer, detail) => {
+    if (category === 'MATCHED' || category === 'GENERATED') {
+      logger.info(`[LinkedIn][Answer] "${auditLabel}" source: ${describeAnswerSource(category, detail)}`);
+    }
+    callerAudit?.(category, auditLabel, auditAnswer, detail);
+  };
 
   // Helper to commit resolved answer to SessionAnswerStore
   const saveToSession = (
@@ -4912,24 +5350,44 @@ export async function resolveModalFieldWithAudit(
     });
   };
 
+  // Last value that could not be put into the form, reported in the FAILED audit entry.
+  const fillFailure: { answer?: string; reason?: string } = {};
+
   // Helper to fill field with intelligent option alignment for dropdown/radio
   async function fillWithOptionFallback(val: string): Promise<boolean> {
-    const guarded = validateAnswerForField(val, field);
+    // Multi-choice checkbox questions take a set of options; everything else the shared guard.
+    const guarded = prepareAnswerForLinkedInField(field, val);
     if (!guarded.valid || !guarded.value) {
       logger.warning(`[FormQuestionResolver] Answer guard rejected "${val}" for "${field.label}": ${guarded.reason}`);
+      fillFailure.answer = String(val ?? '');
+      fillFailure.reason = `rejected by answer guard: ${guarded.reason || 'invalid for this field'}`;
       return false;
     }
-    let success = await page.fillModalFieldDirect(field, guarded.value);
+    const success = await fillVerified(guarded.value);
+    if (!success) {
+      fillFailure.answer = guarded.value;
+      // The page records why (field not rendered, no matching option, value reverted, ...).
+      fillFailure.reason =
+        page?.lastFillDiagnostics?.reason ||
+        (field.fieldType === 'checkbox'
+          ? 'checkbox option was not checked after clicking'
+          : 'value did not hold in the form after filling');
+    }
+    return success;
+  }
+
+  async function fillVerified(value: string): Promise<boolean> {
+    let success = await page.fillModalFieldDirect(field, value);
     if (
       !success &&
       (field.fieldType === 'dropdown' || field.fieldType === 'radio') &&
       field.options &&
       field.options.length > 0
     ) {
-      const aligned = alignValueToOptions(guarded.value, field.options, field.label);
-      if (aligned && aligned.matchedOption !== guarded.value) {
+      const aligned = alignValueToOptions(value, field.options, field.label);
+      if (aligned && aligned.matchedOption !== value) {
         logger.info(
-          `[FormQuestionResolver] Smart-aligning option for "${field.label}": "${guarded.value}" -> "${aligned.matchedOption}" (${aligned.reason}, conf: ${aligned.confidence})`,
+          `[FormQuestionResolver] Smart-aligning option for "${field.label}": "${value}" -> "${aligned.matchedOption}" (${aligned.reason}, conf: ${aligned.confidence})`,
         );
         success = await page.fillModalFieldDirect(field, aligned.matchedOption);
       }
@@ -5000,6 +5458,66 @@ export async function resolveModalFieldWithAudit(
         `[FormQuestionResolver] DOM fill failed for [MATCHED] answer "${fastMatch.answer}" on "${label}". Falling through...`,
       );
     }
+  }
+
+  // Step 1a: Address fields (street / address line / postal code / address) are factual and are
+  // answered ONLY by the grounded rule above. If it had nothing, or the DOM rejected its value,
+  // stop here: the semantic matcher, the LLM tiers and the "Not applicable" fallback below would
+  // otherwise put a guessed street or PIN code into the application.
+  const addressKind = classifyAddressField(field);
+  if (addressKind) {
+    const what = describeAddressKind(addressKind);
+    const isOptionalAddress =
+      field.required === false || /\boptional\b/i.test(label) || /\boptional\b/i.test(field.hintText || '');
+    if (!fastMatch.matched && isOptionalAddress) {
+      const note = `optional field: no ${what} in Career Brain answers or resume — left blank`;
+      logger.info(`[FormQuestionResolver] "${label}": ${note}`);
+      onAuditLog?.('MATCHED', label, '(left blank)', note);
+      return { success: true, category: 'MATCHED', answer: '', sourceDetail: note };
+    }
+    const reason = fastMatch.matched
+      ? `${what} "${fastMatch.answer}" (${fastMatch.sourceDetail}) could not be set in the form: ${fillFailure.reason || 'DOM fill failed'}`
+      : `no ${what} in Career Brain answers or resume — left blank (address details are never guessed)`;
+    logger.warning(`[FormQuestionResolver] [FAILED] "${label}": ${reason}`);
+    onAuditLog?.('FAILED', label, fastMatch.matched ? String(fastMatch.answer) : '(left blank)', reason);
+    return { success: false, category: 'FAILED', error: reason, needsUserAnswer: false };
+  }
+
+  // Step 1c-0: Multi-choice checkbox question ("Which of the following have you owned…?").
+  // Needs a SET of options grounded in the candidate's data (saved answer → resume/profile
+  // evidence → one multi-select AI request). The single-answer tiers below would pick one option
+  // or nothing, so the group is resolved — or reported unresolved — here.
+  if (isMultiChoiceCheckboxGroup(field)) {
+    const isOptionalGroup = field.required === false || /\boptional\b/i.test(label);
+    const group = await solveLinkedInCheckboxGroup(field, careerBrain, llm, { allowAi: !isOptionalGroup && !skipAi });
+    if (group.success && group.answer) {
+      logger.info(`[LinkedIn][Checkbox] "${label}": option(s) matched → ${group.answer} [source: ${group.source}]`);
+      const ok = await fillWithOptionFallback(group.answer);
+      if (ok) {
+        logger.info(`[LinkedIn][Checkbox] "${label}": actual checked state verified`);
+        saveToSession(group.answer, group.source === 'AI' ? 'AI_GENERATED' : 'PROFILE_EXPLICIT', 'HIGH', group.reason);
+        onAuditLog?.(
+          group.source === 'AI' ? 'GENERATED' : 'MATCHED',
+          label,
+          group.answer,
+          `${group.source}: ${group.reason} | checked state verified`,
+        );
+        return { success: true, category: group.source === 'AI' ? 'GENERATED' : 'MATCHED', answer: group.answer };
+      }
+      const reason = `checkbox option(s) "${group.answer}" not checked: ${fillFailure.reason || 'DOM fill failed'}`;
+      logger.warning(`[LinkedIn][Checkbox] "${label}": ${reason}`);
+      onAuditLog?.('FAILED', label, group.answer, reason);
+      return { success: false, category: 'FAILED', error: reason, needsUserAnswer: !isOptionalGroup };
+    }
+    if (isOptionalGroup) {
+      const note = `optional field: ${group.reason} — left blank`;
+      onAuditLog?.('MATCHED', label, '(left blank)', note);
+      return { success: true, category: 'MATCHED', answer: '', sourceDetail: note };
+    }
+    unresolvedInApplication.set(unresolvedKey, Date.now());
+    logger.warning(`[LinkedIn][Question] Required field unresolved: "${label}" — ${group.reason}`);
+    onAuditLog?.('FAILED', label, '(blank)', `Required checkbox question unresolved: ${group.reason}`);
+    return { success: false, category: 'FAILED', error: group.reason, needsUserAnswer: true };
   }
 
   // Step 1b: High-Speed Semantic Question Matcher (Golden Answers & Profile Intent, 0 Credits)
@@ -5329,8 +5847,12 @@ export async function resolveModalFieldWithAudit(
 
   if (isFieldExplicitlyOptional) {
     logger.info(`[FormQuestionResolver] Field "${label}" is optional. Skipping ask_user and leaving default/blank.`);
-    const defaultAns = field.fieldType === 'checkbox' ? 'No' : '';
-    if (field.fieldType === 'checkbox') {
+    // A single (consent-style) checkbox is explicitly kept unticked. A multi-choice checkbox
+    // group is simply left untouched: "No" is not one of its options and could otherwise
+    // match an option such as "No experience".
+    const isSingleCheckbox = field.fieldType === 'checkbox' && !isMultiChoiceCheckboxGroup(field);
+    const defaultAns = isSingleCheckbox ? 'No' : '';
+    if (isSingleCheckbox) {
       await page.fillModalFieldDirect(field, 'No').catch(() => {});
     }
     saveToSession(defaultAns, 'DETERMINISTIC_MAP', 'HIGH', 'optional field: skipped');
@@ -5354,7 +5876,7 @@ export async function resolveModalFieldWithAudit(
   ) {
     logger.info(`[FormQuestionResolver] Analyzing screening choice field "${label}" with LLM...`);
     try {
-      const autoSol = await solveQuestionAutonomousWithLLM(field, careerBrain, llm);
+      const autoSol = await solveLinkedInFieldAutonomously(field, careerBrain, llm);
       if (autoSol.success && autoSol.answer !== undefined) {
         const fillSuccess = await fillWithOptionFallback(autoSol.answer);
         if (fillSuccess) {
@@ -5387,11 +5909,11 @@ export async function resolveModalFieldWithAudit(
 
   // Step 4: Autonomous Resolution with LLM (all field types: text, textarea, number, scale, dropdown)
   // Auto-apply is one-click: solve every unmatched field directly using LLM from candidate profile & resume
-  const activeLLM = llm || (await getActiveChatModel().catch(() => undefined));
+  const activeLLM = llm || (skipAi ? undefined : await getActiveChatModel().catch(() => undefined));
   if (activeLLM && isLlmTierAvailable()) {
     logger.info(`[FormQuestionResolver] Autonomously resolving field "${label}" (${field.fieldType}) with LLM...`);
     try {
-      const autoSol = await solveQuestionAutonomousWithLLM(field, careerBrain, activeLLM);
+      const autoSol = await solveLinkedInFieldAutonomously(field, careerBrain, activeLLM);
       if (
         autoSol.success &&
         autoSol.answer !== undefined &&
@@ -5465,12 +5987,128 @@ export async function resolveModalFieldWithAudit(
     }
   }
 
-  logger.warning(`[FormQuestionResolver] Field "${label}" could not be autonomously resolved in DOM.`);
+  const failDetail = fillFailure.answer
+    ? `answer "${fillFailure.answer}" could not be set in the form (${fillFailure.reason})`
+    : 'no grounded answer from profile, resume or AI';
+  logger.warning(`[FormQuestionResolver] [FAILED] "${label}" (${field.fieldType}): ${failDetail}`);
+  // An answer that did not stick is a definite failure. "No answer yet" is not audited here:
+  // the caller still tries its own autonomous solver and reports the final outcome itself.
+  if (fillFailure.answer) {
+    onAuditLog?.('FAILED', label, fillFailure.answer, failDetail);
+  } else {
+    // Do not walk this question through every AI tier again within the same application.
+    if (unresolvedInApplication.size >= 500) unresolvedInApplication.clear();
+    unresolvedInApplication.set(unresolvedKey, Date.now());
+    logger.info(`[LinkedIn][Answer] "${label}" source: Unknown (${failDetail})`);
+  }
   return {
     success: false,
-    category: 'GENERATED',
+    category: 'FAILED',
+    error: failDetail,
     needsUserAnswer: true,
   };
+}
+
+/**
+ * True for a multi-choice checkbox question (each checkbox is an answer option), as opposed to
+ * a single consent-style checkbox whose descriptor carries the synthetic Yes/No options.
+ */
+/** Short answer-source tag for logs: Approved Memory / Resume / Career Brain / AI (never the answer). */
+export function describeAnswerSource(category: QuestionResolutionCategory, detail?: string): string {
+  const d = String(detail || '');
+  if (/optional field/i.test(d)) return 'Not answered (optional field)';
+  if (/^Approved Memory|golden|saved answer|customAnswers|Career Brain answer|session cache/i.test(d)) {
+    return 'Approved Memory';
+  }
+  if (/^AI\b|LLM|autonomous|AI selection/i.test(d)) return 'AI';
+  if (/resume/i.test(d)) return 'Resume';
+  if (/profile|career brain|work history|currentLocation|workAuthorization|phone|email|name/i.test(d)) {
+    return 'Career Brain';
+  }
+  return category === 'GENERATED' ? 'AI' : 'Career Brain';
+}
+
+export function isMultiChoiceCheckboxGroup(field: Pick<FormFieldDescriptor, 'fieldType' | 'options'>): boolean {
+  if (field.fieldType !== 'checkbox' || !Array.isArray(field.options) || field.options.length < 2) return false;
+  return !field.options.every(o => /^(?:yes|no)$/i.test(String(o || '').trim()));
+}
+
+const OPTION_STOP_WORDS = new Set([
+  'and',
+  'the',
+  'for',
+  'with',
+  'other',
+  'others',
+  'any',
+  'none',
+  'all',
+  'etc',
+  'related',
+  'general',
+  'information',
+  'technology',
+  'technologies',
+  'management',
+  'services',
+  'system',
+  'systems',
+]);
+
+/**
+ * Deterministic choice for a multi-choice question when no LLM answer is available: scores
+ * each option by how strongly its words appear in the candidate's job titles (weight 3),
+ * skills (2) and resume / role descriptions (1). Returns null unless one option is clearly
+ * supported — an ambiguous question is left unanswered instead of guessed.
+ */
+export function pickProfileGroundedOption(
+  options: string[],
+  careerBrain: Partial<ICareerBrain>,
+): { option: string; score: number } | null {
+  const wordsOf = (s: string) =>
+    String(s || '')
+      .toLowerCase()
+      .replace(/[^a-z0-9+#\s]/g, ' ')
+      .split(/\s+/)
+      .filter(Boolean);
+  const stem = (w: string) => w.slice(0, 5);
+  const roles = Array.isArray(careerBrain.workExperience) ? careerBrain.workExperience : [];
+  const evidence: Array<[Set<string>, number]> = [
+    [new Set([careerBrain.currentTitle || '', ...roles.map(r => r.title || '')].flatMap(wordsOf).map(stem)), 3],
+    [
+      new Set([...(careerBrain.skills || []), ...(careerBrain.autoExtractedSkills || [])].flatMap(wordsOf).map(stem)),
+      2,
+    ],
+    [
+      new Set(
+        [String(careerBrain.resumeText || '').slice(0, 8000), ...roles.map(r => r.description || '')]
+          .flatMap(wordsOf)
+          .map(stem),
+      ),
+      1,
+    ],
+  ];
+  const scored = options
+    .map(option => {
+      const tokens = Array.from(
+        new Set(
+          wordsOf(option)
+            .filter(w => w.length >= 3 && !OPTION_STOP_WORDS.has(w))
+            .map(stem),
+        ),
+      );
+      if (tokens.length === 0) return { option, score: 0 };
+      const total = tokens.reduce(
+        (sum, t) => sum + Math.max(0, ...evidence.map(([set, w]) => (set.has(t) ? w : 0))),
+        0,
+      );
+      return { option, score: total / tokens.length };
+    })
+    .sort((a, b) => b.score - a.score);
+  const [best, second] = scored;
+  if (!best || best.score < 1.5) return null;
+  if (second && best.score - second.score < 0.25) return null;
+  return best;
 }
 
 /**
@@ -5490,7 +6128,9 @@ export async function rememberResolvedAnswer(questionLabel: string, answer: stri
     isGenericFieldLabel(label) ||
     isGenericWorkExperienceDateField(label) ||
     isSocialMediaOrUrlQuestion(label) ||
-    isNarrativeAnswerableQuestion(label)
+    isNarrativeAnswerableQuestion(label) ||
+    // Address details are re-derived from Career Brain answers / the resume on every run.
+    classifyAddressField(label)
   ) {
     return;
   }

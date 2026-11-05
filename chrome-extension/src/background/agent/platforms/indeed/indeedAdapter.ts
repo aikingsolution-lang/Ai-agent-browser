@@ -1746,8 +1746,9 @@ export class IndeedAdapter implements IPlatformAdapter {
       creditsUsed: 0,
     });
 
-    // 5. Multi-Step Form Progression Loop (up to 12 steps)
-    const maxSteps = 12;
+    // 5. Multi-Step Form Progression Loop (up to 20 steps)
+    // Indeed employer questionnaires can contain more screens than the default Easy Apply flow.
+    const maxSteps = 20;
     let previousFingerprint = '';
     let consecutiveSameStepCount = 0;
 
@@ -1850,7 +1851,8 @@ export class IndeedAdapter implements IPlatformAdapter {
       // 3. Find primary action button for current step with retry polling (up to 6 retries)
       let stepAction = await this.findStepActionButton(activeTabId, puppeteerPage);
       if (!stepAction.found) {
-        for (let retry = 1; retry <= 6; retry++) {
+        // Indeed may keep the Review screen in a loading/preparing state while the SPA transitions.
+        for (let retry = 1; retry <= 12; retry++) {
           await new Promise(r => setTimeout(r, 1000));
           if (context.signal?.aborted) break;
 
@@ -1940,8 +1942,8 @@ export class IndeedAdapter implements IPlatformAdapter {
       if (stepAction.type === 'submit') {
         logger.info(`[IndeedAdapter] Submit button clicked for "${job.title}". Waiting for submission confirmation...`);
         let submissionConfirmed = false;
-        // Wait up to 15 seconds for submission network request and confirmation rendering
-        for (let waitSec = 0; waitSec < 15; waitSec++) {
+        // Wait up to 30 seconds for submission and confirmation rendering.
+        for (let waitSec = 0; waitSec < 30; waitSec++) {
           await new Promise(r => setTimeout(r, 1000));
           if (context.signal?.aborted) return { status: 'skipped', reason: 'Stopped by user' };
 
@@ -2015,6 +2017,13 @@ export class IndeedAdapter implements IPlatformAdapter {
       await chrome.tabs.remove(activeTabId).catch(() => {});
     }
 
+    if (!isLlmAvailable()) {
+      return {
+        status: 'skipped',
+        reason: 'AI service unavailable; the application could not complete unanswered AI-dependent questions.',
+      };
+    }
+
     return { status: 'skipped', reason: 'Application reached step limit without final confirmation.' };
   }
 
@@ -2051,6 +2060,10 @@ export class IndeedAdapter implements IPlatformAdapter {
         'application complete',
         'thank you for applying',
         'you applied to this job',
+        "we've received your application",
+        'received your application',
+        'application submitted successfully',
+        'application successfully submitted',
         'nice! your application was submitted',
         'return to job search',
       ];
@@ -2337,7 +2350,13 @@ export class IndeedAdapter implements IPlatformAdapter {
 
       const radios = Array.from(
         document.querySelectorAll(
-          'input[type="radio"][name*="resume" i], input[type="radio"][id*="resume" i], input[type="radio"]',
+          [
+            'input[type="radio"][name*="resume" i]',
+            'input[type="radio"][id*="resume" i]',
+            'input[type="radio"][aria-label*="resume" i]',
+            '[data-testid*="resume" i] input[type="radio"]',
+            '.ia-ResumeCard input[type="radio"]',
+          ].join(','),
         ),
       ) as HTMLInputElement[];
 
@@ -2354,7 +2373,12 @@ export class IndeedAdapter implements IPlatformAdapter {
       // Check clickable resume card tiles / radio groups
       const resumeCards = Array.from(
         document.querySelectorAll(
-          '[data-testid*="ResumeCard"], .ia-ResumeCard, div[role="radio"][aria-label*="resume" i]',
+          [
+            '[data-testid*="ResumeCard"]',
+            '.ia-ResumeCard',
+            'div[role="radio"][aria-label*="resume" i]',
+            '[data-testid*="resume" i] [role="radio"]',
+          ].join(','),
         ),
       ) as HTMLElement[];
       if (resumeCards.length > 0) {
@@ -2796,19 +2820,6 @@ export class IndeedAdapter implements IPlatformAdapter {
         answer = { value: '', confidence: 0.99, source: 'profile' };
       }
 
-      const isBasicIdentityField =
-        f.fieldType === 'text' &&
-        (labelLo === 'first name' ||
-          labelLo === 'last name' ||
-          labelLo === 'full name' ||
-          labelLo === 'email' ||
-          labelLo === 'phone' ||
-          labelLo === 'phone no' ||
-          labelLo === 'phone number' ||
-          labelLo === 'mobile' ||
-          labelLo.includes('github') ||
-          labelLo.includes('linkedin'));
-
       const isDirectConsentField =
         f.fieldType === 'checkbox' &&
         (labelLo.includes('consent') ||
@@ -2827,10 +2838,7 @@ export class IndeedAdapter implements IPlatformAdapter {
       // OR whenever the answer was not found confidently (low confidence, empty, or default fallback)!
       const isUnansweredOrLowConfidence = !answer.value || answer.confidence < 0.9 || answer.source === 'default';
       const shouldUseLLM =
-        Boolean(context.scopedLLM) &&
-        !isConditionalIfYes &&
-        (!isBasicIdentityField || isUnansweredOrLowConfidence) &&
-        !isDirectConsentField;
+        Boolean(context.scopedLLM) && !isConditionalIfYes && isUnansweredOrLowConfidence && !isDirectConsentField;
 
       if (shouldUseLLM) {
         if (!isLlmAvailable()) {

@@ -104,26 +104,47 @@ import {
   resolveModalFieldWithAudit,
   cleanLinkedInJobTitle,
   adaptAnswerToFieldFormat,
-  solveQuestionAutonomousWithLLM,
+  solveLinkedInFieldAutonomously,
   solveValidationErrorWithLLM,
   analyzeModalStepWithLLM,
   matchRuleBased,
   rememberResolvedAnswer,
   generateAutonomousFallbackAnswer,
   generateAutonomousFallbackAnswerWithSource,
+  resolveLinkedInAddressField,
+  prepareAnswerForLinkedInField,
+  explainUnanswerableLinkedInField,
+  type QuestionResolutionCategory,
 } from './formQuestionResolver';
+import {
+  wrapLinkedInAiModel,
+  resetLinkedInAiStats,
+  getLinkedInAiStats,
+  formatLinkedInAiStats,
+} from './linkedinAiPolicy';
+import { createLinkedInSubmitter } from './linkedinSubmit';
 import {
   evaluateDeepRelevance,
   inspectAndHealFormErrors,
   checkBlacklistAndNegativeKeywords,
   extractRequiredExperienceYears,
-  validateAnswerForField,
 } from '../intelligence';
 import { buildDraftResumePdf, buildDraftResumeFileName, bytesToBase64 } from './resumeDraft';
-import type { FormFieldDescriptor } from '../../browser/page';
+import type { FormFieldDescriptor, JobTopCardContext } from '../../browser/page';
 import { sessionAnswerStore, computeQuestionFingerprint } from '../sessionAnswerStore';
 
 const logger = createLogger('DedicatedJobRunner');
+
+/**
+ * Pauses (min-max ms, randomised) in the LinkedIn Easy Apply form, so it moves at a calmer, more
+ * human pace: after each answered question, before Next / Review, and before Submit. A typical
+ * form takes some 20-40 s longer — far inside the application time budget.
+ */
+const LINKEDIN_FORM_PACE_MS = {
+  afterAnswer: [900, 1500],
+  beforeAdvance: [900, 1600],
+  beforeSubmit: [1500, 2500],
+} as const;
 
 const SKILL_ALIASES: Record<string, string[]> = {
   react: ['react', 'reactjs', 'react.js'],
@@ -543,6 +564,41 @@ async function getJobScopedLLM(jobRunId: string): Promise<BaseChatModel | undefi
     logger.warning('[DedicatedJobRunner] Could not resolve job-scoped LLM:', err);
   }
   return undefined;
+}
+
+/**
+ * Model for the LinkedIn job + form flow. Same backend Gemini route as getJobScopedLLM, but with
+ * LangChain retries disabled — its default (6 retries, exponential backoff) turned one HTTP 429
+ * into 1-2 minutes of waiting per call — and every call goes through the LinkedIn AI policy
+ * (timeout, 429 cooldown, per-application accounting). Naukri / Indeed keep getJobScopedLLM.
+ */
+async function getLinkedInFormLLM(jobRunId: string): Promise<BaseChatModel | undefined> {
+  try {
+    const session = await authStorage.getSession();
+    if (session?.token) {
+      return wrapLinkedInAiModel(
+        new ChatOpenAI({
+          modelName: 'gemini-3.5-flash',
+          apiKey: session.token,
+          configuration: {
+            baseURL: BACKEND_LLM_URL,
+            defaultHeaders: {
+              Authorization: `Bearer ${session.token}`,
+              'x-run-id': jobRunId,
+            },
+          },
+          temperature: 0.1,
+          maxTokens: 4096,
+          maxRetries: 0,
+        }),
+      );
+    }
+  } catch (err) {
+    logger.warning('[DedicatedJobRunner] Could not build the LinkedIn form model:', err);
+  }
+  // User-configured provider: its own retry settings, but bounded by the policy's call timeout.
+  const fallback = await getJobScopedLLM(jobRunId);
+  return fallback ? wrapLinkedInAiModel(fallback) : undefined;
 }
 
 /**
@@ -1636,6 +1692,58 @@ export class DedicatedJobRunner {
 
       this.abortController.signal.addEventListener('abort', onAbort, { once: true });
     });
+  }
+
+  /** A randomised, stop-aware pause in the LinkedIn form (see LINKEDIN_FORM_PACE_MS). */
+  private async linkedInFormPause(kind: keyof typeof LINKEDIN_FORM_PACE_MS): Promise<void> {
+    const [min, max] = LINKEDIN_FORM_PACE_MS[kind];
+    await this.interruptibleSleep(min + Math.floor(Math.random() * (max - min + 1)));
+  }
+
+  /**
+   * Re-opens a LinkedIn application whose form closed with its answers saved as a draft: the job
+   * then offers "Continue" (beside "You last modified this application …") instead of "Easy
+   * Apply". Returns true when the form is open again. Nothing is clicked when the job shows as
+   * applied or no saved draft is offered.
+   */
+  private async resumeSavedLinkedInApplication(
+    page: Pick<
+      Page,
+      | 'isEasyApplyModalOpen'
+      | 'extractJobTopCardContext'
+      | 'clickEasyApplyButton'
+      | 'waitForEasyApplyModal'
+      | 'trustedClickEasyApplyButton'
+    >,
+    title: string,
+    company: string,
+    portToSend?: chrome.runtime.Port | null,
+    runToken?: string,
+  ): Promise<boolean> {
+    this.checkAbort(runToken, this.abortController?.signal);
+    if (await page.isEasyApplyModalOpen().catch(() => false)) return false;
+    const card: JobTopCardContext | null = await page
+      .extractJobTopCardContext(4000, { fallbackTitle: title, fallbackCompany: company })
+      .catch(() => null);
+    if (!card?.hasSavedDraft || card.isAlreadyApplied) return false;
+    logger.info(`[LinkedIn][Apply] Saved draft found for "${title}" ("Continue") - resuming it once`);
+    this.notifyStatus(
+      portToSend,
+      `🔁 LinkedIn kept your answers for "${title}" - clicking Continue to finish it...`,
+      'info',
+      runToken,
+    );
+    await this.linkedInFormPause('beforeAdvance');
+    const click = await page.clickEasyApplyButton().catch(() => ({ success: false }));
+    if (!click.success) return false;
+    let modal = await page.waitForEasyApplyModal(10000, 300).catch(() => ({ opened: false }));
+    if (!modal.opened && typeof page.trustedClickEasyApplyButton === 'function') {
+      if (await page.trustedClickEasyApplyButton().catch(() => false)) {
+        modal = await page.waitForEasyApplyModal(10000, 300).catch(() => ({ opened: false }));
+      }
+    }
+    if (!modal.opened) logger.warning(`[LinkedIn][Apply] "Continue" did not re-open the form for "${title}"`);
+    return Boolean(modal.opened);
   }
 
   private startKeepAlive(): void {
@@ -3513,7 +3621,7 @@ export class DedicatedJobRunner {
               }
             }
 
-            const jitterMs = 1500 + Math.floor(Math.random() * 1000); // 1.5s - 2.5s natural human cadence
+            const jitterMs = 2500 + Math.floor(Math.random() * 1500); // 2.5s - 4s natural human cadence
             this.notifyStatus(
               portToSend,
               `⏳ Pacing safety delay (${Math.round(jitterMs / 100) / 10}s) before next candidate job...`,
@@ -5493,6 +5601,8 @@ export class DedicatedJobRunner {
     this.checkAbort(runToken, this.abortController?.signal);
     const jobRunId = `${runId}_${job.jobId}`;
     this.activeJobId = job.jobId;
+    // Per-application AI request counts for the run log (a 429 pause itself carries over).
+    resetLinkedInAiStats();
 
     // Daily quota: hold a server slot for this job (released if it is skipped or fails)
     const quota = await DailyQuotaManager.reserveApplication(applicationKey(job.jobId, job.url), 'runner');
@@ -5968,6 +6078,17 @@ export class DedicatedJobRunner {
       return { status: 'skipped', usedDirectFallback };
     }
 
+    // A saved draft shows "Continue" instead of "Easy Apply"; clicking it re-opens the same form.
+    if (topCard.hasSavedDraft) {
+      logger.info(`[LinkedIn][Apply] "${displayTitle}" has a saved draft ("Continue") - continuing that application`);
+      this.notifyStatus(
+        portToSend,
+        `🔁 "${displayTitle}" has a saved application - it will be continued (Continue button)`,
+        'info',
+        runToken,
+      );
+    }
+
     // 4b-1. Post-Load Blacklist & Negative Keyword Check
     const postBlacklist = checkBlacklistAndNegativeKeywords(
       displayTitle,
@@ -6012,7 +6133,7 @@ export class DedicatedJobRunner {
 
     if (!isRelevanceApproved) {
       this.checkAbort(runToken, this.abortController?.signal);
-      const scopedLLM = await getJobScopedLLM(jobRunId).catch(() => undefined);
+      const scopedLLM = await getLinkedInFormLLM(jobRunId).catch(() => undefined);
       if (scopedLLM && isLlmAvailable()) {
         const arbitrated = await arbitrateBorderlineRelevance(
           scopedLLM,
@@ -6088,7 +6209,7 @@ export class DedicatedJobRunner {
     let arbitrationUsed = false;
     if (deepMatch.recommendation === 'skip' && deepMatch.score >= 40 && deepMatch.score <= 60) {
       this.checkAbort(runToken, this.abortController?.signal);
-      const arbitrationLLM = await getJobScopedLLM(jobRunId).catch(() => undefined);
+      const arbitrationLLM = await getLinkedInFormLLM(jobRunId).catch(() => undefined);
       if (arbitrationLLM) {
         const arbitrated = await arbitrateBorderlineRelevance(
           arbitrationLLM,
@@ -6234,6 +6355,16 @@ export class DedicatedJobRunner {
     }
     this.checkAbort(runToken, this.abortController?.signal);
     logger.info(`[DedicatedJobRunner] waitForEasyApplyModal result:`, modalRes);
+    if (modalRes.interstitial) {
+      this.notifyStatus(
+        portToSend,
+        modalRes.opened
+          ? `🛡️ LinkedIn "${modalRes.interstitial.title}" prompt — clicked "Continue applying"; application form opened.`
+          : `🛡️ LinkedIn "${modalRes.interstitial.title}" prompt — ${modalRes.error || 'waiting for the application form'}...`,
+        'info',
+        runToken,
+      );
+    }
     let retryClickRes: { success: boolean; error?: string; diagnostics?: string } | null = null;
     if (!modalRes.opened) {
       // Re-check rate limit dialog
@@ -6264,10 +6395,39 @@ export class DedicatedJobRunner {
         }
       }
 
+      // LinkedIn's "Job search safety reminder" / "Continue applying?" prompt is still covering
+      // the page: re-clicking the (covered) Easy Apply button cannot open the form, so give the
+      // prompt handler one more full window instead (it clicks "Continue applying" and then
+      // waits for the form itself).
+      if (modalRes.interstitial?.stillOpen) {
+        logger.info(
+          `[DedicatedJobRunner] "${modalRes.interstitial.title}" prompt still open for "${displayTitle}" — retrying "Continue applying" instead of re-clicking Easy Apply.`,
+        );
+        try {
+          modalRes = await currentPage.waitForEasyApplyModal(10000, 300);
+        } catch (mErr) {
+          if (isCdpTabClosedError(mErr) || this.isStopping || !this.isRunning) {
+            throw new AbortRunError(this.stopReason || 'Stopped by user');
+          }
+          modalRes = { ...modalRes, error: String(mErr) };
+        }
+        this.checkAbort(runToken, this.abortController?.signal);
+        logger.info(`[DedicatedJobRunner] waitForEasyApplyModal after interstitial retry:`, modalRes);
+        if (modalRes.opened) {
+          this.notifyStatus(
+            portToSend,
+            `🛡️ Passed LinkedIn "${modalRes.interstitial?.title || 'safety reminder'}" prompt; application form opened.`,
+            'info',
+            runToken,
+          );
+        }
+      }
+      const interstitialBlocking = Boolean(modalRes.interstitial?.stillOpen);
+
       // Escalation 1: some LinkedIn builds ignore synthetic pointer events on the apply
       // button (click reports success, nothing opens). Drive a real trusted CDP click on
       // the marked button before spending another full wait on a synthetic retry.
-      if (typeof currentPage.trustedClickEasyApplyButton === 'function') {
+      if (!modalRes.opened && !interstitialBlocking && typeof currentPage.trustedClickEasyApplyButton === 'function') {
         const trustedClicked = await currentPage.trustedClickEasyApplyButton().catch((err: any) => {
           if (isCdpTabClosedError(err) || this.isStopping || !this.isRunning) {
             throw new AbortRunError(this.stopReason || 'Stopped by user');
@@ -6289,8 +6449,9 @@ export class DedicatedJobRunner {
         }
       }
 
-      // Retry click once (synthetic) if the trusted escalation was unavailable or failed
-      if (!modalRes.opened) {
+      // Retry click once (synthetic) if the trusted escalation was unavailable or failed —
+      // never while a LinkedIn prompt still covers the button (the click would hit the overlay).
+      if (!modalRes.opened && !modalRes.interstitial?.stillOpen) {
         logger.warning(`[DedicatedJobRunner] Modal did not open on first attempt. Retrying click...`);
         const modalSleepAborted = await this.interruptibleSleep(1200);
         if (modalSleepAborted || !this.isRunning || this.isStopping) {
@@ -6321,13 +6482,42 @@ export class DedicatedJobRunner {
       this.checkAbort(runToken, this.abortController?.signal);
       if (stats) stats.modalOpened++;
       this.notifyStatus(portToSend, `📝 Application form opened: Filling your details...`, 'info', runToken);
-      const fillRes = await this.fillAndSubmitModal(
+      let fillRes = await this.fillAndSubmitModal(
         currentPage,
         { ...job, title: displayTitle, company: displayCompany },
         jobRunId,
         portToSend,
         onLiveActivity,
         runToken,
+      );
+      // LinkedIn sometimes closes the form mid-application and keeps the answers as a saved draft;
+      // the job then shows "Continue" instead of "Easy Apply". Resume it once. Stops the runner
+      // chose itself (unanswerable question, time budget, Submit outcome) never match, so this
+      // cannot loop or re-submit.
+      if (
+        !fillRes.success &&
+        /modal closed unexpectedly|linkedin closed the application form/i.test(fillRes.reason || '')
+      ) {
+        const resumed = await this.resumeSavedLinkedInApplication(
+          currentPage,
+          displayTitle,
+          displayCompany,
+          portToSend,
+          runToken,
+        );
+        if (resumed) {
+          fillRes = await this.fillAndSubmitModal(
+            currentPage,
+            { ...job, title: displayTitle, company: displayCompany },
+            jobRunId,
+            portToSend,
+            onLiveActivity,
+            runToken,
+          );
+        }
+      }
+      logger.info(
+        `[LinkedIn][AI] Application summary for job ${job.jobId}: ${formatLinkedInAiStats(getLinkedInAiStats())}`,
       );
       this.checkAbort(runToken, this.abortController?.signal);
 
@@ -6537,13 +6727,13 @@ export class DedicatedJobRunner {
   ): Promise<{ success: boolean; reason?: string }> {
     let careerBrain = await careerBrainStore.getCareerBrain();
     careerBrain = await this.enrichMissingCareerBrainFromPlatform(page, careerBrain);
-    const scopedLLM = await getJobScopedLLM(jobRunId);
+    const scopedLLM = await getLinkedInFormLLM(jobRunId);
 
     // Central answer-format adapter: LLM/rule answers must be normalized to the field's
     // expected format (digits for numeric/salary questions, exact options for radios)
     // before they reach the DOM — LinkedIn rejects formatted strings with "Invalid input".
     const fillAnswerWithFormat = async (field: FormFieldDescriptor, answer: string): Promise<boolean> => {
-      const adapted = validateAnswerForField(answer, field);
+      const adapted = prepareAnswerForLinkedInField(field, answer ?? '');
       if (!adapted.valid || !adapted.value) {
         logger.warning(
           `[DedicatedJobRunner] fillAnswerWithFormat rejected invalid answer "${answer}" for field "${field.label}": ${adapted.reason}`,
@@ -6553,12 +6743,7 @@ export class DedicatedJobRunner {
       return page.fillModalFieldDirect(field, adapted.value);
     };
 
-    const onAuditLog = (
-      category: 'MATCHED' | 'GENERATED' | 'ASKED',
-      label: string,
-      answer: string,
-      detail?: string,
-    ) => {
+    const onAuditLog = (category: QuestionResolutionCategory, label: string, answer: string, detail?: string) => {
       const auditMsg = `[${category}] "${label}" -> "${answer}"${detail ? ` (${detail})` : ''}`;
       this.notifyStatus(portToSend, auditMsg, 'info');
       this.notifyActivity(portToSend, onLiveActivity, {
@@ -6637,6 +6822,25 @@ export class DedicatedJobRunner {
     const stepRetryCounts = new Map<number, number>();
     const MAX_STEP_RETRIES = 4;
 
+    // Whole-application budget: a form still not submitted after this long is stopped with the step
+    // and question it was on, instead of leaving "Application in progress" up indefinitely. Time the
+    // candidate spends on a manual step (security check, resume upload) does not count.
+    const APPLICATION_TIME_BUDGET_MS = 6 * 60 * 1000;
+    const applicationStartedAt = Date.now();
+    let manualWaitMs = 0;
+    let lastUnresolvedRequired = '';
+
+    // Exactly one Submit click per application: a slow confirmation must never become a second
+    // click (= a duplicate application). Outcome: success / failed / unknown (see linkedinSubmit.ts).
+    const submitter = createLinkedInSubmitter(page, {
+      onClicked: () =>
+        this.notifyStatus(portToSend, `⏳ Submit clicked - waiting for LinkedIn to confirm the application...`, 'info'),
+    });
+    const submitOnceAndConfirm = async () => {
+      if (!submitter.clicked) await this.linkedInFormPause('beforeSubmit');
+      return submitter.submitOnce();
+    };
+
     // A document/resume step blocks on an <input type="file"> that the field extractor
     // ignores and an LLM answer can never satisfy. Generate the draft resume PDF and
     // upload it once per job. Returns true only when a file was actually attached.
@@ -6676,6 +6880,17 @@ export class DedicatedJobRunner {
         throw new AbortRunError(this.stopReason || 'Stopped by user');
       }
       this.checkAbort(runToken, this.abortController?.signal);
+      const elapsedMs = Date.now() - applicationStartedAt - manualWaitMs;
+      if (elapsedMs > APPLICATION_TIME_BUDGET_MS) {
+        const minutes = Math.round(elapsedMs / 60000);
+        const reason = submitter.clicked
+          ? submitter.unknownReason
+          : `Application timed out after ${minutes} min on step ${step}${
+              lastUnresolvedRequired ? ` - last unresolved required question: "${lastUnresolvedRequired}"` : ''
+            } (not submitted)`;
+        logger.warning(`[LinkedIn][Submit] Timeout: ${reason}`);
+        return { success: false, reason };
+      }
       step++;
       this.notifyStatus(portToSend, `📄 Reviewing Step ${step} of the application...`, 'info', runToken);
 
@@ -6710,7 +6925,9 @@ export class DedicatedJobRunner {
       if (typeof page.detectSecurityCheckpoint === 'function') {
         const stepCheckpoint = await page.detectSecurityCheckpoint().catch(() => ({ isCheckpoint: false }));
         if (stepCheckpoint.isCheckpoint) {
+          const manualStart = Date.now();
           const chkRes = await this.waitForManualCheckpointResolution(page, portToSend, onLiveActivity);
+          manualWaitMs += Date.now() - manualStart;
           if (chkRes.aborted || !this.isRunning) {
             return { success: false, reason: 'Application stopped during security verification' };
           }
@@ -6744,6 +6961,7 @@ export class DedicatedJobRunner {
             logger.info(
               '[DedicatedJobRunner] New account detected (0 resumes on LinkedIn server). Waiting for manual resume upload...',
             );
+            const manualStart = Date.now();
             const uploadRes = await this.waitForManualResumeUpload(
               page,
               portToSend,
@@ -6754,6 +6972,7 @@ export class DedicatedJobRunner {
               altTargets,
               bestResume?.focusTags || careerBrain.skills || [],
             );
+            manualWaitMs += Date.now() - manualStart;
             if (uploadRes.selected) {
               onAuditLog('MATCHED', 'Resume Uploaded & Selected', primaryTarget || 'Resume', uploadRes.label);
             }
@@ -6860,7 +7079,7 @@ export class DedicatedJobRunner {
             );
             unresolvedFields.push(field);
           }
-          await new Promise(r => setTimeout(r, 500));
+          await this.linkedInFormPause('afterAnswer');
         }
 
         // Phase B: Resolve every remaining field autonomously. The run is one-click by
@@ -6872,15 +7091,14 @@ export class DedicatedJobRunner {
             `🧠 Auto-answering ${unresolvedFields.length} unlisted question${unresolvedFields.length > 1 ? 's' : ''} from your profile...`,
             'info',
           );
-          const activeSolverLLM =
-            scopedLLM || (await getJobScopedLLM(jobRunId)) || (await getActiveChatModel(jobRunId));
+          const activeSolverLLM = scopedLLM || (await getLinkedInFormLLM(jobRunId));
           for (const f of unresolvedFields) {
             if (!this.isRunning) break;
             try {
               let answer = '';
               let reason = '';
               if (activeSolverLLM && isLlmAvailable()) {
-                const autoSol = await solveQuestionAutonomousWithLLM(f, careerBrain, activeSolverLLM);
+                const autoSol = await solveLinkedInFieldAutonomously(f, careerBrain, activeSolverLLM);
                 if (autoSol.success && autoSol.answer) {
                   answer = autoSol.answer;
                   reason = autoSol.reason || 'Autonomous LLM resolution';
@@ -6893,18 +7111,36 @@ export class DedicatedJobRunner {
               }
               if (answer) {
                 const fillSuccess = await fillAnswerWithFormat(f, answer);
-                onAuditLog('GENERATED', f.label, answer, `${reason} | DOM fill: ${fillSuccess ? 'SUCCESS' : 'FAILED'}`);
+                onAuditLog(
+                  fillSuccess ? 'GENERATED' : 'FAILED',
+                  f.label,
+                  answer,
+                  `${reason} | DOM fill: ${fillSuccess ? 'SUCCESS' : `FAILED (${page.lastFillDiagnostics?.reason || 'value not held by the form'})`}`,
+                );
                 if (fillSuccess) {
                   await rememberResolvedAnswer(f.label, answer);
                   careerBrain = await careerBrainStore.getCareerBrain();
                 }
               } else {
                 logger.warning(`[DedicatedJobRunner] Autonomous solver could not answer "${f.label}".`);
+                if (f.required) {
+                  lastUnresolvedRequired = f.label;
+                  logger.warning(
+                    `[LinkedIn][Question] Required field unresolved: "${f.label}" - ${
+                      explainUnanswerableLinkedInField(f, careerBrain) ||
+                      'no answer from Career Brain, resume, approved answers or AI'
+                    }`,
+                  );
+                }
+                // Address fields were already reported (left blank on purpose) by the resolver.
+                if (!resolveLinkedInAddressField(f, careerBrain)) {
+                  onAuditLog('FAILED', f.label, '(blank)', 'No answer from profile, resume or AI — field left empty');
+                }
               }
             } catch (solErr) {
               logger.warning(`[DedicatedJobRunner] Failed to auto-solve "${f.label}":`, solErr);
             }
-            await new Promise(r => setTimeout(r, 300));
+            await this.linkedInFormPause('afterAnswer');
           }
         }
       }
@@ -7058,14 +7294,14 @@ export class DedicatedJobRunner {
           if (unresolvedReqFields.length > 0 && this.isRunning) {
             // Zero-interaction rule: required leftovers are answered from the profile via
             // the autonomous solver — no side-panel prompt, no timeout, no user action.
-            const activeReqLLM = scopedLLM || (await getJobScopedLLM(jobRunId)) || (await getActiveChatModel(jobRunId));
+            const activeReqLLM = scopedLLM || (await getLinkedInFormLLM(jobRunId));
             for (const req of unresolvedReqFields) {
               if (!this.isRunning) break;
               try {
                 let answer = '';
                 let reason = '';
                 if (activeReqLLM && isLlmAvailable()) {
-                  const autoSol = await solveQuestionAutonomousWithLLM(req, careerBrain, activeReqLLM);
+                  const autoSol = await solveLinkedInFieldAutonomously(req, careerBrain, activeReqLLM);
                   if (autoSol.success && autoSol.answer) {
                     answer = autoSol.answer;
                     reason = autoSol.reason || 'Autonomous LLM resolution';
@@ -7079,15 +7315,17 @@ export class DedicatedJobRunner {
                 if (answer) {
                   const fillSuccess = await fillAnswerWithFormat(req, answer);
                   onAuditLog(
-                    'GENERATED',
+                    fillSuccess ? 'GENERATED' : 'FAILED',
                     req.label,
                     answer,
-                    `${reason} (required) | DOM fill: ${fillSuccess ? 'SUCCESS' : 'FAILED'}`,
+                    `${reason} (required) | DOM fill: ${fillSuccess ? 'SUCCESS' : `FAILED (${page.lastFillDiagnostics?.reason || 'value not held by the form'})`}`,
                   );
                   if (fillSuccess) {
                     await rememberResolvedAnswer(req.label, answer);
                     careerBrain = await careerBrainStore.getCareerBrain();
                   }
+                } else if (!resolveLinkedInAddressField(req, careerBrain)) {
+                  onAuditLog('FAILED', req.label, '(blank)', 'Required field: no answer from profile, resume or AI');
                 }
               } catch (solErr) {
                 logger.warning(`[DedicatedJobRunner] Required-field auto-answer failed for "${req.label}":`, solErr);
@@ -7121,14 +7359,14 @@ export class DedicatedJobRunner {
                 );
                 const healed = await solveValidationErrorWithLLM(invF, careerBrain, scopedLLM);
                 if (healed.success && healed.answer !== undefined) {
-                  const adapted = validateAnswerForField(healed.answer, invF as any);
+                  const adapted = prepareAnswerForLinkedInField(invF as FormFieldDescriptor, healed.answer ?? '');
                   if (adapted.valid && adapted.value) {
                     const fillSuccess = await page.fillModalFieldDirect(invF, adapted.value);
                     onAuditLog(
-                      'GENERATED',
+                      fillSuccess ? 'GENERATED' : 'FAILED',
                       invF.label,
                       adapted.value,
-                      `Red alert validation heal | Prev: "${invF.currentValue}" | Error: "${invF.errorText}" | Fill: ${fillSuccess ? 'SUCCESS' : 'FAILED'}`,
+                      `Red alert validation heal | Prev: "${invF.currentValue}" | Error: "${invF.errorText}" | Fill: ${fillSuccess ? 'SUCCESS' : `FAILED (${page.lastFillDiagnostics?.reason || 'value not held'})`}`,
                     );
                   }
                 }
@@ -7154,14 +7392,14 @@ export class DedicatedJobRunner {
                 if (reqF.errorText) {
                   const healed = await solveValidationErrorWithLLM(reqF, careerBrain, scopedLLM);
                   if (healed.success && healed.answer !== undefined) {
-                    const adapted = validateAnswerForField(healed.answer, reqF);
+                    const adapted = prepareAnswerForLinkedInField(reqF, healed.answer ?? '');
                     if (adapted.valid && adapted.value) {
                       const fillSuccess = await page.fillModalFieldDirect(reqF, adapted.value);
                       onAuditLog(
-                        'GENERATED',
+                        fillSuccess ? 'GENERATED' : 'FAILED',
                         reqF.label,
                         adapted.value,
-                        `Red alert validation heal | Fill: ${fillSuccess ? 'SUCCESS' : 'FAILED'}`,
+                        `Red alert validation heal | Fill: ${fillSuccess ? 'SUCCESS' : `FAILED (${page.lastFillDiagnostics?.reason || 'value not held'})`}`,
                       );
                       continue;
                     }
@@ -7175,10 +7413,10 @@ export class DedicatedJobRunner {
                   if (adapted.valid) {
                     const fillSuccess = await page.fillModalFieldDirect(reqF, adapted.value);
                     onAuditLog(
-                      'MATCHED',
+                      fillSuccess ? 'MATCHED' : 'FAILED',
                       reqF.label,
                       adapted.value,
-                      `Validation auto-heal | DOM fill: ${fillSuccess ? 'SUCCESS' : 'FAILED'}`,
+                      `Validation auto-heal | DOM fill: ${fillSuccess ? 'SUCCESS' : `FAILED (${page.lastFillDiagnostics?.reason || 'value not held'})`}`,
                     );
                   } else {
                     logger.warning(
@@ -7186,16 +7424,16 @@ export class DedicatedJobRunner {
                     );
                   }
                 } else if (scopedLLM) {
-                  const autoSol = await solveQuestionAutonomousWithLLM(reqF, careerBrain, scopedLLM);
+                  const autoSol = await solveLinkedInFieldAutonomously(reqF, careerBrain, scopedLLM);
                   if (autoSol.success && autoSol.answer) {
                     const adapted = adaptAnswerToFieldFormat(autoSol.answer, reqF);
                     if (adapted.valid) {
                       const fillSuccess = await page.fillModalFieldDirect(reqF, adapted.value);
                       onAuditLog(
-                        'GENERATED',
+                        fillSuccess ? 'GENERATED' : 'FAILED',
                         reqF.label,
                         adapted.value,
-                        `Validation recovery LLM | DOM fill: ${fillSuccess ? 'SUCCESS' : 'FAILED'}`,
+                        `Validation recovery LLM | DOM fill: ${fillSuccess ? 'SUCCESS' : `FAILED (${page.lastFillDiagnostics?.reason || 'value not held'})`}`,
                       );
                     } else {
                       logger.warning(
@@ -7249,7 +7487,7 @@ export class DedicatedJobRunner {
                 for (const invF of postAdvanceCheck.invalidFieldsWithErrors) {
                   const healed = await solveValidationErrorWithLLM(invF, careerBrain, scopedLLM);
                   if (healed.success && healed.answer) {
-                    const adapted = validateAnswerForField(healed.answer, invF as any);
+                    const adapted = prepareAnswerForLinkedInField(invF as FormFieldDescriptor, healed.answer ?? '');
                     if (adapted.valid && adapted.value) {
                       await page.fillModalFieldDirect(invF, adapted.value);
                     }
@@ -7319,7 +7557,11 @@ export class DedicatedJobRunner {
         const zeroControls = zeroSnap
           ? zeroSnap.inputsCount + zeroSnap.selectsCount + zeroSnap.contenteditableCount
           : 0;
-        const zeroButtons = (zeroSnap?.buttonTexts || []).join(' | ');
+        // All modal buttons, not just the first 8: a review page lists many "Edit" buttons before
+        // its "Submit application" footer.
+        const zeroButtons = (
+          zeroSnap?.actionButtonTexts?.length ? zeroSnap.actionButtonTexts : zeroSnap?.buttonTexts || []
+        ).join(' | ');
         const zeroHasForward = /next|review|submit|continue/i.test(zeroButtons);
 
         // A resume-upload step hides its requirement in an <input type="file">, which the
@@ -7331,6 +7573,29 @@ export class DedicatedJobRunner {
           if (uploaded) {
             fieldsZeroStreak = 0;
             stuckStreak = 0;
+            lastIterationSignature = null;
+            continue;
+          }
+        }
+
+        // LinkedIn's current (SDUI) form paints the footer (Next / Review) before its question
+        // list has rendered. A step with a forward button but NO controls at all may simply be
+        // still loading: give the questions a moment before treating the step as empty, so they
+        // are answered instead of being skipped by an early Next.
+        if (zeroControls === 0 && zeroHasForward && !/submit/i.test(zeroButtons)) {
+          let questionsAppeared = false;
+          for (let wait = 0; wait < 4 && !questionsAppeared; wait++) {
+            await new Promise(r => setTimeout(r, 600));
+            const later = await page.captureModalSnapshot().catch(() => null);
+            questionsAppeared = Boolean(
+              later && later.inputsCount + later.selectsCount + later.contenteditableCount > 0,
+            );
+          }
+          if (questionsAppeared) {
+            logger.info(
+              `[DedicatedJobRunner] Step ${step}: questions rendered after the footer — re-scanning the step.`,
+            );
+            fieldsZeroStreak = 0;
             lastIterationSignature = null;
             continue;
           }
@@ -7355,7 +7620,11 @@ export class DedicatedJobRunner {
           const retryControls = retrySnap
             ? retrySnap.inputsCount + retrySnap.selectsCount + retrySnap.contenteditableCount
             : 0;
-          const retryHasForward = /next|review|submit|continue/i.test((retrySnap?.buttonTexts || []).join(' | '));
+          const retryHasForward = /next|review|submit|continue/i.test(
+            (retrySnap?.actionButtonTexts?.length ? retrySnap.actionButtonTexts : retrySnap?.buttonTexts || []).join(
+              ' | ',
+            ),
+          );
           if (retryControls > 0 || retryHasForward || retrySnap?.hasFileInput) {
             logger.info(
               `[DedicatedJobRunner] Step ${step}: modal content appeared after ${900}ms re-check (controls=${retryControls}, forward=${retryHasForward}) — retrying step.`,
@@ -7397,6 +7666,15 @@ export class DedicatedJobRunner {
               );
               if (analysis.action === 'FILL' && analysis.fields && analysis.fields.length > 0) {
                 for (const f of analysis.fields) {
+                  // Address fields only ever get the grounded value (the LLM would invent one).
+                  const address = resolveLinkedInAddressField({ label: f.label, fieldType: 'text' }, careerBrain);
+                  if (address && !address.answer) {
+                    logger.info(
+                      `[DedicatedJobRunner] LLM-guided fill skipped for "${f.label}": ${address.sourceDetail}`,
+                    );
+                    continue;
+                  }
+                  if (address) f.answer = address.answer;
                   const fillOk = await page.fillModalFieldDirect({ label: f.label }, f.answer);
                   logger.info(
                     `[DedicatedJobRunner] LLM-guided fill "${f.label}" = "${f.answer}": ${fillOk ? 'OK' : 'FAILED'}`,
@@ -7404,14 +7682,13 @@ export class DedicatedJobRunner {
                 }
                 await new Promise(r => setTimeout(r, 400));
               } else if (analysis.action === 'SUBMIT') {
-                const subRes = await page.submitApplication();
-                if (subRes.clicked) {
-                  const confirmRes = await page.verifySubmissionConfirmation(8000);
-                  if (confirmRes.confirmed) {
-                    submitted = true;
-                    break;
-                  }
+                const outcome = await submitOnceAndConfirm();
+                if (outcome.state === 'success') {
+                  submitted = true;
+                  break;
                 }
+                // Clicked (unconfirmed or rejected): never fall through to another Submit click.
+                if (submitter.clicked) return { success: false, reason: outcome.reason };
               } else if (analysis.action === 'SKIP') {
                 // Never let a skip verdict win over a live form: the step may have rendered
                 // between the snapshot and the LLM response (the exact false-skip that used
@@ -7463,7 +7740,7 @@ export class DedicatedJobRunner {
             try {
               const healed = await solveValidationErrorWithLLM(invF, careerBrain, scopedLLM);
               if (healed.success && healed.answer) {
-                const adapted = validateAnswerForField(healed.answer, invF as any);
+                const adapted = prepareAnswerForLinkedInField(invF as FormFieldDescriptor, healed.answer ?? '');
                 if (adapted.valid && adapted.value) {
                   await page.fillModalFieldDirect(invF, adapted.value);
                 }
@@ -7476,36 +7753,17 @@ export class DedicatedJobRunner {
           `[DedicatedJobRunner] [STAGE: SUBMIT_APPLICATION] Platform: linkedin | Step: ${step} | Submitting application...`,
         );
         this.notifyStatus(portToSend, `🎉 All steps completed! Submitting your application now...`, 'info');
-        const submitRes = await page.submitApplication();
+        // 5. One Submit click, then wait (bounded) for LinkedIn's confirmation.
+        const outcome = await submitOnceAndConfirm();
         logger.info(
-          `[DedicatedJobRunner] [STAGE: SUBMIT_APPLICATION] Platform: linkedin | Step: ${step} | Submit result: clicked=${submitRes.clicked} error=${submitRes.error || 'none'}`,
+          `[DedicatedJobRunner] [STAGE: VERIFY_CONFIRMATION] Platform: linkedin | Step: ${step} | Outcome: ${outcome.state} (${outcome.reason})`,
         );
-        if (!submitRes.clicked) {
-          return {
-            success: false,
-            reason: submitRes.error || 'Failed to click submit button',
-          };
-        }
-
-        // 5. Verify submission confirmation
-        logger.info(
-          `[DedicatedJobRunner] [STAGE: VERIFY_CONFIRMATION] Platform: linkedin | Step: ${step} | Awaiting confirmation...`,
-        );
-        this.notifyStatus(portToSend, `⏳ Confirming with LinkedIn that application was received...`, 'info');
-        const confirmRes = await page.verifySubmissionConfirmation(8000);
-        logger.info(
-          `[DedicatedJobRunner] [STAGE: VERIFY_CONFIRMATION] Platform: linkedin | Step: ${step} | Outcome: confirmed=${confirmRes.confirmed} details=${confirmRes.message || 'none'}`,
-        );
-        if (confirmRes.confirmed) {
+        if (outcome.state === 'success') {
           submitted = true;
           this.notifyStatus(portToSend, `✅ Application submitted successfully! 🎉`, 'ok');
           break;
-        } else {
-          return {
-            success: false,
-            reason: 'Submission was clicked but confirmation was not verified by LinkedIn DOM',
-          };
         }
+        return { success: false, reason: outcome.reason };
       } else if (actions.hasReview || actions.hasNext) {
         logger.info(
           `[DedicatedJobRunner] [STAGE: STEP_ADVANCE] Platform: linkedin | Step: ${step} | Forward action: ${actions.hasReview ? 'Review' : 'Next'}`,
@@ -7514,6 +7772,8 @@ export class DedicatedJobRunner {
           await page.scrollModalContent('bottom');
           await new Promise(r => setTimeout(r, 200));
         }
+
+        await this.linkedInFormPause('beforeAdvance');
 
         // Capture the step signature BEFORE clicking so we can verify the modal actually advanced.
         // LinkedIn may silently swallow clicks on React-state-disabled Next/Review buttons, so a
@@ -7540,9 +7800,9 @@ export class DedicatedJobRunner {
           const preRetryValidation = await page.validateModalFormState();
           if (preRetryValidation.hasErrors && scopedLLM) {
             for (const reqF of preRetryValidation.emptyRequiredFields) {
-              const autoSol = await solveQuestionAutonomousWithLLM(reqF, careerBrain, scopedLLM);
+              const autoSol = await solveLinkedInFieldAutonomously(reqF, careerBrain, scopedLLM);
               if (autoSol.success && autoSol.answer) {
-                const adapted = validateAnswerForField(autoSol.answer, reqF);
+                const adapted = prepareAnswerForLinkedInField(reqF, autoSol.answer ?? '');
                 if (adapted.valid && adapted.value) {
                   await page.fillModalFieldDirect(reqF, adapted.value);
                 }
@@ -7576,8 +7836,12 @@ export class DedicatedJobRunner {
           if (sigAfter !== null && sigAfter === sigBefore) {
             const MAX_HEAL_ATTEMPTS = 4;
             let stepAdvanced = false;
+            // Required questions no attempt can answer (address detail not on file, checkbox
+            // question with no supported option): retrying them only stalls the form.
+            let permanentlyUnanswerable: Array<{ label: string; reason: string }> = [];
 
             for (let healAttempt = 1; healAttempt <= MAX_HEAL_ATTEMPTS; healAttempt++) {
+              permanentlyUnanswerable = [];
               logger.warning(
                 `[DedicatedJobRunner] Forward click was rejected by LinkedIn (validation blocked, attempt ${healAttempt}/${MAX_HEAL_ATTEMPTS}). Healing surfaced validation errors...`,
               );
@@ -7598,8 +7862,7 @@ export class DedicatedJobRunner {
                 }
               }
 
-              const activeHealLLM =
-                scopedLLM || (await getJobScopedLLM(jobRunId)) || (await getActiveChatModel(jobRunId));
+              const activeHealLLM = scopedLLM || (await getLinkedInFormLLM(jobRunId));
 
               if (blockedValidation.hasErrors) {
                 if (portToSend) {
@@ -7675,7 +7938,7 @@ export class DedicatedJobRunner {
                       source = fallback.source;
                     }
 
-                    const adapted = validateAnswerForField(answer, targetField as any);
+                    const adapted = prepareAnswerForLinkedInField(targetField as FormFieldDescriptor, answer ?? '');
 
                     // DIAGNOSTIC LOGGING:
                     // Log: label of required field, intended value, value read back from DOM,
@@ -7732,15 +7995,23 @@ export class DedicatedJobRunner {
                       });
 
                       onAuditLog(
-                        'GENERATED',
+                        fillSuccess ? 'GENERATED' : 'FAILED',
                         targetField.label,
                         adapted.value,
-                        `Blocked-forward heal (attempt ${healAttempt}) | Source: "${source}" | Error: "${targetField.errorText || 'none'}" | Readback: "${readbackValue}" | Fill: ${fillSuccess ? 'SUCCESS' : 'FAILED'}`,
+                        `Blocked-forward heal (attempt ${healAttempt}) | Source: "${source}" | Error: "${targetField.errorText || 'none'}" | Readback: "${readbackValue}" | Fill: ${fillSuccess ? 'SUCCESS' : `FAILED (${page.lastFillDiagnostics?.reason || 'value not held'})`}`,
                       );
                     } else {
                       logger.warning(
                         `[DedicatedJobRunner] [DIAGNOSTIC] validateAnswerForField REJECTED answer "${answer}" for field "${targetField.label}": ${adapted.reason}`,
                       );
+                      const unanswerable = explainUnanswerableLinkedInField(targetField, careerBrain);
+                      if (unanswerable) {
+                        permanentlyUnanswerable.push({ label: targetField.label, reason: unanswerable });
+                        lastUnresolvedRequired = targetField.label;
+                        logger.warning(
+                          `[LinkedIn][Question] Required field unresolved: "${targetField.label}" - ${unanswerable}`,
+                        );
+                      }
                     }
                   } catch (healErr) {
                     logger.warning(
@@ -7770,6 +8041,23 @@ export class DedicatedJobRunner {
                 step = Math.max(0, step - 1);
                 break;
               }
+              // Still blocked by a question no further attempt can answer: stop now with that
+              // question instead of repeating the same fill/click cycle.
+              if (permanentlyUnanswerable.length > 0) break;
+            }
+
+            if (!stepAdvanced && permanentlyUnanswerable.length > 0) {
+              const first = permanentlyUnanswerable[0];
+              const more = permanentlyUnanswerable.length > 1 ? ` (+${permanentlyUnanswerable.length - 1} more)` : '';
+              const reason = `Required question "${first.label}" unanswered: ${first.reason}${more}. Not submitted; the draft is preserved on LinkedIn.`;
+              logger.error(`[DedicatedJobRunner] ${reason}`);
+              this.notifyStatus(portToSend, `⚠️ ${reason}`, 'fail');
+              if (typeof page.ensureNoModalOrDialogRemains === 'function') {
+                await page.ensureNoModalOrDialogRemains(5000).catch(() => {});
+              } else if (typeof page.dismissEasyApplyModal === 'function') {
+                await page.dismissEasyApplyModal(5000).catch(() => {});
+              }
+              return { success: false, reason };
             }
 
             if (!stepAdvanced) {
@@ -7809,14 +8097,14 @@ export class DedicatedJobRunner {
             for (const invF of postFwdValidation.invalidFieldsWithErrors) {
               const healed = await solveValidationErrorWithLLM(invF, careerBrain, scopedLLM);
               if (healed.success && healed.answer) {
-                const adapted = validateAnswerForField(healed.answer, invF as any);
+                const adapted = prepareAnswerForLinkedInField(invF as FormFieldDescriptor, healed.answer ?? '');
                 if (adapted.valid && adapted.value) {
                   const fillSuccess = await page.fillModalFieldDirect(invF, adapted.value);
                   onAuditLog(
-                    'GENERATED',
+                    fillSuccess ? 'GENERATED' : 'FAILED',
                     invF.label,
                     adapted.value,
-                    `Post-forward validation heal | Prev: "${invF.currentValue}" | Error: "${invF.errorText}" | Fill: ${fillSuccess ? 'SUCCESS' : 'FAILED'}`,
+                    `Post-forward validation heal | Prev: "${invF.currentValue}" | Error: "${invF.errorText}" | Fill: ${fillSuccess ? 'SUCCESS' : `FAILED (${page.lastFillDiagnostics?.reason || 'value not held'})`}`,
                   );
                 }
               }
@@ -7824,9 +8112,9 @@ export class DedicatedJobRunner {
           }
           if (postFwdValidation.emptyRequiredFields.length > 0 && scopedLLM) {
             for (const reqF of postFwdValidation.emptyRequiredFields) {
-              const autoSol = await solveQuestionAutonomousWithLLM(reqF, careerBrain, scopedLLM);
+              const autoSol = await solveLinkedInFieldAutonomously(reqF, careerBrain, scopedLLM);
               if (autoSol.success && autoSol.answer) {
-                const adapted = validateAnswerForField(autoSol.answer, reqF);
+                const adapted = prepareAnswerForLinkedInField(reqF, autoSol.answer ?? '');
                 if (adapted.valid && adapted.value) {
                   await page.fillModalFieldDirect(reqF, adapted.value);
                 }
@@ -7863,16 +8151,16 @@ export class DedicatedJobRunner {
             for (const invF of validationCheck.invalidFieldsWithErrors || []) {
               const healed = await solveValidationErrorWithLLM(invF, careerBrain, scopedLLM);
               if (healed.success && healed.answer) {
-                const adapted = validateAnswerForField(healed.answer, invF as any);
+                const adapted = prepareAnswerForLinkedInField(invF as FormFieldDescriptor, healed.answer ?? '');
                 if (adapted.valid && adapted.value) {
                   await page.fillModalFieldDirect(invF, adapted.value);
                 }
               }
             }
             for (const reqF of validationCheck.emptyRequiredFields || []) {
-              const autoSol = await solveQuestionAutonomousWithLLM(reqF, careerBrain, scopedLLM);
+              const autoSol = await solveLinkedInFieldAutonomously(reqF, careerBrain, scopedLLM);
               if (autoSol.success && autoSol.answer) {
-                const adapted = validateAnswerForField(autoSol.answer, reqF);
+                const adapted = prepareAnswerForLinkedInField(reqF, autoSol.answer ?? '');
                 if (adapted.valid && adapted.value) {
                   await page.fillModalFieldDirect(reqF, adapted.value);
                 }
@@ -7888,14 +8176,13 @@ export class DedicatedJobRunner {
 
         if (retryActions.hasSubmit) {
           this.notifyStatus(portToSend, `🎉 All steps completed! Submitting your application now...`, 'info');
-          const submitRes = await page.submitApplication();
-          if (submitRes.clicked) {
-            const confirmRes = await page.verifySubmissionConfirmation(8000);
-            if (confirmRes.confirmed) {
-              submitted = true;
-              break;
-            }
+          const outcome = await submitOnceAndConfirm();
+          if (outcome.state === 'success') {
+            submitted = true;
+            this.notifyStatus(portToSend, `✅ Application submitted successfully! 🎉`, 'ok');
+            break;
           }
+          return { success: false, reason: outcome.reason };
         } else if (retryActions.hasNext || retryActions.hasReview) {
           let fwdRes = await page.clickModalForwardButton();
           if (!fwdRes.clicked) {
@@ -7926,14 +8213,13 @@ export class DedicatedJobRunner {
           }
           continue;
         }
-        const directSubmit = await page.submitApplication();
-        if (directSubmit.clicked) {
-          const confirmRes = await page.verifySubmissionConfirmation(8000);
-          if (confirmRes.confirmed) {
-            submitted = true;
-            break;
-          }
+        const directOutcome = await submitOnceAndConfirm();
+        if (directOutcome.state === 'success') {
+          submitted = true;
+          break;
         }
+        // Clicked (unconfirmed or rejected): report it rather than guess or click again.
+        if (submitter.clicked) return { success: false, reason: directOutcome.reason };
 
         // Grace period: Re-check modal presence at least twice (~1000ms apart) before declaring closed.
         // Never declare modal closed on a single negative check.
