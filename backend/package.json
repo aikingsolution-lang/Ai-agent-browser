@@ -7,7 +7,7 @@
   "main": "dist/server.js",
   "scripts": {
     "dev": "tsx watch src/server.ts",
-    "build": "tsc",
+    "build": "tsc && esbuild src/server-vercel.ts --bundle --platform=node --format=esm --outfile=api/index.js --packages=external",
     "start": "node dist/server.js",
     "type-check": "tsc --noEmit",
     "test": "vitest run",
@@ -39,6 +39,7 @@
     "zod": "^3.23.8"
   },
   "devDependencies": {
+    "esbuild": "^0.25.0",
     "@types/bcryptjs": "^2.4.6",
     "@types/cors": "^2.8.17",
     "@types/express": "^4.17.21",
