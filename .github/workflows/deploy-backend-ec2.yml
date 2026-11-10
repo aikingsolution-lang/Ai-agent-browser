@@ -1,3 +1,4 @@
+
 name: Backend CI/CD (EC2)
 
 on:
@@ -8,6 +9,7 @@ on:
       - "pnpm-workspace.yaml"
       - "package.json"
       - ".github/workflows/deploy-backend-ec2.yml"
+
   push:
     branches:
       - tushar/Automation
@@ -25,6 +27,7 @@ jobs:
   test:
     name: Test backend
     runs-on: ubuntu-latest
+
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -54,39 +57,88 @@ jobs:
 
   deploy:
     name: Deploy backend to EC2
+
     if: github.event_name == 'push' && github.ref == 'refs/heads/tushar/Automation'
+
     needs: test
     runs-on: ubuntu-latest
+
     permissions:
       contents: read
       id-token: write
+
     env:
       AWS_REGION: ${{ vars.AWS_REGION }}
       ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      # TEMPORARY DEBUG STEP: Inspect GitHub OIDC claims
+      - name: Debug OIDC token claims
+        env:
+          ACTIONS_ID_TOKEN_REQUEST_URL: ${{ env.ACTIONS_ID_TOKEN_REQUEST_URL }}
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: ${{ env.ACTIONS_ID_TOKEN_REQUEST_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          TOKEN_RESPONSE=$(curl -fsS \
+            -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sts.amazonaws.com")
+
+          TOKEN=$(echo "$TOKEN_RESPONSE" | python3 -c \
+            "import sys,json; print(json.load(sys.stdin)['value'])")
+
+          export TOKEN
+
+          python3 - <<'PY'
+          import os
+          import json
+          import base64
+
+          token = os.environ["TOKEN"]
+          payload = token.split(".")[1]
+          payload += "=" * (-len(payload) % 4)
+
+          claims = json.loads(base64.urlsafe_b64decode(payload))
+
+          for key in ["iss", "aud", "sub", "repository", "ref"]:
+              print(f"{key}: {claims.get(key)}")
+          PY
+
+      # Authenticate GitHub Actions with AWS using OIDC
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ vars.AWS_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
 
+      # Login to ECR
       - name: Log in to Amazon ECR
         id: ecr
         uses: aws-actions/amazon-ecr-login@v2
 
+      # Build and push Docker image using Git commit SHA
       - name: Build and push backend image
         id: image
         env:
           ECR_REGISTRY: ${{ steps.ecr.outputs.registry }}
         run: |
+          set -euo pipefail
+
           IMAGE="$ECR_REGISTRY/$ECR_REPOSITORY:$GITHUB_SHA"
-          docker build --file backend/Dockerfile --tag "$IMAGE" backend
+
+          docker build \
+            --file backend/Dockerfile \
+            --tag "$IMAGE" \
+            backend
+
           docker push "$IMAGE"
+
           echo "uri=$IMAGE" >> "$GITHUB_OUTPUT"
 
+      # Deploy the new image to EC2
       - name: Deploy image to EC2
         env:
           EC2_HOST: ${{ vars.EC2_HOST }}
@@ -96,9 +148,13 @@ jobs:
           ECR_REGISTRY: ${{ steps.ecr.outputs.registry }}
           IMAGE: ${{ steps.image.outputs.uri }}
         run: |
+          set -euo pipefail
+
           install -m 700 -d "$HOME/.ssh"
+
           printf '%s\n' "$EC2_SSH_PRIVATE_KEY" > "$HOME/.ssh/ec2_deploy_key"
           chmod 600 "$HOME/.ssh/ec2_deploy_key"
+
           printf '%s\n' "$EC2_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
           chmod 600 "$HOME/.ssh/known_hosts"
 
@@ -107,21 +163,27 @@ jobs:
             -o StrictHostKeyChecking=yes \
             "$EC2_USER@$EC2_HOST" \
             "AWS_REGION='$AWS_REGION' ECR_REGISTRY='$ECR_REGISTRY' IMAGE='$IMAGE' bash -s" <<'REMOTE'
+
           set -eu
 
           if [ ! -f /opt/nanobrowser/backend.env ]; then
-            echo "Missing /opt/nanobrowser/backend.env on EC2; configure backend runtime variables first." >&2
+            echo "Missing /opt/nanobrowser/backend.env" >&2
             exit 1
           fi
 
+          # Authenticate EC2 with ECR using its instance role
           aws ecr get-login-password --region "$AWS_REGION" |
             docker login --username AWS --password-stdin "$ECR_REGISTRY"
+
+          # Pull the newly built image
           docker pull "$IMAGE"
 
+          # Stop and remove previous container
           if docker container inspect nanobrowser-backend >/dev/null 2>&1; then
             docker rm --force nanobrowser-backend
           fi
 
+          # Start new container
           docker run --detach \
             --name nanobrowser-backend \
             --restart unless-stopped \
@@ -130,13 +192,19 @@ jobs:
             --publish 8080:8080 \
             "$IMAGE"
 
-          for attempt in {1..30}; do
-            if docker exec nanobrowser-backend node -e "fetch('http://127.0.0.1:8080/health').then(response => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"; then
+          # Health check
+          for attempt in $(seq 1 30); do
+            if docker exec nanobrowser-backend node -e \
+              "fetch('http://127.0.0.1:8080/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"; then
+              echo "Backend deployment successful!"
               exit 0
             fi
+
             sleep 2
           done
 
-          echo "Backend failed its /health check after deployment." >&2
+          echo "Backend health check failed." >&2
+          docker logs nanobrowser-backend
           exit 1
+
           REMOTE
