@@ -153,7 +153,7 @@ export class AuthService {
     } catch (err: any) {
       const code: string = err?.code || '';
       if (code === 'auth/email-already-exists') {
-        throw new AppError('Email address is already registered', 409, 'EMAIL_EXISTS');
+        throw new AppError('Email address already registered', 409, 'EMAIL_EXISTS');
       }
       if (code === 'auth/invalid-email') {
         throw new AppError('Invalid email address', 400, 'INVALID_EMAIL');
