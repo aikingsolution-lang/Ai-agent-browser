@@ -208,7 +208,7 @@ export class AuthService {
    */
   public static async loginUser(input: LoginInput): Promise<AuthResult> {
     if (!adminAuth) {
-      throw new AppError('Authentication service is  unavailable', 503, 'SERVICE_UNAVAILABLE');
+      throw new AppError('Authentication service  unavailable', 503, 'SERVICE_UNAVAILABLE');
     }
 
     const apiKey = process.env.FIREBASE_WEB_API_KEY || '';
