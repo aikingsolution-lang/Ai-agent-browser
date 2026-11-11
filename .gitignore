@@ -16,7 +16,9 @@
 **/.env.production.local
 **/.env.development
 **/.env
-
+.env
+.env.*
+!.env.example
 # etc
 .DS_Store
 .idea

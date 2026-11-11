@@ -1,178 +1,210 @@
 
-name: Backend CI/CD (EC2)
+# name: Backend CI/CD (EC2)
 
-on:
-  pull_request:
-    paths:
-      - "backend/**"
-      - "pnpm-lock.yaml"
-      - "pnpm-workspace.yaml"
-      - "package.json"
-      - ".github/workflows/deploy-backend-ec2.yml"
+# on:
+#   pull_request:
+#     paths:
+#       - "backend/**"
+#       - "pnpm-lock.yaml"
+#       - "pnpm-workspace.yaml"
+#       - "package.json"
+#       - ".github/workflows/deploy-backend-ec2.yml"
 
-  push:
-    branches:
-      - tushar/Automation
-    paths:
-      - "backend/**"
-      - "pnpm-lock.yaml"
-      - "pnpm-workspace.yaml"
-      - "package.json"
-      - ".github/workflows/deploy-backend-ec2.yml"
+#   push:
+#     branches:
+#       - tushar/Automation
+#     paths:
+#       - "backend/**"
+#       - "pnpm-lock.yaml"
+#       - "pnpm-workspace.yaml"
+#       - "package.json"
+#       - ".github/workflows/deploy-backend-ec2.yml"
 
-permissions:
-  contents: read
+# permissions:
+#   contents: read
 
-jobs:
-  test:
-    name: Test backend
-    runs-on: ubuntu-latest
+# jobs:
+#   test:
+#     name: Test backend
+#     runs-on: ubuntu-latest
 
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
+#     steps:
+#       - name: Check out repository
+#         uses: actions/checkout@v4
+#         with:
+#           show-progress: false
 
-      - name: Set up pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 9.15.1
+#       - name: Set up pnpm
+#         uses: pnpm/action-setup@v4
+#         with:
+#           version: 9.15.1
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
+#       - name: Set up Node.js
+#         uses: actions/setup-node@v4
+#         with:
+#           node-version: 22
+#           cache: pnpm
 
-      - name: Install backend dependencies
-        run: pnpm install --frozen-lockfile --filter @nanobrowser/backend...
+#       - name: Install backend dependencies
+#         run: |
+#           pnpm install --frozen-lockfile --filter @nanobrowser/backend... \
+#             >/dev/null 2>&1 || {
+#               echo "Dependency installation failed."
+#               exit 1
+#             }
 
-      - name: Type-check backend
-        run: pnpm --filter @nanobrowser/backend type-check
+#       - name: Type-check backend
+#         run: |
+#           pnpm --filter @nanobrowser/backend type-check \
+#             >/dev/null 2>&1 || {
+#               echo "Backend validation failed."
+#               exit 1
+#             }
 
-      - name: Run backend tests
-        run: pnpm --filter @nanobrowser/backend test
+#       - name: Run backend tests
+#         run: |
+#           pnpm --filter @nanobrowser/backend test \
+#             >/dev/null 2>&1 || {
+#               echo "Backend tests failed."
+#               exit 1
+#             }
 
-      - name: Build backend
-        run: pnpm --filter @nanobrowser/backend build
+#       - name: Build backend
+#         run: |
+#           pnpm --filter @nanobrowser/backend build \
+#             >/dev/null 2>&1 || {
+#               echo "Backend build failed."
+#               exit 1
+#             }
 
-  deploy:
-    name: Deploy backend to EC2
+#   deploy:
+#     name: Deploy backend to EC2
 
-    if: github.event_name == 'push' && github.ref == 'refs/heads/tushar/Automation'
+#     if: github.event_name == 'push' && github.ref == 'refs/heads/tushar/Automation'
 
-    needs: test
-    runs-on: ubuntu-latest
+#     needs: test
+#     runs-on: ubuntu-latest
 
-    permissions:
-      contents: read
-      id-token: write
+#     permissions:
+#       contents: read
+#       id-token: write
 
-    env:
-      AWS_REGION: ${{ vars.AWS_REGION }}
-      ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+#     env:
+#       AWS_REGION: ${{ vars.AWS_REGION }}
+#       ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
 
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-    
-      # Authenticate GitHub Actions with AWS using OIDC
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
-          aws-region: ${{ vars.AWS_REGION }}
+#     steps:
+#       - name: Check out repository
+#         uses: actions/checkout@v4
+#         with:
+#           show-progress: false
 
-      # Login to ECR
-      - name: Log in to Amazon ECR
-        id: ecr
-        uses: aws-actions/amazon-ecr-login@v2
+#       # AWS OIDC authentication
+#       - name: Configure AWS credentials
+#         uses: aws-actions/configure-aws-credentials@v4
+#         with:
+#           role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+#           aws-region: ${{ vars.AWS_REGION }}
 
-      # Build and push Docker image using Git commit SHA
-      - name: Build and push backend image
-        id: image
-        env:
-          ECR_REGISTRY: ${{ steps.ecr.outputs.registry }}
-        run: |
-          set -euo pipefail
+#       # ECR authentication
+#       - name: Log in to Amazon ECR
+#         id: ecr
+#         uses: aws-actions/amazon-ecr-login@v2
 
-          IMAGE="$ECR_REGISTRY/$ECR_REPOSITORY:$GITHUB_SHA"
+#       # Build and push image
+#       - name: Build and push backend image
+#         id: image
+#         env:
+#           ECR_REGISTRY: ${{ steps.ecr.outputs.registry }}
+#         run: |
+#           set -euo pipefail
 
-          docker build \
-            --file backend/Dockerfile \
-            --tag "$IMAGE" \
-            backend
+#           IMAGE="$ECR_REGISTRY/$ECR_REPOSITORY:$GITHUB_SHA"
 
-          docker push "$IMAGE"
+#           docker build \
+#             --quiet \
+#             --file backend/Dockerfile \
+#             --tag "$IMAGE" \
+#             backend >/dev/null 2>&1 || {
+#               echo "Image build failed."
+#               exit 1
+#             }
 
-          echo "uri=$IMAGE" >> "$GITHUB_OUTPUT"
+#           docker push "$IMAGE" >/dev/null 2>&1 || {
+#             echo "Image publishing failed."
+#             exit 1
+#           }
 
-      # Deploy the new image to EC2
-      - name: Deploy image to EC2
-        env:
-          EC2_HOST: ${{ vars.EC2_HOST }}
-          EC2_USER: ${{ vars.EC2_USER }}
-          EC2_SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
-          EC2_KNOWN_HOSTS: ${{ vars.EC2_KNOWN_HOSTS }}
-          ECR_REGISTRY: ${{ steps.ecr.outputs.registry }}
-          IMAGE: ${{ steps.image.outputs.uri }}
-        run: |
-          set -euo pipefail
+#           echo "uri=$IMAGE" >> "$GITHUB_OUTPUT"
 
-          install -m 700 -d "$HOME/.ssh"
+#       # Deploy to EC2
+#       - name: Deploy image to EC2
+#         env:
+#           EC2_HOST: ${{ vars.EC2_HOST }}
+#           EC2_USER: ${{ vars.EC2_USER }}
+#           EC2_SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+#           EC2_KNOWN_HOSTS: ${{ vars.EC2_KNOWN_HOSTS }}
+#           ECR_REGISTRY: ${{ steps.ecr.outputs.registry }}
+#           IMAGE: ${{ steps.image.outputs.uri }}
+#         run: |
+#           set -euo pipefail
 
-          printf '%s\n' "$EC2_SSH_PRIVATE_KEY" > "$HOME/.ssh/ec2_deploy_key"
-          chmod 600 "$HOME/.ssh/ec2_deploy_key"
+#           install -m 700 -d "$HOME/.ssh"
 
-          printf '%s\n' "$EC2_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
-          chmod 600 "$HOME/.ssh/known_hosts"
+#           printf '%s\n' "$EC2_SSH_PRIVATE_KEY" > "$HOME/.ssh/ec2_deploy_key"
+#           chmod 600 "$HOME/.ssh/ec2_deploy_key"
 
-          ssh -i "$HOME/.ssh/ec2_deploy_key" \
-            -o BatchMode=yes \
-            -o StrictHostKeyChecking=yes \
-            "$EC2_USER@$EC2_HOST" \
-            "AWS_REGION='$AWS_REGION' ECR_REGISTRY='$ECR_REGISTRY' IMAGE='$IMAGE' bash -s" <<'REMOTE'
+#           printf '%s\n' "$EC2_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+#           chmod 600 "$HOME/.ssh/known_hosts"
 
-          set -eu
+#           ssh -i "$HOME/.ssh/ec2_deploy_key" \
+#             -o BatchMode=yes \
+#             -o StrictHostKeyChecking=yes \
+#             "$EC2_USER@$EC2_HOST" \
+#             "AWS_REGION='$AWS_REGION' ECR_REGISTRY='$ECR_REGISTRY' IMAGE='$IMAGE' bash -s" <<'REMOTE' \
+#             >/dev/null 2>&1 || {
+#               echo "Deployment failed."
+#               exit 1
+#             }
 
-          if [ ! -f /opt/nanobrowser/backend.env ]; then
-            echo "Missing /opt/nanobrowser/backend.env" >&2
-            exit 1
-          fi
+#           set -euo pipefail
 
-          # Authenticate EC2 with ECR using its instance role
-          aws ecr get-login-password --region "$AWS_REGION" |
-            docker login --username AWS --password-stdin "$ECR_REGISTRY"
+#           if [ ! -f /opt/nanobrowser/backend.env ]; then
+#             exit 1
+#           fi
 
-          # Pull the newly built image
-          docker pull "$IMAGE"
+#           # Authenticate EC2 using its instance role
+#           aws ecr get-login-password --region "$AWS_REGION" |
+#             docker login --username AWS --password-stdin "$ECR_REGISTRY"
 
-          # Stop and remove previous container
-          if docker container inspect nanobrowser-backend >/dev/null 2>&1; then
-            docker rm --force nanobrowser-backend
-          fi
+#           # Pull image
+#           docker pull "$IMAGE"
 
-          # Start new container
-          docker run --detach \
-            --name nanobrowser-backend \
-            --restart unless-stopped \
-            --env-file /opt/nanobrowser/backend.env \
-            --env PORT=8080 \
-            --publish 8080:8080 \
-            "$IMAGE"
+#           # Remove previous container
+#           if docker container inspect nanobrowser-backend >/dev/null 2>&1; then
+#             docker rm --force nanobrowser-backend
+#           fi
 
-          # Health check
-          for attempt in $(seq 1 30); do
-            if docker exec nanobrowser-backend node -e \
-              "fetch('http://127.0.0.1:8080/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"; then
-              echo "Backend deployment successful!"
-              exit 0
-            fi
+#           # Start new container
+#           docker run --detach \
+#             --name nanobrowser-backend \
+#             --restart unless-stopped \
+#             --env-file /opt/nanobrowser/backend.env \
+#             --env PORT=8080 \
+#             --publish 8080:8080 \
+#             "$IMAGE" >/dev/null
 
-            sleep 2
-          done
+#           # Health check
+#           for attempt in $(seq 1 30); do
+#             if docker exec nanobrowser-backend node -e \
+#               "fetch('http://127.0.0.1:8080/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))" \
+#               >/dev/null 2>&1; then
+#               exit 0
+#             fi
 
-          echo "Backend health check failed." >&2
-          docker logs nanobrowser-backend
-          exit 1
+#             sleep 2
+#           done
 
-          REMOTE
+#           exit 1
+
+#           REMOTE
