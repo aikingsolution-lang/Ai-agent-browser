@@ -2,7 +2,7 @@ services:
   - type: web
     name: nanobrowser-backend
     runtime: node
-    plan: starter
+    plan: free
 
     rootDir: .
 
