@@ -229,15 +229,29 @@ export async function acceptWebsiteSession(input: WebsiteSessionInput): Promise<
   let check = await backendApiClient.checkIdToken(idToken);
 
   if (check.status === 'expired' && refreshToken) {
+    console.info('[accountSync] ID token expired — refreshing with website refresh token…');
     const refreshed = await backendApiClient.exchangeRefreshToken(refreshToken);
-    if (refreshed.status !== 'ok') return { ok: false, reason: refreshed.status };
+    if (refreshed.status !== 'ok') {
+      console.warn(`[accountSync] Token refresh failed: ${refreshed.status}`);
+      return { ok: false, reason: refreshed.status };
+    }
     if (refreshed.userId && refreshed.userId !== input.uid) return { ok: false, reason: 'mismatch' };
     idToken = refreshed.idToken;
     refreshToken = refreshed.refreshToken;
     check = await backendApiClient.checkIdToken(idToken);
   }
 
-  if (check.status !== 'ok') return { ok: false, reason: check.status === 'unavailable' ? 'unavailable' : 'invalid' };
+  if (check.status !== 'ok') {
+    if (check.status === 'unavailable') {
+      // Surface the backend URL so it's clear which server couldn't be reached.
+      console.warn(
+        `[accountSync] Backend unreachable during session verification. ` +
+          `The extension is trying to reach: ${(backendApiClient as any).baseUrl ?? 'unknown'}. ` +
+          `Make sure the backend server is running and accessible from the extension.`,
+      );
+    }
+    return { ok: false, reason: check.status === 'unavailable' ? 'unavailable' : 'invalid' };
+  }
   if (check.user.uid !== input.uid) return { ok: false, reason: 'mismatch' };
 
   const user = check.user;

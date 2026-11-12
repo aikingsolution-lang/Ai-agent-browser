@@ -301,26 +301,63 @@ export class BackendApiClient {
   /**
    * Checks an ID token with the backend (GET /auth/me) without touching the stored session — used to
    * verify a session handed over by the JobForm Automator website before it is accepted.
+   *
+   * Returns 'unavailable' only on network/server errors (backend unreachable or returning 5xx).
+   * Returns 'invalid' or 'expired' for any 4xx auth failure.
+   *
+   * Retries up to 3 times with exponential backoff when the backend returns 503 (Cloud Run
+   * cold-start where Firebase Admin SDK hasn't initialised yet) or a network error.
    */
   public async checkIdToken(idToken: string): Promise<IdTokenCheck> {
-    try {
-      const res = await fetch(`${this.baseUrl}/auth/me`, {
-        method: 'GET',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${idToken}` },
-      });
-      const data = (await res.json().catch(() => null)) as ApiResponse<{
-        user: { uid: string; _id?: string; name?: string; email?: string; role?: string; status?: string };
-      }> | null;
-      if (res.ok && data?.success && data.data?.user?.uid) {
-        return { status: 'ok', user: data.data.user };
+    // Delays between retries (ms): 2s → 4s → 6s — covers Cloud Run cold-starts (up to ~12 s total wait).
+    const RETRY_DELAYS = [2000, 4000, 6000];
+
+    const attempt = async (): Promise<{ result: IdTokenCheck; retryable: boolean }> => {
+      try {
+        const res = await fetch(`${this.baseUrl}/auth/me`, {
+          method: 'GET',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${idToken}` },
+        });
+        const data = (await res.json().catch(() => null)) as ApiResponse<{
+          user: { uid: string; _id?: string; name?: string; email?: string; role?: string; status?: string };
+        }> | null;
+        if (res.ok && data?.success && data.data?.user?.uid) {
+          return { result: { status: 'ok', user: data.data.user }, retryable: false };
+        }
+        if (res.status === 401) {
+          return {
+            result: { status: data?.error?.code === 'TOKEN_EXPIRED' ? 'expired' : 'invalid' },
+            retryable: false,
+          };
+        }
+        // 503 is typically Cloud Run cold-start (Firebase Admin not ready): retryable.
+        // Other 5xx: retryable too (transient server error).
+        console.warn(
+          `[BackendApiClient] checkIdToken: backend returned HTTP ${res.status} from ${this.baseUrl}/auth/me`,
+        );
+        return { result: { status: 'unavailable' }, retryable: res.status >= 500 };
+      } catch (err: any) {
+        console.warn(
+          `[BackendApiClient] checkIdToken: network error reaching ${this.baseUrl}/auth/me — ${err?.message || 'fetch failed'}`,
+        );
+        return { result: { status: 'unavailable' }, retryable: true };
       }
-      if (res.status === 401) {
-        return { status: data?.error?.code === 'TOKEN_EXPIRED' ? 'expired' : 'invalid' };
-      }
-      return { status: 'unavailable' };
-    } catch {
-      return { status: 'unavailable' };
+    };
+
+    const first = await attempt();
+    if (!first.retryable) return first.result;
+
+    for (let i = 0; i < RETRY_DELAYS.length; i++) {
+      console.info(
+        `[BackendApiClient] checkIdToken: retrying in ${RETRY_DELAYS[i]}ms (attempt ${i + 2}/${RETRY_DELAYS.length + 1})…`,
+      );
+      await new Promise(resolve => setTimeout(resolve, RETRY_DELAYS[i]));
+      const retry = await attempt();
+      if (!retry.retryable) return retry.result;
     }
+
+    // All retries exhausted
+    return { status: 'unavailable' };
   }
 
   private getHeaders(extraHeaders: Record<string, string> = {}): Record<string, string> {

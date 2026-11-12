@@ -12,7 +12,7 @@ interface AuthGateViewProps {
  * in the background), which replaces this view.
  */
 export const AuthGateView: React.FC<AuthGateViewProps> = ({ isDarkMode = false }) => {
-  const [status, setStatus] = useState<'idle' | 'opened' | 'different-account'>('idle');
+  const [status, setStatus] = useState<'idle' | 'opened' | 'different-account' | 'unavailable'>('idle');
   const [checking, setChecking] = useState(false);
 
   useEffect(() => {
@@ -31,6 +31,13 @@ export const AuthGateView: React.FC<AuthGateViewProps> = ({ isDarkMode = false }
         const res = await chrome.runtime.sendMessage({ type: 'SYNC_JOBFORM_SESSION', interactive: true });
         if (res?.ok) {
           setChecking(false);
+          return;
+        }
+        if (res?.reason === 'unavailable') {
+          // A website session was found but the backend could not verify it (server unreachable).
+          // The user is already signed in on the website, so opening the sign-in page would not help.
+          setChecking(false);
+          setStatus('unavailable');
           return;
         }
         differentAccount = res?.reason === 'different-account';
@@ -86,6 +93,12 @@ export const AuthGateView: React.FC<AuthGateViewProps> = ({ isDarkMode = false }
           <p role="status" className="mt-3 text-[11px] text-amber-600">
             The JobForm Automator website is signed in with a different account than the one last used in this
             extension. To switch, sign out on the website and sign in again with the account you want.
+          </p>
+        )}
+        {status === 'unavailable' && (
+          <p role="alert" className="mt-3 text-[11px] text-amber-600">
+            You are signed in on the JobForm Automator website, but the JobForm Automator server could not be reached to
+            confirm it. Please try again in a few minutes.
           </p>
         )}
 

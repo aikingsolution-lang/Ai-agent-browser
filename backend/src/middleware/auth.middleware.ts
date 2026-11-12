@@ -19,7 +19,7 @@
  */
 
 import type { Request, Response, NextFunction } from 'express';
-import { adminAuth } from '../config/firebase-admin.js';
+import { adminAuth, getAdminAuthLazy } from '../config/firebase-admin.js';
 import { sendError } from '../utils/apiResponse.js';
 import { logger } from '../utils/logger.js';
 
@@ -78,14 +78,16 @@ export async function authenticate(req: Request, res: Response, next: NextFuncti
     }
 
     // Firebase Admin SDK is required for token verification.
-    if (!adminAuth) {
+    // Use lazy getter to recover from failed cold-start initialisation.
+    const auth = getAdminAuthLazy();
+    if (!auth) {
       sendError(res, 'Authentication service temporarily unavailable', 503, 'SERVICE_UNAVAILABLE');
       return;
     }
 
     let decoded: any;
     try {
-      decoded = await adminAuth.verifyIdToken(token);
+      decoded = await auth.verifyIdToken(token);
     } catch (err: any) {
       // Firebase surfaces expiry as 'auth/id-token-expired' and invalidity as
       // 'auth/argument-error' or 'auth/invalid-id-token'.
@@ -132,7 +134,8 @@ export async function authenticate(req: Request, res: Response, next: NextFuncti
  */
 export async function optionalAuthenticate(req: Request, _res: Response, next: NextFunction): Promise<void> {
   const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith('Bearer ') || !adminAuth) {
+  const auth = getAdminAuthLazy();
+  if (!authHeader || !authHeader.startsWith('Bearer ') || !auth) {
     return next();
   }
 
@@ -140,7 +143,7 @@ export async function optionalAuthenticate(req: Request, _res: Response, next: N
   if (!token) return next();
 
   try {
-    const decoded = await adminAuth.verifyIdToken(token);
+    const decoded = await auth.verifyIdToken(token);
     if (decoded.uid) {
       req.user = {
         uid: decoded.uid,

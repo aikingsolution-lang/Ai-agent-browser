@@ -27,7 +27,7 @@
  *   existing shape parses without error.
  */
 
-import { adminAuth } from '../config/firebase-admin.js';
+import { adminAuth, getAdminAuthLazy } from '../config/firebase-admin.js';
 import { AppError } from '../middleware/errorHandler.js';
 import { logger } from '../utils/logger.js';
 import { UserProfileService } from './userProfile.service.js';
@@ -134,7 +134,8 @@ export class AuthService {
    * the initial user profile to RTDB.
    */
   public static async registerUser(input: RegisterInput): Promise<AuthResult> {
-    if (!adminAuth) {
+    const auth = getAdminAuthLazy();
+    if (!auth) {
       throw new AppError('Authentication service unavailable', 503, 'SERVICE_UNAVAILABLE');
     }
 
@@ -144,7 +145,7 @@ export class AuthService {
     // Firebase will reject duplicate emails automatically (auth/email-already-exists)
     let userRecord: any;
     try {
-      userRecord = await adminAuth.createUser({
+      userRecord = await auth.createUser({
         email: normalizedEmail,
         password: input.password,
         displayName,
@@ -179,7 +180,7 @@ export class AuthService {
 
     // Generate a Firebase custom token so the client can exchange it for an ID token.
     // Note: custom tokens expire in 1h and must be exchanged via the client SDK.
-    const customToken = await adminAuth.createCustomToken(userRecord.uid, { role: 'user' }).catch(() => '');
+    const customToken = await auth.createCustomToken(userRecord.uid, { role: 'user' }).catch(() => '');
 
     const user = toApiUser(userRecord);
     logger.info(`[AuthService] Registered new user ${userRecord.uid} (${normalizedEmail})`);
@@ -207,7 +208,8 @@ export class AuthService {
    * and get an ID token without requiring the client SDK.
    */
   public static async loginUser(input: LoginInput): Promise<AuthResult> {
-    if (!adminAuth) {
+    const auth = getAdminAuthLazy();
+    if (!auth) {
       throw new AppError('Authentication service unavailable', 503, 'SERVICE_UNAVAILABLE');
     }
 
@@ -255,7 +257,7 @@ export class AuthService {
     const refreshToken: string = data.refreshToken || '';
 
     // Fetch the Firebase user record for profile data
-    const userRecord = await adminAuth.getUser(data.localId).catch(() => null);
+    const userRecord = await auth.getUser(data.localId).catch(() => null);
     if (!userRecord) {
       throw new AppError('User not found', 404, 'USER_NOT_FOUND');
     }
@@ -276,7 +278,8 @@ export class AuthService {
    * to the backend.  We verify it with Firebase Admin and upsert the user.
    */
   public static async loginWithGoogle(input: GoogleAuthInput): Promise<AuthResult> {
-    if (!adminAuth) {
+    const auth = getAdminAuthLazy();
+    if (!auth) {
       throw new AppError('Authentication service unavailable', 503, 'SERVICE_UNAVAILABLE');
     }
 
@@ -287,7 +290,7 @@ export class AuthService {
     // Verify the Google ID token with Firebase Auth
     let decodedToken: any;
     try {
-      decodedToken = await adminAuth.verifyIdToken(input.idToken);
+      decodedToken = await auth.verifyIdToken(input.idToken);
     } catch {
       throw new AppError('Invalid or expired Google token', 401, 'INVALID_GOOGLE_TOKEN');
     }
@@ -299,7 +302,7 @@ export class AuthService {
     // Fetch or create the user in Firebase Auth
     let userRecord: any;
     try {
-      userRecord = await adminAuth.getUser(decodedToken.uid);
+      userRecord = await auth.getUser(decodedToken.uid);
     } catch (err: any) {
       if (err?.code === 'auth/user-not-found') {
         throw new AppError('Google user not found in Firebase Auth', 404, 'USER_NOT_FOUND');
@@ -329,7 +332,7 @@ export class AuthService {
     }
 
     // Generate a custom token for the response
-    const customToken = await adminAuth.createCustomToken(userRecord.uid, { role: 'user' }).catch(() => '');
+    const customToken = await auth.createCustomToken(userRecord.uid, { role: 'user' }).catch(() => '');
 
     logger.info(`[AuthService] Google login: ${userRecord.uid} (${userRecord.email})`);
 
@@ -405,9 +408,10 @@ export class AuthService {
 
   /** Fetches a Firebase user record by UID. */
   public static async getUserById(uid: string): Promise<ApiUser | null> {
-    if (!adminAuth) return null;
+    const auth = getAdminAuthLazy();
+    if (!auth) return null;
     try {
-      const record = await adminAuth.getUser(uid);
+      const record = await auth.getUser(uid);
       return toApiUser(record);
     } catch {
       return null;

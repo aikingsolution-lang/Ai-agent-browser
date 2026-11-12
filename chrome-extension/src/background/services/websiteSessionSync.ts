@@ -243,21 +243,49 @@ export async function handleWebsiteMessage(
  * Injected into a JobForm Automator tab (must stay self-contained). Reads only the candidate
  * session: the Firebase SDK keeps it under `firebase:authUser:<apiKey>:[DEFAULT]`, while the
  * website's recruiter (HR) sign-in uses the separate `hr-app` Firebase app and is never read.
+ *
+ * Also checks the `IsLogin` / `isLogin` candidate flag and the `UID` shortcut key that the
+ * JobForm Automator website writes on sign-in, so a session is found even when only one of the
+ * two indicators is present (e.g. SPA navigation that cleared localStorage partially).
  */
 export function readCandidateFirebaseSession(): { uid: string; idToken: string; refreshToken: string } | null {
   try {
     const storage = window.localStorage;
+
+    // Quick candidate-presence check: at least one of these flags must be set.
+    // The website writes `IsLogin = "true"` and often `UID = <uid>` on sign-in.
+    const loginFlag = storage.getItem('IsLogin') ?? storage.getItem('isLogin') ?? storage.getItem('is_login');
+    const uidShortcut = storage.getItem('UID') ?? storage.getItem('uid') ?? storage.getItem('candidate');
+    const flagNormalized = loginFlag ? loginFlag.toLowerCase().trim() : null;
+    const hasLoginFlag = flagNormalized === 'true' || flagNormalized === '1';
+    const hasCandidatePresence = hasLoginFlag || Boolean(uidShortcut);
+
     for (let i = 0; i < storage.length; i++) {
       const key = storage.key(i);
-      if (!key || key.indexOf('firebase:authUser:') !== 0 || key.slice(-':[DEFAULT]'.length) !== ':[DEFAULT]') {
+      // Accept both :[DEFAULT] and :[DEFAULT]-type suffixes in case the Firebase SDK version varies.
+      if (
+        !key ||
+        key.indexOf('firebase:authUser:') !== 0 ||
+        (!key.endsWith(':[DEFAULT]') && !key.includes(':[DEFAULT]'))
+      ) {
         continue;
       }
+      // Skip HR/recruiter app sessions (key contains '-hr-app' or similar)
+      if (key.includes('-hr-') || key.includes(':hr-app')) continue;
+
       const user = JSON.parse(storage.getItem(key) || 'null');
       const tokens = user && user.stsTokenManager;
-      const uid = user && user.uid;
-      const idToken = tokens && tokens.accessToken;
+      const uid = (user && (user.uid || user.id)) as string | undefined;
+      const idToken =
+        (tokens && (tokens.accessToken || tokens.idToken)) || (user && (user.accessToken || user.idToken));
+
       if (typeof uid === 'string' && uid && typeof idToken === 'string' && idToken) {
-        return { uid, idToken, refreshToken: typeof tokens.refreshToken === 'string' ? tokens.refreshToken : '' };
+        // If neither candidate flag is set, only trust this token if the UID matches the shortcut
+        if (!hasCandidatePresence && uidShortcut && uidShortcut !== uid) continue;
+        const refreshToken =
+          (typeof tokens?.refreshToken === 'string' ? tokens.refreshToken : '') ||
+          (typeof user?.refreshToken === 'string' ? user.refreshToken : '');
+        return { uid, idToken, refreshToken };
       }
     }
   } catch {
@@ -290,18 +318,34 @@ export async function syncSessionFromOpenJobformTabs(
     const allTabs = await chrome.tabs.query({});
     const tabs = (allTabs || []).filter(tab => tab.id && isJobformWebsiteOrigin(originOf(tab.url)));
     if (tabs.length === 0) {
+      logger.info('[syncSession] No open JobForm Automator tabs found — open the website and try again');
       return { ok: false, reason: 'no-tabs' };
     }
 
+    logger.info(`[syncSession] Checking ${tabs.length} JobForm Automator tab(s) for a signed-in session…`);
     let reason = 'no-session-found';
     for (const tab of tabs) {
       try {
+        logger.info(`[syncSession] Reading localStorage from tab ${tab.id} (${originOf(tab.url)})`);
         const results = await chrome.scripting.executeScript({
           target: { tabId: tab.id! },
           func: readCandidateFirebaseSession,
         });
-        const input = parseLoginMessage(results?.[0]?.result);
-        if (!input) continue;
+        const rawResult = results?.[0]?.result;
+        if (!rawResult) {
+          logger.info(
+            `[syncSession] Tab ${tab.id}: no Firebase candidate session in localStorage (not signed in on the website)`,
+          );
+          continue;
+        }
+        const input = parseLoginMessage(rawResult);
+        if (!input) {
+          logger.warning(
+            `[syncSession] Tab ${tab.id}: session data found but failed validation (uid or idToken format rejected)`,
+          );
+          continue;
+        }
+        logger.info(`[syncSession] Tab ${tab.id}: session found — verifying with backend…`);
 
         const res: LoginResult = await enqueue(async () => {
           if (await ownedByAnotherAccount(input.uid)) return { ok: false, reason: 'different-account' } as const;

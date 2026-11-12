@@ -86,6 +86,40 @@ export function hasAdminCredentials(): boolean {
 }
 
 /**
+ * Lazy getter for Firebase Admin Auth.
+ *
+ * If `adminAuth` was null at startup (e.g. Cloud Run cold-start race, transient
+ * credential-loading error), this retries `getAuth(adminApp)` on every call until
+ * it succeeds.  Once initialised the cached value is returned immediately.
+ *
+ * All request-time code paths (middleware, services) should prefer this over the
+ * raw `adminAuth` export so that a failed startup doesn't permanently brick the
+ * auth layer until the next container restart.
+ */
+export function getAdminAuthLazy(): Auth | null {
+  if (adminAuth) return adminAuth;
+
+  // If there is no app at all, nothing we can do.
+  if (!adminApp) {
+    try {
+      adminApp = getOrCreateAdminApp();
+    } catch (e: any) {
+      logger.warn(`[Firebase Admin] Lazy app re-init failed: ${e.message}`);
+      return null;
+    }
+  }
+
+  try {
+    adminAuth = getAuth(adminApp);
+    logger.info('✅ [Firebase Admin] Auth lazy-initialised successfully on retry.');
+    return adminAuth;
+  } catch (e: any) {
+    logger.warn(`[Firebase Admin] Lazy Auth init failed: ${e.message}`);
+    return null;
+  }
+}
+
+/**
  * Test-only: replaces the RTDB / Auth handles (e.g. with the in-memory RTDB used by the test suite).
  * Refuses to run outside NODE_ENV=test so production can never be pointed at a fake.
  */

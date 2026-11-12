@@ -600,9 +600,10 @@ async function scriptInjectedFrames(tabId: number): Promise<Map<number, boolean>
       target: { tabId, allFrames: true },
       func: () => Object.prototype.hasOwnProperty.call(window, 'buildDomTree'),
     });
+
     return new Map(results.map(result => [result.frameId, result.result || false]));
   } catch (err) {
-    console.error('Failed to check script injection status:', err);
+    console.warn('Could not check all frame injection statuses:', err);
     return new Map();
   }
 }
@@ -610,31 +611,31 @@ async function scriptInjectedFrames(tabId: number): Promise<Map<number, boolean>
 // Function to inject the buildDomTree script
 export async function injectBuildDomTreeScripts(tabId: number) {
   try {
-    // Check if already injected
     const injectedFrames = await scriptInjectedFrames(tabId);
 
-    // If we couldn't check any frames or all are already injected, try to inject in main frame only
     if (injectedFrames.size === 0) {
-      // Couldn't check frames, so just try to inject in the main frame
       try {
         await chrome.scripting.executeScript({
           target: { tabId },
           files: ['buildDomTree.js'],
         });
-      } catch (injectionErr) {
-        // Silently ignore - script might already be injected or frame might be inaccessible
+      } catch {
+        // Tab may have closed or navigated.
       }
       return;
     }
 
-    // Check if all frames already have the script
-    if (Array.from(injectedFrames.values()).every(injected => injected)) {
+    if (Array.from(injectedFrames.values()).every(Boolean)) {
       return;
     }
 
-    // Inject only in frames that don't have the script
-    const frameIdsToInject = Array.from(injectedFrames.keys()).filter(id => !injectedFrames.get(id));
-    if (frameIdsToInject.length > 0) {
+    const frameIdsToInject = Array.from(injectedFrames.entries())
+      .filter(([, injected]) => !injected)
+      .map(([frameId]) => frameId);
+
+    if (frameIdsToInject.length === 0) return;
+
+    try {
       await chrome.scripting.executeScript({
         target: {
           tabId,
@@ -642,6 +643,8 @@ export async function injectBuildDomTreeScripts(tabId: number) {
         },
         files: ['buildDomTree.js'],
       });
+    } catch (err) {
+      console.warn('Some frames could not receive buildDomTree.js:', err);
     }
   } catch (err) {
     console.error('Failed to inject scripts:', err);
