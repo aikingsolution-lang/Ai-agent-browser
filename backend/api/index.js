@@ -332,6 +332,25 @@ if (adminApp) {
 function hasAdminCredentials() {
   return Boolean(env.FIREBASE_ADMIN_CLIENT_EMAIL && env.FIREBASE_ADMIN_PRIVATE_KEY);
 }
+function getAdminAuthLazy() {
+  if (adminAuth) return adminAuth;
+  if (!adminApp) {
+    try {
+      adminApp = getOrCreateAdminApp();
+    } catch (e) {
+      logger.warn(`[Firebase Admin] Lazy app re-init failed: ${e.message}`);
+      return null;
+    }
+  }
+  try {
+    adminAuth = getAuth(adminApp);
+    logger.info('\u2705 [Firebase Admin] Auth lazy-initialised successfully on retry.');
+    return adminAuth;
+  } catch (e) {
+    logger.warn(`[Firebase Admin] Lazy Auth init failed: ${e.message}`);
+    return null;
+  }
+}
 
 // src/middleware/errorHandler.ts
 var AppError = class extends Error {
@@ -2253,14 +2272,15 @@ var AuthService = class {
    * the initial user profile to RTDB.
    */
   static async registerUser(input) {
-    if (!adminAuth) {
+    const auth = getAdminAuthLazy();
+    if (!auth) {
       throw new AppError('Authentication service unavailable', 503, 'SERVICE_UNAVAILABLE');
     }
     const normalizedEmail = input.email.trim().toLowerCase();
     const displayName = input.name.trim();
     let userRecord;
     try {
-      userRecord = await adminAuth.createUser({
+      userRecord = await auth.createUser({
         email: normalizedEmail,
         password: input.password,
         displayName,
@@ -2287,7 +2307,7 @@ var AuthService = class {
       createdAt: now,
     });
     const subscription = await provisionFreeTrial(userRecord.uid);
-    const customToken = await adminAuth.createCustomToken(userRecord.uid, { role: 'user' }).catch(() => '');
+    const customToken = await auth.createCustomToken(userRecord.uid, { role: 'user' }).catch(() => '');
     const user = toApiUser(userRecord);
     logger.info(`[AuthService] Registered new user ${userRecord.uid} (${normalizedEmail})`);
     return {
@@ -2312,7 +2332,8 @@ var AuthService = class {
    * and get an ID token without requiring the client SDK.
    */
   static async loginUser(input) {
-    if (!adminAuth) {
+    const auth = getAdminAuthLazy();
+    if (!auth) {
       throw new AppError('Authentication service unavailable', 503, 'SERVICE_UNAVAILABLE');
     }
     const apiKey = process.env.FIREBASE_WEB_API_KEY || '';
@@ -2350,7 +2371,7 @@ var AuthService = class {
     }
     const idToken = data.idToken;
     const refreshToken = data.refreshToken || '';
-    const userRecord = await adminAuth.getUser(data.localId).catch(() => null);
+    const userRecord = await auth.getUser(data.localId).catch(() => null);
     if (!userRecord) {
       throw new AppError('User not found', 404, 'USER_NOT_FOUND');
     }
@@ -2368,7 +2389,8 @@ var AuthService = class {
    * to the backend.  We verify it with Firebase Admin and upsert the user.
    */
   static async loginWithGoogle(input) {
-    if (!adminAuth) {
+    const auth = getAdminAuthLazy();
+    if (!auth) {
       throw new AppError('Authentication service unavailable', 503, 'SERVICE_UNAVAILABLE');
     }
     if (!input?.idToken) {
@@ -2376,7 +2398,7 @@ var AuthService = class {
     }
     let decodedToken;
     try {
-      decodedToken = await adminAuth.verifyIdToken(input.idToken);
+      decodedToken = await auth.verifyIdToken(input.idToken);
     } catch {
       throw new AppError('Invalid or expired Google token', 401, 'INVALID_GOOGLE_TOKEN');
     }
@@ -2385,7 +2407,7 @@ var AuthService = class {
     }
     let userRecord;
     try {
-      userRecord = await adminAuth.getUser(decodedToken.uid);
+      userRecord = await auth.getUser(decodedToken.uid);
     } catch (err) {
       if (err?.code === 'auth/user-not-found') {
         throw new AppError('Google user not found in Firebase Auth', 404, 'USER_NOT_FOUND');
@@ -2409,7 +2431,7 @@ var AuthService = class {
         if (current && ['TRIALING', 'ACTIVE'].includes(current.status)) subscription = current;
       }
     }
-    const customToken = await adminAuth.createCustomToken(userRecord.uid, { role: 'user' }).catch(() => '');
+    const customToken = await auth.createCustomToken(userRecord.uid, { role: 'user' }).catch(() => '');
     logger.info(`[AuthService] Google login: ${userRecord.uid} (${userRecord.email})`);
     return {
       user: toApiUser(userRecord),
@@ -2472,9 +2494,10 @@ var AuthService = class {
   }
   /** Fetches a Firebase user record by UID. */
   static async getUserById(uid) {
-    if (!adminAuth) return null;
+    const auth = getAdminAuthLazy();
+    if (!auth) return null;
     try {
-      const record = await adminAuth.getUser(uid);
+      const record = await auth.getUser(uid);
       return toApiUser(record);
     } catch {
       return null;
@@ -2628,13 +2651,14 @@ async function authenticate(req, res, next) {
       sendError(res, 'Authentication token missing', 401, 'UNAUTHORIZED');
       return;
     }
-    if (!adminAuth) {
+    const auth = getAdminAuthLazy();
+    if (!auth) {
       sendError(res, 'Authentication service temporarily unavailable', 503, 'SERVICE_UNAVAILABLE');
       return;
     }
     let decoded;
     try {
-      decoded = await adminAuth.verifyIdToken(token);
+      decoded = await auth.verifyIdToken(token);
     } catch (err) {
       const code = err?.code || 'UNKNOWN_CODE';
       const message = err?.message || 'No message';
@@ -6311,10 +6335,6 @@ var ResumeGeneratorService = class {
   }
 };
 
-// src/services/resumeParser.service.ts
-import { PDFParse } from 'pdf-parse';
-import mammoth from 'mammoth';
-
 // src/utils/skillValidator.ts
 var KNOWN_SHORT_SKILLS = /* @__PURE__ */ new Set(['c', 'r', 'go', 'c#', 'f#']);
 var SKILL_STOPWORDS = /* @__PURE__ */ new Set([
@@ -6571,6 +6591,7 @@ var ResumeParserService = class {
     const ext = (originalName.split('.').pop() || '').toLowerCase();
     try {
       if (ext === 'pdf' || mimeType.includes('pdf')) {
+        const { PDFParse } = await import('pdf-parse');
         const parser = new PDFParse({ data: new Uint8Array(buffer) });
         const textResult = await parser.getText();
         const text2 = textResult.text || '';
@@ -6579,6 +6600,7 @@ var ResumeParserService = class {
       }
       if (ext === 'docx' || ext === 'doc' || mimeType.includes('word')) {
         try {
+          const { default: mammoth } = await import('mammoth');
           const mammothResult = await mammoth.extractRawText({ buffer });
           if (mammothResult.value && mammothResult.value.trim()) {
             return this.cleanExtractedText(mammothResult.value);

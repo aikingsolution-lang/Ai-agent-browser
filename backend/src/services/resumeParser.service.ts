@@ -1,5 +1,3 @@
-import { PDFParse } from 'pdf-parse';
-import mammoth from 'mammoth';
 import { LlmProviderFactory } from './llm/llmProviderFactory.js';
 import { env } from '../config/env.js';
 import { logger } from '../utils/logger.js';
@@ -28,6 +26,7 @@ export class ResumeParserService {
 
     try {
       if (ext === 'pdf' || mimeType.includes('pdf')) {
+        const { PDFParse } = await import('pdf-parse');
         const parser = new PDFParse({ data: new Uint8Array(buffer) });
         const textResult = await parser.getText();
         const text = textResult.text || '';
@@ -37,6 +36,7 @@ export class ResumeParserService {
 
       if (ext === 'docx' || ext === 'doc' || mimeType.includes('word')) {
         try {
+          const { default: mammoth } = await import('mammoth');
           const mammothResult = await mammoth.extractRawText({ buffer });
           if (mammothResult.value && mammothResult.value.trim()) {
             return this.cleanExtractedText(mammothResult.value);
