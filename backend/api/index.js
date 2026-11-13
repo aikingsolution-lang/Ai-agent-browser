@@ -6591,13 +6591,42 @@ var ResumeParserService = class {
     const ext = (originalName.split('.').pop() || '').toLowerCase();
     try {
       if (ext === 'pdf' || mimeType.includes('pdf')) {
-        await import('pdf-parse/worker');
-        const { PDFParse } = await import('pdf-parse');
-        const parser = new PDFParse({ data: new Uint8Array(buffer) });
-        const textResult = await parser.getText();
-        const text2 = textResult.text || '';
-        await parser.destroy();
-        return this.cleanExtractedText(text2);
+        try {
+          const { extractText, getDocumentProxy } = await import('unpdf');
+          const pdf = await getDocumentProxy(new Uint8Array(buffer));
+          const { text: text2 } = await extractText(pdf, { mergePages: true });
+          if (text2 && text2.trim()) {
+            return this.cleanExtractedText(text2);
+          }
+        } catch (unpdfErr) {
+          logger.warn('[ResumeParserService] unpdf extraction failed, falling back to pdf-parse:', unpdfErr);
+        }
+        try {
+          await import('pdf-parse/worker').catch(() => {});
+          const { PDFParse } = await import('pdf-parse');
+          const parser = new PDFParse({ data: new Uint8Array(buffer) });
+          const textResult = await parser.getText();
+          const text2 = textResult.text || '';
+          await parser.destroy();
+          if (text2 && text2.trim()) {
+            return this.cleanExtractedText(text2);
+          }
+        } catch (pdfParseErr) {
+          logger.warn('[ResumeParserService] pdf-parse fallback failed:', pdfParseErr);
+        }
+        const raw3 = buffer.toString('latin1');
+        const streamMatches = raw3.match(/\(([^()]+)\)\s*Tj|\[([^\[\]]+)\]\s*TJ/g);
+        if (streamMatches && streamMatches.length > 0) {
+          const streamText = streamMatches.map(m => m.replace(/^[(\[]|[)\]]\s*T[jJ]$/g, '')).join(' ');
+          if (streamText.trim()) {
+            return this.cleanExtractedText(streamText);
+          }
+        }
+        const plainText = buffer.toString('utf-8').replace(/[^\x20-\x7E\n\r\t]/g, ' ');
+        if (plainText.trim().length > 50) {
+          return this.cleanExtractedText(plainText);
+        }
+        throw new Error('No text could be extracted from PDF');
       }
       if (ext === 'docx' || ext === 'doc' || mimeType.includes('word')) {
         try {

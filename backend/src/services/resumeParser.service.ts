@@ -26,17 +26,50 @@ export class ResumeParserService {
 
     try {
       if (ext === 'pdf' || mimeType.includes('pdf')) {
-        // pdfjs-dist (inside pdf-parse) loads pdf.worker.mjs and @napi-rs/canvas (its DOMMatrix
-        // polyfill) by paths Vercel's file tracing cannot follow, so both are left out of the deployed
-        // function and parsing fails. pdf-parse/worker imports both by literal paths, so the tracer
-        // ships them; it must load before pdf-parse so DOMMatrix is defined when pdfjs evaluates.
-        await import('pdf-parse/worker');
-        const { PDFParse } = await import('pdf-parse');
-        const parser = new PDFParse({ data: new Uint8Array(buffer) });
-        const textResult = await parser.getText();
-        const text = textResult.text || '';
-        await parser.destroy();
-        return this.cleanExtractedText(text);
+        // 1. Primary: unpdf (Serverless-native, zero dependencies, runs natively on Vercel)
+        try {
+          const { extractText, getDocumentProxy } = await import('unpdf');
+          const pdf = await getDocumentProxy(new Uint8Array(buffer));
+          const { text } = await extractText(pdf, { mergePages: true });
+          if (text && text.trim()) {
+            return this.cleanExtractedText(text);
+          }
+        } catch (unpdfErr) {
+          logger.warn('[ResumeParserService] unpdf extraction failed, falling back to pdf-parse:', unpdfErr);
+        }
+
+        // 2. Secondary fallback: pdf-parse
+        try {
+          await import('pdf-parse/worker').catch(() => {});
+          const { PDFParse } = await import('pdf-parse');
+          const parser = new PDFParse({ data: new Uint8Array(buffer) });
+          const textResult = await parser.getText();
+          const text = textResult.text || '';
+          await parser.destroy();
+          if (text && text.trim()) {
+            return this.cleanExtractedText(text);
+          }
+        } catch (pdfParseErr) {
+          logger.warn('[ResumeParserService] pdf-parse fallback failed:', pdfParseErr);
+        }
+
+        // 3. Fallback: stream text extraction from PDF buffer
+        const raw = buffer.toString('latin1');
+        const streamMatches = raw.match(/\(([^()]+)\)\s*Tj|\[([^\[\]]+)\]\s*TJ/g);
+        if (streamMatches && streamMatches.length > 0) {
+          const streamText = streamMatches.map(m => m.replace(/^[(\[]|[)\]]\s*T[jJ]$/g, '')).join(' ');
+          if (streamText.trim()) {
+            return this.cleanExtractedText(streamText);
+          }
+        }
+
+        // 4. Fallback: clean ASCII text extraction
+        const plainText = buffer.toString('utf-8').replace(/[^\x20-\x7E\n\r\t]/g, ' ');
+        if (plainText.trim().length > 50) {
+          return this.cleanExtractedText(plainText);
+        }
+
+        throw new Error('No text could be extracted from PDF');
       }
 
       if (ext === 'docx' || ext === 'doc' || mimeType.includes('word')) {
