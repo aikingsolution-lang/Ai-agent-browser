@@ -26,6 +26,11 @@ export class ResumeParserService {
 
     try {
       if (ext === 'pdf' || mimeType.includes('pdf')) {
+        // pdfjs-dist (inside pdf-parse) loads pdf.worker.mjs and @napi-rs/canvas (its DOMMatrix
+        // polyfill) by paths Vercel's file tracing cannot follow, so both are left out of the deployed
+        // function and parsing fails. pdf-parse/worker imports both by literal paths, so the tracer
+        // ships them; it must load before pdf-parse so DOMMatrix is defined when pdfjs evaluates.
+        await import('pdf-parse/worker');
         const { PDFParse } = await import('pdf-parse');
         const parser = new PDFParse({ data: new Uint8Array(buffer) });
         const textResult = await parser.getText();

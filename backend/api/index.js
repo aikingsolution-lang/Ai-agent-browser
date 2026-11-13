@@ -6591,6 +6591,7 @@ var ResumeParserService = class {
     const ext = (originalName.split('.').pop() || '').toLowerCase();
     try {
       if (ext === 'pdf' || mimeType.includes('pdf')) {
+        await import('pdf-parse/worker');
         const { PDFParse } = await import('pdf-parse');
         const parser = new PDFParse({ data: new Uint8Array(buffer) });
         const textResult = await parser.getText();
